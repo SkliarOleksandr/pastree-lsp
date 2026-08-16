@@ -1,0 +1,61 @@
+package PasTreeIdePlugin;
+
+{$R *.res}
+{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
+{$ALIGN 8}
+{$ASSERTIONS ON}
+{$BOOLEVAL OFF}
+{$DEBUGINFO OFF}
+{$EXTENDEDSYNTAX ON}
+{$IMPORTEDDATA ON}
+{$IOCHECKS ON}
+{$LOCALSYMBOLS ON}
+{$LONGSTRINGS ON}
+{$OPENSTRINGS ON}
+{$OPTIMIZATION OFF}
+{$OVERFLOWCHECKS ON}
+{$RANGECHECKS ON}
+{$REFERENCEINFO ON}
+{$SAFEDIVIDE OFF}
+{$STACKFRAMES ON}
+{$TYPEDADDRESS OFF}
+{$VARSTRINGCHECKS ON}
+{$WRITEABLECONST OFF}
+{$MINENUMSIZE 1}
+{$IMAGEBASE $400000}
+{$DEFINE DEBUG}
+{$ENDIF IMPLICITBUILDING}
+{$IMPLICITBUILD ON}
+
+requires
+  rtl,
+  vcl,
+  designide;
+
+contains
+  PasTreeIdePlugin.Wizard in 'PasTreeIdePlugin.Wizard.pas',
+  PasTreeIdePlugin.Analysis in 'PasTreeIdePlugin.Analysis.pas',
+  PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
+  PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
+  PasTree.Types in '..\object-pascal-tree\source\PasTree.Types.pas',
+  PasTree.Lexer in '..\object-pascal-tree\source\PasTree.Lexer.pas',
+  PasTree.SourceManager in '..\object-pascal-tree\source\PasTree.SourceManager.pas',
+  PasTree.Preprocessor in '..\object-pascal-tree\source\PasTree.Preprocessor.pas',
+  PasTree.CondEval in '..\object-pascal-tree\source\PasTree.CondEval.pas',
+  PasTree.Platforms in '..\object-pascal-tree\source\PasTree.Platforms.pas',
+  PasTree.Ast in '..\object-pascal-tree\source\PasTree.Ast.pas',
+  PasTree.Ast.Json in '..\object-pascal-tree\source\PasTree.Ast.Json.pas',
+  PasTree.Parser in '..\object-pascal-tree\source\PasTree.Parser.pas',
+  PasTree.Project in '..\object-pascal-tree\source\PasTree.Project.pas',
+  PasTree.DProj in '..\object-pascal-tree\source\PasTree.DProj.pas',
+  PasTree.Sema.Diagnostics in '..\object-pascal-tree\source\PasTree.Sema.Diagnostics.pas',
+  PasTree.Sema.Model in '..\object-pascal-tree\source\PasTree.Sema.Model.pas',
+  PasTree.Sema.Builtins in '..\object-pascal-tree\source\PasTree.Sema.Builtins.pas',
+  PasTree.Sema.Types in '..\object-pascal-tree\source\PasTree.Sema.Types.pas',
+  PasTree.Sema.Resolver in '..\object-pascal-tree\source\PasTree.Sema.Resolver.pas',
+  PasTree.Sema.Project in '..\object-pascal-tree\source\PasTree.Sema.Project.pas',
+  PasTree.Sema.Nav in '..\object-pascal-tree\source\PasTree.Sema.Nav.pas',
+  PasTree.Sema.Dump in '..\object-pascal-tree\source\PasTree.Sema.Dump.pas',
+  PasTree.Sema.Async in '..\object-pascal-tree\source\PasTree.Sema.Async.pas';
+
+end.
