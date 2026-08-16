@@ -15,7 +15,11 @@ interface
 
 uses
   System.SysUtils,
-  System.Classes;
+  System.Classes,
+  System.SyncObjs,
+  System.Generics.Collections,
+  System.JSON,
+  PasLsp.Protocol;
 
 type
   TLspTransport = class
@@ -34,6 +38,33 @@ type
       malformed header: there is no way to resync a broken frame stream. }
     function ReadMessage(out AJson: string): Boolean;
     procedure WriteMessage(const AJson: string);
+  end;
+
+  { Phase 2: stdin is read by THIS thread so a $/cancelRequest is SEEN while
+    the dispatcher is busy (waiting out an analysis, typically). Every frame
+    goes into Queue in arrival order; a $/cancelRequest is ADDITIONALLY noted
+    in the cancel set right here, before the dispatcher gets anywhere near
+    it. EOF (client gone) is signaled by an empty-string sentinel — a real
+    message is never empty, ReadMessage yields at least two brace bytes.
+
+    The full-parse cost for cancel detection is only paid for frames that
+    textually contain "$/cancelRequest" (a cheap prefilter): parsing EVERY
+    frame here would double-parse each didChange, whose full-sync payload is
+    the entire document. A false hit on the prefilter (the literal inside a
+    didChange text) costs one wasted parse and nothing else. }
+  TLspReader = class(TThread)
+  private
+    FTransport: TLspTransport;
+    FCancels: TLspCancelSet;
+    FQueue: TThreadedQueue<string>;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ATransport: TLspTransport; ACancels: TLspCancelSet);
+    destructor Destroy; override;
+    { Pops the next frame; wrTimeout after ~50ms (the dispatcher's idle
+      tick, fixed at queue creation), wrSignaled with '' = EOF. }
+    function Pop(out AJson: string): TWaitResult;
   end;
 
 implementation
@@ -148,6 +179,72 @@ begin
   FOut.WriteBuffer(LHeader[0], Length(LHeader));
   if Length(LPayload) > 0 then
     FOut.WriteBuffer(LPayload[0], Length(LPayload));
+end;
+
+{ TLspReader }
+
+constructor TLspReader.Create(ATransport: TLspTransport;
+  ACancels: TLspCancelSet);
+begin
+  // Queue depth 1024: ~a keystroke burst; PushItem blocks (never drops) if
+  // the dispatcher falls further behind than that. Pop timeout 50ms is the
+  // dispatcher's idle tick (finished analyses get finalized on it).
+  FQueue := TThreadedQueue<string>.Create(1024, INFINITE, 50);
+  FTransport := ATransport;
+  FCancels := ACancels;
+  inherited Create(False);
+end;
+
+destructor TLspReader.Destroy;
+begin
+  // The thread is normally already gone (EOF or exit) — Terminate covers the
+  // abnormal teardown path. A blocking FIn.Read cannot be interrupted, but
+  // process exit is what follows this destructor anyway.
+  Terminate;
+  FQueue.DoShutDown;
+  inherited;   // WaitFor would hang on a live blocking read; thread is
+               // FreeOnTerminate=False and reaped by process exit
+  FQueue.Free;
+end;
+
+procedure TLspReader.Execute;
+var
+  LJson: string;
+  LMsg: TLspIncoming;
+begin
+  while not Terminated do
+  begin
+    try
+      if not FTransport.ReadMessage(LJson) then
+        Break;
+    except
+      Break;   // framing is unrecoverable — treat like EOF
+    end;
+    if (Pos('"$/cancelRequest"', LJson) > 0) and
+       ParseIncoming(LJson, LMsg) then
+    begin
+      try
+        if LMsg.Method = '$/cancelRequest' then
+        begin
+          var LId := LMsg.Params.FindValue('id');
+          if LId <> nil then
+            FCancels.NoteCancel(LId.ToJSON);
+        end;
+      finally
+        LMsg.Root.Free;
+      end;
+    end;
+    if FQueue.PushItem(LJson) <> wrSignaled then
+      Break;
+  end;
+  FQueue.PushItem('');   // EOF sentinel
+end;
+
+function TLspReader.Pop(out AJson: string): TWaitResult;
+var
+  LSize: Integer;
+begin
+  Result := FQueue.PopItem(LSize, AJson);
 end;
 
 end.

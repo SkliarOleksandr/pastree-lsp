@@ -35,6 +35,7 @@ uses
   PasTree.DProj,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
+  PasTree.Sema.Async,
   PasTree.Sema.Nav,
   PasLsp.Protocol,
   PasLsp.Documents;
@@ -58,15 +59,25 @@ type
     FDefines: TArray<string>;
     FNamespaces: TArray<string>;
     FAliases: TArray<TPasUnitAlias>;
-    // Analysis cache
-    FProject: TPasSemaProject;
+    // Analysis state (phase 2, all touched by the DISPATCHER thread only:
+    // the async session's worker builds its own project in isolation —
+    // TPasAsyncSession's double-buffering contract).
+    FProject: TPasSemaProject;      // last COMPLETED analysis (may be nil)
     FNav: TPasNavigator;
-    FDirty: Boolean;
+    FSession: TPasAsyncSession;     // in-flight analysis, nil when idle
+    FDirty: Boolean;                // docs changed since FSession started
+    FCancels: TLspCancelSet;        // shared with the reader thread
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
     procedure ApplyInitOptions(AOptions: TJSONValue);
     procedure InvalidateAnalysis;
-    procedure EnsureAnalyzed(const APriorityFile: string);
+    procedure StartAnalysis(const APriorityFile: string);
+    procedure FinalizeAnalysisIfDone;
+    { Blocks until an up-to-date analysis is available, staying responsive
+      to $/cancelRequest for ARequestIdJson. False = that request was
+      cancelled while waiting (the caller answers -32800). }
+    function WaitAnalyzed(const APriorityFile,
+      ARequestIdJson: string): Boolean;
     procedure PublishDiagnostics;
     procedure PublishEmptyDiagnostics(const APath: string);
     function DocPathOf(AParams: TJSONValue): string;
@@ -76,8 +87,13 @@ type
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
   public
-    constructor Create;
+    { ACancels is the reader thread's cancel set; not owned. }
+    constructor Create(ACancels: TLspCancelSet);
     destructor Destroy; override;
+    { The dispatcher's idle tick (no message for ~50ms): finalizes a finished
+      background analysis so diagnostics go out without waiting for the next
+      request. }
+    procedure Idle;
     { Dispatches one raw JSON message; returns the response to send, or ''
       for notifications (and for client responses we ignore). Never raises:
       a handler exception becomes a JSON-RPC InternalError for requests and
@@ -94,9 +110,10 @@ type
 
 implementation
 
-constructor TLspServer.Create;
+constructor TLspServer.Create(ACancels: TLspCancelSet);
 begin
   inherited Create;
+  FCancels := ACancels;
   FDocs := TLspDocumentStore.Create;
   FOutgoing := TList<string>.Create;
   FPlatform := pfWin64;
@@ -159,6 +176,12 @@ end;
 
 procedure TLspServer.InvalidateAnalysis;
 begin
+  if FSession <> nil then
+  begin
+    FSession.Cancel;
+    FreeAndNil(FSession);   // Destroy drains the worker — quick, the cancel
+                            // lands mid-pass (FCancelCheck in PasTree)
+  end;
   FreeAndNil(FNav);
   FreeAndNil(FProject);
   FDirty := True;
@@ -261,24 +284,22 @@ end;
 
 { -------- analysis -------- }
 
-procedure TLspServer.EnsureAnalyzed(const APriorityFile: string);
+{ Cancels whatever is in flight and starts a fresh background analysis over
+  the current document snapshot. Non-blocking: the dispatcher keeps
+  processing messages (didChange restarts, $/cancelRequest lands) while the
+  session's worker builds. The PREVIOUS completed project stays live until
+  the new one is taken — the demo's double-buffering discipline. }
+procedure TLspServer.StartAnalysis(const APriorityFile: string);
 var
   LRoots, LPriority: TArray<string>;
   LDoc: TLspDocument;
   LAlias: TPasUnitAlias;
 begin
-  if (FProject <> nil) and not FDirty then
-    Exit;
-  InvalidateAnalysis;
-  FProject := TPasSemaProject.Create(FPlatform, FSearchPaths, FDefines);
-  FProject.SetNamespaces(FNamespaces);
-  for LAlias in FAliases do
-    FProject.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
-  // Document truth: every open document overlays its disk file, stamped
-  // with the client's version (readable back for staleness checks once
-  // requests go asynchronous in phase 2).
-  for LDoc in FDocs.All do
-    FProject.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
+  if FSession <> nil then
+  begin
+    FSession.Cancel;
+    FreeAndNil(FSession);
+  end;
 
   if FMainSource <> '' then
     LRoots := [FMainSource]
@@ -293,13 +314,85 @@ begin
   else
     LPriority := nil;
 
-  Log(Format('analyzing (%d roots, %d overlays)...',
+  FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
+    LRoots, LPriority);
+  FSession.SetNamespaces(FNamespaces);
+  for LAlias in FAliases do
+    FSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
+  // Document truth, stamped with the client's version — compared on
+  // completion to catch a snapshot that went stale mid-build.
+  for LDoc in FDocs.All do
+    FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
+  FDirty := False;   // this session covers everything up to now
+  Log(Format('analysis started (%d roots, %d overlays)',
     [Length(LRoots), FDocs.Count]));
-  FProject.AnalyzeStaged(LRoots, LPriority, nil, nil);
+  FSession.Start;
+end;
+
+{ Swaps a finished session's project in (on the dispatcher thread — the
+  worker is done, TakeProject is the ownership handoff) and publishes
+  diagnostics. If any open document changed since the session snapshotted
+  its buffers — detected via the version stamps SetBuffer carried — the
+  result is already stale: swap it in anyway (better navigation than none)
+  but immediately start the replacement build. }
+procedure TLspServer.FinalizeAnalysisIfDone;
+var
+  LDoc: TLspDocument;
+  LStale: Boolean;
+  LError: string;
+begin
+  if (FSession = nil) or not FSession.IsDone then
+    Exit;
+  LError := FSession.LastError;
+  if LError <> '' then
+    Log('analysis worker error: ' + LError);
+  FreeAndNil(FNav);
+  FreeAndNil(FProject);
+  FProject := FSession.TakeProject;
+  FreeAndNil(FSession);
+  if FProject = nil then
+    Exit;
   FNav := TPasNavigator.Create(FProject);
-  FDirty := False;
   Log('analysis done');
+
+  LStale := FDirty;
+  if not LStale then
+    for LDoc in FDocs.All do
+      if FProject.BufferVersion(LDoc.Path) <> LDoc.Version then
+      begin
+        LStale := True;
+        Break;
+      end;
   PublishDiagnostics;
+  if LStale then
+  begin
+    Log('result is stale (documents changed mid-build) — restarting');
+    StartAnalysis('');
+  end;
+end;
+
+procedure TLspServer.Idle;
+begin
+  FinalizeAnalysisIfDone;
+end;
+
+function TLspServer.WaitAnalyzed(const APriorityFile,
+  ARequestIdJson: string): Boolean;
+begin
+  if (FProject = nil) and (FSession = nil) then
+    StartAnalysis(APriorityFile);
+  // Wait out the in-flight build (if any), polling the cancel set: this is
+  // exactly the moment $/cancelRequest exists for — the reader thread keeps
+  // noting cancels while we sit here.
+  while FSession <> nil do
+  begin
+    if (ARequestIdJson <> '') and FCancels.IsCancelled(ARequestIdJson) then
+      Exit(False);
+    FinalizeAnalysisIfDone;   // also handles the stale->restart loop
+    if FSession <> nil then
+      TThread.Sleep(10);
+  end;
+  Result := True;
 end;
 
 // LSP DiagnosticSeverity from a PasTree diagnostic code. E/F are dcc's own
@@ -407,7 +500,7 @@ begin
       '"positionEncoding":"utf-16",' +
       '"textDocumentSync":{"openClose":true,"change":1},' +   // 1 = Full
       '"definitionProvider":true' +
-    '},"serverInfo":{"name":"pastree-lsp-server","version":"0.1.0"}}');
+    '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
 // textDocument.uri of AParams -> full Windows path ('' if absent/non-file).
@@ -434,10 +527,7 @@ begin
   FDocs.Open(LPath, LText, LVersion);
   FDirty := True;
   Log(Format('didOpen %s v%d', [LPath, LVersion]));
-  // Analyze eagerly so diagnostics appear without waiting for a request.
-  // Synchronous — acceptable at phase 1 (SPEC.md); the async session +
-  // debounce + $/cancelRequest wiring is phase 2's whole point.
-  EnsureAnalyzed(LPath);
+  StartAnalysis(LPath);   // background; diagnostics follow via Idle
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -463,7 +553,10 @@ begin
   FDirty := True;
   Log(Format('didChange %s v%d (%d chars)',
     [LPath, LVersion, Length(LText)]));
-  EnsureAnalyzed(LPath);   // see HandleDidOpen — synchronous until phase 2
+  // Restart-on-change: the in-flight build's snapshot no longer matches, and
+  // cancelling it is cheap now (mid-pass). A debounce would batch keystroke
+  // bursts — worth adding when a big project shows restart churn.
+  StartAnalysis(LPath);
 end;
 
 procedure TLspServer.HandleDidClose(AParams: TJSONValue);
@@ -477,6 +570,7 @@ begin
   FDirty := True;   // the disk file is the truth again
   PublishEmptyDiagnostics(LPath);
   Log('didClose ' + LPath);
+  StartAnalysis('');
 end;
 
 function TLspServer.HandleDefinition(const AMsg: TLspIncoming): string;
@@ -493,7 +587,10 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'definition: textDocument.uri and position required'));
 
-  EnsureAnalyzed(LPath);
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));   // analysis produced nothing
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
   begin
@@ -521,10 +618,16 @@ begin
     Exit(BuildError('', LSP_PARSE_ERROR, 'malformed JSON'));
   try
     try
-      // A response from the client (id, no method) — phase 1 sends no
+      // A response from the client (id, no method) — we send no
       // client-bound requests, so nothing to correlate; ignore.
       if LMsg.Method = '' then
         Exit;
+
+      // A cancel that arrived before we even started this request (the
+      // reader noted it while earlier messages were being handled).
+      if LMsg.IsRequest and FCancels.IsCancelled(LMsg.IdJson) then
+        Exit(BuildError(LMsg.IdJson, LSP_REQUEST_CANCELLED,
+          'request cancelled'));
 
       if LMsg.Method = 'initialize' then
         Exit(HandleInitialize(LMsg));
@@ -593,6 +696,9 @@ begin
       end;
     end;
   finally
+    // Answered (or never will be) — late cancels for this id are meaningless.
+    if LMsg.IsRequest then
+      FCancels.Retire(LMsg.IdJson);
     LMsg.Root.Free;
   end;
 end;

@@ -12,6 +12,7 @@ program pastree_server;
 
 uses
   System.SysUtils,
+  System.SyncObjs,
   PasLsp.Transport in 'source\PasLsp.Transport.pas',
   PasLsp.Protocol in 'source\PasLsp.Protocol.pas',
   PasLsp.Documents in 'source\PasLsp.Documents.pas',
@@ -19,26 +20,50 @@ uses
 
 var
   GTransport: TLspTransport;
+  GCancels: TLspCancelSet;
+  GReader: TLspReader;
   GServer: TLspServer;
   GJson, GReply: string;
+  GDone: Boolean;
 
 begin
   GTransport := TLspTransport.Create;
-  GServer := TLspServer.Create;
+  GCancels := TLspCancelSet.Create;
+  GReader := TLspReader.Create(GTransport, GCancels);
+  GServer := TLspServer.Create(GCancels);
   try
-    while not GServer.ExitRequested do
+    // Dispatch loop: the READER thread owns stdin (so $/cancelRequest is
+    // seen even while a handler waits out an analysis); this thread owns
+    // everything else, including all stdout writes. A pop timeout is the
+    // idle tick — it finalizes finished background analyses, which is how
+    // diagnostics reach the client when no request follows an edit.
+    GDone := False;
+    while not (GDone or GServer.ExitRequested) do
     begin
-      if not GTransport.ReadMessage(GJson) then
-        Break;   // client closed stdin: session over
-      GReply := GServer.Handle(GJson);
-      if GReply <> '' then
-        GTransport.WriteMessage(GReply);
+      case GReader.Pop(GJson) of
+        wrSignaled:
+          if GJson = '' then
+            GDone := True   // EOF sentinel: client closed stdin
+          else
+          begin
+            GReply := GServer.Handle(GJson);
+            if GReply <> '' then
+              GTransport.WriteMessage(GReply);
+          end;
+        wrTimeout:
+          GServer.Idle;
+      else
+        GDone := True;   // queue shut down
+      end;
       for var GNote in GServer.TakeOutgoing do
         GTransport.WriteMessage(GNote);
     end;
     ExitCode := GServer.ExitCode;
   finally
     GServer.Free;
-    GTransport.Free;
+    // Deliberately NOT freeing GReader: its thread may sit in a blocking
+    // stdin read that nothing can interrupt, and process exit (right here)
+    // is the one clean way out. Freeing the rest first is safe — the reader
+    // touches only the transport's IN stream and the cancel set.
   end;
 end.

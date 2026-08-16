@@ -16,6 +16,7 @@ interface
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   System.JSON;
 
 const
@@ -26,6 +27,7 @@ const
   LSP_INVALID_PARAMS = -32602;
   LSP_INTERNAL_ERROR = -32603;
   LSP_SERVER_NOT_INITIALIZED = -32002;
+  LSP_REQUEST_CANCELLED = -32800;
 
 type
   // One incoming message. Root owns everything; callers free Root only.
@@ -38,6 +40,27 @@ type
     Method: string;
     Params: TJSONValue;   // may be nil; owned by Root
     function IsRequest: Boolean;
+  end;
+
+type
+  { Cancelled request ids, shared between the READER thread (which notes a
+    $/cancelRequest the moment it arrives — that is the entire point of the
+    reader thread: the dispatcher may be busy inside an analysis wait) and
+    the dispatcher (which polls while waiting and checks at request entry).
+    Ids are kept as their raw JSON rendering — the same form TLspIncoming
+    carries — so number vs string ids never need normalizing. }
+  TLspCancelSet = class
+  private
+    FLock: TObject;
+    FIds: TDictionary<string, Boolean>;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure NoteCancel(const AIdJson: string);
+    function IsCancelled(const AIdJson: string): Boolean;
+    { Forget AIdJson (the request was answered — late cancels for it are
+      meaningless and the set must not grow without bound). }
+    procedure Retire(const AIdJson: string);
   end;
 
 function ParseIncoming(const AJson: string; out AMsg: TLspIncoming): Boolean;
@@ -67,6 +90,52 @@ function LocationJson(const AFilePath: string; APasLine, APasCol,
   ALen: Integer): string;
 
 implementation
+
+{ TLspCancelSet }
+
+constructor TLspCancelSet.Create;
+begin
+  inherited Create;
+  FLock := TObject.Create;
+  FIds := TDictionary<string, Boolean>.Create;
+end;
+
+destructor TLspCancelSet.Destroy;
+begin
+  FIds.Free;
+  FLock.Free;
+  inherited;
+end;
+
+procedure TLspCancelSet.NoteCancel(const AIdJson: string);
+begin
+  TMonitor.Enter(FLock);
+  try
+    FIds.AddOrSetValue(AIdJson, True);
+  finally
+    TMonitor.Exit(FLock);
+  end;
+end;
+
+function TLspCancelSet.IsCancelled(const AIdJson: string): Boolean;
+begin
+  TMonitor.Enter(FLock);
+  try
+    Result := FIds.ContainsKey(AIdJson);
+  finally
+    TMonitor.Exit(FLock);
+  end;
+end;
+
+procedure TLspCancelSet.Retire(const AIdJson: string);
+begin
+  TMonitor.Enter(FLock);
+  try
+    FIds.Remove(AIdJson);
+  finally
+    TMonitor.Exit(FLock);
+  end;
+end;
 
 function TLspIncoming.IsRequest: Boolean;
 begin

@@ -15,11 +15,16 @@ It serves two kinds of clients with the same protocol:
 
 ## Status
 
-Phase 1 skeleton works end-to-end: stdio framing, `initialize`/`shutdown`/
-`exit`, full-sync `didOpen`/`didChange`/`didClose` (overlay buffers with
-versions), and `textDocument/definition` over an analyzed project closure.
-Build with `build.bat` (dcc64); smoke-tested by feeding a framed session to
-`out\pastree-server.exe` and checking the definition locations.
+Phase 1 plus the phase-2 async core works end-to-end: stdio framing with a
+dedicated reader thread, `initialize`/`shutdown`/`exit`, full-sync
+`didOpen`/`didChange`/`didClose` (versioned overlay buffers), analysis on a
+background session (restart-on-change, stale-result detection via buffer
+versions), honored `$/cancelRequest` (−32800), `textDocument/definition`,
+and `textDocument/publishDiagnostics` for open documents with optional
+file logging. Verified against VS Code (`clients/vscode`, run with
+`--extensionDevelopmentPath`) — go-to-definition and diagnostics both work
+live. Still open in phase 2: `references`, incremental sync, a didChange
+debounce.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).
