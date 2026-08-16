@@ -15,7 +15,13 @@ It serves two kinds of clients with the same protocol:
 
 ## Status
 
-Design stage. The full specification — architecture, protocol phases, key
+Phase 1 skeleton works end-to-end: stdio framing, `initialize`/`shutdown`/
+`exit`, full-sync `didOpen`/`didChange`/`didClose` (overlay buffers with
+versions), and `textDocument/definition` over an analyzed project closure.
+Build with `build.bat` (dcc64); smoke-tested by feeding a framed session to
+`out\pastree-server.exe` and checking the definition locations.
+
+The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).
 
 The PasTree-side prerequisites (versioned overlay buffers and mid-pass
