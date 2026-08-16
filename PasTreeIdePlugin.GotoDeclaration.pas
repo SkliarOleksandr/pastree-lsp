@@ -195,9 +195,17 @@ begin
 
   // OpenModule loads the module but doesn't itself create a visible editor
   // view for a file that wasn't already open - EditViewCount is 0 right
-  // after OpenModule alone. Show creates/reveals the default editor (and
+  // after OpenModule alone. Show[Filename] creates/reveals the editor (and
   // its view) for the module; only after that does EditViews[0] exist.
-  LModule.Show;
+  //
+  // Deliberately ShowFilename(AFileName), not the plain Show: for a module
+  // with an associated form (Unit1.pas + Unit1.dfm), Show shows the
+  // module's "default editor" - which for a form-owning unit is the Form
+  // Designer, exactly mirroring the well-known Project Manager behavior
+  // where double-clicking such a unit opens the form, not the code. Since
+  // AFileName here is always the .pas we're navigating into, ShowFilename
+  // pins the reveal to that source file specifically, never the form.
+  LModule.ShowFilename(AFileName);
 
   if not Supports(LModule.GetModuleFileEditor(0), IOTASourceEditor, LSourceEditor) then
   begin
