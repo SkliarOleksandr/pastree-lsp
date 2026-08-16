@@ -1,0 +1,29 @@
+# Delphi compiler output
+*.dcu
+*.dcp
+*.bpl
+*.exe
+*.map
+*.drc
+*.rsm
+*.tds
+
+# IDE local state
+*.local
+*.identcache
+*.projdata
+*.tvsconfig
+*.dsk
+*.stat
+__history/
+__recovery/
+
+# Build output directories
+out/
+out32/
+out64/
+bin/
+dcu/
+
+# Local-only notes (never committed, same convention as the PasTree repo)
+local/
