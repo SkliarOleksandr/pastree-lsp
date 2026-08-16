@@ -25,5 +25,8 @@ out64/
 bin/
 dcu/
 
+# Node (VS Code dev client)
+node_modules/
+
 # Local-only notes (never committed, same convention as the PasTree repo)
 local/

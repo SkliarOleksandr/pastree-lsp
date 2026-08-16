@@ -33,6 +33,7 @@ uses
   System.IOUtils,
   PasTree.Platforms,
   PasTree.DProj,
+  PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
   PasLsp.Protocol,
@@ -46,7 +47,10 @@ type
     FExitRequested: Boolean;
     FExitCode: Integer;
     FTrace: Boolean;
+    FLogPath: string;
+    FLogStarted: Boolean;
     FDocs: TLspDocumentStore;
+    FOutgoing: TList<string>;   // notifications queued during Handle
     // Configuration (fixed at initialize)
     FPlatform: TPasPlatform;
     FMainSource: string;
@@ -59,9 +63,12 @@ type
     FNav: TPasNavigator;
     FDirty: Boolean;
     procedure Log(const AMsg: string);
+    procedure Notify(const AJson: string);
     procedure ApplyInitOptions(AOptions: TJSONValue);
     procedure InvalidateAnalysis;
     procedure EnsureAnalyzed(const APriorityFile: string);
+    procedure PublishDiagnostics;
+    procedure PublishEmptyDiagnostics(const APath: string);
     function DocPathOf(AParams: TJSONValue): string;
     function HandleInitialize(const AMsg: TLspIncoming): string;
     function HandleDefinition(const AMsg: TLspIncoming): string;
@@ -76,6 +83,11 @@ type
       a handler exception becomes a JSON-RPC InternalError for requests and
       a stderr line for notifications. }
     function Handle(const AJson: string): string;
+    { Server-initiated notifications produced while handling the last
+      message (publishDiagnostics, ...) — the caller sends each and the
+      queue resets. Drained AFTER the Handle reply by the main loop; order
+      within the queue is preserved. }
+    function TakeOutgoing: TArray<string>;
     property ExitRequested: Boolean read FExitRequested;
     property ExitCode: Integer read FExitCode;
   end;
@@ -86,21 +98,63 @@ constructor TLspServer.Create;
 begin
   inherited Create;
   FDocs := TLspDocumentStore.Create;
+  FOutgoing := TList<string>.Create;
   FPlatform := pfWin64;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
+  FLogPath := GetEnvironmentVariable('PASTREE_LSP_LOG');
 end;
 
 destructor TLspServer.Destroy;
 begin
   InvalidateAnalysis;
+  FOutgoing.Free;
   FDocs.Free;
   inherited;
 end;
 
+{ Diagnostics channel for the server ITSELF (not the analyzer — those go to
+  the client as publishDiagnostics): stderr when PASTREE_LSP_TRACE is set
+  (LSP clients capture stderr; VS Code shows it in the Output panel), and a
+  file when a path is configured — PASTREE_LSP_LOG env var or the "logFile"
+  initializationOption, the latter winning. The file survives the client
+  swallowing stderr, which is exactly the situation a transport bug puts you
+  in. Append per line, open/close each time: crash-safe, and the volume is
+  a handful of lines per request. }
 procedure TLspServer.Log(const AMsg: string);
+var
+  LLine: string;
 begin
   if FTrace then
     Writeln(ErrOutput, '[pastree-lsp] ' + AMsg);
+  if FLogPath = '' then
+    Exit;
+  LLine := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now) + ' ' + AMsg +
+    sLineBreak;
+  try
+    if not FLogStarted then
+    begin
+      // Separator instead of truncation: successive runs stay in one file,
+      // and "which run is this" stays answerable.
+      TFile.AppendAllText(FLogPath,
+        StringOfChar('-', 64) + sLineBreak + LLine, TEncoding.UTF8);
+      FLogStarted := True;
+    end
+    else
+      TFile.AppendAllText(FLogPath, LLine, TEncoding.UTF8);
+  except
+    FLogPath := '';   // an unwritable log must not take the server down
+  end;
+end;
+
+procedure TLspServer.Notify(const AJson: string);
+begin
+  FOutgoing.Add(AJson);
+end;
+
+function TLspServer.TakeOutgoing: TArray<string>;
+begin
+  Result := FOutgoing.ToArray;
+  FOutgoing.Clear;
 end;
 
 procedure TLspServer.InvalidateAnalysis;
@@ -129,6 +183,9 @@ begin
     LProjectFile := AOptions.GetValue<string>('projectFile', '');
     LPlatformStr := AOptions.GetValue<string>('platform', '');
     LConfigStr := AOptions.GetValue<string>('config', '');
+    LItem := AOptions.GetValue<string>('logFile', '');
+    if LItem <> '' then
+      FLogPath := LItem;   // beats PASTREE_LSP_LOG: per-workspace over global
   end;
 
   if not ((LPlatformStr = '') or
@@ -242,6 +299,98 @@ begin
   FNav := TPasNavigator.Create(FProject);
   FDirty := False;
   Log('analysis done');
+  PublishDiagnostics;
+end;
+
+// LSP DiagnosticSeverity from a PasTree diagnostic code. E/F are dcc's own
+// error classes; W maps to warning; everything else (PPIF/PPBAD/PPENC/PPINT,
+// our own "the ANALYZER could not decide" family) is information — calling
+// those errors in the USER's code would be a lie (the demo draws the same
+// line, DiagSeverityLabel).
+function DiagSeverity(const ACode: string): Integer;
+begin
+  if (ACode <> '') and CharInSet(ACode[1], ['E', 'F']) then
+    Result := 1   // Error
+  else if (ACode <> '') and (ACode[1] = 'W') then
+    Result := 2   // Warning
+  else
+    Result := 3;  // Information
+end;
+
+{ Analyzer diagnostics -> the client, as textDocument/publishDiagnostics for
+  every OPEN document (phase 1 scope: the whole-closure report stays a
+  phase-3 concern — an editor shows squiggles for what the user is looking
+  at, and open docs keep the volume bounded on a big project). Publishing
+  for every open doc every time — including an EMPTY array when a doc has
+  none — is what clears stale squiggles after a fixing edit; LSP has no
+  "unchanged" shorthand. A diagnostic raised inside an $I include is matched
+  by the include's own FileId path, so it lands on the include's buffer if
+  that file is open, and is dropped otherwise (its unit's main file is the
+  wrong place to draw it). }
+procedure TLspServer.PublishDiagnostics;
+var
+  LDoc: TLspDocument;
+  LMid, LIdx, LFileId, LLine, LChar: Integer;
+  LModel: TPasSemaModel;
+  LDiagFile, LKey: string;
+  LSB: TStringBuilder;
+  LFirst: Boolean;
+begin
+  for LDoc in FDocs.All do
+  begin
+    LMid := FNav.ModelIdOf(LDoc.Path);
+    LSB := TStringBuilder.Create;
+    try
+      LFirst := True;
+      if LMid >= 0 then
+      begin
+        LModel := FProject.Model(LMid);
+        LKey := LowerCase(LDoc.Path);
+        for LIdx := 0 to High(LModel.Diags) do
+        begin
+          // FileId indexes the MODEL'S own file table ($I includes) — see
+          // the demo's ReportProjectResult for why assuming the main file
+          // misplaces include diagnostics.
+          LFileId := LModel.Diags[LIdx].FileId;
+          if (LFileId >= 0) and
+             (LFileId <= High(LModel.Tree.Source.FileNames)) then
+            LDiagFile := LModel.Tree.Source.FileNames[LFileId]
+          else
+            LDiagFile := FProject.ModelFile(LMid);
+          if LowerCase(TPath.GetFullPath(LDiagFile)) <> LKey then
+            Continue;
+          if not LFirst then
+            LSB.Append(',');
+          LFirst := False;
+          PasTreeToLsp(LModel.Diags[LIdx].Line, LModel.Diags[LIdx].Col,
+            LLine, LChar);
+          LSB.Append(Format(
+            '{"range":{"start":{"line":%d,"character":%d},' +
+            '"end":{"line":%d,"character":%d}},' +
+            '"severity":%d,"code":%s,"source":"pastree","message":%s}',
+            [LLine, LChar, LLine, LChar + 1,
+             DiagSeverity(LModel.Diags[LIdx].Code),
+             JsonQuote(LModel.Diags[LIdx].Code),
+             JsonQuote(LModel.Diags[LIdx].Msg)]));
+        end;
+      end;
+      Notify(Format(
+        '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",' +
+        '"params":{"uri":%s,"version":%d,"diagnostics":[%s]}}',
+        [JsonQuote(PathToUri(LDoc.Path)), LDoc.Version, LSB.ToString]));
+    finally
+      LSB.Free;
+    end;
+  end;
+end;
+
+// didClose: the client owns no more squiggles for this doc — clear them.
+procedure TLspServer.PublishEmptyDiagnostics(const APath: string);
+begin
+  Notify(Format(
+    '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",' +
+    '"params":{"uri":%s,"diagnostics":[]}}',
+    [JsonQuote(PathToUri(APath))]));
 end;
 
 { -------- handlers -------- }
@@ -285,6 +434,10 @@ begin
   FDocs.Open(LPath, LText, LVersion);
   FDirty := True;
   Log(Format('didOpen %s v%d', [LPath, LVersion]));
+  // Analyze eagerly so diagnostics appear without waiting for a request.
+  // Synchronous — acceptable at phase 1 (SPEC.md); the async session +
+  // debounce + $/cancelRequest wiring is phase 2's whole point.
+  EnsureAnalyzed(LPath);
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -310,6 +463,7 @@ begin
   FDirty := True;
   Log(Format('didChange %s v%d (%d chars)',
     [LPath, LVersion, Length(LText)]));
+  EnsureAnalyzed(LPath);   // see HandleDidOpen — synchronous until phase 2
 end;
 
 procedure TLspServer.HandleDidClose(AParams: TJSONValue);
@@ -321,6 +475,7 @@ begin
     Exit;
   FDocs.Close(LPath);
   FDirty := True;   // the disk file is the truth again
+  PublishEmptyDiagnostics(LPath);
   Log('didClose ' + LPath);
 end;
 

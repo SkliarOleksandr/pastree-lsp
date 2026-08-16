@@ -33,6 +33,8 @@ begin
       GReply := GServer.Handle(GJson);
       if GReply <> '' then
         GTransport.WriteMessage(GReply);
+      for var GNote in GServer.TakeOutgoing do
+        GTransport.WriteMessage(GNote);
     end;
     ExitCode := GServer.ExitCode;
   finally
