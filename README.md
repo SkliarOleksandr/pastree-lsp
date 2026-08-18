@@ -20,11 +20,12 @@ dedicated reader thread, `initialize`/`shutdown`/`exit`, full-sync
 `didOpen`/`didChange`/`didClose` (versioned overlay buffers), analysis on a
 background session (restart-on-change, stale-result detection via buffer
 versions), honored `$/cancelRequest` (−32800), `textDocument/definition`,
-and `textDocument/publishDiagnostics` for open documents with optional
-file logging. Verified against VS Code (`clients/vscode`, run with
-`--extensionDevelopmentPath`) — go-to-definition and diagnostics both work
-live. Still open in phase 2: `references`, incremental sync, a didChange
-debounce.
+`textDocument/references` (the three-identity model: symbol / unit /
+builtin), and `textDocument/publishDiagnostics` for open documents with
+optional file logging. Verified against VS Code (`clients/vscode`; also
+installable as a VSIX) — go-to-definition, find-all-references and
+diagnostics all work live. Still open in phase 2: incremental sync, a
+didChange debounce.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).

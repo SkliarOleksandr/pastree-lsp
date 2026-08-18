@@ -83,6 +83,7 @@ type
     function DocPathOf(AParams: TJSONValue): string;
     function HandleInitialize(const AMsg: TLspIncoming): string;
     function HandleDefinition(const AMsg: TLspIncoming): string;
+    function HandleReferences(const AMsg: TLspIncoming): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -499,7 +500,8 @@ begin
     '{"capabilities":{' +
       '"positionEncoding":"utf-16",' +
       '"textDocumentSync":{"openClose":true,"change":1},' +   // 1 = Full
-      '"definitionProvider":true' +
+      '"definitionProvider":true,' +
+      '"referencesProvider":true' +
     '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
@@ -607,6 +609,100 @@ begin
     Result := BuildResponse(AMsg.IdJson, 'null');
 end;
 
+// One TPasRefHit as an LSP Location. The highlight span HiFrom..HiTo (0-based
+// offsets into the snippet LINE) gives the range its length; Col is where
+// that span starts, so start/end derive from Col and the span width.
+function HitLocationJson(const AHit: TPasRefHit): string;
+begin
+  Result := LocationJson(AHit.FilePath, AHit.Line, AHit.Col,
+    AHit.HiTo - AHit.HiFrom);
+end;
+
+{ textDocument/references — the three-identity model, straight from the
+  navigator (see PasTree.Sema.Nav's own comments for why three): a SYMBOL
+  (unit, symbol id — the normal case), a UNIT (header/uses click: each
+  referrer holds its own skUnitRef symbol, so the target model id is the
+  only project-wide identity), or a compiler-seeded BUILTIN (no declaration
+  anywhere; the name is the identity). Tried in that order — SymbolAt
+  declines the latter two by design. FindReferences never includes the
+  declaration site, so context.includeDeclaration is honored by prepending
+  the separate DeclHit/UnitDeclHit answer (builtins have no declaration to
+  include). }
+function TLspServer.HandleReferences(const AMsg: TLspIncoming): string;
+var
+  LPath, LName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym: Integer;
+  LInclDecl: Boolean;
+  LHits: TArray<TPasRefHit>;
+  LDecl: TPasRefHit;
+  LSB: TStringBuilder;
+  LIdx: Integer;
+  LKind: string;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'references: textDocument.uri and position required'));
+  LInclDecl := AMsg.Params.GetValue<Boolean>('context.includeDeclaration',
+    False);
+
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+
+  LHits := nil;
+  // UnitAt BEFORE SymbolAt, deliberately the opposite of the IDE plugin's
+  // order: UnitAt only ever matches a `uses` item or the module's own header
+  // name — positions where the unit identity IS the right answer — while
+  // SymbolAt, tested first, CLAIMS a program's `X in '...'` uses item as an
+  // ordinary symbol whose reference search then finds nothing (observed on
+  // a .dpr; a unit's plain uses items it declines as documented).
+  if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
+  begin
+    LKind := 'unit';
+    LHits := FNav.FindUnitReferences(LTMid);
+    if LInclDecl and FNav.UnitDeclHit(LTMid, LDecl) then
+      LHits := [LDecl] + LHits;
+  end
+  else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    LKind := 'symbol';
+    LHits := FNav.FindReferences(LTMid, LSym);
+    if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
+      LHits := [LDecl] + LHits;
+  end
+  else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
+  begin
+    LKind := 'builtin';
+    LHits := FNav.FindBuiltinReferences(LName);
+  end
+  else
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  Log(Format('references(%s): %s -> %d hits', [LKind, LName, Length(LHits)]));
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('[');
+    for LIdx := 0 to High(LHits) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(HitLocationJson(LHits[LIdx]));
+    end;
+    LSB.Append(']');
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -676,6 +772,8 @@ begin
         Exit;   // we advertise no save interest; harmless if sent anyway
       if LMsg.Method = 'textDocument/definition' then
         Exit(HandleDefinition(LMsg));
+      if LMsg.Method = 'textDocument/references' then
+        Exit(HandleReferences(LMsg));
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful

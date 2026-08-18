@@ -27,6 +27,7 @@ dcu/
 
 # Node (VS Code dev client)
 node_modules/
+*.vsix
 
 # Local-only notes (never committed, same convention as the PasTree repo)
 local/
