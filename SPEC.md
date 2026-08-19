@@ -122,5 +122,8 @@ Three layers, strict dependency direction:
   to own the child process's pipes; ToolsAPI imposes no obstacle, but verify)
 - how much of `TPasAsyncSession` (the demo's async layer) is reusable as the
   server's scheduling core vs. server-owned from scratch
-- incremental reanalysis granularity — per-module is the minimum for
-  keystroke-rate `didChange`; measure before designing finer
+- incremental reanalysis granularity: MEASURED and written up as a feature in
+  the PasTree repo To-do (parse-artifact cache, then single-module reanalysis
+  with a fallback guard). On the demo closure a rebuild splits 21% interface
+  parse / 27% full parse / 52% cross passes, so caching the parse is at best
+  half the answer
