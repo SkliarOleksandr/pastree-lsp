@@ -44,6 +44,11 @@ type
       the caller compares against it without re-reading. }
     procedure Change(const APath, AText: string; AVersion: Integer;
       const ADiskText: string; ADiffers: Boolean);
+    { Re-reads what the disk holds for an OPEN document. Called when the file
+      changed underneath the editor: the overlay stays the truth for analysis,
+      but Differs (and so the rebuild gate, and what didClose decides) must be
+      measured against the CURRENT file, not the one seen at open time. }
+    procedure SetDiskText(const APath, ADiskText: string);
     procedure Close(const APath: string);
     function TryGet(const APath: string; out ADoc: TLspDocument): Boolean;
     function All: TArray<TLspDocument>;
@@ -155,6 +160,17 @@ procedure TLspDocumentStore.Change(const APath, AText: string;
   AVersion: Integer; const ADiskText: string; ADiffers: Boolean);
 begin
   Open(APath, AText, AVersion, ADiskText, ADiffers);   // same shape
+end;
+
+procedure TLspDocumentStore.SetDiskText(const APath, ADiskText: string);
+var
+  LDoc: TLspDocument;
+begin
+  if not FDocs.TryGetValue(KeyOf(APath), LDoc) then
+    Exit;
+  LDoc.DiskText := ADiskText;
+  LDoc.Differs := LDoc.Text <> ADiskText;
+  FDocs.AddOrSetValue(KeyOf(APath), LDoc);
 end;
 
 procedure TLspDocumentStore.Close(const APath: string);

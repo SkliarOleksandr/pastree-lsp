@@ -36,6 +36,14 @@ function activate(context) {
 
   const clientOptions = {
     documentSelector: [{ scheme: 'file', language: 'objectpascal' }],
+    // The server does not watch the file system itself (see its
+    // HandleDidChangeWatchedFiles): an editor already knows about these
+    // events, so the client forwards them as workspace/didChangeWatchedFiles
+    // and the server decides whether a rebuild is due.
+    synchronize: {
+      fileEvents: vscode.workspace.createFileSystemWatcher(
+        '**/*.{pas,dpr,dpk,inc,dproj}'),
+    },
     initializationOptions: {
       projectFile: cfg.get('projectFile') || '',
       platform: cfg.get('platform') || 'Win64',

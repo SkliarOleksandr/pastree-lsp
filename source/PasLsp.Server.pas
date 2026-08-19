@@ -106,6 +106,7 @@ type
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
+    procedure HandleDidChangeWatchedFiles(AParams: TJSONValue);
   public
     { ACancels is the reader thread's cancel set; not owned. }
     constructor Create(ACancels: TLspCancelSet);
@@ -1201,6 +1202,88 @@ begin
     [JsonQuote(LMd), LStartLine, LStartChar, LEndLine, LEndChar]));
 end;
 
+{ workspace/didChangeWatchedFiles — a file changed on disk, outside any
+  editor buffer we hold.
+
+  The CLIENT owns the watching: an editor already knows about file system
+  events, and the IDE plugin gets the same news from ToolsAPI, so a watcher
+  inside the server would be a second (polling, platform-specific) source of
+  truth for something both clients already have. The VS Code client registers
+  the glob in its `synchronize.fileEvents`; any other client just sends this
+  notification.
+
+  What matters here is deciding whether a rebuild is actually due:
+
+  - a file we hold OPEN cannot change the analysis, because the analysis reads
+    the OVERLAY for it, not the disk (document truth). No rebuild — but the
+    cached disk text is refreshed, or the rebuild gate and didClose would keep
+    comparing against a file that no longer exists in that form;
+  - a file we do NOT hold open was read from disk by the analysis, so its
+    change (or creation, or deletion — both move unit resolution) does mean a
+    rebuild;
+  - anything that is not Pascal source is ignored outright: a build writing
+    .dcu/.exe next to the sources would otherwise restart the analysis
+    continuously.
+
+  A changed .dproj is called out rather than acted on: search paths, defines
+  and namespaces are read once at initialize, so honoring it would need a
+  reconfigure the protocol gives us no clean moment for. Saying so beats
+  either silence or a rebuild that quietly uses the old configuration. }
+procedure TLspServer.HandleDidChangeWatchedFiles(AParams: TJSONValue);
+var
+  LChanges: TJSONArray;
+  LItem: TJSONValue;
+  LUri, LPath, LExt, LDisk: string;
+  LDoc: TLspDocument;
+  LRebuild: Boolean;
+  LTouched: Integer;
+begin
+  if (AParams = nil) or
+     not AParams.TryGetValue<TJSONArray>('changes', LChanges) then
+    Exit;
+  LRebuild := False;
+  LTouched := 0;
+  for LItem in LChanges do
+  begin
+    if not LItem.TryGetValue<string>('uri', LUri) then
+      Continue;
+    LPath := UriToPath(LUri);
+    if LPath = '' then
+      Continue;
+    LExt := LowerCase(TPath.GetExtension(LPath));
+    if LExt = '.dproj' then
+    begin
+      Log('note: ' + TPath.GetFileName(LPath) + ' changed on disk; search'
+        + ' paths and defines are read at initialize, so restart the server'
+        + ' to pick them up');
+      Continue;
+    end;
+    if (LExt <> '.pas') and (LExt <> '.dpr') and (LExt <> '.dpk') and
+       (LExt <> '.inc') then
+      Continue;
+    Inc(LTouched);
+    if FDocs.TryGet(LPath, LDoc) then
+    begin
+      try
+        LDisk := TPasSourceManager.LoadFileTolerant(LPath);
+      except
+        LDisk := '';   // deleted or locked: the overlay is all we have
+      end;
+      FDocs.SetDiskText(LPath, LDisk);
+      Log('watched: ' + TPath.GetFileName(LPath) +
+        ' changed on disk but is open here - overlay still wins');
+    end
+    else
+      LRebuild := True;
+  end;
+  if LRebuild then
+  begin
+    Log(Format('watched: %d file(s) changed on disk - rebuild scheduled',
+      [LTouched]));
+    ScheduleAnalysis('');
+  end;
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -1264,6 +1347,11 @@ begin
       if LMsg.Method = 'textDocument/didClose' then
       begin
         HandleDidClose(LMsg.Params);
+        Exit;
+      end;
+      if LMsg.Method = 'workspace/didChangeWatchedFiles' then
+      begin
+        HandleDidChangeWatchedFiles(LMsg.Params);
         Exit;
       end;
       if LMsg.Method = 'textDocument/didSave' then

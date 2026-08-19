@@ -23,11 +23,12 @@ versions), honored `$/cancelRequest` (−32800), `textDocument/definition`,
 `textDocument/references` (the three-identity model: symbol / unit /
 builtin), `textDocument/implementation` and `textDocument/declaration`
 (the decl-impl toggle), `textDocument/documentSymbol`,
-`textDocument/hover`, and `textDocument/publishDiagnostics` for open
-documents with optional file logging. Verified against VS Code
+`textDocument/hover`, `textDocument/publishDiagnostics` for open
+documents, and `workspace/didChangeWatchedFiles` (the client watches, the
+server decides whether a rebuild is due), with optional file logging. Verified against VS Code
 (`clients/vscode`; also installable as a VSIX) — go-to-definition,
-find-all-references, outline and diagnostics all work live. Still open: a disk-change
-watcher and a client-liveness watchdog.
+find-all-references, outline and diagnostics all work live. Still open: a client-liveness
+watchdog.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).
