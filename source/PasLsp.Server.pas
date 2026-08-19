@@ -26,6 +26,7 @@ unit PasLsp.Server;
 interface
 
 uses
+  Winapi.Windows,
   System.SysUtils,
   System.Classes,
   System.Generics.Collections,
@@ -67,11 +68,20 @@ type
     FSession: TPasAsyncSession;     // in-flight analysis, nil when idle
     FDirty: Boolean;                // docs changed since FSession started
     FCancels: TLspCancelSet;        // shared with the reader thread
+    // Debounce: document events SCHEDULE an analysis rather than start one,
+    // so a keystroke burst costs one build, not one per keystroke. The idle
+    // tick fires it when the deadline passes; a REQUEST fires it instantly
+    // (the user stopped typing and asked a question — the answer must be
+    // computed from the text they see, not the pre-burst snapshot).
+    FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
+    FPendingPriority: string;
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
     procedure ApplyInitOptions(AOptions: TJSONValue);
     procedure InvalidateAnalysis;
     procedure StartAnalysis(const APriorityFile: string);
+    procedure ScheduleAnalysis(const APriorityFile: string);
+    procedure FlushPending;
     procedure FinalizeAnalysisIfDone;
     { Blocks until an up-to-date analysis is available, staying responsive
       to $/cancelRequest for ARequestIdJson. False = that request was
@@ -325,9 +335,30 @@ begin
   for LDoc in FDocs.All do
     FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
   FDirty := False;   // this session covers everything up to now
+  FPendingDue := 0;  // whatever was scheduled is covered by this start
+  FPendingPriority := '';
   Log(Format('analysis started (%d roots, %d overlays)',
     [Length(LRoots), FDocs.Count]));
   FSession.Start;
+end;
+
+const
+  DEBOUNCE_MS = 300;   // one typing pause, not one build per keystroke
+
+procedure TLspServer.ScheduleAnalysis(const APriorityFile: string);
+begin
+  FDirty := True;
+  if APriorityFile <> '' then
+    FPendingPriority := APriorityFile;
+  FPendingDue := GetTickCount64 + DEBOUNCE_MS;
+end;
+
+// Fires a scheduled analysis NOW (deadline ignored) — requests call this so
+// they never sit out the debounce window.
+procedure TLspServer.FlushPending;
+begin
+  if FPendingDue <> 0 then
+    StartAnalysis(FPendingPriority);
 end;
 
 { Swaps a finished session's project in (on the dispatcher thread — the
@@ -374,12 +405,15 @@ end;
 
 procedure TLspServer.Idle;
 begin
+  if (FPendingDue <> 0) and (GetTickCount64 >= FPendingDue) then
+    FlushPending;
   FinalizeAnalysisIfDone;
 end;
 
 function TLspServer.WaitAnalyzed(const APriorityFile,
   ARequestIdJson: string): Boolean;
 begin
+  FlushPending;   // a scheduled build must not make the answer stale
   if (FProject = nil) and (FSession = nil) then
     StartAnalysis(APriorityFile);
   // Wait out the in-flight build (if any), polling the cancel set: this is
@@ -529,7 +563,10 @@ begin
   FDocs.Open(LPath, LText, LVersion);
   FDirty := True;
   Log(Format('didOpen %s v%d', [LPath, LVersion]));
-  StartAnalysis(LPath);   // background; diagnostics follow via Idle
+  // Debounced like didChange: switching tabs quickly (each an open, often a
+  // close right behind it — see any real session log) must not restart the
+  // build per tab. A request right after the open flushes instantly.
+  ScheduleAnalysis(LPath);
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -555,10 +592,7 @@ begin
   FDirty := True;
   Log(Format('didChange %s v%d (%d chars)',
     [LPath, LVersion, Length(LText)]));
-  // Restart-on-change: the in-flight build's snapshot no longer matches, and
-  // cancelling it is cheap now (mid-pass). A debounce would batch keystroke
-  // bursts — worth adding when a big project shows restart churn.
-  StartAnalysis(LPath);
+  ScheduleAnalysis(LPath);   // debounced — one build per typing pause
 end;
 
 procedure TLspServer.HandleDidClose(AParams: TJSONValue);
@@ -572,7 +606,7 @@ begin
   FDirty := True;   // the disk file is the truth again
   PublishEmptyDiagnostics(LPath);
   Log('didClose ' + LPath);
-  StartAnalysis('');
+  ScheduleAnalysis('');
 end;
 
 function TLspServer.HandleDefinition(const AMsg: TLspIncoming): string;
