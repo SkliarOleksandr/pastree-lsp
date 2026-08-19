@@ -31,6 +31,10 @@ Phases 1 and 2 are complete and exercised live.
 | `textDocument/publishDiagnostics` | for open documents, after each analysis |
 | `workspace/didChangeWatchedFiles` | the client watches, the server decides whether a rebuild is due |
 | `$/cancelRequest` | honored (−32800), noted by a dedicated stdin reader thread |
+| `$/progress` + `window/workDoneProgress/create` | server-initiated progress for the background analysis |
+| `window/logMessage`, `window/showMessage` | server trouble the user can act on |
+| `textDocument/typeDefinition` | the type of the thing under the cursor, across units |
+| `textDocument/documentHighlight` | occurrences within the current file |
 
 **Behaviour** — analysis runs on a background session, debounced so a typing
 burst costs one build; a document event only schedules a rebuild when the text

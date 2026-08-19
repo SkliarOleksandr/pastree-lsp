@@ -76,28 +76,27 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/publishDiagnostics` | push, open documents |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |
+| `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below) |
+| `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
+| `textDocument/typeDefinition` | via the declared type expression, so it crosses units |
+| `textDocument/documentHighlight` | occurrences in the current file |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
-### Tier 1 — cheap, and the client feels them immediately
+### Tier 1 — done 2026-08-19
 
-- **`$/progress` + `window/workDoneProgress/create`.** A rebuild is 5.3 s on a
-  197-unit closure and the client currently sees *nothing* — the single most
-  visible gap. `TPasStagedProgress` already reports phase and
-  interface/full/total counts through the async session, so this is plumbing,
-  not analysis. The one structural change: `create` is a server→client
-  REQUEST, so the outgoing queue has to learn ids and response correlation,
-  which nothing needs today.
-- **`window/showMessage` / `window/logMessage`.** Server-side trouble (a
-  project file that failed to load, a `searchPaths` option of the wrong shape,
-  a worker exception) reaches only the log file right now. These put it in
-  front of the user, who is the one who can fix it.
-- **`textDocument/typeDefinition`.** "Go to the TYPE of this variable" —
-  `TSemaSymbol.TypeSym` is already resolved, so this is the definition handler
-  with one extra hop.
-- **`textDocument/documentHighlight`.** Occurrences of the symbol under the
-  cursor within the current file, with read/write kinds. It is what
-  `references` already computes, filtered to one file.
+All four shipped. Two notes worth keeping:
+
+- **No percentage in `$/progress`.** `Total` is "modules discovered so far"
+  and grows as the closure opens up — measured going 3/4 → 3/145 within a
+  second — so a percentage during discovery is arithmetic about a denominator
+  that has not happened yet. Clamping it monotonic (tried first) parked the bar
+  at 75%% while the real ratio was 2%%, which is worse than no bar: a wrong
+  number reads as fact. The message carries phase and counts instead.
+- **Not cancellable.** The machinery exists (the session cancels mid-pass), but
+  a cancelled build leaves the user with no results at all — worse than
+  waiting. The demo can offer a Stop button because it keeps the previous
+  project; here that is what the next edit does anyway.
 
 ### Tier 2 — real features, bounded work
 

@@ -83,9 +83,22 @@ type
     // The client process, watched so a dead client cannot leave this one
     // running (see StartClientWatchdog); 0 = not watching.
     FClientHandle: THandle;
+    // Work-done progress (server-initiated). Reporting is gated on the
+    // client's window.workDoneProgress capability, and the token is created
+    // with a REQUEST the client may refuse - see StartProgress.
+    FClientProgress: Boolean;     // client supports server-initiated progress
+    FProgressToken: string;       // '' = no progress stream open
+    FProgressCreateId: Integer;   // id of the create request awaiting a reply
+    FNextServerId: Integer;       // our own id space for server->client calls
+    FProgressSeq: Integer;        // makes each token unique within a session
+    FLastReportTick: UInt64;
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
     procedure StartClientWatchdog(APid: Integer);
+    procedure StartProgress(const ATitle: string);
+    procedure ReportProgress;
+    procedure EndProgress(const AMessage: string);
+    procedure Tell(AType: Integer; const AMsg: string; AShow: Boolean = False);
     function ClientGone: Boolean;
     procedure ApplyInitOptions(AOptions: TJSONValue);
     procedure InvalidateAnalysis;
@@ -108,6 +121,8 @@ type
       AToImpl: Boolean): string;
     function HandleDocumentSymbol(const AMsg: TLspIncoming): string;
     function HandleHover(const AMsg: TLspIncoming): string;
+    function HandleTypeDefinition(const AMsg: TLspIncoming): string;
+    function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -270,7 +285,8 @@ begin
         FAliases := FAliases + LDProj.UnitAliases;
       end
       else
-        Log('failed to load project file: ' + LProjectFile);
+        Tell(1, 'PasTree: failed to load the project file ' + LProjectFile,
+          True);
     finally
       LDProj.Free;
     end;
@@ -308,8 +324,8 @@ begin
           FSearchPaths := FSearchPaths + [LItem];
     end
     else if TJSONObject(AOptions).GetValue('searchPaths') <> nil then
-      Log('WARNING: initializationOptions.searchPaths is not a string array'
-        + ' - ignored');
+      Tell(2, 'PasTree: the searchPaths setting is not a list of strings'
+        + ' - ignored', True);
     if AOptions.TryGetValue<TJSONArray>('defines', LArr) then
     begin
       for LVal in LArr do
@@ -317,8 +333,8 @@ begin
           FDefines := FDefines + [LItem];
     end
     else if TJSONObject(AOptions).GetValue('defines') <> nil then
-      Log('WARNING: initializationOptions.defines is not a string array'
-        + ' - ignored');
+      Tell(2, 'PasTree: the defines setting is not a list of strings'
+        + ' - ignored', True);
   end;
   Log(Format('configured: platform=%s main=%s paths=%d defines=%d',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
@@ -370,6 +386,7 @@ begin
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
   FBuildStart := GetTickCount64;
+  StartProgress('PasTree: analyzing');
   // "full rebuild" spelled out on purpose: when incremental reanalysis
   // lands, this line is where full vs incremental becomes visible.
   Log(Format('analysis started: full rebuild, %d roots, %d overlays',
@@ -412,7 +429,7 @@ begin
     Exit;
   LError := FSession.LastError;
   if LError <> '' then
-    Log('analysis worker error: ' + LError);
+    Tell(1, 'PasTree: the analysis failed - ' + LError, True);
   FreeAndNil(FNav);
   FreeAndNil(FProject);
   FProject := FSession.TakeProject;
@@ -427,6 +444,8 @@ begin
   var LDiagTotal := 0;
   for var LMi := 0 to FProject.ModelCount - 1 do
     Inc(LDiagTotal, Length(FProject.Model(LMi).Diags));
+  EndProgress(Format('%d units in %d ms',
+    [FProject.ModelCount, GetTickCount64 - FBuildStart]));
   Log(Format('analysis done: %d units in %d ms, %d diagnostics in closure;'
     + ' stages %s',
     [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal,
@@ -469,6 +488,103 @@ end;
   SYNCHRONIZE access is all that is needed to wait on a process handle; it is
   the least privilege that answers "are you still alive". A handle also pins
   the pid against reuse, which a bare "does pid exist" check would not. }
+{ Opens a work-done progress stream for work NOBODY asked for - our background
+  rebuild has no client request behind it, so there is no `workDoneToken` to
+  reuse and the token has to be created with a `window/workDoneProgress/create`
+  REQUEST. Two things follow from that, and both are honored here:
+
+  - the client may not support server-initiated progress at all
+    (capabilities.window.workDoneProgress), in which case we stay silent;
+  - the client may REFUSE the create with an error, which arrives later as a
+    response to our id - see the correlation in Handle, which drops the token.
+
+  `begin` is sent immediately after the create rather than after its response:
+  waiting would cost the first (and on a fast rebuild, only) report, and a
+  client that refuses simply discards a token it never registered. Not
+  cancellable on purpose - the machinery exists, but a cancelled build leaves
+  the user with no results at all, which is worse than waiting out five
+  seconds. }
+procedure TLspServer.StartProgress(const ATitle: string);
+begin
+  if not FClientProgress or (FProgressToken <> '') then
+    Exit;
+  Inc(FProgressSeq);
+  FProgressToken := Format('pastree-%d', [FProgressSeq]);
+  Inc(FNextServerId);
+  FProgressCreateId := FNextServerId;
+  FLastReportTick := 0;
+  Notify(Format('{"jsonrpc":"2.0","id":%d,'
+    + '"method":"window/workDoneProgress/create","params":{"token":%s}}',
+    [FProgressCreateId, JsonQuote(FProgressToken)]));
+  Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+    + '"value":{"kind":"begin","title":%s,"cancellable":false}}}',
+    [JsonQuote(FProgressToken), JsonQuote(ATitle)]));
+end;
+
+{ One `report` for the in-flight analysis, throttled.
+
+  NO percentage, deliberately. `Total` is "modules discovered SO FAR" and grows
+  as the closure opens up - the first probe of this showed 3/4 becoming 3/145
+  within a second - so any percentage during discovery is arithmetic about a
+  denominator that has not happened yet. Clamping it monotonic (tried first)
+  only converts jitter into a number that sits at 75% while the real ratio is
+  2%, which is worse: a wrong bar is read as fact. The message carries the
+  phase and the real counts, and without a percentage in `begin` a client shows
+  an indeterminate spinner, which is exactly the truth about this work. }
+procedure TLspServer.ReportProgress;
+var
+  LProg: TPasStagedProgress;
+  LNow: UInt64;
+  LMsg: string;
+begin
+  if (FProgressToken = '') or (FSession = nil) then
+    Exit;
+  LNow := GetTickCount64;
+  if (FLastReportTick <> 0) and (LNow - FLastReportTick < 200) then
+    Exit;   // 200ms: visible movement without a notification per poll
+  FLastReportTick := LNow;
+  LProg := FSession.Progress;
+  if (LProg.Total = 0) or (LProg.Phase = '') then
+    LMsg := 'starting'
+  else
+    LMsg := Format('%s %d/%d units',
+      [LProg.Phase, LProg.FullDone, LProg.Total]);
+  Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+    + '"value":{"kind":"report","message":%s}}}',
+    [JsonQuote(FProgressToken), JsonQuote(LMsg)]));
+end;
+
+procedure TLspServer.EndProgress(const AMessage: string);
+begin
+  if FProgressToken = '' then
+    Exit;
+  Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+    + '"value":{"kind":"end","message":%s}}}',
+    [JsonQuote(FProgressToken), JsonQuote(AMessage)]));
+  FProgressToken := '';
+end;
+
+{ Says something to the USER, not just to the log file. AType is the LSP
+  MessageType (1 Error, 2 Warning, 3 Info, 4 Log).
+
+  Every message still goes to the log; AShow additionally raises it as
+  `window/showMessage`, which VS Code turns into a toast. That is reserved for
+  the handful of conditions the user can actually act on - a project file that
+  would not load, a configuration option of the wrong shape, an analyzer
+  exception - because a toast per rebuild would be hostile. Everything else
+  travels as `window/logMessage`, which lands in the client's output channel
+  and is exactly where someone goes when they wonder what the server is
+  doing. }
+procedure TLspServer.Tell(AType: Integer; const AMsg: string; AShow: Boolean);
+begin
+  Log(AMsg);
+  Notify(Format('{"jsonrpc":"2.0","method":"window/logMessage",'
+    + '"params":{"type":%d,"message":%s}}', [AType, JsonQuote(AMsg)]));
+  if AShow then
+    Notify(Format('{"jsonrpc":"2.0","method":"window/showMessage",'
+      + '"params":{"type":%d,"message":%s}}', [AType, JsonQuote(AMsg)]));
+end;
+
 procedure TLspServer.StartClientWatchdog(APid: Integer);
 begin
   if APid <= 0 then
@@ -500,6 +616,7 @@ end;
 
 procedure TLspServer.Idle;
 begin
+  ReportProgress;
   if ClientGone then
   begin
     Log('client process is gone - exiting');
@@ -530,6 +647,7 @@ begin
       Exit(False);
     if ClientGone then
       Exit(False);   // the idle tick ends the session
+    ReportProgress;
     FinalizeAnalysisIfDone;   // also handles the stale->restart loop
     if FSession <> nil then
       TThread.Sleep(10);
@@ -643,6 +761,9 @@ begin
   else
     ApplyInitOptions(nil);
   if AMsg.Params <> nil then
+    FClientProgress := AMsg.Params.GetValue<Boolean>(
+      'capabilities.window.workDoneProgress', False);
+  if AMsg.Params <> nil then
     StartClientWatchdog(AMsg.Params.GetValue<Integer>('processId', 0));
   FInitialized := True;
   Result := BuildResponse(AMsg.IdJson,
@@ -654,7 +775,9 @@ begin
       '"implementationProvider":true,' +
       '"declarationProvider":true,' +
       '"documentSymbolProvider":true,' +
-      '"hoverProvider":true' +
+      '"hoverProvider":true,' +
+      '"typeDefinitionProvider":true,' +
+      '"documentHighlightProvider":true' +
     '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
@@ -748,8 +871,8 @@ begin
             LRange.TryGetValue<Integer>('end.line', LEL) and
             LRange.TryGetValue<Integer>('end.character', LEC)) then
     begin
-      Log('WARNING: didChange range without line/character - change skipped,'
-        + ' the buffer may now differ from the editor');
+      Tell(2, 'PasTree: a didChange range had no line/character; the edit was'
+        + ' skipped and this buffer may now differ from the editor', False);
       Continue;
     end;
     LText := ApplyRangeChange(LText, LSL, LSC, LEL, LEC, LNew);
@@ -1350,6 +1473,152 @@ begin
   end;
 end;
 
+{ textDocument/typeDefinition — "go to the TYPE of the thing under the cursor",
+  as distinct from definition's "go to where this name is declared". For
+  `FProj: TPasSemaProject` on the field's own name, definition stays on the
+  field and this jumps to the class. The resolved type is already on the
+  symbol (`TypeSym`), so the work is one hop plus the same declaration lookup
+  definition uses; a symbol whose type never resolved, or a type symbol itself
+  (its "type" is itself), answers null rather than something invented. }
+function TLspServer.HandleTypeDefinition(const AMsg: TLspIncoming): string;
+var
+  LPath, LName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx: Integer;
+  LSym: TSemaSymbol;
+  LTarget: TPasNavTarget;
+  LHit: TPasRefHit;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'typeDefinition: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LSym := FProject.Model(LTMid).Symbols[LSymIdx];
+
+  // Route 1: resolve the declaration's TYPE EXPRESSION node with the very
+  // call `definition` uses. That matters because it is the one that reaches
+  // ACROSS units - `TypeSym` below is a model-local index, so on its own it
+  // could only ever answer for a type declared in the same file, which is the
+  // minority of interesting cases (`FProj: TPasSemaProject` lives in another
+  // unit). A type ALIAS is deliberately allowed through here: jumping from
+  // `TFoo = TBar` to TBar is the useful answer.
+  if (LSym.TypeNode <> NIL_NODE) and
+     FNav.ResolveDecl(LTMid, LSym.TypeNode, LTarget) then
+  begin
+    Log(Format('typeDefinition: %s -> %s(%d,%d)',
+      [LName, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
+       LTarget.Col]));
+    Exit(BuildResponse(AMsg.IdJson,
+      LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+        Length(LTarget.Name))));
+  end;
+
+  // Route 2: the resolved type symbol, for the same-unit case where the type
+  // expression itself did not resolve to a declaration (an inferred inline
+  // `var`, say). Not for a type symbol - its own type is itself.
+  if (LSym.Kind <> skType) and (LSym.TypeSym <> NIL_SYM) and
+     FNav.DeclHit(LTMid, LSym.TypeSym, LHit) then
+  begin
+    Log(Format('typeDefinition: %s -> %s(%d,%d) via the resolved type symbol',
+      [LName, TPath.GetFileName(LHit.FilePath), LHit.Line, LHit.Col]));
+    Exit(BuildResponse(AMsg.IdJson,
+      LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
+        LHit.HiTo - LHit.HiFrom)));
+  end;
+
+  Log(Format('typeDefinition: no type declaration reachable for %s', [LName]));
+  Result := BuildResponse(AMsg.IdJson, 'null');
+end;
+
+
+{ textDocument/documentHighlight — every occurrence of the symbol under the
+  cursor WITHIN this document, which is what an editor paints when the caret
+  rests on a name.
+
+  It is the reference search, filtered to one file, and it deliberately reuses
+  the same three-identity resolution: highlighting a `uses` item should light
+  up that unit's other mentions here, not nothing. The declaration site is
+  included when it lives in this file (`DeclHit`), because an occurrence is an
+  occurrence. No read/write kinds are reported: the analyzer knows what a name
+  RESOLVES to, not whether a given mention is being assigned, and guessing
+  from context would be a different (and wrong-half-the-time) feature. }
+function TLspServer.HandleDocumentHighlight(const AMsg: TLspIncoming): string;
+var
+  LPath, LName, LKey: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx, LIdx: Integer;
+  LHits: TArray<TPasRefHit>;
+  LDecl: TPasRefHit;
+  LSB: TStringBuilder;
+  LCount: Integer;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'documentHighlight: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+
+  LHits := nil;
+  if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
+  begin
+    LHits := FNav.FindUnitReferences(LTMid);
+    if FNav.UnitDeclHit(LTMid, LDecl) then
+      LHits := [LDecl] + LHits;
+  end
+  else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
+  begin
+    LHits := FNav.FindReferences(LTMid, LSymIdx);
+    if FNav.DeclHit(LTMid, LSymIdx, LDecl) then
+      LHits := [LDecl] + LHits;
+  end
+  else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
+    LHits := FNav.FindBuiltinReferences(LName)
+  else
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LKey := LowerCase(TPath.GetFullPath(LPath));
+  LCount := 0;
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('[');
+    for LIdx := 0 to High(LHits) do
+    begin
+      if LowerCase(TPath.GetFullPath(LHits[LIdx].FilePath)) <> LKey then
+        Continue;
+      if LCount > 0 then
+        LSB.Append(',');
+      Inc(LCount);
+      LSB.Append(Format('{"range":%s}',
+        [RangeJson(LHits[LIdx].Line, LHits[LIdx].Col,
+          LHits[LIdx].HiTo - LHits[LIdx].HiFrom)]));
+    end;
+    LSB.Append(']');
+    Log(Format('documentHighlight: %s -> %d in this file', [LName, LCount]));
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -1361,10 +1630,22 @@ begin
     Exit(BuildError('', LSP_PARSE_ERROR, 'malformed JSON'));
   try
     try
-      // A response from the client (id, no method) — we send no
-      // client-bound requests, so nothing to correlate; ignore.
+      // A response from the client (id, no method). The only request we
+      // send is the progress-create; a client that REFUSED it must not then
+      // be sent $/progress under a token it never registered, so drop the
+      // stream and stop offering progress for the rest of the session.
       if LMsg.Method = '' then
+      begin
+        if (FProgressCreateId <> 0) and
+           (LMsg.IdJson = IntToStr(FProgressCreateId)) and
+           (LMsg.Root.FindValue('error') <> nil) then
+        begin
+          Log('client refused window/workDoneProgress/create - no progress');
+          FProgressToken := '';
+          FClientProgress := False;
+        end;
         Exit;
+      end;
 
       // A cancel that arrived before we even started this request (the
       // reader noted it while earlier messages were being handled).
@@ -1434,6 +1715,10 @@ begin
         Exit(HandleDocumentSymbol(LMsg));
       if LMsg.Method = 'textDocument/hover' then
         Exit(HandleHover(LMsg));
+      if LMsg.Method = 'textDocument/typeDefinition' then
+        Exit(HandleTypeDefinition(LMsg));
+      if LMsg.Method = 'textDocument/documentHighlight' then
+        Exit(HandleDocumentHighlight(LMsg));
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful

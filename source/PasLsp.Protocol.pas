@@ -84,6 +84,10 @@ procedure LspToPasTree(ALine, ACharacter: Integer; out APasLine,
 procedure PasTreeToLsp(APasLine, APasCol: Integer; out ALine,
   ACharacter: Integer);
 
+{ An LSP Range JSON: ALen UTF-16 units from the (1-based) PasTree position,
+  on one line. }
+function RangeJson(APasLine, APasCol, ALen: Integer): string;
+
 { An LSP Location JSON for a declaration: ALen UTF-16 units starting at the
   (1-based) PasTree position. }
 function LocationJson(const AFilePath: string; APasLine, APasCol,
@@ -282,16 +286,22 @@ begin
   ACharacter := APasCol - 1;
 end;
 
-function LocationJson(const AFilePath: string; APasLine, APasCol,
-  ALen: Integer): string;
+function RangeJson(APasLine, APasCol, ALen: Integer): string;
 var
   LLine, LChar: Integer;
 begin
   PasTreeToLsp(APasLine, APasCol, LLine, LChar);
   Result := Format(
-    '{"uri":%s,"range":{"start":{"line":%d,"character":%d},' +
-    '"end":{"line":%d,"character":%d}}}',
-    [JsonQuote(PathToUri(AFilePath)), LLine, LChar, LLine, LChar + ALen]);
+    '{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}',
+    [LLine, LChar, LLine, LChar + ALen]);
 end;
+
+function LocationJson(const AFilePath: string; APasLine, APasCol,
+  ALen: Integer): string;
+begin
+  Result := Format('{"uri":%s,"range":%s}',
+    [JsonQuote(PathToUri(AFilePath)), RangeJson(APasLine, APasCol, ALen)]);
+end;
+
 
 end.
