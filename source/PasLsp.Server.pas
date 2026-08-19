@@ -28,12 +28,14 @@ interface
 uses
   Winapi.Windows,
   System.SysUtils,
+  System.StrUtils,
   System.Classes,
   System.Generics.Collections,
   System.JSON,
   System.IOUtils,
   PasTree.Platforms,
   PasTree.DProj,
+  PasTree.SourceManager,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Async,
@@ -417,7 +419,14 @@ begin
   LStale := FDirty;
   if not LStale then
     for LDoc in FDocs.All do
-      if FProject.BufferVersion(LDoc.Path) <> LDoc.Version then
+      // Only documents whose text DIFFERS from disk can make a result
+      // stale: a non-differing one reads identically from either source,
+      // and it may legitimately have no overlay in this build at all
+      // (opened after the build started, no rebuild scheduled) — comparing
+      // its version against the missing overlay's -1 would spin a rebuild
+      // loop out of plain tab switching.
+      if LDoc.Differs and
+         (FProject.BufferVersion(LDoc.Path) <> LDoc.Version) then
       begin
         LStale := True;
         Break;
@@ -585,21 +594,32 @@ end;
 
 procedure TLspServer.HandleDidOpen(AParams: TJSONValue);
 var
-  LPath, LText: string;
+  LPath, LText, LDisk: string;
   LVersion: Integer;
+  LDiffers: Boolean;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
     Exit;
   LText := AParams.GetValue<string>('textDocument.text', '');
   LVersion := AParams.GetValue<Integer>('textDocument.version', 0);
-  FDocs.Open(LPath, LText, LVersion);
-  FDirty := True;
-  Log(Format('didOpen %s v%d', [LPath, LVersion]));
-  // Debounced like didChange: switching tabs quickly (each an open, often a
-  // close right behind it — see any real session log) must not restart the
-  // build per tab. A request right after the open flushes instantly.
-  ScheduleAnalysis(LPath);
+  // The rebuild gate: VS Code opens a document for every tab switch and
+  // every peek popup, and the analysis already read this file from disk —
+  // if the editor's text IS the disk text (decoded the same tolerant way
+  // the analysis decodes it), nothing about the project changed and no
+  // rebuild is due. Every real session log showed exactly this churn:
+  // full rebuilds on plain clicking around.
+  try
+    LDisk := TPasSourceManager.LoadFileTolerant(LPath);
+  except
+    LDisk := '';   // unreadable/new file: treat the buffer as the truth
+  end;
+  LDiffers := LText <> LDisk;
+  FDocs.Open(LPath, LText, LVersion, LDisk, LDiffers);
+  Log(Format('didOpen %s v%d%s',
+    [LPath, LVersion, IfThen(LDiffers, ' (differs from disk)', '')]));
+  if LDiffers then
+    ScheduleAnalysis(LPath);
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -608,6 +628,8 @@ var
   LVersion: Integer;
   LChanges: TJSONArray;
   LLast: TJSONValue;
+  LOld: TLspDocument;
+  LHadDoc: Boolean;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
@@ -621,25 +643,35 @@ begin
   if not LLast.TryGetValue<string>('text', LText) then
     Exit;
   LVersion := AParams.GetValue<Integer>('textDocument.version', 0);
-  FDocs.Change(LPath, LText, LVersion);
-  FDirty := True;
+  LHadDoc := FDocs.TryGet(LPath, LOld);
+  FDocs.Change(LPath, LText, LVersion, LOld.DiskText,
+    not LHadDoc or (LText <> LOld.DiskText));
   Log(Format('didChange %s v%d (%d chars)',
     [LPath, LVersion, Length(LText)]));
-  ScheduleAnalysis(LPath);   // debounced — one build per typing pause
+  // Rebuild only on a real text change — the version always bumps, but a
+  // no-op change (or one we never saw the open for) must not cost a build.
+  if not LHadDoc or (LText <> LOld.Text) then
+    ScheduleAnalysis(LPath);
 end;
 
 procedure TLspServer.HandleDidClose(AParams: TJSONValue);
 var
   LPath: string;
+  LDoc: TLspDocument;
+  LDiffered: Boolean;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
     Exit;
+  LDiffered := FDocs.TryGet(LPath, LDoc) and LDoc.Differs;
   FDocs.Close(LPath);
-  FDirty := True;   // the disk file is the truth again
   PublishEmptyDiagnostics(LPath);
   Log('didClose ' + LPath);
-  ScheduleAnalysis('');
+  // The disk file is the truth again — a rebuild is due only if the overlay
+  // ever DIFFERED from it (analysis results built from unsaved text now
+  // describe content that no longer exists anywhere).
+  if LDiffered then
+    ScheduleAnalysis('');
 end;
 
 function TLspServer.HandleDefinition(const AMsg: TLspIncoming): string;
