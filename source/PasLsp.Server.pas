@@ -658,8 +658,8 @@ begin
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
 
   LHits := nil;
-  // UnitAt BEFORE SymbolAt, deliberately the opposite of the IDE plugin's
-  // order: UnitAt only ever matches a `uses` item or the module's own header
+  // UnitAt BEFORE SymbolAt (the IDE plugin now uses the same order):
+  // UnitAt only ever matches a `uses` item or the module's own header
   // name — positions where the unit identity IS the right answer — while
   // SymbolAt, tested first, CLAIMS a program's `X in '...'` uses item as an
   // ordinary symbol whose reference search then finds nothing (observed on
