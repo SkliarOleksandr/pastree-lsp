@@ -262,15 +262,19 @@ begin
 
     LFound := True;
     LHasDecl := False;
-    if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
-    begin
-      LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
-      LHits := LNav.FindReferences(LTMid, LSym);
-    end
-    else if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
+    // UnitAt BEFORE SymbolAt: UnitAt only matches uses items and the module's
+    // own header name, where the unit identity is the right answer. SymbolAt,
+    // tested first, claims a program's `X in '...'` uses item as an ordinary
+    // symbol whose reference search then finds nothing.
+    if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
     begin
       LHasDecl := LNav.UnitDeclHit(LTargetMid, LDeclHit);
       LHits := LNav.FindUnitReferences(LTargetMid);
+    end
+    else if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
+    begin
+      LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
+      LHits := LNav.FindReferences(LTMid, LSym);
     end
     else if LNav.BuiltinNameAt(LMid, LRow, LCol, LName) then
       LHits := LNav.FindBuiltinReferences(LName)

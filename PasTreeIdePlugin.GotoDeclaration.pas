@@ -407,10 +407,14 @@ begin
     end;
 
     LFound := False;
-    if LNav.SymbolAt(LMid, ARow, ACol, LTMid, LSym, LName) then
-      LFound := LNav.DeclHit(LTMid, LSym, LHit)
-    else if LNav.UnitAt(LMid, ARow, ACol, LTargetMid, LName) then
-      LFound := LNav.UnitDeclHit(LTargetMid, LHit);
+    // UnitAt BEFORE SymbolAt: UnitAt only matches uses items and the module's
+    // own header name, where the unit identity is the right answer. SymbolAt,
+    // tested first, claims a program's `X in '...'` uses item as an ordinary
+    // symbol with no navigable references.
+    if LNav.UnitAt(LMid, ARow, ACol, LTargetMid, LName) then
+      LFound := LNav.UnitDeclHit(LTargetMid, LHit)
+    else if LNav.SymbolAt(LMid, ARow, ACol, LTMid, LSym, LName) then
+      LFound := LNav.DeclHit(LTMid, LSym, LHit);
     // BuiltinNameAt: no source declaration exists anywhere for a
     // compiler builtin - correctly nothing to navigate to.
 

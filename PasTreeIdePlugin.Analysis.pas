@@ -242,7 +242,7 @@ end;
 function MapPlatform(const APlatformId: string): TPasPlatform;
 begin
   if SameText(APlatformId, cWin64Platform) or SameText(APlatformId, cWin64xPlatform)
-    or SameText(APlatformId, cWinArm64Platform) or SameText(APlatformId, cWinArm64ECPlatform) then
+    or SameText(APlatformId, cWinArm64Platform) or SameText(APlatformId, 'WinARM64EC') then // no PlatformConst constant for ARM64EC yet
     Result := pfWin64
   else if SameText(APlatformId, ciOSDevice64Platform) then
     Result := pfIOSDevice64
