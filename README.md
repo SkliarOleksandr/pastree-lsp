@@ -25,14 +25,23 @@ Declaration**, replacing RAD
 Studio's own DelphiLSP-based navigation (reported to work poorly on large
 projects) - both the native menu item and Ctrl+Click.
 
-## Status: LSP move covered by out-of-IDE tests, not yet confirmed in the IDE
+## Status: working over LSP, confirmed in the IDE
 
-The transport, session and configuration harvest are each exercised against a
-real server by `tests/` (see "Files"), which is what the earlier in-process
-version never had. What no automated test here can cover is the ToolsAPI half:
-whether the menu item and Ctrl+Click behave, and whether the asynchronous
-answer lands correctly in a real editor. That needs a manual pass with an IDE
-restart first - see the hot-reload note under "Known first-pass limitations".
+Ctrl+Click and the Find References menu item were both confirmed working
+against the out-of-process server in a running RAD Studio (2026-08-19), which
+was the one thing no test here can cover - whether the asynchronous answer
+lands correctly in a real editor.
+
+The transport, session and configuration harvest are each also exercised
+against a real server by `tests/` (see "Files"), which is what the earlier
+in-process version never had.
+
+Not yet exercised by hand, in rough order of how likely they are to matter:
+switching the active project or platform mid-session (restarts the server),
+recovery after killing `pastree-server.exe` while the IDE is open, navigation
+from a buffer with unsaved edits, and a `uses` item in a `.dpr` - the
+three-identity case that motivated moving the resolve order into the server in
+the first place.
 
 The ToolsAPI side is built directly from RAD Studio's own official samples
 (`Samples\Object Pascal\ToolsAPI\Editor Demos\...`), not from an
@@ -183,6 +192,40 @@ not an oversight - and these are the reasons it could not stay:
 
 `publishDiagnostics` (server phase 3), which is also what will require a
 push-based `didChange` alongside the sync-on-request path.
+
+## Pointing the plugin at the server
+
+No path is hardcoded. `FindServerExe` looks in two places, in order:
+
+1. `%PASTREE_LSP_SERVER%`, if set - the development override, so the IDE runs
+   whatever was last built into `pastree-lsp-server\out\`. A value that is set
+   but wrong is **reported rather than ignored**: falling back would silently
+   run some other build, and a typo would cost an afternoon.
+2. `pastree-server.exe` next to the package's own BPL, so a matched pair can be
+   deployed together.
+
+Note where the BPL actually lands - with no `DCC_BplOutput` in the `.dproj` it
+is the IDE default, e.g.
+`C:\Users\Public\Documents\Embarcadero\Studio\37.0\Bpl\` - which is *not* next
+to this repo. So one of these has to happen before the plugin can do anything:
+
+```
+copy ..\pastree-lsp-server\out\pastree-server.exe "%PUBLIC%\Documents\Embarcadero\Studio\37.0\Bpl"
+```
+
+or, better for a development loop because it never goes stale:
+
+```
+setx PASTREE_LSP_SERVER "C:\Repos\pastree-lsp-server\out\pastree-server.exe"
+```
+
+The environment variable is only picked up on the next IDE start - a process's
+environment is captured when it launches. Copying the exe next to the BPL, by
+contrast, needs no restart: the session re-looks for the server on every
+request until it finds one, precisely so that fixing this does not cost an IDE
+restart on top of everything else.
+
+If neither is in place, both features log to the Build tab and do nothing else.
 
 ## Building and testing
 
