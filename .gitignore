@@ -7,3 +7,4 @@ PasTreeIdePlugin.res
 *.tvsconfig
 __history/
 __recovery/
+tests/out/
