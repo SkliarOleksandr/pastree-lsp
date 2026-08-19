@@ -102,6 +102,7 @@ type
     function HandleToggle(const AMsg: TLspIncoming;
       AToImpl: Boolean): string;
     function HandleDocumentSymbol(const AMsg: TLspIncoming): string;
+    function HandleHover(const AMsg: TLspIncoming): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -300,7 +301,7 @@ begin
     end
     else if TJSONObject(AOptions).GetValue('searchPaths') <> nil then
       Log('WARNING: initializationOptions.searchPaths is not a string array'
-        + ' — ignored');
+        + ' - ignored');
     if AOptions.TryGetValue<TJSONArray>('defines', LArr) then
     begin
       for LVal in LArr do
@@ -309,7 +310,7 @@ begin
     end
     else if TJSONObject(AOptions).GetValue('defines') <> nil then
       Log('WARNING: initializationOptions.defines is not a string array'
-        + ' — ignored');
+        + ' - ignored');
   end;
   Log(Format('configured: platform=%s main=%s paths=%d defines=%d',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
@@ -439,7 +440,7 @@ begin
   PublishDiagnostics;
   if LStale then
   begin
-    Log('result is stale (documents changed mid-build) — restarting');
+    Log('result is stale (documents changed mid-build) - restarting');
     StartAnalysis('');
   end;
 end;
@@ -585,7 +586,8 @@ begin
       '"referencesProvider":true,' +
       '"implementationProvider":true,' +
       '"declarationProvider":true,' +
-      '"documentSymbolProvider":true' +
+      '"documentSymbolProvider":true,' +
+      '"hoverProvider":true' +
     '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
@@ -1048,6 +1050,119 @@ begin
   Result := BuildResponse(AMsg.IdJson, '[' + LItems + ']');
 end;
 
+// The word a reader expects in front of a name, per symbol kind. Not the
+// LSP SymbolKind enum (that is SymbolKindOf above) — this is prose for a
+// hover card.
+function KindWord(AKind: TSemaSymbolKind): string;
+begin
+  case AKind of
+    skType: Result := 'type';
+    skVar: Result := 'variable';
+    skConst: Result := 'constant';
+    skField: Result := 'field';
+    skRoutine: Result := 'routine';
+    skParam: Result := 'parameter';
+    skProperty: Result := 'property';
+    skEnumValue: Result := 'enum value';
+    skGenericParam: Result := 'type parameter';
+    skLabel: Result := 'label';
+    skUnitRef: Result := 'unit reference';
+    skBuiltinType: Result := 'builtin type';
+  else
+    Result := 'symbol';
+  end;
+end;
+
+{ textDocument/hover — what is under the cursor, as a small markdown card:
+  the DECLARATION's own source line in a Pascal code fence, plus a prose line
+  naming the kind and where it lives.
+
+  The declaration line comes from the navigator's DeclHit, the same snippet
+  Find References shows for a declaration site — so the hover can never
+  disagree with the results list, and there is no second formatter to keep in
+  sync. A routine header that spans several source lines shows only its
+  first: DeclHit is line-based, and inventing a multi-line reconstruction
+  here would be exactly the second source of truth just avoided.
+
+  The three identities are tried in the same order as references (unit,
+  symbol, builtin) for the same reason documented there. }
+function TLspServer.HandleHover(const AMsg: TLspIncoming): string;
+var
+  LPath, LName, LCode, LNote, LMd: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx: Integer;
+  LIdent: TPasNavIdent;
+  LHit: TPasRefHit;
+  LStartLine, LStartChar, LEndLine, LEndChar: Integer;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'hover: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  // No identifier under the cursor is the COMMON case for a hover (any
+  // keyword, any whitespace) — answered with null and NOT logged, or a
+  // session log becomes unreadable from mouse movement alone.
+  if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LCode := '';
+  LNote := '';
+  if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
+  begin
+    LCode := 'unit ' + LName + ';';
+    if FNav.UnitDeclHit(LTMid, LHit) then
+      LNote := Format('unit - %s', [TPath.GetFileName(LHit.FilePath)])
+    else
+      LNote := 'unit';
+  end
+  else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
+  begin
+    if FNav.DeclHit(LTMid, LSymIdx, LHit) then
+    begin
+      LCode := Trim(LHit.Snippet);
+      LNote := Format('%s - %s:%d',
+        [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind),
+         TPath.GetFileName(LHit.FilePath), LHit.Line]);
+    end
+    else
+      // A symbol with no declaration node of its own: the implicit Result,
+      // for instance. Still worth a card saying what it is.
+      LNote := Format('%s %s',
+        [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind), LName]);
+  end
+  else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
+  begin
+    LCode := LName;
+    LNote := 'compiler builtin - no source declaration';
+  end
+  else
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LMd := '';
+  if LCode <> '' then
+    LMd := '```pascal'#10 + LCode + #10'```'#10#10;
+  LMd := LMd + '_' + LNote + '_';
+  // The range is the identifier's own span, so the editor underlines exactly
+  // the name it is describing — including all segments of a qualified `uses`
+  // name, which IdentAt reports as one span.
+  PasTreeToLsp(LIdent.Line, LIdent.ColFrom, LStartLine, LStartChar);
+  PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"contents":{"kind":"markdown","value":%s},' +
+    '"range":{"start":{"line":%d,"character":%d},' +
+    '"end":{"line":%d,"character":%d}}}',
+    [JsonQuote(LMd), LStartLine, LStartChar, LEndLine, LEndChar]));
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -1125,6 +1240,8 @@ begin
         Exit(HandleToggle(LMsg, {AToImpl} False));
       if LMsg.Method = 'textDocument/documentSymbol' then
         Exit(HandleDocumentSymbol(LMsg));
+      if LMsg.Method = 'textDocument/hover' then
+        Exit(HandleHover(LMsg));
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful
