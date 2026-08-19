@@ -315,6 +315,48 @@ file-trait question above).
 | Signature help | Server | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | same block |
 | Semantic tokens | Server | `PaintText` with `AllowDefaultPainting := False` | `IOTAHighlighter` (`1801`) is the other route but is synchronous per line; either way it must paint from a cache. `INTACodeEditorOptions` (`881`) is read-only — a new named colour cannot be registered, only painted |
 
+### Syntax highlighting: override the lexer, or repaint over it
+
+The syntax highlighter is genuinely replaceable, not merely paintable-over:
+implement `IOTAHighlighter` (`ToolsAPI.pas:1801`), register it with
+`IOTAHighlightServices.AddHighlighter` (`1893`), and assign it — the
+`IOTAEditOptions.SyntaxHighlighter` property is read/**write** (`7745`).
+Cross-line state is provided for and is ours to define: `TOTALineClass` is
+documented as user-definable "to gain context for lines", and
+`TokenizeLineClass` returns the state at end of line for the IDE to feed into
+the next, which is enough to lex `{...}`, `(* *)` and multi-line strings
+correctly.
+
+**But that path cannot express semantics, for three separate reasons, any one of
+which is decisive.** The code vocabulary is fixed and lexical — `TOTASyntaxCode`
+is a `Byte`, the declaration says "do not exceed `SyntaxOff`" (15), and the
+usable values (`440`–`454`) are whitespace, comment, reserved word, identifier,
+symbol, string, number, float, hex, binary, preproc, assembler. There is no
+"type name", "parameter", "local", "method" or "unit": every identifier is
+`atIdentifier` whatever it resolves to, which is exactly the distinction
+semantic tokens exist to draw. Second, no new colour can be registered —
+`INTACodeEditorOptions` exposes `FontColor`/`BackgroundColor`/`FontStyles`
+read-only, with no setter anywhere, so even a spare code would have nowhere for
+the user to configure it. (`atOverridable = $8000` at `456` looks promising and
+is not usable: it does not fit the `Byte` element, and appears nowhere else in
+the ToolsAPI headers.) Third, `Tokenize` is synchronous, per line, over a byte
+buffer, called from the paint path — it can never consult the server.
+
+**So the recommendation is a hybrid, and it is cheaper than either extreme.**
+Do not replace the highlighter at all. `PaintText` already delivers each token
+run *together with the `SyntaxCode` the IDE assigned it*, so the line is
+pre-split for us: leave everything lexical — comments, strings, keywords,
+numbers — to the built-in highlighter, which works and which the user has
+already themed, and repaint only the runs whose code is `atIdentifier` and for
+which the server has a classification cached. Minimum pixels drawn, maximum
+reuse, and the user's colour scheme survives everywhere else. Replacing the
+lexer would only be worth it if the *lexical* markup were wrong, and it is not.
+
+One case where our analysis is strictly better than the IDE's is worth naming
+here: inactive `{$IFDEF}` branches. The editor has an `eceDisabledCode` cell
+state, so it models the idea, but the server evaluates conditional compilation
+properly and knows which branches are really dead.
+
 ### Result surfaces
 
 | Capability | Status | IDE surface | Notes |
