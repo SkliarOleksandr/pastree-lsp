@@ -97,6 +97,7 @@
         <DCCReference Include="designide.dcp"/>
         <DCCReference Include="PasTreeIdePlugin.Wizard.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspTransport.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.LspClient.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Analysis.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
