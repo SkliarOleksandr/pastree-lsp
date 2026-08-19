@@ -321,6 +321,30 @@ begin
       begin
         FDocs.ResendAll;
       end;
+
+    { DIAGNOSTICS ARE DELIBERATELY DROPPED, for now.
+
+      textDocument/publishDiagnostics is the only notification this server
+      sends, and it is unsolicited by design - a client cannot ask it to stop,
+      and it computes them after every analysis anyway. So "ignore them" is not
+      one option among several, it is the whole available design space until
+      there is somewhere to put them.
+
+      And there isn't yet: ToolsAPI exposes no public way to underline a range
+      in the editor, so the realistic home is a Messages-panel list like Find
+      References has - which is a feature to design (severity filtering,
+      clearing, navigation), not a side effect of this migration.
+
+      Handled EXPLICITLY rather than left unassigned so that (a) it reads as a
+      decision instead of an oversight, and (b) anything else the server starts
+      notifying about surfaces in the Build tab instead of vanishing silently. }
+    FClient.OnNotification :=
+      procedure(const AMethod: string; AParams: TJSONValue)
+      begin
+        if AMethod = 'textDocument/publishDiagnostics' then
+          Exit;
+        LogDiagnostic('unhandled server notification: ' + AMethod);
+      end;
   end;
 
   // A different project, platform or configuration means a different server:

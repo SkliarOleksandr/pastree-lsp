@@ -9,9 +9,11 @@ program DemoApp;
 {$APPTYPE CONSOLE}
 
 uses
-  DemoUnit in 'DemoUnit.pas';
+  DemoUnit in 'DemoUnit.pas',
+  DemoUnicode in 'DemoUnicode.pas';
 
 begin
   Writeln(Greet('world'));
   Writeln(Greet('again'));
+  Writeln(Shout('quiet'));
 end.

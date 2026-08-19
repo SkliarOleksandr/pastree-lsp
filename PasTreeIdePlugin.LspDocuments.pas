@@ -304,6 +304,19 @@ begin
   FClient.Notify('textDocument/didClose', LParams);
 end;
 
+{ While the handshake is still in flight we update our own picture but send
+  NOTHING, and let ResendAll establish the whole document set once the server
+  is ready. Sending here instead would double-open every document: the
+  notifications would queue behind the handshake in the client's outbox, and
+  then ResendAll - which runs on the handshake, BEFORE that outbox is flushed -
+  would send them all again. The server treats each didOpen as a fresh open and
+  schedules an analysis for any document that differs from disk, so the
+  duplicate is not merely redundant traffic, it is a wasted full project
+  rebuild.
+
+  There is no race between "not ready" here and the handshake completing: the
+  reply can only be dispatched on a later main-thread turn, and the caller runs
+  EnsureSession and Sync back to back on this one. }
 procedure TLspDocumentSync.Sync;
 var
   LOpen: TArray<TSentDocument>;
@@ -311,7 +324,9 @@ var
   LKey: string;
   LSeen: TDictionary<string, Boolean>;
   LStale: TArray<string>;
+  LReady: Boolean;
 begin
+  LReady := FClient.IsReady;
   LOpen := CollectOpenDocuments;
   LSeen := TDictionary<string, Boolean>.Create;
   try
@@ -323,7 +338,8 @@ begin
       if not FSent.TryGetValue(LKey, LKnown) then
       begin
         LDoc.Version := 1;
-        SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version);
+        if LReady then
+          SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version);
         FSent.Add(LKey, LDoc);       // FSent owns it from here
         Continue;
       end;
@@ -332,7 +348,8 @@ begin
       begin
         Inc(LKnown.Version);
         LKnown.Text := LDoc.Text;
-        SendDidChange(LKnown.Path, LKnown.Text, LKnown.Version);
+        if LReady then
+          SendDidChange(LKnown.Path, LKnown.Text, LKnown.Version);
       end;
       LDoc.Free;                     // duplicate of a document we already hold
     end;
@@ -345,7 +362,10 @@ begin
         LStale := LStale + [LKey];
     for LKey in LStale do
     begin
-      SendDidClose(FSent[LKey].Path);
+      // Not ready: the server either never heard of this document or is about
+      // to be told the whole set by ResendAll, which omits it anyway.
+      if LReady then
+        SendDidClose(FSent[LKey].Path);
       FSent.Remove(LKey);
     end;
   finally

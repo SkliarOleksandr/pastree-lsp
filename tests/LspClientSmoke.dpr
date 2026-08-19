@@ -41,6 +41,7 @@ var
   // restarted server - the job the real document layer will do.
   GOpened: TArray<string>;
   GReopens: Integer;
+  GVersion: Integer;   // document version counter, must only ever increase
 
 procedure Check(ACondition: Boolean; const AWhat: string);
 begin
@@ -136,26 +137,82 @@ end;
 /// ALineHint. Raises if either is absent - a broken fixture must not read as
 /// a failed feature.
 /// </summary>
-procedure FindPos(const AFile, ALineHint, AToken: string;
+/// <summary>
+/// Splits on either line-ending style. The fixtures are checked in with LF but
+/// git may hand them over as CRLF, so nothing here may assume one.
+/// </summary>
+function SplitLines(const AText: string): TArray<string>;
+begin
+  Result := AText.Replace(#13#10, #10).Split([#10]);
+end;
+
+procedure FindPosInText(const AText, ALineHint, AToken: string;
   out ALine, AChar: Integer);
 var
   LLines: TArray<string>;
   I, LCol: Integer;
 begin
-  LLines := TFile.ReadAllLines(AFile);
+  LLines := SplitLines(AText);
   for I := 0 to High(LLines) do
     if LLines[I].Contains(ALineHint) then
     begin
       LCol := Pos(AToken, LLines[I]);
       if LCol = 0 then
-        raise Exception.CreateFmt('fixture %s: no "%s" on the line with "%s"',
-          [AFile, AToken, ALineHint]);
+        raise Exception.CreateFmt('no "%s" on the line with "%s"',
+          [AToken, ALineHint]);
       ALine := I;
       AChar := LCol - 1;   // Pos is 1-based, LSP characters are 0-based
       Exit;
     end;
-  raise Exception.CreateFmt('fixture %s: no line containing "%s"',
-    [AFile, ALineHint]);
+  raise Exception.CreateFmt('no line containing "%s"', [ALineHint]);
+end;
+
+procedure FindPos(const AFile, ALineHint, AToken: string;
+  out ALine, AChar: Integer);
+begin
+  try
+    FindPosInText(TFile.ReadAllText(AFile), ALineHint, AToken, ALine, AChar);
+  except
+    on E: Exception do
+      raise Exception.CreateFmt('fixture %s: %s', [AFile, E.Message]);
+  end;
+end;
+
+/// <summary>
+/// Inserts ANew right after the first line containing AHint. Raises if the hint
+/// is gone: a fixture that drifted must fail loudly, not silently test nothing.
+/// </summary>
+function InsertAfterLine(const ALines: TArray<string>;
+  const AHint: string; const ANew: TArray<string>): TArray<string>;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ALines) do
+    if ALines[I].Contains(AHint) then
+    begin
+      Result := Copy(ALines, 0, I + 1) + ANew +
+        Copy(ALines, I + 1, Length(ALines) - I - 1);
+      Exit;
+    end;
+  raise Exception.CreateFmt('fixture drifted: no line containing "%s"',
+    [AHint]);
+end;
+
+/// <summary>Inserts ANew right BEFORE the first line containing AHint.</summary>
+function InsertBeforeLine(const ALines: TArray<string>;
+  const AHint: string; const ANew: TArray<string>): TArray<string>;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ALines) do
+    if ALines[I].Contains(AHint) then
+    begin
+      Result := Copy(ALines, 0, I) + ANew +
+        Copy(ALines, I, Length(ALines) - I);
+      Exit;
+    end;
+  raise Exception.CreateFmt('fixture drifted: no line containing "%s"',
+    [AHint]);
 end;
 
 function PositionParams(const AFile: string; ALine, AChar: Integer;
@@ -191,6 +248,31 @@ begin
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   GClient.Notify('textDocument/didOpen', LParams);
+end;
+
+/// <summary>
+/// One contentChange with NO range - a whole-document replacement. Exactly the
+/// shape PasTreeIdePlugin.LspDocuments sends, and the thing worth pinning: the
+/// server advertises INCREMENTAL sync, and this relies on its documented
+/// willingness to accept a rangeless change as a full replace.
+/// </summary>
+procedure SendDidChange(const AFile, AText: string);
+var
+  LParams, LDoc, LChange: TJSONObject;
+  LChanges: TJSONArray;
+begin
+  Inc(GVersion);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFile));
+  LDoc.AddPair('version', TJSONNumber.Create(GVersion));
+  LChange := TJSONObject.Create;
+  LChange.AddPair('text', AText);
+  LChanges := TJSONArray.Create;
+  LChanges.Add(LChange);
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('contentChanges', LChanges);
+  GClient.Notify('textDocument/didChange', LParams);
 end;
 
 /// <summary>
@@ -323,6 +405,140 @@ begin
     'navigation works again after the restart');
 end;
 
+{ 4. Positions on a line containing non-ASCII text.
+
+  The one risk the LSP move inherited rather than introduced: LSP columns are
+  UTF-16 code units, and a chain that counted UTF-8 bytes anywhere would land
+  off by the extra bytes. DemoUnicode.Shout puts 13 Cyrillic characters (26
+  UTF-8 bytes) before the identifier Wrap on one line - a byte-counting bug
+  would resolve nothing, or something inside the string literal. }
+procedure TestNonAsciiPositions;
+var
+  LLine, LChar, LDeclLine, LDeclChar: Integer;
+  LFile: string;
+begin
+  Writeln;
+  Writeln('=== 4. columns on a line with a Cyrillic literal ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoUnicode.pas');
+  DidOpen(LFile);
+
+  // Where Wrap is CALLED - the line whose leading Cyrillic literal is the point
+  // of the fixture - and where it is DECLARED, both read from the file so
+  // editing the fixture cannot make this assert the wrong place.
+  FindPos(LFile, 'Wrap(AText)', 'Wrap(AText)', LLine, LChar);
+  FindPos(LFile, 'function Wrap(', 'Wrap', LDeclLine, LDeclChar);
+
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered');
+  Check(GOk and GResultJson.Contains('DemoUnicode.pas'),
+    'Wrap resolves despite the Cyrillic literal earlier on the line');
+  // Landing in the right FILE is not enough: a column error could still hit
+  // some other identifier. Only the exact declaration position proves the
+  // request was aimed where we meant.
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LDeclLine, LDeclChar])),
+    Format('and lands exactly on Wrap''s declaration (%d,%d)',
+      [LDeclLine, LDeclChar]));
+end;
+
+{ 5. Document overlay: a full-replacement didChange must beat what is on disk.
+
+  This is the "document truth" rule the whole plugin leans on - once a file is
+  open, the buffer is the truth. It also pins an assumption verified so far only
+  by READING the server: the plugin sends one contentChange with no range (a
+  whole-document replacement) even though the server advertises INCREMENTAL
+  sync. The test adds a function that exists ONLY in the sent text; if the
+  overlay were ignored, the server would resolve nothing, because nothing on
+  disk mentions it. Nothing here writes to the fixture files. }
+procedure TestOverlayBeatsDisk;
+var
+  LUnitFile, LAppFile, LUnitText, LAppText: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5. didChange overlay beats the text on disk ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+
+  // A new exported function, in the buffer only - declaration after Greet's,
+  // body before the final `end.`.
+  LUnitText := string.Join(#13#10, InsertBeforeLine(
+    InsertAfterLine(SplitLines(TFile.ReadAllText(LUnitFile)),
+      'function Greet(const AName: string): string;',
+      ['function Farewell: string;']),
+    'end.',
+    ['function Farewell: string;', 'begin', '  Result := ''Bye'';', 'end;',
+     '']));
+  Check(LUnitText.Contains('function Farewell'),
+    'fixture patch applied (declaration and body added in memory)');
+
+  LAppText := string.Join(#13#10, InsertAfterLine(
+    SplitLines(TFile.ReadAllText(LAppFile)), 'Writeln(Shout(',
+    ['  Writeln(Farewell);']));
+  Check(LAppText.Contains('Writeln(Farewell)'), 'call site added in memory');
+
+  SendDidChange(LUnitFile, LUnitText);
+  SendDidChange(LAppFile, LAppText);
+
+  // Position of the call site in the PATCHED text, which is what the server
+  // now holds - not in the file.
+  FindPosInText(LAppText, 'Writeln(Farewell)', 'Farewell', LLine, LChar);
+  Check(Ask('textDocument/definition',
+    PositionParams(LAppFile, LLine, LChar)),
+    'definition answered');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas'),
+    'a function that exists only in the buffer resolves into DemoUnit.pas');
+
+  // Put both documents back to their on-disk text so later scenarios (and
+  // reruns) see the fixtures as written.
+  SendDidChange(LUnitFile, TFile.ReadAllText(LUnitFile));
+  SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
+end;
+
+{ 6. Cancellation hygiene.
+
+  TLspSession cancels a superseded request on every new one, so the invariant
+  that matters is not "the answer is an error" - the server may well finish
+  first - but that the callback fires EXACTLY ONCE either way and the client
+  stays usable. A double-fire or a dropped callback would leave a feature
+  either reporting twice or waiting forever. }
+procedure TestCancelHygiene;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+  LCalls: Integer;
+  LId: Int64;
+begin
+  Writeln;
+  Writeln('=== 6. a cancelled request still answers exactly once ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  FindPos(LFile, 'function Greet', 'Greet', LLine, LChar);
+
+  LCalls := 0;
+  LId := GClient.Request('textDocument/references',
+    PositionParams(LFile, LLine, LChar, True),
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      Inc(LCalls);
+      if ASuccess then
+        Writeln('  -- answered normally (server finished before the cancel)')
+      else
+        Writeln('  -- answered as cancelled: ' + AError);
+    end);
+  Check(LId <> 0, 'request was issued');
+  GClient.Cancel(LId);
+
+  Check(PumpUntil(function: Boolean begin Result := LCalls > 0 end,
+    cAnswerTimeoutMs), 'the cancelled request produced an answer');
+  // Give any stray second delivery a chance to show up before asserting.
+  PumpUntil(function: Boolean begin Result := LCalls > 1 end, 500);
+  Check(LCalls = 1, Format('callback fired exactly once (fired %d)', [LCalls]));
+
+  // Still usable afterwards - a botched cancel could leave stale pending state.
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'the client still answers requests after a cancel');
+end;
+
 var
   GExe: string;
 begin
@@ -358,6 +574,10 @@ begin
 
       TestQueuedBeforeReady(GExe);
       TestNavigation;
+      TestNonAsciiPositions;
+      TestOverlayBeatsDisk;
+      TestCancelHygiene;
+      // Last: it kills the server, so anything after it pays for a restart.
       TestLazyRestart;
     finally
       Writeln;
