@@ -427,8 +427,10 @@ begin
   var LDiagTotal := 0;
   for var LMi := 0 to FProject.ModelCount - 1 do
     Inc(LDiagTotal, Length(FProject.Model(LMi).Diags));
-  Log(Format('analysis done: %d units in %d ms, %d diagnostics in closure',
-    [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal]));
+  Log(Format('analysis done: %d units in %d ms, %d diagnostics in closure;'
+    + ' stages %s',
+    [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal,
+     FProject.StageTimings]));
 
   LStale := FDirty;
   if not LStale then
