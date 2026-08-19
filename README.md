@@ -184,6 +184,32 @@ not an oversight - and these are the reasons it could not stay:
 `publishDiagnostics` (server phase 3), which is also what will require a
 push-based `didChange` alongside the sync-on-request path.
 
+## Building and testing
+
+Everything below runs from a shell with `rsvars.bat` sourced (it sets `%BDS%`,
+which `LspProjectSmoke` uses to find the RTL/VCL/ToolsAPI sources).
+
+The package:
+
+```
+msbuild PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win32
+```
+
+The test harnesses are plain programs, not part of the package - `dcc32`
+straight at them, with `-U` pointing at the repo root so they can see the two
+IDE-free units:
+
+```
+dcc32 -B tests\LspTransportSmoke.dpr -U. -Etests\out -Ntests\out
+```
+
+Then run the exe. Each takes the server path as its first argument and
+defaults to `..\pastree-lsp-server\out\pastree-server.exe`; each prints a
+per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. `LspClientSmoke`
+and `LspProjectSmoke` need a built server; `LspProjectSmoke` also needs this
+repo's own `.dproj` to be buildable, since that is what it asks the server to
+analyze.
+
 ## Known first-pass limitations
 
 - **The server must be found.** It is looked for next to the package's BPL, or
