@@ -344,10 +344,20 @@ begin
       one option among several, it is the whole available design space until
       there is somewhere to put them.
 
-      And there isn't yet: ToolsAPI exposes no public way to underline a range
-      in the editor, so the realistic home is a Messages-panel list like Find
-      References has - which is a feature to design (severity filtering,
-      clearing, navigation), not a side effect of this migration.
+      And there isn't yet - though NOT for lack of API, which an earlier version
+      of this comment wrongly claimed. ToolsAPI has supported painting in the
+      code editor since 11.3, on the very same notifier this plugin already
+      registers for Ctrl+Click (INTACodeEditorEvents, ToolsAPI.Editor.pas): add
+      cevPaintLineEvents or cevPaintTextEvents to AllowedEvents and PaintLine /
+      PaintText arrive with an INTACodeEditorPaintContext carrying FileName,
+      LogicalLineNum (fold-aware, so it matches a diagnostic's own line
+      numbers), a TCanvas and CellSize - everything a squiggle under a column
+      range needs. PaintGutter covers an error mark in the gutter too.
+
+      So this is deferred because it is a FEATURE TO DESIGN - severity
+      filtering, what clears when, navigation, and a paint path that does a
+      dictionary lookup per visible line without allocating - not because the
+      editor cannot be drawn on.
 
       Handled EXPLICITLY rather than left unassigned so that (a) it reads as a
       decision instead of an oversight, and (b) anything else the server starts

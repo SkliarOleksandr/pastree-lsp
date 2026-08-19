@@ -190,8 +190,26 @@ not an oversight - and these are the reasons it could not stay:
 
 ### What is left
 
-`publishDiagnostics` (server phase 3), which is also what will require a
-push-based `didChange` alongside the sync-on-request path.
+`publishDiagnostics`. The server side already exists and sends them
+unsolicited; the client currently drops them explicitly (see the stub comment
+in `PasTreeIdePlugin.LspSession.pas`). Turning them into a feature needs three
+things:
+
+- **A push-based `didChange`**, alongside the sync-on-request path rather than
+  instead of it: squiggles have to follow typing, and nothing currently reaches
+  the server between requests.
+- **Somewhere to draw.** ToolsAPI *can* do this - it has supported painting in
+  the code editor since 11.3, on the same `INTACodeEditorEvents` notifier this
+  plugin already registers for Ctrl+Click. Add `cevPaintLineEvents` or
+  `cevPaintTextEvents` to `AllowedEvents`, and `PaintLine`/`PaintText` arrive
+  with an `INTACodeEditorPaintContext` carrying `FileName`, `LogicalLineNum`
+  (fold-aware, so it lines up with a diagnostic's own line numbers), a
+  `TCanvas` and `CellSize` - enough to underline a column range.
+  `PaintGutter` covers a gutter mark. See `ToolsAPI.Editor.pas`.
+- **A design, which is the actual work**: severity filtering (error-tolerant
+  analysis is the default and can be noisy), what clears a squiggle and when,
+  navigation, and a paint path that does a per-visible-line lookup without
+  allocating - it runs on every repaint of every line.
 
 ## Pointing the plugin at the server
 
