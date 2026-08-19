@@ -75,6 +75,7 @@ type
     // computed from the text they see, not the pre-burst snapshot).
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
+    FBuildStart: UInt64;            // for the analysis-done log line
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
     procedure ApplyInitOptions(AOptions: TJSONValue);
@@ -277,16 +278,31 @@ begin
     FNamespaces := PasDefaultNamespaces(FPlatform);
 
   // Extra searchPaths/defines from the client, appended after the project's.
+  // A present-but-not-an-array value is CALLED OUT rather than skipped
+  // silently: this exact shape cost a debugging round (PowerShell 5.1's
+  // ConvertTo-Json wraps arrays into a value/Count object, the option
+  // vanished, and the only symptom was navigation quietly not reaching the
+  // RTL).
   if AOptions is TJSONObject then
   begin
     if AOptions.TryGetValue<TJSONArray>('searchPaths', LArr) then
+    begin
       for LVal in LArr do
         if LVal.TryGetValue<string>(LItem) then
           FSearchPaths := FSearchPaths + [LItem];
+    end
+    else if TJSONObject(AOptions).GetValue('searchPaths') <> nil then
+      Log('WARNING: initializationOptions.searchPaths is not a string array'
+        + ' — ignored');
     if AOptions.TryGetValue<TJSONArray>('defines', LArr) then
+    begin
       for LVal in LArr do
         if LVal.TryGetValue<string>(LItem) then
           FDefines := FDefines + [LItem];
+    end
+    else if TJSONObject(AOptions).GetValue('defines') <> nil then
+      Log('WARNING: initializationOptions.defines is not a string array'
+        + ' — ignored');
   end;
   Log(Format('configured: platform=%s main=%s paths=%d defines=%d',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
@@ -337,7 +353,10 @@ begin
   FDirty := False;   // this session covers everything up to now
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
-  Log(Format('analysis started (%d roots, %d overlays)',
+  FBuildStart := GetTickCount64;
+  // "full rebuild" spelled out on purpose: when incremental reanalysis
+  // lands, this line is where full vs incremental becomes visible.
+  Log(Format('analysis started: full rebuild, %d roots, %d overlays',
     [Length(LRoots), FDocs.Count]));
   FSession.Start;
 end;
@@ -385,7 +404,15 @@ begin
   if FProject = nil then
     Exit;
   FNav := TPasNavigator.Create(FProject);
-  Log('analysis done');
+  // The whole-closure diagnostic count (open docs get theirs listed by
+  // PublishDiagnostics below): a healthy run on a fully-pathed project is
+  // near zero, so a big number here means missing search paths (F1027
+  // gating) long before any individual click misbehaves.
+  var LDiagTotal := 0;
+  for var LMi := 0 to FProject.ModelCount - 1 do
+    Inc(LDiagTotal, Length(FProject.Model(LMi).Diags));
+  Log(Format('analysis done: %d units in %d ms, %d diagnostics in closure',
+    [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal]));
 
   LStale := FDirty;
   if not LStale then
@@ -487,6 +514,12 @@ begin
             LDiagFile := FProject.ModelFile(LMid);
           if LowerCase(TPath.GetFullPath(LDiagFile)) <> LKey then
             Continue;
+          // Mirror every published diagnostic into the log: the Problems
+          // panel shows them too, but the log survives the panel being
+          // cleared and lines up with the analysis timing lines around it.
+          Log(Format('  diag %s(%d,%d): %s',
+            [TPath.GetFileName(LDoc.Path), LModel.Diags[LIdx].Line,
+             LModel.Diags[LIdx].Col, LModel.Diags[LIdx].Msg]));
           if not LFirst then
             LSB.Append(',');
           LFirst := False;
@@ -634,13 +667,27 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) and
-     FNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
-    Result := BuildResponse(AMsg.IdJson,
-      LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
-        Length(LTarget.Name)))
-  else
-    Result := BuildResponse(AMsg.IdJson, 'null');
+  // Failures answer null to the client (per protocol) but SAY WHY in the
+  // log — "F12 did nothing" is otherwise undebuggable from the outside.
+  if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+  begin
+    Log(Format('definition: no identifier at %s(%d,%d)',
+      [TPath.GetFileName(LPath), LPasLine, LPasCol]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  if not FNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
+  begin
+    Log(Format('definition: ''%s'' at %s(%d,%d) did not resolve to a source'
+      + ' declaration (unresolved name, or a builtin with none)',
+      [LIdent.Name, TPath.GetFileName(LPath), LPasLine, LPasCol]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  Log(Format('definition: %s -> %s(%d,%d)',
+    [LIdent.Name, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
+     LTarget.Col]));
+  Result := BuildResponse(AMsg.IdJson,
+    LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+      Length(LTarget.Name)));
 end;
 
 // One TPasRefHit as an LSP Location. The highlight span HiFrom..HiTo (0-based
