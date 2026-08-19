@@ -83,6 +83,23 @@ IDE plugin first, VS Code second), not by protocol order.
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
+**Encoding disagreement — known, and NOT fixed here.** PasTree decodes a source
+with no BOM as ANSI (dcc's own rule, and the point of its tolerant loader)
+while an editor decodes it as UTF-8. Two consequences, one fixed and one not:
+
+- *fixed:* every PasTree source with an em-dash in a comment looked "modified"
+  to the rebuild gate, so peeking a declaration — VS Code opens the target file
+  and closes it milliseconds later — cost two full closure rebuilds, about 14
+  seconds of the editor apparently reparsing a file nobody touched. The gate
+  now also accepts "re-encoding the editor's text as UTF-8 reproduces the
+  file's bytes", because a decode disagreement is not an edit (`FileMatches`).
+- *not fixed:* for a file the editor does NOT have open, the analysis still
+  reads it as ANSI, so a column on a line that contains a non-ASCII character
+  before the identifier is shifted relative to the client's UTF-16 view. The
+  server cannot paper over this without re-decoding every file the analysis
+  reads; it is a decode decision for the library, and belongs in the PasTree
+  repo next to the other analyzer-behaviour switches.
+
 ### Tier 1 — done 2026-08-19
 
 All four shipped. Two notes worth keeping:
