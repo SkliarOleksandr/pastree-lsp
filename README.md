@@ -27,8 +27,8 @@ builtin), `textDocument/implementation` and `textDocument/declaration`
 documents, and `workspace/didChangeWatchedFiles` (the client watches, the
 server decides whether a rebuild is due), with optional file logging. Verified against VS Code
 (`clients/vscode`; also installable as a VSIX) — go-to-definition,
-find-all-references, outline and diagnostics all work live. Still open: a client-liveness
-watchdog.
+find-all-references, outline and diagnostics all work live. The client-liveness watchdog exits the server if the client
+dies without closing stdin.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).

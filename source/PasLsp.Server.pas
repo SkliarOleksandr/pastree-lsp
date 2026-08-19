@@ -80,8 +80,13 @@ type
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
     FBuildStart: UInt64;            // for the analysis-done log line
+    // The client process, watched so a dead client cannot leave this one
+    // running (see StartClientWatchdog); 0 = not watching.
+    FClientHandle: THandle;
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
+    procedure StartClientWatchdog(APid: Integer);
+    function ClientGone: Boolean;
     procedure ApplyInitOptions(AOptions: TJSONValue);
     procedure InvalidateAnalysis;
     procedure StartAnalysis(const APriorityFile: string);
@@ -144,6 +149,8 @@ end;
 
 destructor TLspServer.Destroy;
 begin
+  if FClientHandle <> 0 then
+    CloseHandle(FClientHandle);
   InvalidateAnalysis;
   FOutgoing.Free;
   FDocs.Free;
@@ -446,8 +453,61 @@ begin
   end;
 end;
 
+{ The client-liveness watchdog.
+
+  Normally the session ends when the client closes our stdin: the reader
+  thread sees EOF and the dispatcher stops. That covers every orderly exit and
+  most disorderly ones. What it does not cover is a client that DIES while
+  something else keeps the pipe's write end open — then stdin never reaches
+  EOF and this process would sit here forever, holding a multi-hundred-MB
+  analysis, invisible to the user who just restarted their editor. LSP exists
+  for exactly this: `initialize` carries the client's own processId so a server
+  can watch it.
+
+  SYNCHRONIZE access is all that is needed to wait on a process handle; it is
+  the least privilege that answers "are you still alive". A handle also pins
+  the pid against reuse, which a bare "does pid exist" check would not. }
+procedure TLspServer.StartClientWatchdog(APid: Integer);
+begin
+  if APid <= 0 then
+  begin
+    Log('no client processId in initialize - liveness watchdog disabled'
+      + ' (stdin EOF is still the normal exit path)');
+    Exit;
+  end;
+  FClientHandle := OpenProcess(SYNCHRONIZE, False, APid);
+  if FClientHandle = 0 then
+    // Do not guess: a failure here (access denied, or a pid that already
+    // vanished between spawn and initialize) is not evidence the client is
+    // gone, and exiting on it would kill a healthy session.
+    Log(Format('cannot watch client pid %d (error %d) - watchdog disabled',
+      [APid, GetLastError]))
+  else
+    Log(Format('watching client pid %d', [APid]));
+end;
+
+function TLspServer.ClientGone: Boolean;
+begin
+  if FClientHandle = 0 then
+    Exit(False);
+  // Zero timeout: a poll, not a wait. Called from the 50ms idle tick and from
+  // the analysis wait loop, so both an idle server and one in the middle of a
+  // long build notice within a tick.
+  Result := WaitForSingleObject(FClientHandle, 0) = WAIT_OBJECT_0;
+end;
+
 procedure TLspServer.Idle;
 begin
+  if ClientGone then
+  begin
+    Log('client process is gone - exiting');
+    FExitRequested := True;
+    // Zero, not the no-shutdown 1: the client vanished, which is not a
+    // protocol violation to report, and a nonzero code would be misleading
+    // noise in whatever supervisor log outlives us.
+    FExitCode := 0;
+    Exit;
+  end;
   if (FPendingDue <> 0) and (GetTickCount64 >= FPendingDue) then
     FlushPending;
   FinalizeAnalysisIfDone;
@@ -466,6 +526,8 @@ begin
   begin
     if (ARequestIdJson <> '') and FCancels.IsCancelled(ARequestIdJson) then
       Exit(False);
+    if ClientGone then
+      Exit(False);   // the idle tick ends the session
     FinalizeAnalysisIfDone;   // also handles the stale->restart loop
     if FSession <> nil then
       TThread.Sleep(10);
@@ -578,6 +640,8 @@ begin
     ApplyInitOptions(AMsg.Params.FindValue('initializationOptions'))
   else
     ApplyInitOptions(nil);
+  if AMsg.Params <> nil then
+    StartClientWatchdog(AMsg.Params.GetValue<Integer>('processId', 0));
   FInitialized := True;
   Result := BuildResponse(AMsg.IdJson,
     '{"capabilities":{' +
