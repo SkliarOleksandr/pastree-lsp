@@ -1,5 +1,9 @@
 # PasTree IDE Plugin
 
+`SPEC.md` is the companion to this file: what the plugin COULD present and what
+each option costs, mapped over the ToolsAPI surface. This README is what it does
+today.
+
 ## Repo layout
 
 This repo was split out of `object-pascal-tree`'s `ide-plugin/` directory
