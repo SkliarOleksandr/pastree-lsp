@@ -21,11 +21,13 @@ dedicated reader thread, `initialize`/`shutdown`/`exit`, full-sync
 background session (restart-on-change, stale-result detection via buffer
 versions), honored `$/cancelRequest` (−32800), `textDocument/definition`,
 `textDocument/references` (the three-identity model: symbol / unit /
-builtin), and `textDocument/publishDiagnostics` for open documents with
+builtin), `textDocument/implementation` and `textDocument/declaration`
+(the decl-impl toggle), `textDocument/documentSymbol`, and
+`textDocument/publishDiagnostics` for open documents with
 optional file logging. Verified against VS Code (`clients/vscode`; also
 installable as a VSIX) — go-to-definition, find-all-references and
-diagnostics all work live. Still open in phase 2: incremental sync, a
-didChange debounce.
+diagnostics all work live. Still open: incremental sync, `hover`, a disk-change
+watcher.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).

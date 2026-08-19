@@ -37,6 +37,7 @@ uses
   PasTree.Platforms,
   PasTree.DProj,
   PasTree.SourceManager,
+  PasTree.Ast,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Async,
@@ -100,6 +101,7 @@ type
     function HandleReferences(const AMsg: TLspIncoming): string;
     function HandleToggle(const AMsg: TLspIncoming;
       AToImpl: Boolean): string;
+    function HandleDocumentSymbol(const AMsg: TLspIncoming): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -582,7 +584,8 @@ begin
       '"definitionProvider":true,' +
       '"referencesProvider":true,' +
       '"implementationProvider":true,' +
-      '"declarationProvider":true' +
+      '"declarationProvider":true,' +
+      '"documentSymbolProvider":true' +
     '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
@@ -885,6 +888,166 @@ begin
       Length(LTarget.Name)));
 end;
 
+{ LSP SymbolKind for a PasTree symbol, or 0 for "do not put this in an
+  outline": parameters, labels, generic parameters, `uses` items and seeded
+  builtins are all declarations, but none of them is what a reader scans a
+  unit's structure for. A type's LSP kind comes from its category, so a class
+  gets the class icon and a record the struct one. }
+function SymbolKindOf(const ASym: TSemaSymbol): Integer;
+begin
+  case ASym.Kind of
+    skType:
+      case ASym.TypeCat of
+        tcClass: Result := 5;        // Class
+        tcInterface: Result := 11;   // Interface
+        tcRecord: Result := 23;      // Struct
+        tcEnum: Result := 10;        // Enum
+        tcArray: Result := 18;       // Array
+        tcProc: Result := 12;        // Function (a procedural type)
+      else
+        Result := 23;                // alias, subrange, set, pointer, ...
+      end;
+    skRoutine:
+      if sfClassMember in ASym.Flags then
+        Result := 6                  // Method
+      else
+        Result := 12;                // Function
+    skVar: Result := 13;             // Variable
+    skConst: Result := 14;           // Constant
+    skField: Result := 8;            // Field
+    skProperty: Result := 7;         // Property
+    skEnumValue: Result := 22;       // EnumMember
+  else
+    Result := 0;
+  end;
+end;
+
+{ textDocument/documentSymbol — the unit's own outline (VS Code: Outline
+  pane, Ctrl+Shift+O, breadcrumbs; the IDE plugin's Structure view maps here
+  too).
+
+  Built from the model's SCOPES rather than by walking the CST: the unit and
+  implementation scopes list their symbols in declaration order, which is the
+  order a reader expects, and a type's MemberScope gives its fields, methods
+  and properties as children with no separate traversal. Routine bodies
+  (sckRoutine/sckBlock) are deliberately not descended into — locals are not
+  outline material.
+
+  Known limit: range = selectionRange = the NAME's span, because NodeSite
+  gives a node's first-token position and nothing public gives a
+  declaration's full extent yet. Navigation and the tree are correct; what
+  suffers is breadcrumb tracking as the cursor moves inside a body, which
+  needs a real span (a nav-side NodeSpan belongs in PasTree, not here). }
+function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
+var
+  LPath, LItems, LParts: string;
+  LMid, LScopeIdx: Integer;
+  LModel: TPasSemaModel;
+
+  // The items of one scope as comma-joined DocumentSymbol JSON ('' = none).
+  function ScopeItems(AScopeIdx, ADepth: Integer): string;
+  var
+    LScope: TSemaScope;
+    LI, LSymIdx, LKind, LLine, LChar, LPasLine, LPasCol: Integer;
+    LSym: TSemaSymbol;
+    LFile, LChildren, LOne: string;
+    LSB: TStringBuilder;
+  begin
+    Result := '';
+    // The depth guard bounds the JSON a pathological nesting could produce;
+    // every level here is recursion.
+    if (ADepth > 16) or (AScopeIdx < 0) or (AScopeIdx >= LModel.Scopes.Count)
+    then
+      Exit;
+    LScope := LModel.Scopes[AScopeIdx];
+    LSB := TStringBuilder.Create;
+    try
+      for LI := 0 to LScope.Symbols.Count - 1 do
+      begin
+        LSymIdx := LScope.Symbols[LI];
+        if (LSymIdx < 0) or (LSymIdx > High(LModel.Symbols)) then
+          Continue;
+        LSym := LModel.Symbols[LSymIdx];
+        LKind := SymbolKindOf(LSym);
+        if (LKind = 0) or (LSym.DeclNode = NIL_NODE) then
+          Continue;
+        if not FProject.NodeSite(LMid, LSym.DeclNode, LFile, LPasLine,
+          LPasCol) then
+          Continue;
+        // A symbol declared in an $I include belongs to THAT document, not
+        // this one — LSP documentSymbol is strictly per-document.
+        if not SameText(TPath.GetFullPath(LFile), LPath) then
+          Continue;
+        // Members of a type, one level down. Asking only types for their
+        // members is what keeps routine locals out.
+        if LSym.Kind = skType then
+          LChildren := ScopeItems(LSym.MemberScope, ADepth + 1)
+        else
+          LChildren := '';
+        PasTreeToLsp(LPasLine, LPasCol, LLine, LChar);
+        LOne := Format(
+          '{"name":%s,"kind":%d,' +
+          '"range":{"start":{"line":%d,"character":%d},' +
+          '"end":{"line":%d,"character":%d}},' +
+          '"selectionRange":{"start":{"line":%d,"character":%d},' +
+          '"end":{"line":%d,"character":%d}},"children":[%s]}',
+          [JsonQuote(LSym.Name), LKind,
+           LLine, LChar, LLine, LChar + Length(LSym.Name),
+           LLine, LChar, LLine, LChar + Length(LSym.Name),
+           LChildren]);
+        if LSB.Length > 0 then
+          LSB.Append(',');
+        LSB.Append(LOne);
+      end;
+      Result := LSB.ToString;
+    finally
+      LSB.Free;
+    end;
+  end;
+
+  // Appends one scope's items to the running list.
+  procedure AddScope(AScopeIdx: Integer);
+  begin
+    LParts := ScopeItems(AScopeIdx, 0);
+    if LParts = '' then
+      Exit;
+    if LItems <> '' then
+      LItems := LItems + ',';
+    LItems := LItems + LParts;
+  end;
+
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'documentSymbol: textDocument.uri required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+  begin
+    Log('documentSymbol: file not in the analyzed closure: ' + LPath);
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LPath := TPath.GetFullPath(LPath);
+  LModel := FProject.Model(LMid);
+
+  // Interface first, then implementation — source order, and the two are
+  // separate sibling scopes rather than a nested pair.
+  LItems := '';
+  for LScopeIdx := 0 to LModel.Scopes.Count - 1 do
+    if LModel.Scopes[LScopeIdx].Kind = sckUnit then
+      AddScope(LScopeIdx);
+  for LScopeIdx := 0 to LModel.Scopes.Count - 1 do
+    if LModel.Scopes[LScopeIdx].Kind = sckImplementation then
+      AddScope(LScopeIdx);
+  Log(Format('documentSymbol: %s -> %d bytes of outline',
+    [TPath.GetFileName(LPath), Length(LItems)]));
+  Result := BuildResponse(AMsg.IdJson, '[' + LItems + ']');
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -960,6 +1123,8 @@ begin
         Exit(HandleToggle(LMsg, {AToImpl} True));
       if LMsg.Method = 'textDocument/declaration' then
         Exit(HandleToggle(LMsg, {AToImpl} False));
+      if LMsg.Method = 'textDocument/documentSymbol' then
+        Exit(HandleDocumentSymbol(LMsg));
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful
