@@ -18,15 +18,21 @@ unit PasTreeIdePlugin.GotoDeclaration;
     - MouseDown with Ctrl+Left: only sets Handled := True (suppress
       whatever default down-side processing exists, e.g. starting a text
       selection) - no navigation here.
-    - MouseUp with Ctrl+Left: sets Handled := True AND does the actual
-      resolve+navigate, via PasTreeIdePlugin.Analysis.BuildNavigator (the
-      same pipeline PasTreeIdePlugin.FindReferences uses) + TPasNavigator's
-      SymbolAt/UnitAt (+ DeclHit/UnitDeclHit for the declaration site).
-      BuiltinNameAt is deliberately NOT handled here - a compiler builtin
-      has no source declaration anywhere, so there is nothing to navigate
-      to; native behavior is still suppressed (Handled stays True) rather
-      than falling back to the slow/broken native path, but nothing happens
-      instead of an error.
+    - MouseUp with Ctrl+Left: sets Handled := True AND starts the actual
+      resolve+navigate, now as an LSP textDocument/definition request
+      (PasTreeIdePlugin.LspSession) instead of an in-process
+      BuildNavigator call. A compiler builtin still navigates nowhere -
+      it has no source declaration anywhere - and native behavior is
+      still suppressed (Handled stays True) rather than falling back to
+      the slow/broken native path.
+
+  ASYNCHRONOUS SINCE THE LSP MOVE. The mouse handler returns immediately and
+  the jump happens on a later main-thread turn, when the server answers. In
+  practice that is milliseconds, but it is a real behavior change: the click
+  no longer blocks the IDE while the project is analyzed, and by the time the
+  answer lands the cursor may have moved. The "jumped from" position recorded
+  in the history is therefore captured at click time, not at answer time -
+  see the closure comment in ResolveAndNavigate.
 
   CONFIRMED WORKING (2026-08-15): this override does intercept RAD Studio's
   native Ctrl+Click declaration navigation via this TCodeEditorEvents mouse
@@ -81,7 +87,7 @@ implementation
 uses
   System.SysUtils, System.Types, System.Classes, System.UITypes,
   System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
-  PasTree.Sema.Project, PasTree.Sema.Nav, PasTreeIdePlugin.Analysis;
+  PasTreeIdePlugin.LspSession;
 
 type
   // AllowedEvents can only be customized by overriding it - there is no
@@ -376,55 +382,35 @@ end;
 /// useful; a miss is still always visible and says where it happened.
 /// </summary>
 procedure ResolveAndNavigate(const AFileName: string; ARow, ACol: Integer);
-var
-  LProject: IOTAProject;
-  LMainFile: string;
-  LSema: TPasSemaProject;
-  LNav: TPasNavigator;
-  LMid, LTMid, LSym, LTargetMid: Integer;
-  LName: string;
-  LHit: TPasRefHit;
-  LFound: Boolean;
 begin
   try
-    LProject := GetActiveProject;
-    if not Assigned(LProject) then
-    begin
-      LogDiagnostic('Goto Declaration: no active project.');
-      Exit;
-    end;
-
-    // BuildNavigator's result is cache-owned (see PasTreeIdePlugin.Analysis
-    // - "Caching") - do not free LNav/LSema, they outlive this call.
-    LNav := BuildNavigator(LProject, LSema, LMainFile);
-
-    LMid := LNav.ModelIdOf(AFileName);
-    if LMid < 0 then
-    begin
-      LogDiagnostic(Format('Goto Declaration: "%s" was not part of '
-        + 'the analyzed project.', [AFileName]));
-      Exit;
-    end;
-
-    LFound := False;
-    // UnitAt BEFORE SymbolAt: UnitAt only matches uses items and the module's
-    // own header name, where the unit identity is the right answer. SymbolAt,
-    // tested first, claims a program's `X in '...'` uses item as an ordinary
-    // symbol with no navigable references.
-    if LNav.UnitAt(LMid, ARow, ACol, LTargetMid, LName) then
-      LFound := LNav.UnitDeclHit(LTargetMid, LHit)
-    else if LNav.SymbolAt(LMid, ARow, ACol, LTMid, LSym, LName) then
-      LFound := LNav.DeclHit(LTMid, LSym, LHit);
-    // BuiltinNameAt: no source declaration exists anywhere for a
-    // compiler builtin - correctly nothing to navigate to.
-
-    if LFound then
-      PushHistoryAndNavigate(AFileName, ARow, ACol, LHit.FilePath, LHit.Line, LHit.Col)
-    else
-      LogDiagnostic('Goto Declaration: no identifier/declaration resolved at cursor.');
+    // The three-identity resolve (unit before symbol, builtins declining to
+    // have a declaration at all) now lives in the server's HandleDefinition -
+    // one implementation for both this plugin and any other LSP client,
+    // instead of the same ordering rule written twice.
+    LspDefinition(AFileName, ARow, ACol,
+      // Captures AFileName/ARow/ACol, which are parameters of THIS call, so
+      // every Ctrl+Click gets its own closure frame and its own "jumped from"
+      // position. Capturing a shared local instead would send the history
+      // entry to wherever the cursor happened to be when the answer arrived.
+      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
+        const AError: string)
+      begin
+        if not ASuccess then
+          LogDiagnostic('Goto Declaration: ' + AError)
+        else if Length(AHits) = 0 then
+          // Also the honest answer for a compiler builtin: no source
+          // declaration exists anywhere, so there is nothing to navigate to.
+          LogDiagnostic('Goto Declaration: no identifier/declaration '
+            + 'resolved at cursor.')
+        else
+          PushHistoryAndNavigate(AFileName, ARow, ACol, AHits[0].FilePath,
+            AHits[0].Row, AHits[0].Col);
+      end);
   except
     on E: Exception do
-      LogDiagnostic(Format('Goto Declaration: unhandled %s: %s', [E.ClassName, E.Message]));
+      LogDiagnostic(Format('Goto Declaration: unhandled %s: %s',
+        [E.ClassName, E.Message]));
   end;
 end;
 

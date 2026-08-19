@@ -36,6 +36,8 @@ contains
   PasTreeIdePlugin.Wizard in 'PasTreeIdePlugin.Wizard.pas',
   PasTreeIdePlugin.LspTransport in 'PasTreeIdePlugin.LspTransport.pas',
   PasTreeIdePlugin.LspClient in 'PasTreeIdePlugin.LspClient.pas',
+  PasTreeIdePlugin.LspDocuments in 'PasTreeIdePlugin.LspDocuments.pas',
+  PasTreeIdePlugin.LspSession in 'PasTreeIdePlugin.LspSession.pas',
   PasTreeIdePlugin.Analysis in 'PasTreeIdePlugin.Analysis.pas',
   PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',

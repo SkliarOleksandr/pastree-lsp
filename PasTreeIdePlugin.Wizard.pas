@@ -33,7 +33,7 @@ implementation
 uses
   System.SysUtils, Vcl.ActnList, Vcl.Dialogs, Vcl.Forms, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
-  PasTreeIdePlugin.Analysis;
+  PasTreeIdePlugin.Analysis, PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -160,6 +160,9 @@ end;
 constructor TIDEWizard.Create;
 begin
   FMenuManager := TMenuManager.Create;
+  // Creates the session object only - no server is spawned until the first
+  // navigation request, so loading this package costs nothing.
+  InitializeLspSession;
   InitializeGotoDeclaration;
 end;
 
@@ -168,6 +171,11 @@ begin
   FinalizeGotoDeclaration;
   FinalizeFindReferencesMessageGroup;
   FinalizeAnalysisCache;
+  // Last of the teardowns and the least forgiving one: this stops the server
+  // and joins the transport's reader thread. A reader thread still running
+  // inside this package's code when the BPL unloads is an immediate crash, so
+  // it must not outlive this call.
+  FinalizeLspSession;
   FreeAndNil(FMenuManager);
   inherited;
 end;
