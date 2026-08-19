@@ -86,6 +86,15 @@ procedure LspDefinition(const AFileName: string; ARow, ACol: Integer;
 procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 
+/// <summary>
+/// The text of AFileName as the server currently sees it: the live buffer we
+/// last sent, or the file on disk if it was never open. Callers displaying a
+/// line the server pointed at must use this and not read the file directly - a
+/// buffer with unsaved edits has line numbers that only match the text the
+/// server was given. Returns '' if neither source is available.
+/// </summary>
+function LspSourceTextOf(const AFileName: string): string;
+
 implementation
 
 uses
@@ -139,6 +148,7 @@ type
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
       AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
+    function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
 var
@@ -458,6 +468,12 @@ begin
     FPendingReferences, AOnDone);
 end;
 
+function TLspSession.TryGetSentText(const APath: string;
+  out AText: string): Boolean;
+begin
+  Result := Assigned(FDocs) and FDocs.TryGetSentText(APath, AText);
+end;
+
 { ---------------------------------------------------------------------------
   Unit-level entry points
   --------------------------------------------------------------------------- }
@@ -493,6 +509,20 @@ begin
     Exit;
   end;
   GSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+end;
+
+function LspSourceTextOf(const AFileName: string): string;
+begin
+  Result := '';
+  if Assigned(GSession) and GSession.TryGetSentText(AFileName, Result) then
+    Exit;
+  // Never opened in an editor, so disk IS what the server read.
+  try
+    if TFile.Exists(AFileName) then
+      Result := TFile.ReadAllText(AFileName);
+  except
+    Result := '';   // unreadable: callers degrade to no snippet
+  end;
 end;
 
 end.

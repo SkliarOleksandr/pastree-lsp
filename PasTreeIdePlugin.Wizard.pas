@@ -33,7 +33,7 @@ implementation
 uses
   System.SysUtils, Vcl.ActnList, Vcl.Dialogs, Vcl.Forms, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
-  PasTreeIdePlugin.Analysis, PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -170,7 +170,6 @@ destructor TIDEWizard.Destroy;
 begin
   FinalizeGotoDeclaration;
   FinalizeFindReferencesMessageGroup;
-  FinalizeAnalysisCache;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
   // inside this package's code when the BPL unloads is an immediate crash, so

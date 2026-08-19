@@ -13,8 +13,11 @@ unit PasTreeIdePlugin.LspDocuments;
 
   - The text is by definition current at the moment the question is asked,
     which is the only moment that matters for definition/references.
-  - No keystroke-rate traffic. The server declares full-document sync
-    (change:1), so a push model would ship the whole document per keypress.
+  - No keystroke-rate traffic at all, which is also why we do not need the
+    server's incremental sync: at most one whole-document replacement per user
+    action is cheaper than a stream of correctly-ranged patches, and a full
+    replacement cannot silently desynchronise the way a mis-applied patch can
+    (the server has no way to ask a client to resend).
   - One less notifier to tear down at package unload. This repo's README
     already names AddEditorEventsNotifier's incomplete teardown as the likely
     cause of its package hot-reload trouble; not adding a second notifier of
@@ -94,6 +97,15 @@ type
     /// tell - for use when the connection is already gone).
     /// </summary>
     procedure Forget;
+
+    /// <summary>
+    /// The exact text the server was last given for APath, if we sent it at
+    /// all. Callers that want to display a line the server pointed at must ask
+    /// here rather than read the file: for a buffer with unsaved edits, the
+    /// text on disk no longer matches the line and column numbers the answer
+    /// is expressed in.
+    /// </summary>
+    function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
 /// <summary>
@@ -267,8 +279,10 @@ begin
   LDoc := TJSONObject.Create;
   LDoc.AddPair('uri', PathToLspUri(APath));
   LDoc.AddPair('version', TJSONNumber.Create(AVersion));
-  // Full sync: one change with no range replaces the whole document, which is
-  // what the server advertises (textDocumentSync.change = 1).
+  // One change with NO range: the spec defines that as replacing the whole
+  // document, and the server honors it explicitly even though it advertises
+  // incremental sync (see HandleDidChange there). Deliberate - see the unit
+  // header on why sync-on-request has no use for ranged patches.
   LChange := TJSONObject.Create;
   LChange.AddPair('text', AText);
   LChanges := TJSONArray.Create;
@@ -356,6 +370,16 @@ end;
 procedure TLspDocumentSync.Forget;
 begin
   FSent.Clear;
+end;
+
+function TLspDocumentSync.TryGetSentText(const APath: string;
+  out AText: string): Boolean;
+var
+  LDoc: TSentDocument;
+begin
+  Result := FSent.TryGetValue(LowerCase(APath), LDoc);
+  if Result then
+    AText := LDoc.Text;
 end;
 
 end.

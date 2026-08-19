@@ -100,29 +100,8 @@
         <DCCReference Include="PasTreeIdePlugin.LspClient.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspDocuments.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspSession.pas"/>
-        <DCCReference Include="PasTreeIdePlugin.Analysis.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Types.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Lexer.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.SourceManager.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Preprocessor.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.CondEval.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Platforms.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Ast.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Ast.Json.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Parser.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Project.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.DProj.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Diagnostics.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Model.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Builtins.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Types.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Resolver.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Project.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Nav.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Dump.pas"/>
-        <DCCReference Include="..\object-pascal-tree\source\PasTree.Sema.Async.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
