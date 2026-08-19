@@ -1,6 +1,8 @@
 # PasTree LSP Server — specification
 
-Status: draft, 2026-08-15. This is the design agreed before any code exists.
+Status: 2026-08-19. Phases 1-2 are implemented and exercised live against
+VS Code; see "Protocol coverage" below for what the standard still holds and
+the repo README for what the server does today.
 
 ## Goal
 
@@ -52,34 +54,128 @@ Three layers, strict dependency direction:
    results back to IDE actions; IDE-specific features (IOTAHistoryServices
    Backward/Forward) stay in the plugin, layered over LSP results.
 
-## Protocol scope
+## Protocol coverage
 
-### Phase 1 — one feature end-to-end
+Phases 1-2 (the plugin-parity set) and part of phase 3 are implemented. What
+follows walks the whole LSP 3.17 inventory, so this list is CLOSED — every
+request in the standard is either implemented, in a tier below, or explicitly
+out of scope with a reason. Tiers are by value-per-effort for OUR clients (the
+IDE plugin first, VS Code second), not by protocol order.
 
-- transport: stdio (named pipe as a fallback option for the IDE)
-- `initialize` / `initialized` / `shutdown` / `exit`
-- `textDocument/didOpen`, `didChange` (full sync first), `didClose`
-- `textDocument/definition`
+### Implemented
 
-### Phase 2 — parity with the current plugin
+| | |
+|---|---|
+| `initialize`, `initialized`, `shutdown`, `exit` | project config via `initializationOptions` |
+| `textDocument/didOpen`, `didChange`, `didClose` | incremental sync, versioned overlays |
+| `textDocument/definition` | |
+| `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
+| `textDocument/references` | symbol / unit / builtin identities |
+| `textDocument/documentSymbol` | outline, types with members |
+| `textDocument/hover` | declaration card |
+| `textDocument/publishDiagnostics` | push, open documents |
+| `workspace/didChangeWatchedFiles` | client watches, server decides |
+| `$/cancelRequest` | |
 
-- `textDocument/references` (the three-identity model: symbol / unit /
-  builtin, as in the PasTree Find References work)
-- incremental `didChange`
-- `$/cancelRequest` honored end-to-end (requires PasTree cancellation)
+`textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
-### Phase 3 — beyond the plugin
+### Tier 1 — cheap, and the client feels them immediately
 
-- `textDocument/publishDiagnostics` — error-tolerant mode is the default,
-  exactly as in the library; strict member checks stay opt-in via server
-  configuration, mirroring the existing switch chain
-- `textDocument/documentSymbol`, `hover`
-- custom methods under `pastree/…` for anything LSP cannot express
-  (e.g. a uses-graph query) — additive, never required by standard clients
+- **`$/progress` + `window/workDoneProgress/create`.** A rebuild is 5.3 s on a
+  197-unit closure and the client currently sees *nothing* — the single most
+  visible gap. `TPasStagedProgress` already reports phase and
+  interface/full/total counts through the async session, so this is plumbing,
+  not analysis. The one structural change: `create` is a server→client
+  REQUEST, so the outgoing queue has to learn ids and response correlation,
+  which nothing needs today.
+- **`window/showMessage` / `window/logMessage`.** Server-side trouble (a
+  project file that failed to load, a `searchPaths` option of the wrong shape,
+  a worker exception) reaches only the log file right now. These put it in
+  front of the user, who is the one who can fix it.
+- **`textDocument/typeDefinition`.** "Go to the TYPE of this variable" —
+  `TSemaSymbol.TypeSym` is already resolved, so this is the definition handler
+  with one extra hop.
+- **`textDocument/documentHighlight`.** Occurrences of the symbol under the
+  cursor within the current file, with read/write kinds. It is what
+  `references` already computes, filtered to one file.
+
+### Tier 2 — real features, bounded work
+
+- **`workspace/symbol` (+ `workspaceSymbol/resolve`).** Project-wide symbol
+  search: on a 3747-unit project this is the feature people reach for most
+  (the IDE's own Ctrl+T). Every model's unit and implementation scopes already
+  hold what it needs, keyed by `NameLower`.
+- **`textDocument/rename` (+ `prepareRename`).** Precise *because* the
+  references are resolved rather than textual, and the three-identity model
+  already decides what a rename even means. Work is in the edges: a
+  `WorkspaceEdit` touching files nobody has open, and a refusal for a builtin
+  or a symbol declared in a library unit the user cannot edit. (Listed as a
+  non-goal in the original phase plan; the reason it was — no precise
+  references — has since gone away.)
+- **`workspace/didChangeConfiguration` (+ `workspace/configuration`).**
+  Reconfigure without a restart. Today a changed `.dproj` only prints a note
+  from the watched-files handler, because search paths, defines and namespaces
+  are read once at `initialize`.
+- **`textDocument/foldingRange`.** From the CST: unit sections, type bodies,
+  `begin`/`end` blocks, `$REGION`.
+- **`textDocument/documentLink`.** A `uses` item and an `$I` include name are
+  links to files, and the source manager resolves both already.
+- **`textDocument/prepareCallHierarchy` + `callHierarchy/incoming|outgoingCalls`.**
+  The call bindings exist (that is what the cross-call pass checks).
+- **`textDocument/prepareTypeHierarchy` + `typeHierarchy/super|subtypes`.**
+  Ancestry is exactly what the inherited-member pass walks.
+- **`textDocument/codeLens` (+ `codeLens/resolve`).** "N references" over a
+  declaration; a reference search per lens, so it only makes sense with the
+  resolve split doing the counting lazily.
+- **`textDocument/diagnostic` + `workspace/diagnostic` (pull model).** Lets a
+  client ask for whole-closure diagnostics instead of only the open documents
+  we push — the natural home for the "diagnostics beyond open files" idea.
+
+### Tier 3 — large, or blocked on library work
+
+- **`textDocument/completion` (+ `completionItem/resolve`).** The biggest
+  single feature: members after a dot, names in scope, unit names in a `uses`
+  clause. The scopes and member scopes are all there; what is missing is a
+  scope lookup AT A POSITION in text that usually does NOT parse — a buffer
+  mid-typing is invalid by definition, and that is a different requirement
+  from anything the analyzer does today.
+- **`textDocument/semanticTokens/full|range|full/delta`.** Semantic
+  highlighting is a strong fit — the model knows what every identifier
+  resolved to, and the demo's own PasTree highlighter is the precedent — but
+  it means emitting every token of a file, plus the delta protocol to keep it
+  affordable while typing.
+- **`textDocument/signatureHelp`.** Needs a formatted signature and
+  active-parameter tracking inside a call being typed: the same
+  position-in-invalid-text problem as completion.
+- **`textDocument/selectionRange`.** Wants a declaration's full extent — the
+  `NodeSpan` the PasTree To-do already lists, which is also the fix for
+  `documentSymbol`'s name-only ranges.
+- **`textDocument/codeAction` (+ resolve), `workspace/executeCommand`,
+  `workspace/applyEdit`.** Quick fixes. "Add the missing unit to `uses`" is
+  the obvious first one, and the unresolved-unit diagnostics already know
+  which unit is missing.
+- **`textDocument/inlayHint` (+ resolve).** Pascal infers little (`var` with
+  inferred type), so the payoff is small.
+- **`client/registerCapability` / `unregisterCapability`.** Only needed if we
+  want to register the file watcher dynamically instead of having each client
+  configure it.
+
+### Out of scope, with the reason
+
+- **`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`,
+  `willSaveWaitUntil`.** All need a PRINTER. PasTree parses and analyzes; it
+  does not emit source. A formatter is its own project, and a half-correct one
+  reformats code wrongly and silently.
+- **`notebookDocument/*`.** No notebooks in Pascal.
+- **`textDocument/documentColor`, `colorPresentation`, `inlineValue`,
+  `moniker`, `linkedEditingRange`.** Either not applicable to the language or
+  they serve tooling we do not have (a debugger, an indexer protocol).
+- **`workspace/didChangeWorkspaceFolders`, `willCreate|Rename|DeleteFiles`.**
+  The server tracks one project, not a folder set — multi-root stays a
+  non-goal.
 
 ### Explicit non-goals (for now)
 
-- completion, rename, formatting, semantic tokens
 - multi-root workspaces beyond one `.dproj`/directory target
 - running on anything but Windows x64
 
@@ -108,13 +204,26 @@ Three layers, strict dependency direction:
 
 ## Order of work
 
-1. (PasTree repo) overlay buffers + cancellation in the facade.
-2. Server skeleton: JSON-RPC loop, lifecycle, didOpen/didChange, `definition`.
-3. LSP client layer in the IDE plugin; move Goto Declaration onto it.
-4. `references`; retire the in-process analysis path in the plugin.
-5. `publishDiagnostics` from the error-tolerant analysis.
-6. Validate with VS Code as a second client — the proof that no IDE-specific
+Done, in this order (2026-08-16 … 19):
+
+1. (PasTree repo) overlay buffers + cancellation in the facade — versioned
+   `SetBuffer`/`BufferVersion` and mid-pass cancellation.
+2. Server skeleton: JSON-RPC loop, lifecycle, document sync, `definition`.
+3. Diagnostics, file logging, and a VS Code dev client.
+4. Async core: background session, reader thread, honored `$/cancelRequest`.
+5. `references`, the decl-impl toggle, `documentSymbol`, `hover`.
+6. Incremental sync, the watched-files handler, the liveness watchdog.
+7. Validated with VS Code as a second client — the proof that no IDE-specific
    assumption leaked into the protocol.
+
+Next, and NOT in protocol order:
+
+8. The IDE plugin becomes an LSP client (its own repo) — the point of the
+   whole exercise, and the only step that retires in-process analysis.
+9. Tier 1 of the coverage list above, `$/progress` first: a 5-second rebuild
+   the client cannot see is the most visible remaining gap.
+10. (PasTree repo) incremental reanalysis — see that repo's To do; the host
+    side here is already doing everything it can without library support.
 
 ## Open questions
 
