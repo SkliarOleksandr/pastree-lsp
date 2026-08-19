@@ -34,6 +34,7 @@ uses
   System.Generics.Collections,
   System.JSON,
   System.IOUtils,
+  System.Hash,
   PasTree.Platforms,
   PasTree.DProj,
   PasTree.SourceManager,
@@ -80,6 +81,11 @@ type
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
     FBuildStart: UInt64;            // for the analysis-done log line
+    // The overlay signature the LAST COMPLETED analysis was built from - the
+    // backstop that keeps a scheduled rebuild from running when the inputs
+    // came back to what is already analyzed (an edit typed and undone).
+    FBuiltSignature: string;
+    FStartedSignature: string;
     // The client process, watched so a dead client cannot leave this one
     // running (see StartClientWatchdog); 0 = not watching.
     FClientHandle: THandle;
@@ -95,6 +101,8 @@ type
     procedure Log(const AMsg: string);
     procedure Notify(const AJson: string);
     procedure StartClientWatchdog(APid: Integer);
+    function FileMatches(const APath, AText, ADiskText: string): Boolean;
+    function OverlaySignature: string;
     procedure StartProgress(const ATitle: string);
     procedure ReportProgress;
     procedure EndProgress(const AMessage: string);
@@ -385,6 +393,7 @@ begin
   FDirty := False;   // this session covers everything up to now
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
+  FStartedSignature := OverlaySignature;
   FBuildStart := GetTickCount64;
   StartProgress('PasTree: analyzing');
   // "full rebuild" spelled out on purpose: when incremental reanalysis
@@ -409,8 +418,19 @@ end;
 // they never sit out the debounce window.
 procedure TLspServer.FlushPending;
 begin
-  if FPendingDue <> 0 then
-    StartAnalysis(FPendingPriority);
+  if FPendingDue = 0 then
+    Exit;
+  // Nothing to do if the inputs are back to what the current project was
+  // built from - an edit typed and undone, or a file opened and closed.
+  if (FProject <> nil) and (OverlaySignature = FBuiltSignature) then
+  begin
+    Log('scheduled rebuild dropped: the analyzed inputs did not change');
+    FPendingDue := 0;
+    FPendingPriority := '';
+    FDirty := False;
+    Exit;
+  end;
+  StartAnalysis(FPendingPriority);
 end;
 
 { Swaps a finished session's project in (on the dispatcher thread — the
@@ -437,6 +457,7 @@ begin
   if FProject = nil then
     Exit;
   FNav := TPasNavigator.Create(FProject);
+  FBuiltSignature := FStartedSignature;
   // The whole-closure diagnostic count (open docs get theirs listed by
   // PublishDiagnostics below): a healthy run on a fully-pathed project is
   // near zero, so a big number here means missing search paths (F1027
@@ -504,6 +525,82 @@ end;
   cancellable on purpose - the machinery exists, but a cancelled build leaves
   the user with no results at all, which is worse than waiting out five
   seconds. }
+{ Does the FILE hold exactly this text? Two ways to be equal, and the second
+  one matters far more than it looks:
+
+  1. the tolerant decode the analysis itself uses returns the same string;
+  2. re-encoding the editor's text as UTF-8 reproduces the file's bytes.
+
+  (2) exists because the two sides decode a source with no BOM differently and
+  both are being reasonable: PasTree reads it as ANSI, which is dcc's own rule
+  and the whole point of its tolerant loader, while an editor reads it as
+  UTF-8. Every PasTree source with an em-dash in a comment therefore "differs"
+  from its own file under (1) alone - a 3-byte UTF-8 dash becomes three ANSI
+  characters - and that is not an edit, it is a disagreement about encoding.
+
+  What it cost before this test existed: peeking a declaration (VS Code opens
+  the target file, then closes it) scheduled TWO full closure rebuilds, ~14
+  seconds of the editor apparently reparsing a file nobody touched. The user
+  saw it as a rebuild bug; it was this.
+
+  NB the remaining consequence is real and NOT fixed here: for a file the
+  editor does NOT have open, the analysis still reads it as ANSI, so a column
+  on a line that contains a non-ASCII character before the identifier is
+  shifted relative to the client's UTF-16 view. That is a decode decision for
+  the library (see the PasTree To-do), not something the server can paper
+  over. }
+function TLspServer.FileMatches(const APath, AText, ADiskText: string):
+  Boolean;
+var
+  LFile, LEnc: TBytes;
+  LOffset: Integer;
+begin
+  if AText = ADiskText then
+    Exit(True);
+  try
+    LFile := TFile.ReadAllBytes(APath);
+  except
+    Exit(False);
+  end;
+  LEnc := TEncoding.UTF8.GetBytes(AText);
+  LOffset := 0;
+  // A UTF-8 BOM is not part of the document text on either side.
+  if (Length(LFile) >= 3) and (LFile[0] = $EF) and (LFile[1] = $BB) and
+     (LFile[2] = $BF) then
+    LOffset := 3;
+  if Length(LFile) - LOffset <> Length(LEnc) then
+    Exit(False);
+  Result := (Length(LEnc) = 0) or
+    CompareMem(@LFile[LOffset], @LEnc[0], Length(LEnc));
+end;
+
+{ The inputs the analysis would see, as a comparable string: every open
+  document whose text DIFFERS from its file, by path and content hash.
+
+  Non-differing documents are deliberately absent. Their file holds the same
+  content, so listing them would make merely LOOKING at a file (an open
+  followed by a close) change the signature and force a rebuild - which is the
+  churn this exists to stop. The overlay is still handed to the analysis for
+  them; what it buys there is the editor's own decoding of the bytes, which is
+  not worth a rebuild on its own. }
+function TLspServer.OverlaySignature: string;
+var
+  LDoc: TLspDocument;
+  LParts: TStringList;
+begin
+  LParts := TStringList.Create;
+  try
+    LParts.Sorted := True;   // dictionary order is not stable; this is
+    for LDoc in FDocs.All do
+      if LDoc.Differs then
+        LParts.Add(Format('%s|%d|%.8x', [LowerCase(LDoc.Path),
+          Length(LDoc.Text), THashFNV1a32.GetHashValue(LDoc.Text)]));
+    Result := LParts.CommaText;
+  finally
+    LParts.Free;
+  end;
+end;
+
 procedure TLspServer.StartProgress(const ATitle: string);
 begin
   if not FClientProgress or (FProgressToken <> '') then
@@ -814,11 +911,24 @@ begin
   except
     LDisk := '';   // unreadable/new file: treat the buffer as the truth
   end;
+  // When the file HOLDS this text, remember the editor.s own string as the
+  // disk text: every later comparison is then a plain string compare that
+  // means "same as what is on disk", and typing-then-undoing comes back to
+  // not-differing on its own.
+  if FileMatches(LPath, LText, LDisk) then
+    LDisk := LText;
   LDiffers := LText <> LDisk;
   FDocs.Open(LPath, LText, LVersion, LDisk, LDiffers);
-  Log(Format('didOpen %s v%d%s',
-    [LPath, LVersion, IfThen(LDiffers, ' (differs from disk)', '')]));
   if LDiffers then
+    Log(Format('didOpen %s v%d (unsaved: %d chars here, %d on disk)',
+      [LPath, LVersion, Length(LText), Length(LDisk)]))
+  else
+    Log(Format('didOpen %s v%d', [LPath, LVersion]));
+  // Schedule when this buffer is unsaved work the analysis has not seen, OR
+  // when nothing has been analyzed yet - the first file opened is what starts
+  // the initial build, and without this clause a workspace whose files all
+  // match their disk contents would sit unanalyzed until the first request.
+  if LDiffers or ((FProject = nil) and (FSession = nil)) then
     ScheduleAnalysis(LPath);
 end;
 
@@ -1458,6 +1568,8 @@ begin
       except
         LDisk := '';   // deleted or locked: the overlay is all we have
       end;
+      if FileMatches(LPath, LDoc.Text, LDisk) then
+        LDisk := LDoc.Text;   // see FileMatches: a decode difference is not an edit
       FDocs.SetDiskText(LPath, LDisk);
       Log('watched: ' + TPath.GetFileName(LPath) +
         ' changed on disk but is open here - overlay still wins');
