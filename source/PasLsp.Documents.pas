@@ -39,8 +39,9 @@ type
     destructor Destroy; override;
     procedure Open(const APath, AText: string; AVersion: Integer;
       const ADiskText: string; ADiffers: Boolean);
-    { Full-sync change (TextDocumentSyncKind.Full). DiskText is carried over
-      from the open — the caller compares against it without re-reading. }
+    { Replaces the stored text (the caller has already applied whatever
+      incremental edits arrived). DiskText is carried over from the open —
+      the caller compares against it without re-reading. }
     procedure Change(const APath, AText: string; AVersion: Integer;
       const ADiskText: string; ADiffers: Boolean);
     procedure Close(const APath: string);
@@ -49,7 +50,76 @@ type
     function Count: Integer;
   end;
 
+{ An LSP position (0-based line, 0-based UTF-16 code unit) as a 1-based index
+  into AText. Delphi strings ARE UTF-16, so a character offset is an index
+  offset and no encoding conversion happens here — see PasLsp.Protocol's own
+  note on position encoding.
+
+  Lines are split on CRLF, LF or a lone CR, all three, because that is the
+  spec's definition of a line and a real document carries whichever its author
+  used. A position past the end of its line (or past the end of the document)
+  CLAMPS to that end: editors legitimately send end-of-line positions, and a
+  clamp keeps a malformed or racing patch from raising. }
+function PositionToIndex(const AText: string; ALine, ACharacter: Integer):
+  Integer;
+
+{ AText with the given LSP range replaced by ANewText — one incremental
+  contentChange. A reversed range is treated as empty (an insertion at its
+  start) rather than as an error. }
+function ApplyRangeChange(const AText: string; AStartLine, AStartChar,
+  AEndLine, AEndChar: Integer; const ANewText: string): string;
+
 implementation
+
+function PositionToIndex(const AText: string; ALine, ACharacter: Integer):
+  Integer;
+var
+  LIdx, LLen, LSeen: Integer;
+begin
+  LLen := Length(AText);
+  LIdx := 1;
+  LSeen := 0;
+  while (LSeen < ALine) and (LIdx <= LLen) do
+  begin
+    case AText[LIdx] of
+      #13:
+        begin
+          Inc(LIdx);
+          if (LIdx <= LLen) and (AText[LIdx] = #10) then
+            Inc(LIdx);          // CRLF counts once
+          Inc(LSeen);
+        end;
+      #10:
+        begin
+          Inc(LIdx);
+          Inc(LSeen);
+        end;
+    else
+      Inc(LIdx);
+    end;
+  end;
+  // Walk the requested column, stopping at the line break: a character offset
+  // beyond the line's length clamps to its end.
+  while (ACharacter > 0) and (LIdx <= LLen) and
+        not CharInSet(AText[LIdx], [#13, #10]) do
+  begin
+    Dec(ACharacter);
+    Inc(LIdx);
+  end;
+  Result := LIdx;
+end;
+
+function ApplyRangeChange(const AText: string; AStartLine, AStartChar,
+  AEndLine, AEndChar: Integer; const ANewText: string): string;
+var
+  LFrom, LTo: Integer;
+begin
+  LFrom := PositionToIndex(AText, AStartLine, AStartChar);
+  LTo := PositionToIndex(AText, AEndLine, AEndChar);
+  if LTo < LFrom then
+    LTo := LFrom;
+  Result := Copy(AText, 1, LFrom - 1) + ANewText + Copy(AText, LTo, MaxInt);
+end;
 
 constructor TLspDocumentStore.Create;
 begin
@@ -84,7 +154,7 @@ end;
 procedure TLspDocumentStore.Change(const APath, AText: string;
   AVersion: Integer; const ADiskText: string; ADiffers: Boolean);
 begin
-  Open(APath, AText, AVersion, ADiskText, ADiffers);   // full sync
+  Open(APath, AText, AVersion, ADiskText, ADiffers);   // same shape
 end;
 
 procedure TLspDocumentStore.Close(const APath: string);

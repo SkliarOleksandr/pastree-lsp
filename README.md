@@ -16,8 +16,8 @@ It serves two kinds of clients with the same protocol:
 ## Status
 
 Phase 1 plus the phase-2 async core works end-to-end: stdio framing with a
-dedicated reader thread, `initialize`/`shutdown`/`exit`, full-sync
-`didOpen`/`didChange`/`didClose` (versioned overlay buffers), analysis on a
+dedicated reader thread, `initialize`/`shutdown`/`exit`, incremental
+`didOpen`/`didChange`/`didClose` sync (versioned overlay buffers), analysis on a
 background session (restart-on-change, stale-result detection via buffer
 versions), honored `$/cancelRequest` (−32800), `textDocument/definition`,
 `textDocument/references` (the three-identity model: symbol / unit /
@@ -26,8 +26,8 @@ builtin), `textDocument/implementation` and `textDocument/declaration`
 `textDocument/hover`, and `textDocument/publishDiagnostics` for open
 documents with optional file logging. Verified against VS Code
 (`clients/vscode`; also installable as a VSIX) — go-to-definition,
-find-all-references, outline and diagnostics all work live. Still open:
-incremental sync and a disk-change watcher.
+find-all-references, outline and diagnostics all work live. Still open: a disk-change
+watcher and a client-liveness watchdog.
 
 The full specification — architecture, protocol phases, key
 decisions and their costs, order of work — is in [SPEC.md](SPEC.md).

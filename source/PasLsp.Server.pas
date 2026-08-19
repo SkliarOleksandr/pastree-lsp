@@ -1,7 +1,7 @@
 unit PasLsp.Server;
 
 {
-  The LSP state machine: lifecycle, full-sync document events, and the
+  The LSP state machine: lifecycle, incremental document sync, and the
   navigation/diagnostics requests (SPEC.md phases 1-2). One message at a
   time on the dispatcher thread; the ANALYSIS runs on a background
   TPasAsyncSession, so a request that needs a fresh build waits on it while
@@ -581,7 +581,7 @@ begin
   Result := BuildResponse(AMsg.IdJson,
     '{"capabilities":{' +
       '"positionEncoding":"utf-16",' +
-      '"textDocumentSync":{"openClose":true,"change":1},' +   // 1 = Full
+      '"textDocumentSync":{"openClose":true,"change":2},' +   // 2 = Incremental
       '"definitionProvider":true,' +
       '"referencesProvider":true,' +
       '"implementationProvider":true,' +
@@ -634,12 +634,12 @@ end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
 var
-  LPath, LText: string;
-  LVersion: Integer;
+  LPath, LText, LNew: string;
+  LVersion, LIdx, LSL, LSC, LEL, LEC: Integer;
   LChanges: TJSONArray;
-  LLast: TJSONValue;
+  LChange, LRange: TJSONValue;
   LOld: TLspDocument;
-  LHadDoc: Boolean;
+  LHadDoc, LFullReplace: Boolean;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
@@ -647,19 +647,57 @@ begin
   if not AParams.TryGetValue<TJSONArray>('contentChanges', LChanges) or
      (LChanges.Count = 0) then
     Exit;
-  // Full sync: the last change wins outright (we advertised change=1, so a
-  // conforming client sends exactly one full-text change anyway).
-  LLast := LChanges.Items[LChanges.Count - 1];
-  if not LLast.TryGetValue<string>('text', LText) then
-    Exit;
   LVersion := AParams.GetValue<Integer>('textDocument.version', 0);
   LHadDoc := FDocs.TryGet(LPath, LOld);
+  LText := LOld.Text;
+
+  { Incremental sync (TextDocumentSyncKind.Incremental): each change carries a
+    range, and they must be applied IN ORDER — every range after the first
+    refers to the text as the previous ones left it. A change with no range is
+    a full replacement and is honored too: the spec allows a client to mix
+    them, and a resync arrives that way.
+
+    Correctness here is invisible until it is wrong: a mis-applied patch does
+    not fail, it silently leaves the server analyzing text the editor never
+    had, and LSP gives a server no way to ask for a resend. Hence the clamping
+    in PositionToIndex rather than exceptions, and the log line below carrying
+    the resulting length — the cheapest thing that makes a divergence
+    noticeable at all. }
+  LFullReplace := False;
+  for LIdx := 0 to LChanges.Count - 1 do
+  begin
+    LChange := LChanges.Items[LIdx];
+    if not LChange.TryGetValue<string>('text', LNew) then
+      Continue;
+    LRange := LChange.FindValue('range');
+    if LRange = nil then
+    begin
+      LText := LNew;              // full replacement
+      LFullReplace := True;
+      Continue;
+    end;
+    if not (LRange.TryGetValue<Integer>('start.line', LSL) and
+            LRange.TryGetValue<Integer>('start.character', LSC) and
+            LRange.TryGetValue<Integer>('end.line', LEL) and
+            LRange.TryGetValue<Integer>('end.character', LEC)) then
+    begin
+      Log('WARNING: didChange range without line/character - change skipped,'
+        + ' the buffer may now differ from the editor');
+      Continue;
+    end;
+    LText := ApplyRangeChange(LText, LSL, LSC, LEL, LEC, LNew);
+  end;
+
   FDocs.Change(LPath, LText, LVersion, LOld.DiskText,
     not LHadDoc or (LText <> LOld.DiskText));
-  Log(Format('didChange %s v%d (%d chars)',
-    [LPath, LVersion, Length(LText)]));
-  // Rebuild only on a real text change — the version always bumps, but a
-  // no-op change (or one we never saw the open for) must not cost a build.
+  if LFullReplace then
+    Log(Format('didChange %s v%d (full, %d chars)',
+      [LPath, LVersion, Length(LText)]))
+  else
+    Log(Format('didChange %s v%d (%d edits, now %d chars)',
+      [LPath, LVersion, LChanges.Count, Length(LText)]));
+  // Rebuild only on a real text change - the version always bumps, but a
+  // no-op edit must not cost a build.
   if not LHadDoc or (LText <> LOld.Text) then
     ScheduleAnalysis(LPath);
 end;
