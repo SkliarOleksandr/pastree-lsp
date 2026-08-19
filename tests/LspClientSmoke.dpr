@@ -539,6 +539,131 @@ begin
     'the client still answers requests after a cancel');
 end;
 
+{ 7. Restart on a configuration change, with a request in flight.
+
+  TLspSession calls Start again whenever the active project, platform or build
+  configuration changes, because the server fixes its configuration at
+  initialize and cannot be retargeted. That path tears down a LIVE client, so
+  two things have to hold: the old server must go, and a request that was still
+  outstanding must fail exactly once rather than leave a feature waiting for an
+  answer that can never come. The in-flight case is the interesting one - it is
+  what "the user switched project mid-Ctrl+Click" looks like. }
+procedure TestRestartOnConfigChange(const AExe: string);
+var
+  LOldPid, LNewPid: DWORD;
+  LFile: string;
+  LLine, LChar: Integer;
+  LOrphaned: Integer;
+  LOptions: TLspInitOptions;
+begin
+  Writeln;
+  Writeln('=== 7. Start again for a new configuration, request in flight ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  FindPos(LFile, 'function Greet', 'Greet', LLine, LChar);
+  LOldPid := GClient.ProcessId;
+
+  LOrphaned := 0;
+  GClient.Request('textDocument/references',
+    PositionParams(LFile, LLine, LChar, True),
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      Inc(LOrphaned);
+      Writeln(Format('  -- in-flight request answered: success=%s %s',
+        [BoolToStr(ASuccess, True), AError]));
+    end);
+
+  // Same project, different platform: a different server by the session's
+  // rules. Start tears the old one down.
+  LOptions := Default(TLspInitOptions);
+  LOptions.ProjectFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+  LOptions.Platform := 'Win64';
+  LOptions.SearchPaths := [GFixtureDir];
+  GOpened := nil;   // the new server starts with no documents
+  Check(GClient.Start(LOptions), 'Start succeeded for the new configuration');
+
+  Check(LOrphaned = 1,
+    Format('the in-flight request was failed exactly once (%d)', [LOrphaned]));
+  Sleep(300);
+  Check(not ProcessAlive(LOldPid), 'the previous server was shut down');
+
+  LNewPid := GClient.ProcessId;
+  Check((LNewPid <> 0) and (LNewPid <> LOldPid),
+    Format('a different server is running (pid %d -> %d)',
+      [LOldPid, LNewPid]));
+
+  DidOpen(LFile);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'navigation works against the reconfigured server');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas'),
+    'and resolves correctly');
+end;
+
+{ 8. The server dies while a request is queued behind the handshake.
+
+  The regression this pins: a queued frame that gets discarded used to leave its
+  pending entry behind, so the callback documented as firing exactly once fired
+  NEVER - the feature that asked would wait forever and the user's click would
+  vanish with no message at all. Reaching it is possible only because nothing is
+  dispatched until we pump: Start sends initialize, the request queues behind
+  it, and killing the server before the first CheckSynchronize guarantees the
+  handshake cannot have been acted on.
+
+  Either internal path may run - the reply never arrives, or it arrives and the
+  flush then fails on a broken pipe - and the assertion is the same for both,
+  which is the point. }
+procedure TestDeathDuringHandshake(const AExe: string);
+var
+  LFile: string;
+  LLine, LChar: Integer;
+  LCalls: Integer;
+  LOk: Boolean;
+  LPid: DWORD;
+begin
+  Writeln;
+  Writeln('=== 8. server dies with a request queued behind the handshake ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  FindPos(LFile, 'function Greet', 'Greet', LLine, LChar);
+
+  GOpened := nil;
+  Check(StartClient(AExe), 'server started');
+  LPid := GClient.ProcessId;
+  Check(GClient.State = lcsStarting, 'handshake still in flight');
+
+  LCalls := 0;
+  LOk := True;
+  GClient.Request('textDocument/definition', PositionParams(LFile, LLine, LChar),
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      Inc(LCalls);
+      LOk := ASuccess;
+      Writeln(Format('  -- queued request answered: success=%s %s',
+        [BoolToStr(ASuccess, True), AError]));
+    end);
+
+  // Not pumped yet, so nothing the server said has been acted on.
+  KillProcess(LPid);
+
+  Check(PumpUntil(function: Boolean begin Result := LCalls > 0 end, 10000),
+    'the queued request''s callback fired rather than being stranded');
+  PumpUntil(function: Boolean begin Result := LCalls > 1 end, 500);
+  Check(LCalls = 1, Format('and fired exactly once (fired %d)', [LCalls]));
+  Check(not LOk, 'and reported failure rather than a bogus success');
+
+  { And the client is not wedged - but not instantly, either, and that is
+    correct: this server died before ever completing a handshake, so the attempt
+    counter was never cleared and the restart backoff applies. An immediate
+    retry is expected to be refused; the recovery only proves something once the
+    backoff has elapsed. Pump through it rather than sleeping, so the reader
+    thread's deliveries keep being dispatched. }
+  Check(not GClient.IsReady, 'client is not ready immediately after the death');
+  PumpUntil(function: Boolean begin Result := False end, 1300);
+
+  DidOpen(LFile);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'once the backoff elapses the next request restarts the server');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas'), 'and resolves correctly');
+end;
+
 var
   GExe: string;
 begin
@@ -577,8 +702,10 @@ begin
       TestNonAsciiPositions;
       TestOverlayBeatsDisk;
       TestCancelHygiene;
-      // Last: it kills the server, so anything after it pays for a restart.
+      // These three each kill or replace the server, so they go last.
       TestLazyRestart;
+      TestRestartOnConfigChange(GExe);
+      TestDeathDuringHandshake(GExe);
     finally
       Writeln;
       Writeln('stopping client');

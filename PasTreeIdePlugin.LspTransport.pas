@@ -404,7 +404,14 @@ begin
             Break;
           end;
       else
+        // WAIT_FAILED, with a read still pending. Leaving now would return from
+        // Execute and release this stack while the kernel still holds pointers
+        // into LOv and LBuf - it would write into freed memory the next time
+        // the server sent a frame. Same cancel-and-drain as the teardown arm
+        // above; the wait failing does not make the pending I/O go away.
         LReason := Format('wait failed (%d)', [GetLastError]);
+        CancelIoEx(FPipe, @LOv);
+        GetOverlappedResult(FPipe, LOv, LRead, True);
         Break;
       end;
     end;

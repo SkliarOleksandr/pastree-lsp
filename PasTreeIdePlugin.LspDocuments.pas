@@ -325,13 +325,21 @@ var
   LSeen: TDictionary<string, Boolean>;
   LStale: TArray<string>;
   LReady: Boolean;
+  LIdx: Integer;
 begin
   LReady := FClient.IsReady;
   LOpen := CollectOpenDocuments;
   LSeen := TDictionary<string, Boolean>.Create;
   try
-    for LDoc in LOpen do
+    for LIdx := 0 to High(LOpen) do
     begin
+      LDoc := LOpen[LIdx];
+      // Clear the slot as we take responsibility for it, so the cleanup below
+      // frees exactly what this loop did not get to. CollectOpenDocuments hands
+      // over ownership of every element, and each one carries a whole document's
+      // text - megabytes per leak, once per navigation, if an exception between
+      // here and the end of the loop went unhandled.
+      LOpen[LIdx] := nil;
       LKey := LowerCase(LDoc.Path);
       LSeen.AddOrSetValue(LKey, True);
 
@@ -369,6 +377,9 @@ begin
       FSent.Remove(LKey);
     end;
   finally
+    // Anything the loop above did not claim (it nils each slot as it does).
+    for LIdx := 0 to High(LOpen) do
+      LOpen[LIdx].Free;
     LSeen.Free;
   end;
 end;

@@ -135,6 +135,7 @@ type
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingReferences: Int64;
+    FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
     function EnsureSession: Boolean;
@@ -250,6 +251,15 @@ end;
 
 destructor TLspSession.Destroy;
 begin
+  { Set BEFORE anything is freed. Freeing the client fails its outstanding
+    requests, which invokes their callbacks; a callback that responds by asking
+    another question would otherwise reach EnsureSession, find FClient already
+    nil, and build a fresh client, document map and SERVER PROCESS from inside
+    this destructor - leaving a live reader thread behind after
+    FinalizeLspSession returns and the BPL unloads. That is precisely the crash
+    class the teardown ordering in PasTreeIdePlugin.Wizard exists to prevent. }
+  FDestroying := True;
+
   // Client first: it stops the server and joins the reader thread. The
   // document map is only state, but freeing it before the thread that could
   // still be delivering into this object would be the wrong order.
@@ -282,6 +292,10 @@ var
   LPlatform, LConfig: string;
 begin
   Result := False;
+
+  // Never resurrect a session that is being torn down - see Destroy.
+  if FDestroying then
+    Exit;
 
   if FExePath = '' then
   begin
@@ -427,6 +441,10 @@ procedure TLspSession.Ask(const AMethod: string; const AFileName: string;
 var
   LParams, LDoc, LPos, LCtx: TJSONObject;
   LLine, LChar: Integer;
+  // Captured by the response closure. Initialised because a send that fails
+  // synchronously invokes that closure from inside Request, before the
+  // assignment below has run - it would otherwise read an undefined value.
+  LIssuedId: Int64;
 begin
   if not EnsureSession then
   begin
@@ -461,21 +479,35 @@ begin
     LParams.AddPair('context', LCtx);
   end;
 
-  APendingId := FClient.Request(AMethod, LParams,
+  LIssuedId := 0;
+  LIssuedId := FClient.Request(AMethod, LParams,
     procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
     begin
-      // Whatever happens, this request is no longer outstanding - clearing it
-      // before the callback means a callback that asks another question does
-      // not cancel its own successor.
+      { Clear the outstanding-request slot only if it still holds THIS request.
+
+        A cancelled request is still answered - with an error - so answers
+        arrive for requests that have already been superseded. Clearing
+        unconditionally would wipe the id of the request that superseded this
+        one, and the NEXT click would then find nothing to cancel: two
+        definition requests would be in flight at once, and both would
+        eventually call PushHistoryAndNavigate. The editor would jump to the
+        stale target and push a bogus Backward/Forward entry alongside the real
+        one. }
       if AMethod = 'textDocument/definition' then
-        FPendingDefinition := 0
+      begin
+        if FPendingDefinition = LIssuedId then
+          FPendingDefinition := 0;
+      end
       else
-        FPendingReferences := 0;
+        if FPendingReferences = LIssuedId then
+          FPendingReferences := 0;
+
       if ASuccess then
         AOnDone(True, ParseHits(AResult), '')
       else
         AOnDone(False, nil, AError);
     end);
+  APendingId := LIssuedId;
 end;
 
 procedure TLspSession.Definition(const AFileName: string; ARow, ACol: Integer;

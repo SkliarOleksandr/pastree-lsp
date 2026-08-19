@@ -106,6 +106,11 @@ type
     FPending: TObjectDictionary<Int64, TPendingRequest>;
     FOutbox: TList<string>;   // frames held back until the handshake lands
     FServerInfo: string;
+    // Connections replaced but not yet freed, and how deeply we are currently
+    // nested inside a connection's own callback - see RetireConnection.
+    FRetired: TObjectList<TLspConnection>;
+    FDispatchDepth: Integer;
+    FRestarting: Boolean;
     // Restart policy
     FAttempts: Integer;
     FLastAttemptTick: UInt64;
@@ -113,6 +118,19 @@ type
     procedure Log(const AText: string);
     function Connect: Boolean;
     procedure Teardown;
+    /// <summary>
+    /// Detaches the current connection and disposes of it as soon as that is
+    /// safe. NEVER frees it outright, because this can be reached from inside a
+    /// callback that the connection's own reader thread queued: freeing it there
+    /// would destroy the object whose method is on the stack, and the RTL still
+    /// handles the queued entry after our closure returns.
+    /// </summary>
+    procedure RetireConnection;
+    procedure DisposeRetired;
+    /// <summary>
+    /// Drops every queued frame AND fails the requests they belonged to.
+    /// </summary>
+    procedure DiscardOutbox(const AReason: string);
     function BackoffMs: UInt64;
     /// <summary>
     /// True if a request can be issued now: the server is up, or was
@@ -383,6 +401,7 @@ begin
   FOnLog := AOnLog;
   FPending := TObjectDictionary<Int64, TPendingRequest>.Create([doOwnsValues]);
   FOutbox := TList<string>.Create;
+  FRetired := TObjectList<TLspConnection>.Create(True);
   FState := lcsStopped;
   FNextId := 1;
 end;
@@ -390,9 +409,31 @@ end;
 destructor TLspClient.Destroy;
 begin
   Teardown;
+  DisposeRetired;
+  FRetired.Free;
   FOutbox.Free;
   FPending.Free;
   inherited;
+end;
+
+procedure TLspClient.RetireConnection;
+begin
+  if not Assigned(FConn) then
+    Exit;
+  FRetired.Add(FConn);   // FRetired owns it now
+  FConn := nil;
+  DisposeRetired;        // a no-op while we are inside a dispatch
+end;
+
+procedure TLspClient.DisposeRetired;
+begin
+  // Freeing a connection joins its reader thread and drops that thread's queued
+  // closures. Doing so while one of those closures is on the stack is a
+  // use-after-free, so disposal waits for the dispatch to unwind - the next
+  // Request, Teardown or destructor picks it up.
+  if (FDispatchDepth > 0) or (FRetired.Count = 0) then
+    Exit;
+  FRetired.Clear;
 end;
 
 procedure TLspClient.Log(const AText: string);
@@ -440,17 +481,36 @@ end;
 
 function TLspClient.Connect: Boolean;
 begin
+  // Never overwrite a live connection. Teardown and FailAllPending both invoke
+  // callbacks, and a callback that issues a request can reach EnsureStarted and
+  // connect underneath us; assigning over FConn here would leak that
+  // connection, its handles and its reader thread, and orphan a live server.
+  RetireConnection;
+
   Inc(FAttempts);
   FLastAttemptTick := GetTickCount64;
   try
+    // Both callbacks bracket themselves with FDispatchDepth so that anything
+    // they reach - a restart, a reconfigure - defers freeing this very
+    // connection until the dispatch has unwound. See RetireConnection.
     FConn := TLspConnection.Create(FExePath, FWorkDir,
       procedure(const AJson: string)
       begin
-        HandleFrame(AJson);
+        Inc(FDispatchDepth);
+        try
+          HandleFrame(AJson);
+        finally
+          Dec(FDispatchDepth);
+        end;
       end,
       procedure(const AReason: string)
       begin
-        OnConnectionGone(AReason);
+        Inc(FDispatchDepth);
+        try
+          OnConnectionGone(AReason);
+        finally
+          Dec(FDispatchDepth);
+        end;
       end);
   except
     on E: ELspTransport do
@@ -480,12 +540,12 @@ begin
       FConn.Send('{"jsonrpc":"2.0","id":0,"method":"shutdown"}');
       FConn.Send('{"jsonrpc":"2.0","method":"exit"}');
     end;
-    FreeAndNil(FConn);
+    RetireConnection;
   end;
-  FOutbox.Clear;
   FState := lcsStopped;
   FServerInfo := '';
-  FailAllPending('server stopped');
+  DiscardOutbox('server stopped');
+  DisposeRetired;   // normally already done; picks up a deferred disposal
 end;
 
 procedure TLspClient.ResetRestartPolicy;
@@ -515,6 +575,10 @@ begin
      (FState in [lcsStarting, lcsReady]) then
     Exit(True);
 
+  // Reentered from a callback that this very restart is failing - see below.
+  if FRestarting then
+    Exit(False);
+
   if not FStarted then
     Exit(False);   // Start has never been called: no options to start with
 
@@ -533,12 +597,32 @@ begin
      (GetTickCount64 - FLastAttemptTick < BackoffMs) then
     Exit(False);   // still inside the backoff window
 
-  // Only now dispose of the corpse. OnConnectionGone deliberately leaves it
-  // alone: it runs inside a callback that the dying connection's own reader
-  // thread queued, and freeing the connection from there would tear down that
-  // thread while its queued closure is still on the stack.
-  FreeAndNil(FConn);
-  FOutbox.Clear;
+  // Retire rather than free: this can be reached from inside a callback the
+  // dying connection's own reader thread queued (see RetireConnection).
+  RetireConnection;
+
+  { Fail whatever the dead server will never answer, and do it BEFORE
+    connecting: Connect issues the new handshake, which registers a pending
+    request of its own, and sweeping that away would kill the very handshake we
+    are starting - leaving the client permanently in lcsFailed.
+
+    This sweep cannot be left to OnConnectionGone, which normally performs it:
+    that runs from a closure the reader thread queued, and disposing of the
+    connection calls TThread.RemoveQueuedEvents, which DELETES that closure if
+    it has not been dispatched yet. A crash with a request outstanding, followed
+    by a Ctrl+Click processed before the queued notification, would otherwise
+    strand the earlier request's callback forever.
+
+    FRestarting keeps a callback that responds by asking again from starting a
+    second server underneath this one; it gets 'server unavailable' and the
+    restart in progress continues. }
+  FRestarting := True;
+  try
+    DiscardOutbox('server restarted; earlier request abandoned');
+  finally
+    FRestarting := False;
+  end;
+
   Log(Format('restarting server (attempt %d)', [FAttempts + 1]));
   // Connect leaves us in lcsStarting, so the request that triggered this gets
   // queued rather than lost.
@@ -568,8 +652,13 @@ begin
   if not ASuccess then
   begin
     FState := lcsFailed;
-    FOutbox.Clear;
     Log('initialize failed: ' + AError);
+    // Every queued frame is now undeliverable. Clearing the outbox WITHOUT
+    // failing the matching pending entries would silently break the
+    // fire-exactly-once contract this class documents: a request queued behind
+    // a handshake that then failed would never hear anything back, so the
+    // feature that made it waits forever and the user's click vanishes.
+    DiscardOutbox('initialize failed: ' + AError);
     Exit;
   end;
 
@@ -605,20 +694,34 @@ begin
   FlushOutbox;
 end;
 
+{ Drops every queued frame and fails the requests they belonged to. The two go
+  together: a pending entry whose frame was thrown away can never be answered,
+  and leaving it in FPending turns "fires exactly once" into "never fires". }
+procedure TLspClient.DiscardOutbox(const AReason: string);
+begin
+  FOutbox.Clear;
+  FailAllPending(AReason);
+end;
+
 procedure TLspClient.FlushOutbox;
 var
-  LFrame: string;
+  LIdx: Integer;
 begin
   if not Assigned(FConn) then
   begin
-    FOutbox.Clear;
+    DiscardOutbox('no connection to send queued requests on');
     Exit;
   end;
-  for LFrame in FOutbox do
-    if not FConn.Send(LFrame) then
+  // Indexed, not for-in: the failure path mutates FOutbox, which would
+  // invalidate an active enumerator.
+  for LIdx := 0 to FOutbox.Count - 1 do
+    if not FConn.Send(FOutbox[LIdx]) then
     begin
       Log('send failed while flushing queued requests');
-      Break;
+      // The connection is gone mid-flush; nothing after this frame went out
+      // either, so fail the lot rather than leave callers waiting.
+      DiscardOutbox('connection lost while sending queued requests');
+      Exit;
     end;
   FOutbox.Clear;
 end;
@@ -670,6 +773,9 @@ var
   LCallback: TLspResponseProc;
 begin
   Result := 0;
+  // A safe point to collect any connection whose disposal was deferred because
+  // we were inside its own callback at the time.
+  DisposeRetired;
   LIsLifecycle := SameText(AMethod, 'initialize');
 
   if not LIsLifecycle and not EnsureStarted then
