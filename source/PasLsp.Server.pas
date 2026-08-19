@@ -1,16 +1,17 @@
 unit PasLsp.Server;
 
 {
-  The LSP state machine, phase 1 (SPEC.md): lifecycle, full-sync document
-  events, textDocument/definition. One message at a time, analysis runs
-  synchronously on the dispatch thread — asynchrony and $/cancelRequest are
-  phase 2, and the PasTree side (mid-pass cancellation) is already in place
-  for it.
+  The LSP state machine: lifecycle, full-sync document events, and the
+  navigation/diagnostics requests (SPEC.md phases 1-2). One message at a
+  time on the dispatcher thread; the ANALYSIS runs on a background
+  TPasAsyncSession, so a request that needs a fresh build waits on it while
+  the reader thread keeps noting $/cancelRequest.
 
-  Project state: one TPasSemaProject + TPasNavigator pair, rebuilt lazily —
-  any document event only marks it dirty; the next definition request pays
-  for the re-analysis, with the requested file front-loaded (AnalyzeStaged's
-  APriority). The same shape as the IDE plugin's BuildNavigator cache.
+  Project state: one TPasSemaProject + TPasNavigator pair, kept across
+  requests (this IS the analysis cache — the same shape as the IDE plugin's
+  BuildNavigator cache). A document event only SCHEDULES a rebuild, and only
+  when the text actually differs from what was analyzed; the previous project
+  keeps answering until the new one is ready.
 
   Configuration comes from initialize's initializationOptions — an object
   with these keys (all optional):
@@ -97,6 +98,8 @@ type
     function HandleInitialize(const AMsg: TLspIncoming): string;
     function HandleDefinition(const AMsg: TLspIncoming): string;
     function HandleReferences(const AMsg: TLspIncoming): string;
+    function HandleToggle(const AMsg: TLspIncoming;
+      AToImpl: Boolean): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -577,7 +580,9 @@ begin
       '"positionEncoding":"utf-16",' +
       '"textDocumentSync":{"openClose":true,"change":1},' +   // 1 = Full
       '"definitionProvider":true,' +
-      '"referencesProvider":true' +
+      '"referencesProvider":true,' +
+      '"implementationProvider":true,' +
+      '"declarationProvider":true' +
     '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
 end;
 
@@ -816,6 +821,70 @@ begin
   end;
 end;
 
+{ textDocument/implementation and textDocument/declaration — the decl<->impl
+  toggle, a Pascal-specific navigation the navigator implements as pure CST
+  walks (GotoImplementation/GotoDeclaration; they never cross units, because
+  the language requires the body in the same one).
+
+  Note how this differs from textDocument/definition above: definition asks
+  "where is this NAME declared" and follows a resolved reference anywhere in
+  the closure, while these two ask "where is the OTHER HALF of the routine I
+  am standing in" — from a method header or a `forward` to the body's first
+  statement, and from anywhere inside an implementation back to its own
+  header. An editor binds them to separate commands (VS Code: Go to
+  Implementation / Go to Declaration), and the IDE plugin's own decl<->impl
+  command maps here rather than onto definition. }
+function TLspServer.HandleToggle(const AMsg: TLspIncoming;
+  AToImpl: Boolean): string;
+var
+  LPath, LWhat: string;
+  LLine, LChar, LPasLine, LPasCol, LMid: Integer;
+  LTarget: TPasNavTarget;
+  LFound: Boolean;
+begin
+  if AToImpl then
+    LWhat := 'implementation'
+  else
+    LWhat := 'declaration';
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      LWhat + ': textDocument.uri and position required'));
+
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+  begin
+    Log(LWhat + ': file not in the analyzed closure: ' + LPath);
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if AToImpl then
+    LFound := FNav.GotoImplementation(LMid, LPasLine, LPasCol, LTarget)
+  else
+    LFound := FNav.GotoDeclaration(LMid, LPasLine, LPasCol, LTarget);
+  if not LFound then
+  begin
+    // Not an error: the cursor is simply not on a routine that HAS another
+    // half (a plain procedure defined once has no separate header). Said in
+    // the log because "the command did nothing" needs a reason.
+    Log(Format('%s: nothing to toggle to at %s(%d,%d)',
+      [LWhat, TPath.GetFileName(LPath), LPasLine, LPasCol]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  Log(Format('%s: %s -> %s(%d,%d)',
+    [LWhat, LTarget.Name, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
+     LTarget.Col]));
+  Result := BuildResponse(AMsg.IdJson,
+    LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+      Length(LTarget.Name)));
+end;
+
 { -------- dispatch -------- }
 
 function TLspServer.Handle(const AJson: string): string;
@@ -887,6 +956,10 @@ begin
         Exit(HandleDefinition(LMsg));
       if LMsg.Method = 'textDocument/references' then
         Exit(HandleReferences(LMsg));
+      if LMsg.Method = 'textDocument/implementation' then
+        Exit(HandleToggle(LMsg, {AToImpl} True));
+      if LMsg.Method = 'textDocument/declaration' then
+        Exit(HandleToggle(LMsg, {AToImpl} False));
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful
