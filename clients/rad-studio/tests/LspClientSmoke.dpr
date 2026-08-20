@@ -25,7 +25,12 @@ uses
   PasTreeIdePlugin.LspClient;
 
 const
-  cDefaultExe = 'C:\Repos\pastree-lsp-server\out\pastree-server.exe';
+  { The server this repo's own build.bat produces, as a path RELATIVE to the
+    test exe's directory. Relative rather than absolute because since the
+    package moved into the server's repository there is no sibling checkout to
+    guess at - and an absolute C:\Repos\... default was only ever correct on
+    one machine. Overridden by the first command-line argument. }
+  cDefaultExeRel = '..\..\..\..\out\pastree-server.exe';
   cAnswerTimeoutMs = 30000;
 
 var
@@ -670,7 +675,8 @@ begin
   try
     GExe := ParamStr(1);
     if GExe = '' then
-      GExe := cDefaultExe;
+      GExe := TPath.GetFullPath(TPath.Combine(
+        ExtractFilePath(ParamStr(0)), cDefaultExeRel));
     GFixtureDir := TPath.Combine(
       TPath.GetDirectoryName(ParamStr(0)), '..\fixtures');
     GFixtureDir := TPath.GetFullPath(GFixtureDir);

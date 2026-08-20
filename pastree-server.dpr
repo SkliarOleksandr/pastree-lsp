@@ -16,6 +16,7 @@ uses
   PasLsp.Transport in 'source\PasLsp.Transport.pas',
   PasLsp.Protocol in 'source\PasLsp.Protocol.pas',
   PasLsp.Documents in 'source\PasLsp.Documents.pas',
+  PasLsp.ProductVersion in 'source\PasLsp.ProductVersion.pas',
   PasLsp.Version in 'source\PasLsp.Version.pas',
   PasLsp.Server in 'source\PasLsp.Server.pas';
 

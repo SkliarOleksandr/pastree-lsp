@@ -3,7 +3,7 @@
 Status: draft, 2026-08-19. What this plugin COULD present, and what it would
 take. The README describes what it does today; this describes the space.
 
-Companion to `..\pastree-lsp-server\SPEC.md`, which owns the other half of the
+Companion to the repository root's [SPEC.md](../../SPEC.md), which owns the other half of the
 same question. That document walks the LSP 3.17 inventory and says which
 requests the server implements, could implement, or refuses — a protocol-side
 list. This one walks the **ToolsAPI** inventory and says which IDE surfaces
@@ -12,11 +12,12 @@ and a place in the IDE to put it.
 
 ## Versioning
 
-`cPluginVersion` lives in `PasTreeIdePlugin.Version.pas`. Two rules, and the
-same two hold in all three repositories (PasTree, the LSP server, this package),
-each counting its own commits:
+This package shares **one version with the server**: `PasTreeLspVersion` in
+`..\..\source\PasLsp.ProductVersion.pas`. The policy and the reasoning live in
+the root [SPEC.md](../../SPEC.md); the short form is two rules, which PasTree
+also follows for its own independent number:
 
-- **Every commit bumps the PATCH.** `0.2.1` → `0.2.2` → `0.2.3`, mechanically,
+- **Every commit bumps the PATCH.** `0.5.0` → `0.5.1` → `0.5.2`, mechanically,
   no judgement call about whether a change "deserves" it.
 - **A substantial change bumps the MINOR** and resets the patch: a new feature,
   a new IDE surface, a reworked subsystem.
@@ -29,15 +30,14 @@ build stamp next to it answers the same question independently, and without
 depending on anyone remembering to bump — the two are deliberate belt and
 braces.)
 
-The minor component keeps its ordinary semver meaning, so:
-
-- **Compatibility lives in the `cMin*` constants, not in the version.**
-  `cMinServerVersion` moves only when the plugin starts depending on something a
-  server did not previously provide. Ordinary commits do not touch it, and it
-  must never be raised to "whatever I just built" — that would reject working
-  deployments and turn the mismatch warning into noise, which is how a real
-  mismatch goes unread. It may legitimately name a *patch* version: a server-side
-  fix is a patch there and can still be a hard requirement here.
+What this replaced, and why, is worth keeping in mind when touching the
+handshake: the package used to carry its own version plus a `cMinServerVersion`
+minimum, which was a *guess* at what it needed from a separately versioned
+server. Sharing the number turns that into an equality check — both halves come
+from one commit, so any difference means one binary on disk was not rebuilt. The
+old loose check had already failed to report exactly that. Only
+`cMinPasTreeVersion`, on the server side, remains a real minimum, because PasTree
+genuinely is a separately versioned dependency.
 
 ## How to read this
 

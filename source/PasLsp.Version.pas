@@ -1,50 +1,49 @@
 unit PasLsp.Version;
 
 {
-  This server's version, and the oldest PasTree it can be built against.
+  The PasTree-dependent half of versioning: the minimum PasTree this server can
+  be built against, the check that enforces it, and the banner that names both
+  numbers.
 
-  Independent semver per repository, tied together by stated minimums rather
-  than by a shared number - see the header of PasTree.Version for the reasoning
-  and CompareVersions for the comparison this relies on.
+  SPLIT FROM PasLsp.ProductVersion FOR A HARD REASON, not tidiness. The product
+  version has to be readable by the RAD Studio package, which is a Win32
+  designtime BPL and cannot link PasTree (Win64-only). So the version string
+  itself lives in a unit with no dependencies, and everything that needs
+  PasTree.Version stays here - compiled only into pastree-server.exe. See the
+  header of PasLsp.ProductVersion.
 
-  THE PASTREE CHECK IS A COMPILE-TIME ONE, and it is the only one of the three
-  that can be: PasTree is linked into this exe, so "which PasTree am I using"
-  is decided when the exe is built, and a mismatch should stop the build rather
-  than surface as a puzzling runtime failure. The plugin's check on THIS server
-  is necessarily a runtime one - it talks to whatever exe it finds on disk.
+  THE PASTREE CHECK IS THE ONLY BUILD-TIME ONE IN THE PRODUCT. PasTree is
+  linked into this exe, so which PasTree is in use is decided when the exe is
+  built, and a mismatch should fail loudly at startup rather than surface later
+  as puzzling wrong answers. The other direction - is the deployed package the
+  same build as the deployed exe - can only be checked at runtime, over the
+  protocol, and lives in the package's LSP client.
 }
 
 interface
 
 uses
+  PasLsp.ProductVersion,
   PasTree.Version;
 
 const
   /// <summary>
-  /// This server's version, reported to every client in the initialize
-  /// response (serverInfo.version), on the log's first line and by --version.
-  /// BUMP THE PATCH IN EVERY COMMIT, mechanically; bump the MINOR for a
-  /// substantial change (a new request, a new initializationOption) - see
-  /// SPEC.md's Versioning section. The patch component is what lets this
-  /// identify a build; what a client can RELY on is expressed by its own
-  /// cMinServerVersion instead.
-  /// </summary>
-  PasLspServerVersion = '0.4.1';
-
-  /// <summary>
-  /// The oldest PasTree this server's code actually works with. Raise it in
-  /// the same commit that starts depending on something newer - that is the
-  /// commit where a stale sibling checkout begins producing wrong answers
-  /// instead of a compile error, which is the failure this constant exists to
-  /// convert back into a compile error.
+  /// The oldest PasTree this server's code actually works with. Raise it in the
+  /// same commit that starts depending on something newer - that is the commit
+  /// where a stale sibling checkout begins producing wrong answers instead of a
+  /// compile error, which is the failure this constant exists to convert back
+  /// into a loud one.
+  ///
+  /// It may legitimately name a PATCH version of PasTree: a resolver fix is a
+  /// patch in PasTree's own terms and can still be a hard requirement here.
   /// </summary>
   cMinPasTreeVersion = '0.1.0';
 
 /// <summary>
-/// One line naming both versions and when this exe was built - the log's first
-/// line, and what --version prints. Both numbers, always: "the server is
-/// 0.3.0" does not tell you whether the resolver fix you are looking for is in
-/// it, and that fix lives in PasTree.
+/// One line naming the product version, the PasTree it was built against, and
+/// when this exe was built - the log's first line, and what --version prints.
+/// Both numbers, always: "the server is 0.5.0" does not tell you whether the
+/// resolver fix you are looking for is in it, and that fix lives in PasTree.
 /// </summary>
 function PasLspVersionBanner: string;
 
@@ -53,9 +52,9 @@ implementation
 uses
   System.SysUtils;
 
-{ Compile-time gate on the sibling PasTree checkout. A string comparison is not
-  possible in a $IF, so this is checked at unit initialization instead - the
-  earliest moment a string comparison can run, and still before any request is
+{ Compile-time gate on the sibling PasTree checkout, in spirit. A string
+  comparison cannot run in a $IF, so this is checked at unit initialization
+  instead - the earliest moment it can be, and still before any request is
   served. }
 procedure CheckPasTreeVersion;
 begin
@@ -76,7 +75,7 @@ begin
   if LBuilt <> '' then
     LBuilt := ', built ' + LBuilt;
   Result := Format('pastree-lsp-server %s (PasTree %s%s)',
-    [PasLspServerVersion, PasTreeVersion, LBuilt]);
+    [PasTreeLspVersion, PasTreeVersion, LBuilt]);
 end;
 
 initialization

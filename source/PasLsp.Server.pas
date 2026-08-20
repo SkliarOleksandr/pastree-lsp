@@ -45,6 +45,7 @@ uses
   PasTree.Sema.Nav,
   PasLsp.Protocol,
   PasLsp.Documents,
+  PasLsp.ProductVersion,
   PasLsp.Version,
   PasTree.Version;
 
@@ -1012,7 +1013,7 @@ begin
     // but "does it have the analysis fix I need", and that lives in PasTree.
     // Unknown members of serverInfo are ignored by every conforming client.
     '},"serverInfo":{"name":"pastree-lsp-server","version":' +
-      JsonQuote(PasLspServerVersion) + ',"pastreeVersion":' +
+      JsonQuote(PasTreeLspVersion) + ',"pastreeVersion":' +
       JsonQuote(PasTreeVersion) + '}}');
 end;
 

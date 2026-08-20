@@ -39,7 +39,12 @@ uses
   PasTreeIdePlugin.LspTransport;
 
 const
-  cDefaultExe = 'C:\Repos\pastree-lsp-server\out\pastree-server.exe';
+  { The server this repo's own build.bat produces, as a path RELATIVE to the
+    test exe's directory. Relative rather than absolute because since the
+    package moved into the server's repository there is no sibling checkout to
+    guess at - and an absolute C:\Repos\... default was only ever correct on
+    one machine. Overridden by the first command-line argument. }
+  cDefaultExeRel = '..\..\..\..\out\pastree-server.exe';
   cTimeoutMs = 20000;
   // Teardown is CancelIoEx plus at most a 1s wait on a server that already
   // saw stdin EOF. Anything near the transport's own 3s reader backstop means
@@ -267,7 +272,8 @@ begin
   try
     GExe := ParamStr(1);
     if GExe = '' then
-      GExe := cDefaultExe;
+      GExe := TPath.GetFullPath(TPath.Combine(
+        ExtractFilePath(ParamStr(0)), cDefaultExeRel));
     Writeln('server: ' + GExe);
 
     GFailures := 0;

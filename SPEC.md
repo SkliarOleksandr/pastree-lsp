@@ -10,7 +10,8 @@ One out-of-process analysis server, `pastree-server.exe` (Win64), that speaks
 the Language Server Protocol (JSON-RPC 2.0). It serves two kinds of clients
 with the SAME protocol:
 
-1. the RAD Studio IDE plugin (`c:\Repos\pastree-ide-plugin`), reduced to a
+1. the RAD Studio IDE package (`clients/rad-studio/`, merged into this
+   repository on 2026-08-20 — see the README for why), reduced to a
    thin LSP client over ToolsAPI;
 2. standard editors — VS Code, Neovim, anything with an LSP client.
 
@@ -20,34 +21,49 @@ one; the plugin is just its first client.
 
 ## Versioning
 
-`PasLspServerVersion` lives in `source/PasLsp.Version.pas`. Two rules, and the
-same two hold in all three repositories (PasTree, this server, the IDE plugin),
-each counting its own commits:
+**One version for the whole product** — this server and every client in
+`clients/` — as `PasTreeLspVersion` in `source/PasLsp.ProductVersion.pas`. Two
+rules; PasTree counts its own commits under the same two:
 
-- **Every commit bumps the PATCH.** `0.4.1` → `0.4.2` → `0.4.3`, mechanically,
+- **Every commit bumps the PATCH.** `0.5.0` → `0.5.1` → `0.5.2`, mechanically,
   no judgement call about whether a change "deserves" it.
 - **A substantial change bumps the MINOR** and resets the patch: a newly
-  supported request, a new initializationOption, a reworked subsystem —
-  anything a client might reasonably need to *require*.
+  supported request, a new initializationOption, a reworked subsystem — anything
+  a consumer might reasonably need to *require*.
 
-The per-commit patch bump exists so that a version identifies a **build**. This
-server is deployed as one half of a pair with a plugin that runs whatever exe is
-on disk, so "which build is running" is a question that comes up constantly, and
-a number that only moved on release could not answer it.
+The per-commit patch bump exists so that a version identifies a **build**. The
+server is deployed alongside a RAD Studio package that runs whatever exe is on
+disk, so "which build is running" is a question that comes up constantly, and a
+number that only moved on release could not answer it.
+
+**Why one number rather than one per component.** The server and the RAD Studio
+package are one deliverable built from one commit by one script, so "which
+version is the package" and "which version is the server" were never two
+questions — giving them two numbers only created a way for the answers to
+disagree. They did, on 2026-08-20: a freshly built package ran against the
+previous day's exe, the old `cMinServerVersion` gate was satisfied by the stale
+server, and nothing was reported. The mismatch was caught by a human reading a
+version string. With one number the client checks **equality** and says so,
+which is the difference between a guess about compatibility and a fact about
+deployment. `clients/vscode` shares the number too, at the mild cost that a
+package-only fix moves a version VS Code users see — acceptable, since the
+number identifies a build rather than a feature set.
 
 The minor component keeps its ordinary semver meaning, which is what makes the
-compatibility constants readable:
+one remaining compatibility constant readable:
 
-- **Compatibility lives in the `cMin*` constants.** `cMinPasTreeVersion` moves
-  only when this server's code starts depending on something a PasTree did not
-  previously provide. Ordinary commits do not touch it. Note that it can
-  legitimately name a *patch* version: a resolver fix is a patch in PasTree's
-  own terms and can still be a hard requirement here. The mirror-image constant
-  lives in the plugin (`cMinServerVersion`), which gates against an old copy of
-  THIS exe.
-- **`serverInfo` reports both numbers**, this server's and the PasTree it was
-  built against, because the client's real question is almost always about the
+- **`cMinPasTreeVersion`** (`source/PasLsp.Version.pas`) moves only when this
+  server's code starts depending on something a PasTree did not previously
+  provide. Ordinary commits do not touch it. It can legitimately name a *patch*
+  version: a resolver fix is a patch in PasTree's own terms and can still be a
+  hard requirement here. Checked at startup, because PasTree is linked into this
+  exe.
+- **`serverInfo` reports both numbers**, the product's and the PasTree it was
+  built against, because a client's real question is almost always about the
   latter.
+- **There is no `cMinServerVersion` any more.** It was the client's guess at
+  what it needed from a separately versioned server; with one repository and one
+  number, equality replaces it.
 
 ## Why out-of-process at all
 

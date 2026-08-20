@@ -1,26 +1,39 @@
-# PasTree IDE Plugin
+# PasTree LSP — RAD Studio package
 
-`SPEC.md` is the companion to this file: what the plugin COULD present and what
-each option costs, mapped over the ToolsAPI surface. This README is what it does
-today.
+The RAD Studio client of [PasTree LSP](../../README.md). `SPEC.md` here is the
+companion to this file: what the package COULD present and what each option
+costs, mapped over the ToolsAPI surface. This README is what it does today; the
+repository root README covers the server and the product as a whole.
 
-## Repo layout
+## Where this lives, and the one rule that protects it
 
-This repo was split out of `object-pascal-tree`'s `ide-plugin/` directory
-(2026-08-16, no history carried over - see that repo's git log for the
-prior commits).
+Two moves brought it here: out of `object-pascal-tree`'s `ide-plugin/` directory
+into its own repository (2026-08-16), then into the server's repository as
+`clients/rad-studio/` (2026-08-20, history preserved). The second move was
+because the server and this package are one deliverable with one version — see
+the root README.
 
-**No sibling checkout is needed to build the package any more.** It used to
-compile the ~20 `PasTree.*.pas` analysis units directly from
-`..\object-pascal-tree\source\`; since the LSP move it links none of them -
-the analysis lives in `pastree-server.exe`, which owns that dependency
-instead. The package is a thin LSP client: `requires rtl, vcl, designide` and
-nothing else. (The `tests/` harnesses need only this repo and a built server
-exe.)
+**THE PACKAGE LINKS NO PASTREE, AND MUST NOT START.** It is a 32-bit designtime
+BPL; PasTree is Win64-only, and that mismatch is the entire reason the analysis
+runs out of process at all. So:
 
-The sibling `pastree-lsp-server` repo hosts the out-of-process LSP server that
-now does all the analysis; **both features have moved onto it**. See
-"Architecture" below.
+```
+requires rtl, vcl, designide;
+```
+
+plus exactly one unit from outside this directory: `PasLsp.ProductVersion`,
+which is dependency-free by construction and shared with the server so the two
+halves cannot disagree about their version.
+
+This used to be guaranteed by geography — PasTree was in another repository
+entirely. Now it is in the same tree, one directory up, and "just link this one
+unit" is an easy and plausible mistake that would quietly undo the whole
+out-of-process design. `tests/VersionSmoke` is the tripwire for the most likely
+version of it: it is a Win32 program over the shared version unit, so it stops
+compiling the moment that unit grows a PasTree dependency.
+
+The analysis itself lives in `pastree-server.exe`; **both features run through
+it**. See "Architecture" below.
 
 A RAD Studio IDE package that surfaces PasTree's analysis inside the Delphi
 editor itself. Two features so far: **Find References** (the feature
@@ -242,7 +255,7 @@ things:
 No path is hardcoded. `FindServerExe` looks in two places, in order:
 
 1. `%PASTREE_LSP_SERVER%`, if set - the development override, so the IDE runs
-   whatever was last built into `pastree-lsp-server\out\`. A value that is set
+   whatever was last built into the repository's own `out\`. A value that is set
    but wrong is **reported rather than ignored**: falling back would silently
    run some other build, and a typo would cost an afternoon.
 2. `pastree-server.exe` next to the package's own BPL, so a matched pair can be
@@ -254,13 +267,13 @@ is the IDE default, e.g.
 to this repo. So one of these has to happen before the plugin can do anything:
 
 ```
-copy ..\pastree-lsp-server\out\pastree-server.exe "%PUBLIC%\Documents\Embarcadero\Studio\37.0\Bpl"
+copy ..\..\out\pastree-server.exe "%PUBLIC%\Documents\Embarcadero\Studio\37.0\Bpl"
 ```
 
 or, better for a development loop because it never goes stale:
 
 ```
-setx PASTREE_LSP_SERVER "C:\Repos\pastree-lsp-server\out\pastree-server.exe"
+setx PASTREE_LSP_SERVER "C:\Repos\pastree-lsp\out\pastree-server.exe"
 ```
 
 The environment variable is only picked up on the next IDE start - a process's
@@ -284,65 +297,67 @@ naming which case it is, since the two need different fixes:
 
 ## Building and testing
 
-Everything below runs from a shell with `rsvars.bat` sourced (it sets `%BDS%`,
-which `LspProjectSmoke` uses to find the RTL/VCL/ToolsAPI sources).
+**`build.bat` at the repository root builds everything** - server, this
+package, all four harnesses - and runs the harnesses. That is the intended way,
+and not merely a convenience: the package and the server share one version and
+check each other for equality at the handshake, which only means anything if a
+normal build produces both halves from the same commit. RAD Studio must be
+closed (a running IDE holds the `.bpl`, a live LSP session holds the exe).
 
-The package:
-
-```
-msbuild PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win32
-```
-
-The test harnesses are plain programs, not part of the package - `dcc32`
-straight at them, with `-U` pointing at the repo root so they can see the two
-IDE-free units:
+The individual commands, for when only one piece needs rebuilding - from a shell
+with `rsvars.bat` sourced (`LspProjectSmoke` needs `%BDS%` to find the
+RTL/VCL/ToolsAPI sources):
 
 ```
-dcc32 -B tests\LspTransportSmoke.dpr -U. -Etests\out -Ntests\out
+msbuild clients\rad-studio\PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win32
+dcc32 -B clients\rad-studio\tests\LspTransportSmoke.dpr -U"clients\rad-studio;source" -Eclients\rad-studio\tests\out -Nclients\rad-studio\tests\out
 ```
 
-Then run the exe. Each takes the server path as its first argument and
-defaults to `..\pastree-lsp-server\out\pastree-server.exe`; each prints a
-per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. `LspClientSmoke`
-and `LspProjectSmoke` need a built server; `LspProjectSmoke` also needs this
-repo's own `.dproj` to be buildable, since that is what it asks the server to
-analyze.
+`-U` names two directories: this one for the IDE-free LSP units, and `source`
+for the shared `PasLsp.ProductVersion`.
+
+Each harness takes the server path as its first argument and otherwise falls
+back to `out\pastree-server.exe` resolved relative to its own exe; each prints a
+per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. Build them into
+`tests\out\` - `LspClientSmoke` finds its fixtures at `..\fixtures` and
+`LspProjectSmoke` finds this package's `.dproj` at `..\..`, both relative to the
+test exe.
 
 ## Versions
 
-Three repositories, three independent versions - PasTree, `pastree-lsp-server`,
-this package - each counting its own commits: **one PATCH bump per commit**, so
-the number identifies a build, and a MINOR bump for a substantial change.
-`SPEC.md` has the policy. What ties the three together is not a shared number
-but a **stated minimum** in each consumer, which does *not* move with the
-per-commit bumps:
+**One version for the whole product**, shared with the server:
+`PasTreeLspVersion` in `..\..\source\PasLsp.ProductVersion.pas`. Patch bump per
+commit, minor for a substantial change - `SPEC.md` has the policy and the
+reasoning. PasTree versions itself separately, and is the one dependency the
+product states a minimum against.
 
-| Where | Declares | Checked |
-|---|---|---|
-| `PasTree.Version.pas` | `PasTreeVersion` | - |
-| `PasLsp.Version.pas` | `PasLspServerVersion`, `cMinPasTreeVersion` | at server startup - PasTree is linked in, so a stale sibling checkout is a build/startup problem |
-| `PasTreeIdePlugin.Version.pas` | `cPluginVersion`, `cMinServerVersion` | at the initialize handshake - the only moment it can be, since the server is whatever exe is on disk |
-
-Both halves announce themselves in the Build tab, so a bug report names the
-pair that was running:
+Both halves announce themselves in the Build tab, so a bug report names the pair
+that was running:
 
 ```
-[pastree-lsp] plugin 0.2.1, built 2026-08-20 12:40
-[pastree-lsp] server ready: pastree-lsp-server 0.4.1 (PasTree 0.2.1)
+[pastree-lsp] package 0.5.0, built 2026-08-20 13:15
+[pastree-lsp] server ready: pastree-lsp-server 0.5.0 (PasTree 0.2.1)
 ```
 
-A server older than `cMinServerVersion` produces a warning, not a refusal: an
-old server still answers what it knows, and a plugin that disabled itself over
-a version string would turn a partial degradation into the exact symptom
-everything else here also produces - "nothing happens on Ctrl+Click".
+**Unequal versions mean a stale binary, not an incompatibility** - both are
+built from one commit, so the client compares the server's reported version with
+its own for equality and warns when they differ. That check replaced an "at
+least version X" minimum which had failed to catch exactly this: on 2026-08-20 a
+freshly built package ran against the previous day's exe, the stale server
+satisfied the minimum, and the mismatch was found only because someone read the
+version out of the Build tab.
+
+The warning is not a refusal: a mismatched pair usually still navigates, and a
+package that disabled itself over a version string would produce the same
+symptom as every other misconfiguration here - "nothing happens on Ctrl+Click".
 
 `pastree-server.exe --version` answers the same question without speaking
-JSON-RPC, which is how to check which exe is actually deployed next to the BPL.
-The build stamp comes from the binary's own timestamp rather than a compile-time
-constant (Delphi has no compile-date macro), and it answers the question a
-semver cannot during development: whether the IDE is running the BPL you just
-built - which, given that rebuilding inside a live IDE session is unreliable
-here, is worth being able to check.
+JSON-RPC, which is how to check which exe is actually deployed. The build stamp
+comes from each binary's own timestamp rather than a compile-time constant
+(Delphi has no compile-date macro), and it answers what a version cannot when no
+commit has happened: whether the IDE is running the BPL you just built - worth
+being able to check, given that rebuilding inside a live IDE session is
+unreliable here.
 
 ## When a navigation does nothing
 
@@ -387,10 +402,9 @@ log anything leaves its last words.
 ## Files
 
 - `PasTreeIdePlugin.dpk` / `.dproj` - package project, `Win32`.
-  `requires: rtl, vcl, designide` and its own eight units - no PasTree, no
-  sibling checkout (see "Repo layout" above).
-- `PasTreeIdePlugin.Version.pas` - this package's version, the minimum server
-  version it accepts, and `CompareVersions`. See "Versions" below.
+  `requires: rtl, vcl, designide`, its own seven units, and the shared
+  `..\..\source\PasLsp.ProductVersion.pas` - no PasTree, ever (see the top of
+  this file).
 - `PasTreeIdePlugin.Wizard.pas` - `TIDEWizard` (`IOTAWizard`): owns the
   single editor-menu action list (Find Declaration + Find References,
   both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP
@@ -423,8 +437,11 @@ what lets `tests/` drive them against a real server outside the IDE:
   (this package's own `.dproj` plus the IDE source paths - the check that the
   `initializationOptions` harvest actually resolves `TActionList`,
   `IOTAWizard` and the project's own types). `VersionSmoke` needs nothing at
-  all - no server, no fixtures - and pins the compatibility gate, including
-  the `0.10.0` vs `0.9.0` case that plain string comparison gets wrong.
+  all - no server, no fixtures - and does two jobs: it pins `CompareVersions`
+  (including the `0.10.0` vs `0.9.0` case plain string comparison gets wrong),
+  and by being a Win32 program over the shared version unit it fails to build if
+  that unit ever gains a PasTree dependency, which is the tripwire on this
+  package's one hard invariant.
 - `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,

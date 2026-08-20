@@ -40,7 +40,7 @@ uses
   System.JSON,
   System.Generics.Collections,
   PasTreeIdePlugin.LspTransport,
-  PasTreeIdePlugin.Version;
+  PasLsp.ProductVersion;
 
 type
   /// <summary>
@@ -736,16 +736,30 @@ begin
     LReady := LReady + ': ' + FServerInfo;
   Log(LReady);
 
-  // The compatibility gate, at the only moment it can be checked - see the
-  // header of PasTreeIdePlugin.Version. A warning, not a refusal: an old server
-  // still answers what it knows, and the alternative failure mode ("nothing
-  // happens on Ctrl+Click") is the one this project keeps having to debug.
-  if (FServerVersion <> '') and
-     (CompareVersions(FServerVersion, cMinServerVersion) < 0) then
-    Log(Format('WARNING: this server is %s but the plugin (%s) needs %s or '
-      + 'newer - some navigation will not work. Update pastree-server.exe '
-      + 'next to the package''s BPL.',
-      [FServerVersion, cPluginVersion, cMinServerVersion]));
+  { THE STALE-DEPLOYMENT CHECK, at the only moment it can run.
+
+    An EQUALITY check, not "the server is at least version X". Since the move
+    into the server's repository, both halves are built from the same commit by
+    the same script, so equal versions is not a compatibility guess - it is a
+    fact about a correct deployment. Any difference means exactly one thing: one
+    of the two binaries on disk was not rebuilt.
+
+    That is worth being precise about because the imprecise version of this
+    check already failed to catch it. On 2026-08-20 a freshly built package ran
+    against an exe from the previous day; the old gate compared it against a
+    minimum of '0.2.0', the stale server reported '0.2.0', and nothing was said.
+    The mismatch was found by a human reading the version out of the Build tab.
+
+    A WARNING, NOT A REFUSAL. A mismatched pair usually still navigates, and a
+    plugin that disabled itself here would produce the same symptom as every
+    other misconfiguration in this project ("nothing happens on Ctrl+Click") -
+    the confusion this diagnostic work exists to remove. An empty version means
+    a server too old to report one, which is also a mismatch by definition. }
+  if FServerVersion <> PasTreeLspVersion then
+    Log(Format('WARNING: this package is %s but the server reports "%s" - one '
+      + 'of the two binaries is a stale build, so behaviour will not match '
+      + 'either version. Rebuild both (build.bat) and restart the IDE.',
+      [PasTreeLspVersion, FServerVersion]));
 
   // Before the queued requests: a restarted server knows nothing about the
   // documents the editor has open, and answering a queued request against

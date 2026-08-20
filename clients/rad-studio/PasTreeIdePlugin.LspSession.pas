@@ -115,7 +115,7 @@ uses
   System.Win.Registry,
   Winapi.Windows,
   PasTreeIdePlugin.LspClient,
-  PasTreeIdePlugin.Version,
+  PasLsp.ProductVersion,
   PasTreeIdePlugin.LspDocuments;
 
 const
@@ -457,7 +457,7 @@ begin
   LBuilt := BinaryBuiltOn(PackageFileName);
   if LBuilt <> '' then
     LBuilt := ', built ' + LBuilt;
-  LogDiagnostic(Format('plugin %s%s', [cPluginVersion, LBuilt]));
+  LogDiagnostic(Format('package %s%s', [PasTreeLspVersion, LBuilt]));
 end;
 
 destructor TLspSession.Destroy;
