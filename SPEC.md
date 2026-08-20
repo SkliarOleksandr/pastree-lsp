@@ -147,6 +147,31 @@ while an editor decodes it as UTF-8. Two consequences, one fixed and one not:
   reads; it is a decode decision for the library, and belongs in the PasTree
   repo next to the other analyzer-behaviour switches.
 
+**This is the cause of the only red in the test suite, so do not go hunting for
+a regression.** `clients/rad-studio/tests/LspClientSmoke` fails exactly two
+checks — *"Wrap resolves despite the Cyrillic literal earlier on the line"* and
+*"and lands exactly on Wrap's declaration (18,9)"* — and has done since before
+the move into this repository (verified against older server binaries). Every
+other harness passes. A run that fails only those two is the expected state; a
+run that fails anything else is new.
+
+**A leading BOM in `didOpen` text breaks navigation for the whole file — server
+side, unfixed.** Measured 2026-08-20: open a document whose text begins with
+U+FEFF and `FNav.IdentAt` then finds nothing at *any* position in that file, not
+merely on line 1. The log says only `no identifier at ...`, which reads exactly
+like a resolver failure and sent one debugging session down the wrong path
+entirely.
+
+The RAD Studio client strips a leading BOM before sending
+(`ReadBufferText`), so the IDE is covered — but that is one client defending
+itself against a server-side flaw, and **any other client can still hit it**.
+An editor is free to hand its buffer over with the BOM included, and a
+UTF-8-with-BOM `.pas` is completely ordinary in Delphi projects. The fix belongs
+here: treat a leading U+FEFF in received document text as not-content, at the
+one place documents enter (`PasLsp.Documents`), rather than asking every client
+to remember. Worth pairing with a harness check, since the failure is silent and
+total.
+
 ### Tier 1 — done 2026-08-19
 
 All four shipped. Two notes worth keeping:
@@ -299,3 +324,17 @@ Next, and NOT in protocol order:
   with a fallback guard). On the demo closure a rebuild splits 21% interface
   parse / 27% full parse / 52% cross passes, so caching the parse is at best
   half the answer
+- **a git hash in the build stamp — deliberately deferred, 2026-08-20.** The
+  version identifies a commit only if nobody forgets to bump it, and the
+  binary's timestamp identifies a compile rather than a commit; embedding
+  `git rev-parse --short HEAD` would identify both exactly, with no discipline
+  required (`0.5.1+a1b2c3d`). Not done because it needs a real build step:
+  `build.bat` would generate an include file, and the package builds through
+  msbuild, which would need a pre-build event. Decided to wait until a missed
+  bump actually causes confusion — the two existing signals have not failed yet.
+  Revisit rather than re-derive.
+- **the RAD Studio package's `.dproj` version resource** still says
+  `FileVersion=1.0.0.0`, unrelated to `PasTreeLspVersion`. Harmless today (the
+  BPL's version resource is not what anything reads), but it is a second number
+  claiming to be the package's version, which is exactly the situation this
+  project just spent a day removing.

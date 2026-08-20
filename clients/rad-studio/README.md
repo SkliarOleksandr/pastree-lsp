@@ -97,8 +97,7 @@ callback rather than before the handler returns:
   session - there's no handle to the native action list to restore it, so
   uninstalling the package without restarting the IDE would leave "Find
   Declaration" missing until restart (which the project's own workflow
-  already does after every rebuild - see project memory on package
-  hot-reload).
+  already does after every rebuild - see "Known first-pass limitations").
 - **Ctrl+Click override.** Hooks `INTACodeEditorServices.AddEditorEventsNotifier`
   (`ToolsAPI.Editor.pas`, the same mechanism the official "KeyboardMouse
   Events Demo" sample uses) and intercepts
@@ -220,7 +219,7 @@ not an oversight - and these are the reasons it could not stay:
 - A designtime package is forced to run **Win32** (the IDE itself is a
   32-bit process) - there is no way to make this package itself Win64.
 - The real target project this plugin is ultimately for is large enough to
-  need **Win64 and several GB** to analyze (see project memory - the same
+  need **Win64 and several GB** to analyze (the same
   codebase OOMs when analyzed as Win32). That analysis was never going to fit
   inside this Win32 package.
 - Synchronous analysis on the UI thread froze the IDE for as long as it took.
@@ -395,9 +394,14 @@ log anything leaves its last words.
   Harmless for navigation; the reason diagnostics will need a notifier.
 - Rebuilding this package inside the same running IDE session is unreliable
   even with an explicit Uninstall/Build/Install cycle - always restart the
-  IDE before testing a rebuild (see project memory on package hot-reload;
-  the likely cause is `AddEditorEventsNotifier` not being fully torn down
-  by the IDE's own Uninstall step).
+  IDE before testing a rebuild. The likely cause is
+  `AddEditorEventsNotifier` not being fully torn down by the IDE's own
+  Uninstall step. This has cost real debugging time more than once, and the
+  symptom is misleading: a change that appears not to work, or an access
+  violation in unrelated IDE code, because the previously loaded BPL is
+  still live. The build stamp in the Build tab exists partly to make this
+  answerable - if it does not name the build you just made, the IDE is
+  running the old package.
 
 ## Files
 

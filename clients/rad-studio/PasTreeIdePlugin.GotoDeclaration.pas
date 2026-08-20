@@ -319,8 +319,9 @@ var
   // Every TPasHistoryItem we've ever handed to IOTAHistoryServices - tracked
   // so ClearHistoryItems can remove them all at package unload. Left
   // registered, they'd be exactly the kind of dangling-object AV this
-  // project has already hit more than once (see project memory on
-  // package-hot-reload): pressing Alt-Left/Right after an unload would call
+  // project has already hit more than once, which is also why a rebuild here
+  // means restarting the IDE rather than reinstalling the package (see the
+  // README): pressing Alt-Left/Right after an unload would call
   // .Execute on an instance living in unloaded package code.
   GHistoryItems: TList<IOTAHistoryItem>;
 

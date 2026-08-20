@@ -16,7 +16,8 @@ unit PasTreeIdePlugin.Wizard;
   list to restore it, so if this package is ever uninstalled without an IDE
   restart, "Find Declaration" would be gone until the IDE restarts (which
   the project's own workflow already does after every rebuild anyway - see
-  project memory on package hot-reload).
+  the README on rebuilding: an Uninstall/Build/Install cycle inside a live IDE
+  session is not reliable here, so a rebuild means restarting the IDE).
 
   Modelled on the official samples shipped with RAD Studio:
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Local Menu Demo

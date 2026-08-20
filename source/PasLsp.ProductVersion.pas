@@ -1,4 +1,4 @@
-unit PasLsp.ProductVersion;
+﻿unit PasLsp.ProductVersion;
 
 {
   ONE VERSION FOR THE WHOLE PRODUCT - the server and every client that ships
@@ -47,7 +47,7 @@ const
   /// Bump the MINOR for a substantial change; that component keeps its ordinary
   /// semver meaning.
   /// </summary>
-  PasTreeLspVersion = '0.5.1';
+  PasTreeLspVersion = '0.5.2';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than
