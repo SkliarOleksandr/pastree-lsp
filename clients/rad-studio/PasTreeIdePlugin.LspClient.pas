@@ -565,8 +565,15 @@ begin
     end;
   end;
   FState := lcsStarting;
-  Log(Format('server started (pid %d), stderr: %s',
-    [FConn.ProcessId, FConn.StdErrPath]));
+  { DELIBERATELY SILENT ON A SUCCESSFUL SPAWN. This used to announce the pid and
+    the stderr path, and it was noise: 'server ready' follows a moment later
+    with the version, which is the line that actually says something, and the
+    stderr path is fixed (next to the server log) and documented. Nothing is
+    lost for diagnosis - every path where the pid or that file matters logs it
+    itself: 'cannot start server' above, 'restarting server (attempt N)',
+    'server connection lost ... (stderr: ...)', and the give-up message all do.
+    The rule this follows is the one the features already follow: log failures,
+    not steps. }
   SendInitialize;
   Result := True;
 end;
