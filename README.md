@@ -59,7 +59,48 @@ cancellation in the analysis) landed in the PasTree repo on 2026-08-16.
 - An analyzer crash must not take the IDE down.
 - The same executable serves editor-agnostic LSP clients for free.
 
+## Versions
+
+`PasLsp.Version.pas` holds this server's semver and `cMinPasTreeVersion`, the
+oldest sibling PasTree checkout it works with. The check runs at startup rather
+than being a comment, because PasTree is linked into this exe: a stale sibling
+checkout otherwise turns into wrong answers instead of a clear failure.
+
+Both numbers are reported in three places, deliberately - the answer to "does
+this build have the fix I need" is usually the PasTree one, not the server's:
+
+```
+pastree-server --version          -> pastree-lsp-server 0.3.0 (PasTree 0.1.0, built 2026-08-20 12:01)
+initialize response, serverInfo   -> {"name":"pastree-lsp-server","version":"0.3.0","pastreeVersion":"0.1.0"}
+first line of the log             -> the --version banner
+```
+
+`pastreeVersion` is this server's own addition to `serverInfo`; conforming
+clients ignore members they do not know.
+
+## What the log contains
+
+`PASTREE_LSP_LOG`, or the `logFile` initializationOption (which wins). Per
+completed analysis it writes the **parse record**: every unit in the closure
+with the full path of the file that was picked for it, and every diagnostic -
+not only the open documents' (those are what `publishDiagnostics` sends, which
+is the right scope for squiggles and the wrong one for debugging: an `F1027` on
+a unit nobody has open is exactly what breaks navigation in the file they do
+have open). The configuration block lists the search paths themselves, not just
+how many.
+
+Every navigation line names **both ends**:
+
+```
+definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3)
+```
+
+A line that gave only the target could not be checked - `TArray` resolving into
+`System.Generics.Collections` looks reasonable until you know the click was on
+`TArray<T>`, which belongs in `System.pas`.
+
 ## Requirements
 
 - Delphi 12+ (Win64 target)
-- The PasTree repo checked out as a sibling: `..\object-pascal-tree`
+- The PasTree repo checked out as a sibling: `..\object-pascal-tree`, at
+  `cMinPasTreeVersion` or newer

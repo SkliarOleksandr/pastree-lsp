@@ -18,6 +18,36 @@ We deliberately do NOT build a private RPC for the plugin first and LSP later:
 that is the same protocol written twice. LSP is the native protocol from day
 one; the plugin is just its first client.
 
+## Versioning
+
+**Every commit bumps the MINOR component of `PasLspServerVersion`**
+(`source/PasLsp.Version.pas`). `0.4.0` → `0.5.0` → `0.6.0`, one step per commit,
+no exceptions and no judgement call about whether a change "deserves" it. The
+same rule holds in all three repositories (PasTree, this server, the IDE
+plugin), each counting its own commits.
+
+The point is that a version identifies a build, unambiguously. This server is
+deployed as one half of a pair with a plugin that finds whatever exe is on disk,
+so "which build is running" is a question that comes up constantly — and a
+number that only moves on release cannot answer it. One bump per commit makes
+the number a commit counter, and a commit counter is what that question needs.
+
+The consequence is worth stating plainly: **MINOR here does not mean "new
+request supported"**, the way plain semver would have it. It means "a commit
+happened". So:
+
+- **Compatibility lives in the `cMin*` constants.** `cMinPasTreeVersion` moves
+  only when this server's code starts depending on something a PasTree did not
+  previously provide — including, importantly, a resolver FIX, which is a patch
+  in PasTree's own terms but a hard requirement here. Ordinary commits do not
+  touch it. The mirror-image constant lives in the plugin
+  (`cMinServerVersion`), which is what gates against an old copy of THIS exe.
+- **PATCH stays reserved** for a fix issued against an already-tagged version
+  without the commits that followed it.
+- **`serverInfo` reports both numbers**, this server's and the PasTree it was
+  built against, because the client's real question is almost always about the
+  latter.
+
 ## Why out-of-process at all
 
 - **Address space.** The large client project needs ~3.5 GB and analyzes clean

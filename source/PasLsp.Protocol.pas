@@ -93,7 +93,20 @@ function RangeJson(APasLine, APasCol, ALen: Integer): string;
 function LocationJson(const AFilePath: string; APasLine, APasCol,
   ALen: Integer): string;
 
+{ A position as `file.pas(line,col)`, for the LOG only.
+
+  Every navigation log line carries one for the position that was asked about,
+  not just for the answer. A line that says only where it jumped to cannot be
+  checked: `definition: TArray -> System.Generics.Collections.pas(42,3)` looks
+  fine until you know the click was on `TArray<T>` in a different unit, which
+  should have landed on System.pas. Naming both ends turns the log into
+  something a resolver bug can be reproduced from. }
+function PosTag(const AFilePath: string; APasLine, APasCol: Integer): string;
+
 implementation
+
+uses
+  System.IOUtils;
 
 { TLspCancelSet }
 
@@ -301,6 +314,12 @@ function LocationJson(const AFilePath: string; APasLine, APasCol,
 begin
   Result := Format('{"uri":%s,"range":%s}',
     [JsonQuote(PathToUri(AFilePath)), RangeJson(APasLine, APasCol, ALen)]);
+end;
+
+function PosTag(const AFilePath: string; APasLine, APasCol: Integer): string;
+begin
+  Result := Format('%s(%d,%d)',
+    [TPath.GetFileName(AFilePath), APasLine, APasCol]);
 end;
 
 

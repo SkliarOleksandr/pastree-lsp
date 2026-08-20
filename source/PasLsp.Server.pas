@@ -44,7 +44,9 @@ uses
   PasTree.Sema.Async,
   PasTree.Sema.Nav,
   PasLsp.Protocol,
-  PasLsp.Documents;
+  PasLsp.Documents,
+  PasLsp.Version,
+  PasTree.Version;
 
 type
   TLspServer = class
@@ -99,6 +101,8 @@ type
     FProgressSeq: Integer;        // makes each token unique within a session
     FLastReportTick: UInt64;
     procedure Log(const AMsg: string);
+    procedure LogBlock(const ALines: TArray<string>);
+    procedure LogParseRecord;
     procedure Notify(const AJson: string);
     procedure StartClientWatchdog(APid: Integer);
     function FileMatches(const APath, AText, ADiskText: string): Boolean;
@@ -214,6 +218,50 @@ begin
   end;
 end;
 
+{ Many lines, ONE file write.
+
+  Log() opens and closes the file per line, which is the right trade for the
+  handful of lines a request produces but the wrong one for the parse record:
+  a project with missing search paths can produce thousands of diagnostics, and
+  a thousand open/close cycles is slow enough to be felt in the analysis timing
+  the log is there to report. Same append-with-separator semantics otherwise. }
+procedure TLspServer.LogBlock(const ALines: TArray<string>);
+var
+  LSB: TStringBuilder;
+  LLine, LStamp: string;
+begin
+  if Length(ALines) = 0 then
+    Exit;
+  if not FTrace and (FLogPath = '') then
+    Exit;   // nothing to write it to; do not pay for the formatting
+  LStamp := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now) + ' ';
+  LSB := TStringBuilder.Create;
+  try
+    for LLine in ALines do
+    begin
+      if FTrace then
+        Writeln(ErrOutput, '[pastree-lsp] ' + LLine);
+      LSB.Append(LStamp).Append(LLine).Append(sLineBreak);
+    end;
+    if FLogPath = '' then
+      Exit;
+    try
+      if not FLogStarted then
+      begin
+        TFile.AppendAllText(FLogPath,
+          StringOfChar('-', 64) + sLineBreak + LSB.ToString, TEncoding.UTF8);
+        FLogStarted := True;
+      end
+      else
+        TFile.AppendAllText(FLogPath, LSB.ToString, TEncoding.UTF8);
+    except
+      FLogPath := '';
+    end;
+  finally
+    LSB.Free;
+  end;
+end;
+
 procedure TLspServer.Notify(const AJson: string);
 begin
   FOutgoing.Add(AJson);
@@ -261,6 +309,12 @@ begin
     if LItem <> '' then
       FLogPath := LItem;   // beats PASTREE_LSP_LOG: per-workspace over global
   end;
+
+  // FIRST line of the run, before anything that could go wrong: a log whose
+  // opening line does not say which build produced it is worth much less than
+  // one that does - especially across a rebuild, where "did my fix even get
+  // into the exe the IDE is running" is the first question worth asking.
+  Log(PasLspVersionBanner);
 
   if not ((LPlatformStr = '') or
     TryParsePlatformName(LPlatformStr, FPlatform)) then
@@ -347,6 +401,21 @@ begin
   Log(Format('configured: platform=%s main=%s paths=%d defines=%d',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
      Length(FDefines)]));
+  // THE PATHS THEMSELVES, not just how many. A count tells you nothing about
+  // the failure this actually has: a plausible-looking number of paths that
+  // happen to be the wrong directories (the IDE plugin sent three that did not
+  // contain the RTL for months) reads as a healthy configuration right up until
+  // every F1027 in the parse record.
+  var LLines: TArray<string> := nil;
+  for LItem in FSearchPaths do
+    LLines := LLines + ['  path ' + LItem];
+  for LItem in FDefines do
+    LLines := LLines + ['  define ' + LItem];
+  for LItem in FNamespaces do
+    LLines := LLines + ['  namespace ' + LItem];
+  for LAlias in FAliases do
+    LLines := LLines + [Format('  alias %s=%s', [LAlias.Alias, LAlias.UnitName])];
+  LogBlock(LLines);
 end;
 
 { -------- analysis -------- }
@@ -433,6 +502,67 @@ begin
   StartAnalysis(FPendingPriority);
 end;
 
+{ WHAT WAS ACTUALLY PARSED, AND EVERYTHING WRONG WITH IT — the whole closure,
+  every unit and every diagnostic, written once per completed analysis.
+
+  Not a debug-only extra. The client sees a null answer and can say only "no
+  identifier/declaration resolved at cursor"; the reason lives here or nowhere.
+  Two questions come up over and over and both are answered by this block and
+  nothing else:
+
+    - "Is the unit this identifier comes from even in the closure, and WHICH
+      FILE was picked for it?" A wrong file on the search path (an older copy
+      of a library, two SynEdit checkouts) resolves to real declarations in the
+      wrong place, which no per-request line can reveal.
+    - "Which diagnostics does the analysis have?" PublishDiagnostics sends only
+      the OPEN documents' to the editor - that is the right scope for squiggles
+      and the wrong one for debugging, because an F1027 on a unit nobody has
+      open is precisely what breaks navigation in the file they do have open.
+
+  Volume is the point rather than a cost: a healthy fully-pathed project logs
+  ~200 unit lines and no diagnostics, and the run that made this feature
+  necessary logged 304 F1027s. Written with LogBlock, so it is one file
+  write. }
+procedure TLspServer.LogParseRecord;
+var
+  LLines: TArray<string>;
+  LMi, LDi, LFileId, LTotal: Integer;
+  LModel: TPasSemaModel;
+  LFile: string;
+begin
+  if FProject = nil then
+    Exit;
+  LLines := ['parsed closure: ' + IntToStr(FProject.ModelCount) + ' units'];
+  LTotal := 0;
+  for LMi := 0 to FProject.ModelCount - 1 do
+  begin
+    LModel := FProject.Model(LMi);
+    Inc(LTotal, Length(LModel.Diags));
+    // The FULL path, not the file name: which of several copies on the search
+    // path won is exactly the thing this line exists to answer.
+    LLines := LLines + [Format('  unit %s <- %s%s',
+      [LModel.UnitNameLower, FProject.ModelFile(LMi),
+       IfThen(Length(LModel.Diags) = 0, '',
+         Format(' (%d diagnostics)', [Length(LModel.Diags)]))])];
+    for LDi := 0 to High(LModel.Diags) do
+    begin
+      // FileId indexes the model's own file table, so a diagnostic raised
+      // inside an $I include is attributed to the include - same rule
+      // PublishDiagnostics follows, for the same reason.
+      LFileId := LModel.Diags[LDi].FileId;
+      if (LFileId >= 0) and (LFileId <= High(LModel.Tree.Source.FileNames)) then
+        LFile := LModel.Tree.Source.FileNames[LFileId]
+      else
+        LFile := FProject.ModelFile(LMi);
+      LLines := LLines + [Format('    %s %s: %s',
+        [PosTag(LFile, LModel.Diags[LDi].Line, LModel.Diags[LDi].Col),
+         LModel.Diags[LDi].Code, LModel.Diags[LDi].Msg])];
+    end;
+  end;
+  LLines := LLines + [Format('parsed closure: %d diagnostics total', [LTotal])];
+  LogBlock(LLines);
+end;
+
 { Swaps a finished session's project in (on the dispatcher thread — the
   worker is done, TakeProject is the ownership handoff) and publishes
   diagnostics. If any open document changed since the session snapshotted
@@ -471,6 +601,9 @@ begin
     + ' stages %s',
     [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal,
      FProject.StageTimings]));
+  // Every unit and every diagnostic, not just the open documents' - see
+  // LogParseRecord for why that difference is the whole point.
+  LogParseRecord;
 
   LStale := FDirty;
   if not LStale then
@@ -809,12 +942,11 @@ begin
             LDiagFile := FProject.ModelFile(LMid);
           if LowerCase(TPath.GetFullPath(LDiagFile)) <> LKey then
             Continue;
-          // Mirror every published diagnostic into the log: the Problems
-          // panel shows them too, but the log survives the panel being
-          // cleared and lines up with the analysis timing lines around it.
-          Log(Format('  diag %s(%d,%d): %s',
-            [TPath.GetFileName(LDoc.Path), LModel.Diags[LIdx].Line,
-             LModel.Diags[LIdx].Col, LModel.Diags[LIdx].Msg]));
+          // Deliberately NOT logged here any more: LogParseRecord already
+          // wrote every diagnostic in the closure, including these, right
+          // above. Logging them a second time only made the open documents'
+          // subset look like the whole picture, which is the misreading that
+          // cost a debugging session.
           if not LFirst then
             LSB.Append(',');
           LFirst := False;
@@ -875,7 +1007,13 @@ begin
       '"hoverProvider":true,' +
       '"typeDefinitionProvider":true,' +
       '"documentHighlightProvider":true' +
-    '},"serverInfo":{"name":"pastree-lsp-server","version":"0.2.0"}}');
+    // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
+    // because a client's real question is never "which server build is this"
+    // but "does it have the analysis fix I need", and that lives in PasTree.
+    // Unknown members of serverInfo are ignored by every conforming client.
+    '},"serverInfo":{"name":"pastree-lsp-server","version":' +
+      JsonQuote(PasLspServerVersion) + ',"pastreeVersion":' +
+      JsonQuote(PasTreeVersion) + '}}');
 end;
 
 // textDocument.uri of AParams -> full Windows path ('' if absent/non-file).
@@ -1051,20 +1189,20 @@ begin
   // log — "F12 did nothing" is otherwise undebuggable from the outside.
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
   begin
-    Log(Format('definition: no identifier at %s(%d,%d)',
-      [TPath.GetFileName(LPath), LPasLine, LPasCol]));
+    Log(Format('definition: %s no identifier at that position',
+      [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   if not FNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
   begin
-    Log(Format('definition: ''%s'' at %s(%d,%d) did not resolve to a source'
+    Log(Format('definition: %s ''%s'' did not resolve to a source'
       + ' declaration (unresolved name, or a builtin with none)',
-      [LIdent.Name, TPath.GetFileName(LPath), LPasLine, LPasCol]));
+      [PosTag(LPath, LPasLine, LPasCol), LIdent.Name]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  Log(Format('definition: %s -> %s(%d,%d)',
-    [LIdent.Name, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
-     LTarget.Col]));
+  Log(Format('definition: %s ''%s'' -> %s',
+    [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
+     PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
     LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
       Length(LTarget.Name)));
@@ -1147,7 +1285,8 @@ begin
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
-  Log(Format('references(%s): %s -> %d hits', [LKind, LName, Length(LHits)]));
+  Log(Format('references(%s): %s ''%s'' -> %d hits',
+    [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits)]));
   LSB := TStringBuilder.Create;
   try
     LSB.Append('[');
@@ -1216,13 +1355,13 @@ begin
     // Not an error: the cursor is simply not on a routine that HAS another
     // half (a plain procedure defined once has no separate header). Said in
     // the log because "the command did nothing" needs a reason.
-    Log(Format('%s: nothing to toggle to at %s(%d,%d)',
-      [LWhat, TPath.GetFileName(LPath), LPasLine, LPasCol]));
+    Log(Format('%s: %s nothing to toggle to at that position',
+      [LWhat, PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  Log(Format('%s: %s -> %s(%d,%d)',
-    [LWhat, LTarget.Name, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
-     LTarget.Col]));
+  Log(Format('%s: %s ''%s'' -> %s',
+    [LWhat, PosTag(LPath, LPasLine, LPasCol), LTarget.Name,
+     PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
     LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
       Length(LTarget.Name)));
@@ -1628,9 +1767,9 @@ begin
   if (LSym.TypeNode <> NIL_NODE) and
      FNav.ResolveDecl(LTMid, LSym.TypeNode, LTarget) then
   begin
-    Log(Format('typeDefinition: %s -> %s(%d,%d)',
-      [LName, TPath.GetFileName(LTarget.FilePath), LTarget.Line,
-       LTarget.Col]));
+    Log(Format('typeDefinition: %s ''%s'' -> %s',
+      [PosTag(LPath, LPasLine, LPasCol), LName,
+       PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
       LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
         Length(LTarget.Name))));
@@ -1642,14 +1781,16 @@ begin
   if (LSym.Kind <> skType) and (LSym.TypeSym <> NIL_SYM) and
      FNav.DeclHit(LTMid, LSym.TypeSym, LHit) then
   begin
-    Log(Format('typeDefinition: %s -> %s(%d,%d) via the resolved type symbol',
-      [LName, TPath.GetFileName(LHit.FilePath), LHit.Line, LHit.Col]));
+    Log(Format('typeDefinition: %s ''%s'' -> %s via the resolved type symbol',
+      [PosTag(LPath, LPasLine, LPasCol), LName,
+       PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
       LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
         LHit.HiTo - LHit.HiFrom)));
   end;
 
-  Log(Format('typeDefinition: no type declaration reachable for %s', [LName]));
+  Log(Format('typeDefinition: %s no type declaration reachable for ''%s''',
+    [PosTag(LPath, LPasLine, LPasCol), LName]));
   Result := BuildResponse(AMsg.IdJson, 'null');
 end;
 
@@ -1724,7 +1865,8 @@ begin
           LHits[LIdx].HiTo - LHits[LIdx].HiFrom)]));
     end;
     LSB.Append(']');
-    Log(Format('documentHighlight: %s -> %d in this file', [LName, LCount]));
+    Log(Format('documentHighlight: %s ''%s'' -> %d in this file',
+      [PosTag(LPath, LPasLine, LPasCol), LName, LCount]));
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
     LSB.Free;

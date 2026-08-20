@@ -16,6 +16,7 @@ uses
   PasLsp.Transport in 'source\PasLsp.Transport.pas',
   PasLsp.Protocol in 'source\PasLsp.Protocol.pas',
   PasLsp.Documents in 'source\PasLsp.Documents.pas',
+  PasLsp.Version in 'source\PasLsp.Version.pas',
   PasLsp.Server in 'source\PasLsp.Server.pas';
 
 var
@@ -27,6 +28,19 @@ var
   GDone: Boolean;
 
 begin
+  // --version on STDOUT and exit, before the transport claims stdout for the
+  // protocol. Deliberately checked here rather than as an LSP request: the
+  // question "which build is this exe" has to be answerable without speaking
+  // JSON-RPC to it, because that is how you check a deployment (the plugin
+  // looks for the exe next to its BPL - `pastree-server --version` is how a
+  // person confirms which one is actually there).
+  if (ParamCount >= 1) and
+     ((ParamStr(1) = '--version') or (ParamStr(1) = '-v')) then
+  begin
+    Writeln(PasLspVersionBanner);
+    Exit;
+  end;
+
   GTransport := TLspTransport.Create;
   GCancels := TLspCancelSet.Create;
   GReader := TLspReader.Create(GTransport, GCancels);
