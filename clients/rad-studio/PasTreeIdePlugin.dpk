@@ -1,0 +1,50 @@
+package PasTreeIdePlugin;
+
+{$R *.res}
+{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
+{$ALIGN 8}
+{$ASSERTIONS ON}
+{$BOOLEVAL OFF}
+{$DEBUGINFO OFF}
+{$EXTENDEDSYNTAX ON}
+{$IMPORTEDDATA ON}
+{$IOCHECKS ON}
+{$LOCALSYMBOLS ON}
+{$LONGSTRINGS ON}
+{$OPENSTRINGS ON}
+{$OPTIMIZATION OFF}
+{$OVERFLOWCHECKS ON}
+{$RANGECHECKS ON}
+{$REFERENCEINFO ON}
+{$SAFEDIVIDE OFF}
+{$STACKFRAMES ON}
+{$TYPEDADDRESS OFF}
+{$VARSTRINGCHECKS ON}
+{$WRITEABLECONST OFF}
+{$MINENUMSIZE 1}
+{$IMAGEBASE $400000}
+{$DEFINE DEBUG}
+{$ENDIF IMPLICITBUILDING}
+{$IMPLICITBUILD ON}
+
+requires
+  rtl,
+  vcl,
+  designide;
+
+{ The ~20 PasTree.*.pas analysis units are GONE from this package as of the LSP
+  move: the analysis runs in pastree-server.exe (Win64) now, so a Win32
+  designtime package has no reason to link a parser it cannot usefully run at
+  the target project's scale. That also drops this repo's build-time dependency
+  on a sibling object-pascal-tree checkout - the server owns it instead. }
+contains
+  PasTreeIdePlugin.Version in 'PasTreeIdePlugin.Version.pas',
+  PasTreeIdePlugin.Wizard in 'PasTreeIdePlugin.Wizard.pas',
+  PasTreeIdePlugin.LspTransport in 'PasTreeIdePlugin.LspTransport.pas',
+  PasTreeIdePlugin.LspClient in 'PasTreeIdePlugin.LspClient.pas',
+  PasTreeIdePlugin.LspDocuments in 'PasTreeIdePlugin.LspDocuments.pas',
+  PasTreeIdePlugin.LspSession in 'PasTreeIdePlugin.LspSession.pas',
+  PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
+  PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas';
+
+end.

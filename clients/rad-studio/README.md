@@ -1,0 +1,438 @@
+# PasTree IDE Plugin
+
+`SPEC.md` is the companion to this file: what the plugin COULD present and what
+each option costs, mapped over the ToolsAPI surface. This README is what it does
+today.
+
+## Repo layout
+
+This repo was split out of `object-pascal-tree`'s `ide-plugin/` directory
+(2026-08-16, no history carried over - see that repo's git log for the
+prior commits).
+
+**No sibling checkout is needed to build the package any more.** It used to
+compile the ~20 `PasTree.*.pas` analysis units directly from
+`..\object-pascal-tree\source\`; since the LSP move it links none of them -
+the analysis lives in `pastree-server.exe`, which owns that dependency
+instead. The package is a thin LSP client: `requires rtl, vcl, designide` and
+nothing else. (The `tests/` harnesses need only this repo and a built server
+exe.)
+
+The sibling `pastree-lsp-server` repo hosts the out-of-process LSP server that
+now does all the analysis; **both features have moved onto it**. See
+"Architecture" below.
+
+A RAD Studio IDE package that surfaces PasTree's analysis inside the Delphi
+editor itself. Two features so far: **Find References** (the feature
+already available in `object-pascal-tree`'s `demo/`) and **Go to
+Declaration**, replacing RAD
+Studio's own DelphiLSP-based navigation (reported to work poorly on large
+projects) - both the native menu item and Ctrl+Click.
+
+## Status: working over LSP, confirmed in the IDE
+
+Ctrl+Click and the Find References menu item were both confirmed working
+against the out-of-process server in a running RAD Studio (2026-08-19), which
+was the one thing no test here can cover - whether the asynchronous answer
+lands correctly in a real editor.
+
+The transport, session and configuration harvest are each also exercised
+against a real server by `tests/` (see "Files"), which is what the earlier
+in-process version never had.
+
+Not yet exercised by hand, in rough order of how likely they are to matter:
+switching the active project or platform mid-session (restarts the server),
+recovery after killing `pastree-server.exe` while the IDE is open, navigation
+from a buffer with unsaved edits, and a `uses` item in a `.dpr` - the
+three-identity case that motivated moving the resolve order into the server in
+the first place.
+
+The ToolsAPI side is built directly from RAD Studio's own official samples
+(`Samples\Object Pascal\ToolsAPI\Editor Demos\...`), not from an
+unofficial/community API surface.
+
+### Menu
+
+Both "Find Declaration (PasTree)" and "Find References (PasTree)" live
+together at the top of the editor's right-click menu, in the Identifier
+category (`cEdMenuCatIdentifier` in `ToolsAPI.pas`) - the exact slot RAD
+Studio's native "Find Declaration" used to occupy alone. See "Go to
+Declaration" below for how the native item got replaced.
+
+### Find References
+
+- Results go to a dedicated "Find References" tab in the Messages panel
+  (`IOTAMessageServices.AddMessageGroup`), grouped by file (one header row
+  per file via `AddToolMessage`'s own `Parent`/`LineRef` mechanism - same
+  tree structure "Find in Files" uses), each hit carrying file/line/column
+  so the IDE's own message navigation (double-click, Enter, F8/Shift+F8)
+  jumps straight to it.
+
+### Go to Declaration
+
+Two ways to trigger the same resolve+navigate logic
+(`PasTreeIdePlugin.GotoDeclaration.ResolveAndNavigate`), both **confirmed
+working** in the in-process version and unchanged as ToolsAPI plumbing by the
+LSP move - what changed underneath them is that the jump now happens in a
+callback rather than before the handler returns:
+
+- **Native menu item replaced.** The built-in "Find Declaration" is removed
+  via `INTAEditorLocalMenu.UnregisterActionList(cEdMenuCatIdentifier)` and
+  replaced with our own action registered under that same category string
+  (`PasTreeIdePlugin.Wizard.TMenuManager` - lands in the exact same, first,
+  menu position). **Caveat:** this is a one-way door within a running IDE
+  session - there's no handle to the native action list to restore it, so
+  uninstalling the package without restarting the IDE would leave "Find
+  Declaration" missing until restart (which the project's own workflow
+  already does after every rebuild - see project memory on package
+  hot-reload).
+- **Ctrl+Click override.** Hooks `INTACodeEditorServices.AddEditorEventsNotifier`
+  (`ToolsAPI.Editor.pas`, the same mechanism the official "KeyboardMouse
+  Events Demo" sample uses) and intercepts
+  `OnEditorMouseDownEx`/`OnEditorMouseUpEx`: on Ctrl+Left-click it resolves
+  the identifier under the cursor and navigates there itself, setting
+  `Handled := True` to suppress RAD Studio's own default handling
+  (documented as "prevent further processing" - `ToolsAPI.Editor.pas:804-806`).
+
+Every successful jump registers with `IOTAHistoryServices` (the same global
+Backward/Forward stack the IDE's own Alt+Left/Alt+Right toolbar buttons
+use), via `PushHistoryAndNavigate`/`TPasHistoryItem` - so Alt+Left/Right work
+across our jumps too. Every history item handed to the IDE is tracked and
+removed via `RemoveHistoryItem` at package unload (`ClearHistoryItems`) -
+left registered, a stale entry would call `.Execute` on an object living in
+already-unloaded package code the next time the user pressed Alt-Left/Right.
+
+### Shared analysis pipeline
+
+Both features now ask the LSP server the same way, through
+`PasTreeIdePlugin.LspSession` - `LspDefinition` and `LspReferences`. The
+three-identity lookup (symbol / unit / builtin) and the caching that used to
+live in this package are the server's job now, which is the point: one
+implementation, shared with every other LSP client, instead of the same
+resolve order written twice. See "Architecture" below.
+
+Two things LSP does not carry, and where they come from instead:
+- **The identifier's name.** A `Location` has no name. Find References reads
+  it out of the same snapshot the server was given (`IdentifierAt`) at answer
+  time, for the report's title.
+- **The snippet line.** `TPasRefHit` carried the source line; a `Location`
+  does not. `TSnippetCache` reads it from that same snapshot rather than
+  re-reading the file, so an unsaved buffer's line numbers still match the
+  text shown.
+
+### Diagnostics
+
+Logged only on failure (no active project, cursor's file not analyzed, no
+identifier resolved, unhandled exception) - not on every step or on
+success. Go to Declaration fires on every Ctrl+Click, far more often than a
+menu click, so logging progress/success would be much noisier than useful.
+Goes to the IDE's own default Messages tab (the "Build" tab -
+`AddTitleMessage` with no group), tagged `[pastree]` so it's identifiable
+alongside compiler/linker output, rather than into a dedicated tab of its
+own.
+
+## Architecture: out of process, over LSP
+
+Both features ask `pastree-server.exe` (Win64) over the Language Server
+Protocol. **Nothing is analyzed inside the package any more** - it links no
+PasTree units at all, and went from ~30,500 lines of compiled code to ~3,600
+when the last of them went. The four LSP units are described in "Files";
+`tests/` drives three of them against a real server without needing the IDE.
+
+### How the client is wired
+
+- **Hybrid pipes.** The plugin creates two uniquely-named pipes itself, keeps
+  the overlapped end, and hands the synchronous end to the child as its std
+  handles. The server still reads plain stdin/stdout - the same code path the
+  VS Code client exercises - while the plugin gets cancellable reads
+  (`CancelIoEx`, so no reader thread can be stuck in `ReadFile` while this BPL
+  unloads) and explicit handle inheritance (only three handles, instead of
+  every inheritable handle the whole IDE process holds).
+- **Nothing blocks the main thread.** Requests are fire-and-callback. This is
+  not a style preference: on this very package's `.dproj`, the first request
+  after a server start takes ~2.7s to analyze the project plus RTL/VCL/
+  ToolsAPI, and subsequent ones 0-16ms. In-process, that 2.7s froze the IDE.
+- **Sync on request, not on keystroke.** Live buffer text is read and sent just
+  before a request, not pushed from an editor notifier. One less notifier to
+  tear down - see the hot-reload note under "Known first-pass limitations" for
+  why that matters here - and no keystroke-rate traffic. It also means the
+  server's incremental sync goes unused: one whole-document replacement per
+  user action is cheaper than a stream of ranged patches, and cannot silently
+  desynchronise the way a mis-applied patch can. A push-based `didChange`
+  becomes necessary when `publishDiagnostics` arrives, and belongs alongside
+  this rather than instead of it.
+- **One server per project configuration.** Changing the active project,
+  platform or build configuration restarts the server, because the server
+  fixes its configuration at `initialize`.
+- **Lazy, timerless restart.** A dead server is respawned by the next
+  request, with backoff and a give-up count. A completed handshake clears the
+  failure history. On every handshake the open documents are re-sent, since a
+  fresh server has none.
+- **The server gets the `.dproj` verbatim** and evaluates it with the same
+  MSBuild logic the CLI tools use, so main source, search paths, defines,
+  namespaces and unit aliases all come from the project file. That is
+  strictly more than the in-process path ever managed: it guessed the real
+  `.dpr`/`.dpk` by naming convention and never read the project's defines at
+  all. What no `.dproj` lists is everything the IDE finds through its own
+  **Library** configuration, so that is read from the IDE and passed as extra
+  `searchPaths`: the **Browsing Path** (RTL/VCL/ToolsAPI source) and the
+  **Search Path** (every third-party library the user has installed), for the
+  project's platform, with `$(...)` macros expanded - including the user's own
+  Environment Variables overrides, which is how a real installation points at
+  its third-party source. `GetIDELibraryPaths` in
+  `PasTreeIdePlugin.LspSession.pas`.
+
+  This list is not a detail. Getting it wrong is indistinguishable, from the
+  editor, from the whole plugin being broken: Ctrl+Click answers "no
+  identifier/declaration resolved at cursor" for every type not declared in
+  the project's own units, and the reason - a wall of `F1027 Unit not found` -
+  appears only in the server log. That was the state until 2026-08-20, when
+  the three hardcoded paths this used to send (`source\rtl`, `source\vcl`,
+  `source\ToolsAPI`) turned out not to include the RTL at all: the RTL sources
+  live in `source\rtl\sys`, `\common`, `\win`, not in `source\rtl` itself.
+
+- **The server log goes next to the project**, as `pastree-lsp.log`, with the
+  server's stderr beside it as `pastree-lsp-stderr.log`. Both are appended to,
+  with a separator line per server run, so history survives a restart and the
+  name stays stable enough to keep open in a tail. Same reason as above: the
+  log is the only place the real cause of a failed navigation shows up, so it
+  lives where someone will actually look rather than in `%TEMP%`.
+
+### Why the in-process path had to go
+
+It ran `TPasSemaProject` **inside the 32-bit designtime package**,
+synchronously. That was a deliberate, accepted limitation for the PoC stage -
+not an oversight - and these are the reasons it could not stay:
+
+- A designtime package is forced to run **Win32** (the IDE itself is a
+  32-bit process) - there is no way to make this package itself Win64.
+- The real target project this plugin is ultimately for is large enough to
+  need **Win64 and several GB** to analyze (see project memory - the same
+  codebase OOMs when analyzed as Win32). That analysis was never going to fit
+  inside this Win32 package.
+- Synchronous analysis on the UI thread froze the IDE for as long as it took.
+  The measurement above puts that at ~2.7s for this small package; at the real
+  target's scale it is not a pause, it is a hang.
+
+### What is left
+
+`publishDiagnostics`. The server side already exists and sends them
+unsolicited; the client currently drops them explicitly (see the stub comment
+in `PasTreeIdePlugin.LspSession.pas`). Turning them into a feature needs three
+things:
+
+- **A push-based `didChange`**, alongside the sync-on-request path rather than
+  instead of it: squiggles have to follow typing, and nothing currently reaches
+  the server between requests.
+- **Somewhere to draw.** ToolsAPI *can* do this - it has supported painting in
+  the code editor since 11.3, on the same `INTACodeEditorEvents` notifier this
+  plugin already registers for Ctrl+Click. Add `cevPaintLineEvents` or
+  `cevPaintTextEvents` to `AllowedEvents`, and `PaintLine`/`PaintText` arrive
+  with an `INTACodeEditorPaintContext` carrying `FileName`, `LogicalLineNum`
+  (fold-aware, so it lines up with a diagnostic's own line numbers), a
+  `TCanvas` and `CellSize` - enough to underline a column range.
+  `PaintGutter` covers a gutter mark. See `ToolsAPI.Editor.pas`.
+- **A design, which is the actual work**: severity filtering (error-tolerant
+  analysis is the default and can be noisy), what clears a squiggle and when,
+  navigation, and a paint path that does a per-visible-line lookup without
+  allocating - it runs on every repaint of every line.
+
+## Pointing the plugin at the server
+
+No path is hardcoded. `FindServerExe` looks in two places, in order:
+
+1. `%PASTREE_LSP_SERVER%`, if set - the development override, so the IDE runs
+   whatever was last built into `pastree-lsp-server\out\`. A value that is set
+   but wrong is **reported rather than ignored**: falling back would silently
+   run some other build, and a typo would cost an afternoon.
+2. `pastree-server.exe` next to the package's own BPL, so a matched pair can be
+   deployed together.
+
+Note where the BPL actually lands - with no `DCC_BplOutput` in the `.dproj` it
+is the IDE default, e.g.
+`C:\Users\Public\Documents\Embarcadero\Studio\37.0\Bpl\` - which is *not* next
+to this repo. So one of these has to happen before the plugin can do anything:
+
+```
+copy ..\pastree-lsp-server\out\pastree-server.exe "%PUBLIC%\Documents\Embarcadero\Studio\37.0\Bpl"
+```
+
+or, better for a development loop because it never goes stale:
+
+```
+setx PASTREE_LSP_SERVER "C:\Repos\pastree-lsp-server\out\pastree-server.exe"
+```
+
+The environment variable is only picked up on the next IDE start - a process's
+environment is captured when it launches. Copying the exe next to the BPL, by
+contrast, needs no restart: the session re-looks for the server on every
+request until it finds one, precisely so that fixing this does not cost an IDE
+restart on top of everything else.
+
+**The environment variable is the setup in actual use**, with the server left
+in its own `out\` directory and never copied anywhere. That keeps one binary in
+one place: `build.bat` writes it, the IDE runs it, `pastree-server --version`
+identifies it, and there is no second copy to go stale behind a rebuild.
+
+If neither is in place, both features log to the Build tab and do nothing else -
+naming which case it is, since the two need different fixes:
+
+```
+[pastree-lsp] PASTREE_LSP_SERVER points at "C:\...\out\pastree-server.exe", which does not exist.
+[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\Bpl\) - put it there or point PASTREE_LSP_SERVER at it.
+```
+
+## Building and testing
+
+Everything below runs from a shell with `rsvars.bat` sourced (it sets `%BDS%`,
+which `LspProjectSmoke` uses to find the RTL/VCL/ToolsAPI sources).
+
+The package:
+
+```
+msbuild PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win32
+```
+
+The test harnesses are plain programs, not part of the package - `dcc32`
+straight at them, with `-U` pointing at the repo root so they can see the two
+IDE-free units:
+
+```
+dcc32 -B tests\LspTransportSmoke.dpr -U. -Etests\out -Ntests\out
+```
+
+Then run the exe. Each takes the server path as its first argument and
+defaults to `..\pastree-lsp-server\out\pastree-server.exe`; each prints a
+per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. `LspClientSmoke`
+and `LspProjectSmoke` need a built server; `LspProjectSmoke` also needs this
+repo's own `.dproj` to be buildable, since that is what it asks the server to
+analyze.
+
+## Versions
+
+Three repositories, three independent versions - PasTree, `pastree-lsp-server`,
+this package - each counting its own commits: **one PATCH bump per commit**, so
+the number identifies a build, and a MINOR bump for a substantial change.
+`SPEC.md` has the policy. What ties the three together is not a shared number
+but a **stated minimum** in each consumer, which does *not* move with the
+per-commit bumps:
+
+| Where | Declares | Checked |
+|---|---|---|
+| `PasTree.Version.pas` | `PasTreeVersion` | - |
+| `PasLsp.Version.pas` | `PasLspServerVersion`, `cMinPasTreeVersion` | at server startup - PasTree is linked in, so a stale sibling checkout is a build/startup problem |
+| `PasTreeIdePlugin.Version.pas` | `cPluginVersion`, `cMinServerVersion` | at the initialize handshake - the only moment it can be, since the server is whatever exe is on disk |
+
+Both halves announce themselves in the Build tab, so a bug report names the
+pair that was running:
+
+```
+[pastree-lsp] plugin 0.2.1, built 2026-08-20 12:40
+[pastree-lsp] server ready: pastree-lsp-server 0.4.1 (PasTree 0.2.1)
+```
+
+A server older than `cMinServerVersion` produces a warning, not a refusal: an
+old server still answers what it knows, and a plugin that disabled itself over
+a version string would turn a partial degradation into the exact symptom
+everything else here also produces - "nothing happens on Ctrl+Click".
+
+`pastree-server.exe --version` answers the same question without speaking
+JSON-RPC, which is how to check which exe is actually deployed next to the BPL.
+The build stamp comes from the binary's own timestamp rather than a compile-time
+constant (Delphi has no compile-date macro), and it answers the question a
+semver cannot during development: whether the IDE is running the BPL you just
+built - which, given that rebuilding inside a live IDE session is unreliable
+here, is worth being able to check.
+
+## When a navigation does nothing
+
+The editor's own report is deliberately thin - `[pastree] Goto Declaration: no
+identifier/declaration resolved at cursor` in the Build tab is all a miss ever
+says, because it fires on every Ctrl+Click. The actual reason is in
+**`pastree-lsp.log`, in the same folder as the `.dproj`**, and it is worth
+reading before assuming the resolver is at fault:
+
+- `F1027 Unit not found: 'X'` on a `uses` line means the search paths are
+  wrong, not the analysis: nothing declared in that unit can resolve. Compare
+  the `configured: ... paths=N` line against the IDE's Library paths.
+- `'X' at Y(l,c) did not resolve to a source declaration` means the identifier
+  was found but has no declaration reachable from there - usually the same
+  cause one step later, sometimes an honest answer (a compiler builtin has no
+  source declaration anywhere).
+- `no identifier at Y(l,c)` means the position index has nothing there at all,
+  which points at the position or the text rather than the resolver.
+
+`pastree-lsp-stderr.log`, beside it, is where a server that dies before it can
+log anything leaves its last words.
+
+## Known first-pass limitations
+
+- **The server must be found.** It is looked for next to the package's BPL, or
+  wherever `PASTREE_LSP_SERVER` points (a set-but-wrong value is deliberately
+  reported rather than falling back, so a typo does not silently run some other
+  build). Missing, and both features log to the Build tab and do nothing.
+- Positions are exact for ASCII and all BMP text, including Cyrillic. A
+  character outside the BMP occupies two UTF-16 code units but may be counted
+  once by the editor, so a line containing one could be off by one after it -
+  inherited unchanged from the in-process path, which relied on the same
+  identity (see the header of `PasTreeIdePlugin.LspDocuments.pas`).
+- Nothing reaches the server between requests, by design (sync on request).
+  Harmless for navigation; the reason diagnostics will need a notifier.
+- Rebuilding this package inside the same running IDE session is unreliable
+  even with an explicit Uninstall/Build/Install cycle - always restart the
+  IDE before testing a rebuild (see project memory on package hot-reload;
+  the likely cause is `AddEditorEventsNotifier` not being fully torn down
+  by the IDE's own Uninstall step).
+
+## Files
+
+- `PasTreeIdePlugin.dpk` / `.dproj` - package project, `Win32`.
+  `requires: rtl, vcl, designide` and its own eight units - no PasTree, no
+  sibling checkout (see "Repo layout" above).
+- `PasTreeIdePlugin.Version.pas` - this package's version, the minimum server
+  version it accepts, and `CompareVersions`. See "Versions" below.
+- `PasTreeIdePlugin.Wizard.pas` - `TIDEWizard` (`IOTAWizard`): owns the
+  single editor-menu action list (Find Declaration + Find References,
+  both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP
+  session's.
+
+The LSP client, bottom up. The first two touch no ToolsAPI at all, which is
+what lets `tests/` drive them against a real server outside the IDE:
+
+- `PasTreeIdePlugin.LspTransport.pas` - the Win32 plumbing: the hybrid pipes,
+  process spawn with an explicit inherited-handle list, LSP framing, the
+  overlapped reader thread, and an ordered teardown that must leave no thread
+  alive in this BPL's code.
+- `PasTreeIdePlugin.LspClient.pas` - the JSON-RPC session: request ids,
+  pending-response callbacks, the initialize/shutdown lifecycle, requests
+  queued behind the handshake, the lazy restart policy, and path↔URI
+  conversion mirroring the server's own `PasLsp.Protocol`.
+- `PasTreeIdePlugin.LspDocuments.pas` - `didOpen`/`didChange`/`didClose` from
+  the live editor buffers, synced on request; plus the IDE↔LSP position
+  conversion and why it reduces to the identity the in-process path already
+  relies on.
+- `PasTreeIdePlugin.LspSession.pas` - the package-lifetime session and the
+  replacement for `BuildNavigator`: harvests `initializationOptions` from
+  ToolsAPI, restarts the server when the project configuration changes, and
+  exposes `LspDefinition`/`LspReferences` as callback-style requests.
+- `tests/` - four console harnesses, each built with `dcc32` and run
+  directly (no IDE, no package): `LspTransportSmoke` (graceful round trip,
+  abrupt teardown with the server live, server killed behind our back),
+  `LspClientSmoke` (handshake with a request queued behind it, real
+  navigation over `tests/fixtures/`, lazy restart), and `LspProjectSmoke`
+  (this package's own `.dproj` plus the IDE source paths - the check that the
+  `initializationOptions` harvest actually resolves `TActionList`,
+  `IOTAWizard` and the project's own types). `VersionSmoke` needs nothing at
+  all - no server, no fixtures - and pins the compatibility gate, including
+  the `0.10.0` vs `0.9.0` case that plain string comparison gets wrong.
+- `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
+  Messages-panel reporting. Its unit header has the fuller architecture
+  note and a TODO list for what's next (out-of-process, real defines,
+  snippet highlighting).
+- `PasTreeIdePlugin.GotoDeclaration.pas` - the Ctrl+Click override plus the
+  shared `ResolveAndNavigate`/`ExecuteGotoDeclaration` used by both Go to
+  Declaration entry points: mouse event interception, cursor
+  pixel→file-position conversion, navigation, and `IOTAHistoryServices`
+  integration (`TPasHistoryItem`) for Backward/Forward. Since the LSP move,
+  `ResolveAndNavigate` issues a request and jumps from the callback, so the
+  "jumped from" position is captured at click time rather than at answer time.
