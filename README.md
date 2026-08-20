@@ -70,8 +70,8 @@ Both numbers are reported in three places, deliberately - the answer to "does
 this build have the fix I need" is usually the PasTree one, not the server's:
 
 ```
-pastree-server --version          -> pastree-lsp-server 0.3.0 (PasTree 0.1.0, built 2026-08-20 12:01)
-initialize response, serverInfo   -> {"name":"pastree-lsp-server","version":"0.3.0","pastreeVersion":"0.1.0"}
+pastree-server --version          -> pastree-lsp-server 0.4.1 (PasTree 0.2.1, built 2026-08-20 12:40)
+initialize response, serverInfo   -> {"name":"pastree-lsp-server","version":"0.4.1","pastreeVersion":"0.2.1"}
 first line of the log             -> the --version banner
 ```
 

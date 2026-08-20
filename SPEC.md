@@ -20,30 +20,31 @@ one; the plugin is just its first client.
 
 ## Versioning
 
-**Every commit bumps the MINOR component of `PasLspServerVersion`**
-(`source/PasLsp.Version.pas`). `0.4.0` → `0.5.0` → `0.6.0`, one step per commit,
-no exceptions and no judgement call about whether a change "deserves" it. The
-same rule holds in all three repositories (PasTree, this server, the IDE
-plugin), each counting its own commits.
+`PasLspServerVersion` lives in `source/PasLsp.Version.pas`. Two rules, and the
+same two hold in all three repositories (PasTree, this server, the IDE plugin),
+each counting its own commits:
 
-The point is that a version identifies a build, unambiguously. This server is
-deployed as one half of a pair with a plugin that finds whatever exe is on disk,
-so "which build is running" is a question that comes up constantly — and a
-number that only moves on release cannot answer it. One bump per commit makes
-the number a commit counter, and a commit counter is what that question needs.
+- **Every commit bumps the PATCH.** `0.4.1` → `0.4.2` → `0.4.3`, mechanically,
+  no judgement call about whether a change "deserves" it.
+- **A substantial change bumps the MINOR** and resets the patch: a newly
+  supported request, a new initializationOption, a reworked subsystem —
+  anything a client might reasonably need to *require*.
 
-The consequence is worth stating plainly: **MINOR here does not mean "new
-request supported"**, the way plain semver would have it. It means "a commit
-happened". So:
+The per-commit patch bump exists so that a version identifies a **build**. This
+server is deployed as one half of a pair with a plugin that runs whatever exe is
+on disk, so "which build is running" is a question that comes up constantly, and
+a number that only moved on release could not answer it.
+
+The minor component keeps its ordinary semver meaning, which is what makes the
+compatibility constants readable:
 
 - **Compatibility lives in the `cMin*` constants.** `cMinPasTreeVersion` moves
   only when this server's code starts depending on something a PasTree did not
-  previously provide — including, importantly, a resolver FIX, which is a patch
-  in PasTree's own terms but a hard requirement here. Ordinary commits do not
-  touch it. The mirror-image constant lives in the plugin
-  (`cMinServerVersion`), which is what gates against an old copy of THIS exe.
-- **PATCH stays reserved** for a fix issued against an already-tagged version
-  without the commits that followed it.
+  previously provide. Ordinary commits do not touch it. Note that it can
+  legitimately name a *patch* version: a resolver fix is a patch in PasTree's
+  own terms and can still be a hard requirement here. The mirror-image constant
+  lives in the plugin (`cMinServerVersion`), which gates against an old copy of
+  THIS exe.
 - **`serverInfo` reports both numbers**, this server's and the PasTree it was
   built against, because the client's real question is almost always about the
   latter.

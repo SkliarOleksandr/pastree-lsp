@@ -23,11 +23,13 @@ const
   /// <summary>
   /// This server's version, reported to every client in the initialize
   /// response (serverInfo.version), on the log's first line and by --version.
-  /// BUMP THE MINOR IN EVERY COMMIT, mechanically - see SPEC.md's Versioning
-  /// section. It is a commit counter, so it can identify a build; what a client
-  /// can RELY on is expressed by its own cMinServerVersion instead.
+  /// BUMP THE PATCH IN EVERY COMMIT, mechanically; bump the MINOR for a
+  /// substantial change (a new request, a new initializationOption) - see
+  /// SPEC.md's Versioning section. The patch component is what lets this
+  /// identify a build; what a client can RELY on is expressed by its own
+  /// cMinServerVersion instead.
   /// </summary>
-  PasLspServerVersion = '0.4.0';
+  PasLspServerVersion = '0.4.1';
 
   /// <summary>
   /// The oldest PasTree this server's code actually works with. Raise it in
