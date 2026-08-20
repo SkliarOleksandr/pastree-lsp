@@ -4,6 +4,33 @@
 specification, `clients/rad-studio/SPEC.md` the ToolsAPI-side one. This file is
 the short list of things that are easy to get wrong and expensive to rediscover.
 
+## Line endings: CRLF for everything Delphi and cmd.exe read
+
+**A `.pas`, `.dpr`, `.dpk`, `.inc`, `.dproj`, `.dfm` or `.bat` in a working copy
+is CRLF. Docs (`.md`, `LICENSE`) and the VS Code client (`.json`, `.js`, `.ts`)
+are LF.** Declared in `.gitattributes`, in this repo and identically in PasTree
+(`../object-pascal-tree`) — keep the two files in step.
+
+This is a rule for **tools and scripts, not just people**: a `sed -i`, a
+heredoc, or any editor writing "just a newline" produces LF, and nothing
+complains at the time. RAD Studio then re-saves the file its own way on the
+first edit, and the next diff is the whole file instead of the three lines that
+changed — which is how real changes get lost in review. `cmd.exe` is worse than
+cosmetic: it is the one interpreter here that can genuinely misparse an LF-only
+`.bat`, and every build goes through one.
+
+Both repositories were renormalized on 2026-08-20, and the drift was *not*
+confined to recently-touched files — `PasTree.Parser.pas`, the whole `demo/`
+directory and several harnesses had been LF for a while. To check a repository:
+
+```bash
+git ls-files --eol
+```
+
+Every line's `w/` must match its `attr/`; `i/` is LF for everything, which is
+correct — normalization happens in the repository, `eol=` decides the working
+copy.
+
 ## One product, two halves, one version
 
 The server (`pastree-server.exe`, Win64) and the RAD Studio package
@@ -27,6 +54,15 @@ builds the server, the package and all four harnesses, then runs the harnesses.
 Use it rather than building halves separately — the equality check above only
 means something if a normal build produces both from the same commit.
 
+**Every `.dcu` goes to `out\dcu\win32` or `out\dcu\win64`, never next to a
+source.** Same in the PasTree repo (`tests\build.bat` there builds and runs all
+13 suites). It is intermediate output nothing reads between runs, so that one
+directory is safe to delete and the one thing to leave out of a backup — and
+keeping it out of `source\` means a stray `.dcu` next to a `.pas` is a signal
+that something was built outside the scripts. Add a new compilation? Give it
+`-N0` (or `DCC_DcuOutput` in a `.dproj`) pointing there, with the platform
+subdirectory: the same units compile both ways and the names collide.
+
 - **RAD Studio must be closed.** A running IDE holds the `.bpl`; its live LSP
   session holds `pastree-server.exe`. Either one produces a confusing
   "could not create output file".
@@ -38,10 +74,44 @@ means something if a normal build produces both from the same commit.
 
 ## Expected test result
 
-`LspClientSmoke` fails exactly two checks, both about a Cyrillic literal. That
-is the known ANSI-vs-UTF-8 decode split documented in `SPEC.md`, it predates the
-repository merge, and it is **not** a regression. Everything else passes. A run
-that fails only those two is green in practice; anything else is new.
+**All four harnesses pass. `build.bat` ends with `all built, all harnesses
+passed`, and anything else is a real failure.**
+
+Until 2026-08-20 this section said the opposite: `LspClientSmoke` was expected to
+fail exactly two checks about a Cyrillic literal, the known ANSI-vs-UTF-8 decode
+split. That is now fixed at the root, in PasTree — a preamble-less source whose
+bytes are valid UTF-8 decodes as UTF-8, so the analysis and the editor finally
+read the same text (`cMinPasTreeVersion` is pinned at the PasTree version where
+that landed, so an older sibling checkout fails loudly instead of quietly
+shifting columns). If those two checks ever come back, the first thing to check
+is which PasTree the server was built against, not the resolver.
+
+## Diagnosing "the analysis got slow"
+
+**First suspect: `System.NeverSleepOnMMThreadContention := True` is missing.** It
+is the first statement in `pastree-server.dpr` and it must stay there — PasTree
+parses across cores, and without it Delphi's memory manager sleeps on allocation
+contention, so the workers wait instead of working. Dropping it cost 4.5x on a
+3757-unit project (70 s vs 15 s). The fingerprint, and the reason this is worth
+a section rather than a comment:
+
+- **CPU time goes DOWN while wall time goes up** — threads waiting, not
+  computing. Check with `Get-Process pastree-server` (`TotalProcessorTime` vs
+  elapsed); one running thread among thirty asleep is the tell.
+- **`intf` and `full` inflate, `cross` does not** — the `stages` field of the
+  `analysis done` line in `pastree-lsp.log`. The damage lands on the
+  allocation-heavy stages.
+
+To compare against the library directly, run the same closure in-process:
+`tools\out64\PasTreeSemaProject.exe <project>.dproj -dproj -p:<platform>
+-studio:<bds>` plus one `-L<path>` per search path from the log's own `path`
+lines. Matching stage numbers mean the server is fine and the analysis is simply
+that expensive; a server 3x worse than in-process means the host, not PasTree.
+The reasoning is in `SPEC.md`; do not re-derive it.
+
+Ruled out by measurement, so do not start there: out-of-process overhead (nil —
+in-process is the same 15 s) and Debug-vs-Release (~2%, inside noise; the server
+carries no debug-only directives).
 
 ## Diagnosing "Ctrl+Click did nothing"
 
@@ -55,10 +125,28 @@ which was visible from the editor.
 
 ## The package's one hard invariant
 
-`clients/rad-studio` links `rtl, vcl, designide` and exactly one unit from
-outside its directory: `PasLsp.ProductVersion`, which is dependency-free by
-construction. **It must never link PasTree** — it is a 32-bit designtime
-package and PasTree is Win64-only, which is the entire reason the analysis runs
-out of process. `tests/VersionSmoke` is the tripwire: a Win32 program over the
-shared version unit, so it stops compiling if that unit ever gains a
-dependency.
+`clients/rad-studio` links `rtl, vcl, designide` and exactly two units from
+outside its directory — `PasLsp.ProductVersion` and `PasLsp.SourceText`, both
+dependency-free by construction. **It must never link PasTree** — it is a
+32-bit designtime package and PasTree is Win64-only, which is the entire reason
+the analysis runs out of process. `tests/VersionSmoke` is the tripwire: a Win32
+program over both shared units, so it stops compiling if either one ever gains
+a dependency. Adding a third shared unit is a real decision, not a convenience:
+each one is a way for PasTree to get in.
+
+## Reading source text: assume a BOM
+
+**Any `.pas`/`.dpr` may start with a BOM, and a BOM is never content.** Delphi
+writes UTF-8-with-BOM by default, so this is the common case, not an edge one.
+Never hand-roll the handling: go through `source/PasLsp.SourceText.pas` —
+`StripLeadingBom` for text arriving from a client, `TryReadTextNoBom` for a file
+on disk, `FileHoldsText` to ask whether a file holds a buffer's text. New rules
+about incoming text belong in that unit, not in the caller.
+
+Both halves link it, so a fix lands once. The reason it exists is that the same
+BOM bug was fixed locally in three separate layers before it was fixed once, and
+the symptom is silent and total: one leading U+FEFF in `didOpen` text made
+`IdentAt` resolve nothing anywhere in the file — not just line 1 — while the log
+said only `no identifier at ...`, which reads exactly like a resolver bug. The
+unit header has the full story; `tests/VersionSmoke` pins the behaviour and
+`LspClientSmoke` section 4b pins the server end of it.

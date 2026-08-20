@@ -1,8 +1,10 @@
 program VersionSmoke;
 
 {
-  Pins PasLsp.ProductVersion - the version string shared by the server and this
-  package, and the comparison that reads it. No server, no IDE, no fixtures.
+  Pins the units SHARED by the server and the RAD Studio package:
+  PasLsp.ProductVersion (the version string and the comparison that reads it)
+  and PasLsp.SourceText (BOM and file-vs-buffer rules). No server, no IDE, no
+  fixtures.
 
   Two things are worth a harness of their own here.
 
@@ -15,12 +17,14 @@ program VersionSmoke;
   numbers; it can only be pinned in advance.
 
   SECOND, and the reason this harness is built as part of the package's test
-  set: it proves PasLsp.ProductVersion COMPILES INTO A WIN32 PROGRAM THAT LINKS
-  NO PASTREE. That unit is shared with the Win64 server, and the one change that
-  would silently break the RAD Studio package is someone adding `uses
-  PasTree.Version` to it - the version is "just a string", so it looks
-  harmless. It is not: PasTree is Win64-only, which is why the analysis moved
-  out of process at all. This program failing to build IS that alarm.
+  set: it proves BOTH SHARED UNITS COMPILE INTO A WIN32 PROGRAM THAT LINKS NO
+  PASTREE. They are shared with the Win64 server, and the one change that would
+  silently break the RAD Studio package is someone adding `uses PasTree.Version`
+  to the version unit - the version is "just a string", so it looks harmless -
+  or reaching for a PasTree source loader from PasLsp.SourceText, which is
+  exactly the temptation a unit about reading source files invites. It is not
+  harmless: PasTree is Win64-only, which is why the analysis moved out of
+  process at all. This program failing to build IS that alarm.
 
   Usage: VersionSmoke.exe   (no arguments; exits non-zero on failure)
 }
@@ -29,7 +33,9 @@ program VersionSmoke;
 
 uses
   System.SysUtils,
-  PasLsp.ProductVersion;
+  System.IOUtils,
+  PasLsp.ProductVersion,
+  PasLsp.SourceText;
 
 var
   GFailures: Integer;
@@ -61,6 +67,68 @@ procedure CheckEqual(const A, B: string);
 begin
   Check(CompareVersions(A, B) = 0, Format('%s = %s', [A, B]));
   Check(CompareVersions(B, A) = 0, Format('%s = %s', [B, A]));
+end;
+
+/// <summary>
+/// PasLsp.SourceText, over temporary files written here so the harness still
+/// needs no fixtures. Two of these pin behaviour that cost real debugging: a
+/// BOM must not survive into document text at all, and a file whose bytes ARE
+/// the buffer's text must compare equal even though a tolerant ANSI decode of
+/// those same bytes would not (the rebuild gate).
+/// </summary>
+procedure TestSourceText;
+var
+  LDir, LPlain, LBom, LMissing: string;
+  LText: string;
+const
+  cText = 'unit A;'#13#10'// em dash — here'#13#10'end.'#13#10;
+begin
+  Check(StripLeadingBom('') = '', 'empty text survives the BOM strip');
+  Check(StripLeadingBom('abc') = 'abc', 'text with no BOM is untouched');
+  Check(StripLeadingBom(#$FEFF + 'abc') = 'abc', 'a leading BOM is removed');
+  // Only LEADING: a U+FEFF later in the text is a zero-width no-break space,
+  // which is content, and removing it would shift every column after it.
+  Check(StripLeadingBom('a' + #$FEFF + 'bc') = 'a' + #$FEFF + 'bc',
+    'a BOM that is not leading is content and stays');
+  Check(StripLeadingBom(#$FEFF#$FEFF + 'a') = #$FEFF + 'a',
+    'exactly one BOM is removed, not a run of them');
+
+  LDir := TPath.Combine(TPath.GetTempPath, 'PasLspSourceTextSmoke');
+  TDirectory.CreateDirectory(LDir);
+  try
+    LPlain := TPath.Combine(LDir, 'plain.pas');
+    LBom := TPath.Combine(LDir, 'bom.pas');
+    LMissing := TPath.Combine(LDir, 'nosuchfile.pas');
+
+    TFile.WriteAllBytes(LPlain, TEncoding.UTF8.GetBytes(cText));
+    TFile.WriteAllBytes(LBom,
+      TBytes.Create($EF, $BB, $BF) + TEncoding.UTF8.GetBytes(cText));
+
+    // The rebuild gate. cText holds an em-dash on purpose: this is precisely
+    // the case where the two sides' decodes disagree and a string comparison
+    // would call an untouched file "modified".
+    Check(FileHoldsText(LPlain, cText),
+      'a file holds the text its own UTF-8 bytes encode');
+    Check(FileHoldsText(LBom, cText),
+      'and still holds it when the file carries a UTF-8 BOM');
+    Check(not FileHoldsText(LPlain, cText + 'x'),
+      'a real edit is not mistaken for a decode difference');
+    Check(not FileHoldsText(LMissing, cText),
+      'an unreadable file holds nothing, rather than raising');
+
+    Check(TryReadTextNoBom(LPlain, LText) and (LText = cText),
+      'reading a plain file gives its text');
+    Check(TryReadTextNoBom(LBom, LText) and (LText = cText),
+      'reading a BOM''d file gives the same text, with no BOM');
+    Check((not TryReadTextNoBom(LMissing, LText)) and (LText = ''),
+      'a missing file reports failure and yields no text');
+  finally
+    try
+      TDirectory.Delete(LDir, True);
+    except
+      // A leftover temp directory is not a test failure.
+    end;
+  end;
 end;
 
 begin
@@ -111,6 +179,10 @@ begin
   Check(CompareVersions(PasTreeLspVersion, '0.0.1') > 0,
     'an ancient server version differs from ours, so it warns');
   Check(PasTreeLspVersion <> '', 'an empty serverInfo version differs too');
+
+  Writeln;
+  Writeln('source text (BOM, and buffer vs file)');
+  TestSourceText;
 
   Writeln;
   if GFailures = 0 then

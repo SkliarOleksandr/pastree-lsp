@@ -51,6 +51,13 @@
         <DCC_N>false</DCC_N>
         <DCC_S>false</DCC_S>
         <DCC_ImageBase>00400000</DCC_ImageBase>
+        <!-- .dcu files go to the repository's one throwaway directory, with
+             every other build's, rather than next to the sources they came
+             from. See the DCUS note in build.bat: intermediate output, nothing
+             reads it between runs, and it exists to be deletable. The .bpl and
+             .dcp still go where the IDE expects them - a designtime package
+             has to be findable by RAD Studio. -->
+        <DCC_DcuOutput>..\..\out\dcu\win32</DCC_DcuOutput>
         <GenDll>true</GenDll>
         <GenPackage>true</GenPackage>
         <SanitizedProjectName>PasTreeIdePlugin</SanitizedProjectName>
@@ -96,6 +103,7 @@
         <DCCReference Include="vcl.dcp"/>
         <DCCReference Include="designide.dcp"/>
         <DCCReference Include="..\..\source\PasLsp.ProductVersion.pas"/>
+        <DCCReference Include="..\..\source\PasLsp.SourceText.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Wizard.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspTransport.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspClient.pas"/>

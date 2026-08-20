@@ -241,7 +241,7 @@ begin
   end;
 end;
 
-procedure SendDidOpen(const AFile: string);
+procedure SendDidOpenText(const AFile, AText: string);
 var
   LParams, LDoc: TJSONObject;
 begin
@@ -249,10 +249,17 @@ begin
   LDoc.AddPair('uri', PathToLspUri(AFile));
   LDoc.AddPair('languageId', 'pascal');
   LDoc.AddPair('version', TJSONNumber.Create(1));
-  LDoc.AddPair('text', TFile.ReadAllText(AFile));
+  LDoc.AddPair('text', AText);
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   GClient.Notify('textDocument/didOpen', LParams);
+end;
+
+procedure SendDidOpen(const AFile: string);
+begin
+  // TFile.ReadAllText drops a BOM as it decodes, so this is BOM-free text -
+  // which is what every other test wants. TestBomIsNotContent sends its own.
+  SendDidOpenText(AFile, TFile.ReadAllText(AFile));
 end;
 
 /// <summary>
@@ -444,6 +451,42 @@ begin
     Format('"line":%d,"character":%d', [LDeclLine, LDeclChar])),
     Format('and lands exactly on Wrap''s declaration (%d,%d)',
       [LDeclLine, LDeclChar]));
+end;
+
+{ 4b. A leading BOM in didOpen text is not content.
+
+  This one goes through the raw notification rather than the plugin's document
+  layer ON PURPOSE: PasTreeIdePlugin.LspDocuments strips the BOM in
+  ReadBufferText, so the IDE could never reach the flaw and the server's own
+  behaviour went untested. Any other LSP client is free to hand its buffer over
+  with the U+FEFF included, and a UTF-8-with-BOM .pas is ordinary in Delphi.
+
+  Measured 2026-08-20, before the fix in PasLsp.Documents: one BOM character
+  made the identifier scan find NOTHING at any position in the whole file - not
+  merely on line 1 - and the only trace was "no identifier at ...", which reads
+  like a resolver bug. Silent and total, hence a check of its own. }
+procedure TestBomIsNotContent;
+var
+  LLine, LChar: Integer;
+  LUnitFile: string;
+begin
+  Writeln;
+  Writeln('=== 4b. a leading BOM in didOpen text ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+
+  SendDidOpenText(LUnitFile, #$FEFF + TFile.ReadAllText(LUnitFile));
+  try
+    // Line 1 is where a BOM could plausibly cost a column; the point of the
+    // bug was that a LATER line broke too, so ask about one.
+    FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+    Check(Ask('textDocument/definition',
+      PositionParams(LUnitFile, LLine, LChar)),
+      'definition answered for a BOM-prefixed document');
+    Check(GOk and GResultJson.Contains('DemoUnit.pas'),
+      'a leading BOM does not stop identifiers resolving');
+  finally
+    SendDidOpen(LUnitFile);   // back to the text the later tests expect
+  end;
 end;
 
 { 5. Document overlay: a full-replacement didChange must beat what is on disk.
@@ -706,6 +749,7 @@ begin
       TestQueuedBeforeReady(GExe);
       TestNavigation;
       TestNonAsciiPositions;
+      TestBomIsNotContent;
       TestOverlayBeatsDisk;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.

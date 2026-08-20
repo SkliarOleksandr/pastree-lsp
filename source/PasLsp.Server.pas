@@ -45,6 +45,7 @@ uses
   PasTree.Sema.Nav,
   PasLsp.Protocol,
   PasLsp.Documents,
+  PasLsp.SourceText,
   PasLsp.ProductVersion,
   PasLsp.Version,
   PasTree.Version;
@@ -438,6 +439,16 @@ begin
     FreeAndNil(FSession);
   end;
 
+  // The tripwire for the 4.5x described in SPEC.md, deliberately placed FAR
+  // from the assignment it guards (the first statement of pastree-server.dpr):
+  // a guard next to the line it checks catches nothing, since deleting one
+  // deletes the other. Logged rather than raised - a slow analysis is still a
+  // working one, and the log is where a slowdown is diagnosed anyway.
+  if not System.NeverSleepOnMMThreadContention then
+    Log('WARNING: NeverSleepOnMMThreadContention is False. The analysis will'
+      + ' run several times slower than it should (measured 4.5x) because the'
+      + ' memory manager sleeps on allocation contention instead of spinning.'
+      + ' Set it at startup - see pastree-server.dpr and SPEC.md.');
   if FMainSource <> '' then
     LRoots := [FMainSource]
   else
@@ -685,27 +696,10 @@ end;
   over. }
 function TLspServer.FileMatches(const APath, AText, ADiskText: string):
   Boolean;
-var
-  LFile, LEnc: TBytes;
-  LOffset: Integer;
 begin
-  if AText = ADiskText then
-    Exit(True);
-  try
-    LFile := TFile.ReadAllBytes(APath);
-  except
-    Exit(False);
-  end;
-  LEnc := TEncoding.UTF8.GetBytes(AText);
-  LOffset := 0;
-  // A UTF-8 BOM is not part of the document text on either side.
-  if (Length(LFile) >= 3) and (LFile[0] = $EF) and (LFile[1] = $BB) and
-     (LFile[2] = $BF) then
-    LOffset := 3;
-  if Length(LFile) - LOffset <> Length(LEnc) then
-    Exit(False);
-  Result := (Length(LEnc) = 0) or
-    CompareMem(@LFile[LOffset], @LEnc[0], Length(LEnc));
+  // The cheap answer first: the two decoded strings are already equal, so no
+  // file needs reading. Only a decode DISAGREEMENT gets as far as the bytes.
+  Result := (AText = ADiskText) or FileHoldsText(APath, AText);
 end;
 
 { The inputs the analysis would see, as a comparable string: every open
@@ -1037,7 +1031,9 @@ begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
     Exit;
-  LText := AParams.GetValue<string>('textDocument.text', '');
+  // A leading BOM is not content — see StripLeadingBom. Before the gate
+  // below, so a BOM'd file still compares equal to its own bytes on disk.
+  LText := StripLeadingBom(AParams.GetValue<string>('textDocument.text', ''));
   LVersion := AParams.GetValue<Integer>('textDocument.version', 0);
   // The rebuild gate: VS Code opens a document for every tab switch and
   // every peek popup, and the analysis already read this file from disk —
@@ -1111,7 +1107,7 @@ begin
     LRange := LChange.FindValue('range');
     if LRange = nil then
     begin
-      LText := LNew;              // full replacement
+      LText := StripLeadingBom(LNew);   // full replacement (resync)
       LFullReplace := True;
       Continue;
     end;

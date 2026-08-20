@@ -101,6 +101,49 @@ Three layers, strict dependency direction:
    results back to IDE actions; IDE-specific features (IOTAHistoryServices
    Backward/Forward) stay in the plugin, layered over LSP results.
 
+### Hosting PasTree: `NeverSleepOnMMThreadContention`
+
+```pascal
+System.NeverSleepOnMMThreadContention := True;
+```
+
+**The first statement in `pastree-server.dpr`, and it must stay there.** PasTree
+fans parse and resolve out across cores, and with this global left at its default
+(`False`) Delphi's memory manager *sleeps* when it cannot take its lock. Every
+one of those passes allocates heavily — a token stream, a tree and a model per
+unit — so the workers sit in `Sleep` instead of allocating. The library cannot
+set it: it is a process-wide mode the application owns.
+
+Missed here until 2026-08-20, at a cost of **4.5x**. Measured on a 3757-unit
+project, identical closure and inputs:
+
+| | wall | CPU | `intf` | `full` | `cross` |
+|---|---|---|---|---|---|
+| with the flag | **15.4 s** | 135 s | 2 928 | 4 825 | 7 598 |
+| without it | **70.3 s** | 50 s | 18 586 | 29 836 | 21 847 |
+
+Two things in that table are worth memorising, because they are how this gets
+recognised next time rather than re-investigated for an afternoon:
+
+- **CPU went DOWN while wall time went up.** Threads waiting, not working —
+  sampling showed one thread running and thirty-odd asleep. A slowdown that
+  burns *less* CPU is never a "we compute too much" problem.
+- **`cross` was unaffected; `intf` and `full` were 3x worse than a deliberately
+  single-threaded run** (44.7 s total). The damage lands exactly on the
+  allocation-heavy stages, which is the fingerprint of this flag and of nothing
+  else.
+
+What it was NOT, both checked by measurement rather than argument: the cost of
+running out of process (the same analysis in-process takes the same 15 s), and
+a Debug-versus-Release build — rebuilding the server with full release flags
+(`-$O+ -$C- -$D- -$R- -$Q-`) was worth about 2%, inside the noise. The server
+and the demo are built by identical `dcc64` invocations and neither carries
+debug-only directives, so there is no Release build to switch to.
+
+The PasTree side of this is in that repo's README (`## Multithreading` → "The
+one line every host must set"); it is a requirement of hosting the library, and
+this server is the host that proved a host can forget.
+
 ## Protocol coverage
 
 Phases 1-2 (the plugin-parity set) and part of phase 3 are implemented. What
@@ -130,47 +173,71 @@ IDE plugin first, VS Code second), not by protocol order.
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
-**Encoding disagreement — known, and NOT fixed here.** PasTree decodes a source
-with no BOM as ANSI (dcc's own rule, and the point of its tolerant loader)
-while an editor decodes it as UTF-8. Two consequences, one fixed and one not:
+**Encoding disagreement — fixed 2026-08-20, in PasTree, and the diagnosis is
+worth keeping because the obvious explanation was wrong.** PasTree used to
+decode a source with no BOM as ANSI (dcc's own rule, and the point of its
+tolerant loader) while an editor decodes it as UTF-8. Three consequences, in the
+order they were understood:
 
-- *fixed:* every PasTree source with an em-dash in a comment looked "modified"
-  to the rebuild gate, so peeking a declaration — VS Code opens the target file
-  and closes it milliseconds later — cost two full closure rebuilds, about 14
-  seconds of the editor apparently reparsing a file nobody touched. The gate
-  now also accepts "re-encoding the editor's text as UTF-8 reproduces the
-  file's bytes", because a decode disagreement is not an edit (`FileMatches`).
-- *not fixed:* for a file the editor does NOT have open, the analysis still
-  reads it as ANSI, so a column on a line that contains a non-ASCII character
-  before the identifier is shifted relative to the client's UTF-16 view. The
-  server cannot paper over this without re-decoding every file the analysis
-  reads; it is a decode decision for the library, and belongs in the PasTree
-  repo next to the other analyzer-behaviour switches.
+- *the visible cost:* every PasTree source with an em-dash in a comment looked
+  "modified" to the rebuild gate, so peeking a declaration — VS Code opens the
+  target file and closes it milliseconds later — cost two full closure rebuilds,
+  about 14 seconds of the editor apparently reparsing a file nobody touched. The
+  gate now also accepts "re-encoding the editor's text as UTF-8 reproduces the
+  file's bytes", because a decode disagreement is not an edit (`FileMatches`,
+  now `FileHoldsText` in `PasLsp.SourceText`).
+- *what this document used to claim, and it was wrong:* that the remaining skew
+  only affected files the editor does NOT have open. It affected open ones too,
+  and by way of the fix above. The gate correctly concludes "no edit, so no
+  rebuild" — but the analysis then keeps its own ANSI reading of a file the
+  editor has open, and no rebuild is ever due to correct it. The log said
+  `DemoUnicode.pas(31,31) no identifier at that position` for a column that was
+  right: 31 is where `Wrap` sits in UTF-16 code units, while the analysis, with
+  13 Cyrillic characters inflated to 26, had it at 44.
+- *the fix, and why it is not here:* the server cannot paper over this — it
+  would have to re-decode every file the analysis reads. It is a decode decision
+  for the library, and PasTree 0.2.3 makes it: a preamble-less file whose bytes
+  are valid UTF-8 decodes as UTF-8, ANSI only when they are not. Both sides then
+  read the same text out of the same bytes, which is what makes the byte-level
+  gate sound rather than merely cheap. `cMinPasTreeVersion` is pinned there, so
+  an older sibling checkout fails loudly instead of shifting columns quietly.
 
-**This is the cause of the only red in the test suite, so do not go hunting for
-a regression.** `clients/rad-studio/tests/LspClientSmoke` fails exactly two
-checks — *"Wrap resolves despite the Cyrillic literal earlier on the line"* and
-*"and lands exactly on Wrap's declaration (18,9)"* — and has done since before
-the move into this repository (verified against older server binaries). Every
-other harness passes. A run that fails only those two is the expected state; a
-run that fails anything else is new.
+**The suite is fully green as of 0.5.4** — `build.bat` ends with `all built, all
+harnesses passed`. The two long-standing red checks in
+`clients/rad-studio/tests/LspClientSmoke` (*"Wrap resolves despite the Cyrillic
+literal earlier on the line"* and *"and lands exactly on Wrap's declaration
+(18,9)"*), red since before the move into this repository, are the two the fix
+above turned green. If they return, suspect which PasTree the server was built
+against before suspecting the resolver.
 
 **A leading BOM in `didOpen` text breaks navigation for the whole file — server
-side, unfixed.** Measured 2026-08-20: open a document whose text begins with
-U+FEFF and `FNav.IdentAt` then finds nothing at *any* position in that file, not
-merely on line 1. The log says only `no identifier at ...`, which reads exactly
-like a resolver failure and sent one debugging session down the wrong path
-entirely.
+side — fixed 0.5.3, and worth keeping the symptom written down.** Measured
+2026-08-20: open a document whose text begins with U+FEFF and `FNav.IdentAt`
+then finds nothing at *any* position in that file, not merely on line 1. The log
+says only `no identifier at ...`, which reads exactly like a resolver failure
+and sent one debugging session down the wrong path entirely.
 
-The RAD Studio client strips a leading BOM before sending
-(`ReadBufferText`), so the IDE is covered — but that is one client defending
-itself against a server-side flaw, and **any other client can still hit it**.
-An editor is free to hand its buffer over with the BOM included, and a
-UTF-8-with-BOM `.pas` is completely ordinary in Delphi projects. The fix belongs
-here: treat a leading U+FEFF in received document text as not-content, at the
-one place documents enter (`PasLsp.Documents`), rather than asking every client
-to remember. Worth pairing with a harness check, since the failure is silent and
-total.
+The RAD Studio client already stripped a leading BOM before sending
+(`ReadBufferText`), so the IDE was covered — but that was one client defending
+itself against a server-side flaw, and any other client still hit it. An editor
+is free to hand its buffer over with the BOM included, and a UTF-8-with-BOM
+`.pas` is completely ordinary in Delphi projects. So the strip now happens at
+the one place documents enter: `StripLeadingBom` in `PasLsp.Documents`, applied
+to `didOpen` text and to a rangeless (full-replacement) `didChange`, before the
+rebuild gate so a BOM'd file still compares equal to its own bytes on disk. The
+residual cost is one column on line 1 for a client that counts the BOM as a
+character — strictly smaller than a file where nothing resolves. Pinned by
+`LspClientSmoke` section 4b, which sends the BOM as a raw notification
+precisely because the plugin's own document layer can no longer produce one.
+
+**The standing rule, since this was the third layer to learn it separately: any
+source text entering the product — from a client's buffer or from a file — may
+begin with a BOM, and a BOM is not content.** Delphi writes UTF-8-with-BOM by
+default, so it is the ordinary case. Do not open-code the handling; use
+`PasLsp.SourceText` (`StripLeadingBom`, `TryReadTextNoBom`, `FileHoldsText`),
+which is one of the two units shared with the RAD Studio package and therefore
+dependency-free by construction. A new rule about incoming text goes in there,
+where both halves get it, rather than in the layer that happened to notice.
 
 ### Tier 1 — done 2026-08-19
 

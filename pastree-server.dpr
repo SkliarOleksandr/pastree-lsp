@@ -1,4 +1,4 @@
-program pastree_server;
+﻿program pastree_server;
 
 {
   PasTree LSP server — phase 1 (see SPEC.md). WIN64 ONLY, like every PasTree
@@ -29,6 +29,22 @@ var
   GDone: Boolean;
 
 begin
+  // EVERY PasTree HOST MUST SET THIS, and this one did not until 2026-08-20.
+  // The analysis fans parse+resolve out across cores; with the default (False)
+  // Delphi's memory manager SLEEPS when it cannot get its lock, so the
+  // allocation-heavy passes - lex, parse, model building - block instead of
+  // spinning, and the parallelism is worse than useless.
+  //
+  // Measured on a 3757-unit project, identical closure and inputs: 70 s here
+  // versus 16 s for the same analysis in-process (the CLI driver), with the
+  // server burning LESS CPU (50 s vs 135 s) while 30-odd pool threads sat in
+  // Sleep. It was slower than a deliberately SINGLE-THREADED run (45 s), and
+  // the giveaway was the stage split: `cross`, which allocates little, was
+  // fine, while `intf` and `full` were 3x worse than serial. The demo
+  // (PasTreeDemo.dpr) and every CLI tool set this; the server was the one host
+  // that did not, which is why "the demo is fast and the server is slow" read
+  // like an out-of-process cost and was not one.
+  System.NeverSleepOnMMThreadContention := True;
   // --version on STDOUT and exit, before the transport claims stdout for the
   // protocol. Deliberately checked here rather than as an LSP request: the
   // question "which build is this exe" has to be answerable without speaking

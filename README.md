@@ -18,9 +18,11 @@ It serves two kinds of clients with the same protocol:
 ```
 pastree-server.dpr, source/       the server (Win64)
 source/PasLsp.ProductVersion.pas  one version for the server and both clients
+source/PasLsp.SourceText.pas      BOM and buffer-vs-file rules, shared likewise
 clients/rad-studio/               the RAD Studio designtime package + its tests
 clients/vscode/                   the VS Code extension (also a .vsix)
 build.bat                         builds everything and runs the harnesses
+out/                              build output; out/dcu/{win32,win64} is throwaway
 SPEC.md                           the protocol-side specification
 clients/rad-studio/SPEC.md        the ToolsAPI-side specification
 ```
@@ -35,13 +37,14 @@ Build tab. One repository makes that an equality check. `clients/vscode` was
 already here, so the layout is unchanged in kind: a server and its clients.
 
 **One invariant to protect.** The RAD Studio package must keep linking nothing
-but `rtl, vcl, designide` and the single dependency-free
-`PasLsp.ProductVersion`. It is a 32-bit designtime BPL; PasTree is Win64-only,
-and that constraint is the whole reason the analysis runs out of process. Now
-that the package sits in the same repository as PasTree-dependent code, adding
-"just one" PasTree unit to it is an easy mistake to make and would undo the
-move. `VersionSmoke` fails to build if the shared version unit ever grows a
-dependency, which is the alarm for the most likely version of that mistake.
+but `rtl, vcl, designide` and the two dependency-free shared units,
+`PasLsp.ProductVersion` and `PasLsp.SourceText`. It is a 32-bit designtime BPL;
+PasTree is Win64-only, and that constraint is the whole reason the analysis runs
+out of process. Now that the package sits in the same repository as
+PasTree-dependent code, adding "just one" PasTree unit to it is an easy mistake
+to make and would undo the move. `VersionSmoke` fails to build if either shared
+unit ever grows a dependency, which is the alarm for the most likely version of
+that mistake.
 
 ## Status
 

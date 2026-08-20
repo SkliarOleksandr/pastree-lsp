@@ -20,10 +20,29 @@ setlocal enabledelayedexpansion
 call "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
 cd /d "%~dp0"
 
+rem DCUS: every compilation in this repository writes its .dcu files under
+rem out\dcu, and nothing else writes anything there. They are intermediate
+rem output - no build step consumes a .dcu from a previous run (every dcc call
+rem here passes -B, a full rebuild) - so the directory exists to be DELETED,
+rem which is the point: one path to exclude from a backup, and one path to
+rem clear when something looks stale. Left at their defaults they land next to
+rem the sources instead, scattered across source\, clients\rad-studio\ and the
+rem harness output directory.
+rem
+rem SPLIT BY PLATFORM, because this product compiles the SAME units for both:
+rem the server is Win64 and the package and harnesses are Win32, so
+rem PasLsp.ProductVersion.dcu exists twice and one would silently overwrite the
+rem other. Every call here passes -B, so a clobber could not corrupt a build --
+rem but it would leave a directory whose contents depend on build order, and
+rem the first person to drop -B would get a platform-mismatch error with no
+rem obvious cause.
 set PLUGIN=clients\rad-studio
 set TESTOUT=%PLUGIN%\tests\out
+set DCU32=%CD%\out\dcu\win32
+set DCU64=%CD%\out\dcu\win64
 if not exist out mkdir out
-if not exist out\dcu mkdir out\dcu
+if not exist out\dcu\win32 mkdir out\dcu\win32
+if not exist out\dcu\win64 mkdir out\dcu\win64
 if not exist "%TESTOUT%" mkdir "%TESTOUT%"
 
 rem -- 1. the server (Win64: a real project's closure needs more than a 32-bit
@@ -34,7 +53,7 @@ dcc64 -B -Q ^
  -U"..\object-pascal-tree\source" ^
  -I"..\object-pascal-tree\source" ^
  -Usource ^
- -N0out\dcu -Eout pastree-server.dpr
+ -N0"%DCU64%" -Eout pastree-server.dpr
 if errorlevel 1 goto :fail
 
 rem -- 2. the RAD Studio designtime package (Win32, and it links no PasTree) --
@@ -44,11 +63,12 @@ if errorlevel 1 goto :failbpl
 
 rem -- 3. the harnesses (Win32, like the package they exercise, driving the
 rem       Win64 server -- the same cross-bitness pairing the real plugin uses).
-rem       Built into %TESTOUT% because each locates its own resources relative
-rem       to its exe: ..\fixtures and ..\.. for the package directory.
+rem       EXEs go to %TESTOUT% because each locates its own resources relative
+rem       to its exe: ..\fixtures and ..\.. for the package directory. DCUs go
+rem       to out\dcu\win32 with every other Win32 build's -- see DCUS, above.
 echo === test harnesses (Win32) ===
 for %%T in (VersionSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
-  dcc32 -B -Q -U"%PLUGIN%;source" -E"%TESTOUT%" -N"%TESTOUT%" "%PLUGIN%\tests\%%T.dpr"
+  dcc32 -B -Q -U"%PLUGIN%;source" -E"%TESTOUT%" -N0"%DCU32%" "%PLUGIN%\tests\%%T.dpr"
   if errorlevel 1 goto :fail
 )
 

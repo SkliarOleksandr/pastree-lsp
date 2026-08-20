@@ -38,10 +38,14 @@ requires
   the target project's scale. That also drops this repo's build-time dependency
   on a sibling object-pascal-tree checkout - the server owns it instead. }
 contains
-  { The product version, shared with the server - see its own unit header for
-    why it has no dependencies and must keep none. This is the ONLY unit this
-    package takes from outside its own directory. }
+  { The two units this package takes from outside its own directory, and the
+    only two it may. Each is dependency-free BY CONSTRUCTION - see their own
+    headers - because this is a Win32 designtime package and anything they
+    reached for could drag in PasTree, which is Win64-only. tests/VersionSmoke
+    links both into a Win32 program so that a `uses` line creeping into either
+    one breaks a build rather than the IDE. }
   PasLsp.ProductVersion in '..\..\source\PasLsp.ProductVersion.pas',
+  PasLsp.SourceText in '..\..\source\PasLsp.SourceText.pas',
   PasTreeIdePlugin.Wizard in 'PasTreeIdePlugin.Wizard.pas',
   PasTreeIdePlugin.LspTransport in 'PasTreeIdePlugin.LspTransport.pas',
   PasTreeIdePlugin.LspClient in 'PasTreeIdePlugin.LspClient.pas',

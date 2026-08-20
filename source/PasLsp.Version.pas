@@ -37,7 +37,13 @@ const
   /// It may legitimately name a PATCH version of PasTree: a resolver fix is a
   /// patch in PasTree's own terms and can still be a hard requirement here.
   /// </summary>
-  cMinPasTreeVersion = '0.1.0';
+  /// Raised to 0.2.3 on 2026-08-20: that is where PasTree started decoding a
+  /// preamble-less source as UTF-8 when its bytes are valid UTF-8, instead of
+  /// always as ANSI. This server's columns are only correct against that rule -
+  /// an older PasTree reads a different string out of the same file and every
+  /// position after a non-ASCII character on the line is off, silently. Exactly
+  /// the "wrong answers instead of a compile error" case above.
+  cMinPasTreeVersion = '0.2.3';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

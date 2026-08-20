@@ -21,16 +21,22 @@ runs out of process at all. So:
 requires rtl, vcl, designide;
 ```
 
-plus exactly one unit from outside this directory: `PasLsp.ProductVersion`,
-which is dependency-free by construction and shared with the server so the two
-halves cannot disagree about their version.
+plus exactly two units from outside this directory, both dependency-free by
+construction and both shared with the server:
+
+- `PasLsp.ProductVersion` — so the two halves cannot disagree about their
+  version;
+- `PasLsp.SourceText` — the BOM and buffer-vs-file rules. Shared because the
+  same BOM bug was fixed locally in three separate layers before it was fixed
+  once; anything this package learns about incoming text belongs in there.
 
 This used to be guaranteed by geography — PasTree was in another repository
 entirely. Now it is in the same tree, one directory up, and "just link this one
 unit" is an easy and plausible mistake that would quietly undo the whole
 out-of-process design. `tests/VersionSmoke` is the tripwire for the most likely
-version of it: it is a Win32 program over the shared version unit, so it stops
-compiling the moment that unit grows a PasTree dependency.
+version of it: it is a Win32 program over both shared units, so it stops
+compiling the moment either one grows a PasTree dependency. A third shared unit
+is a decision to weigh, not a convenience — each one is a route in.
 
 The analysis itself lives in `pastree-server.exe`; **both features run through
 it**. See "Architecture" below.
@@ -313,7 +319,7 @@ dcc32 -B clients\rad-studio\tests\LspTransportSmoke.dpr -U"clients\rad-studio;so
 ```
 
 `-U` names two directories: this one for the IDE-free LSP units, and `source`
-for the shared `PasLsp.ProductVersion`.
+for the shared `PasLsp.ProductVersion` and `PasLsp.SourceText`.
 
 Each harness takes the server path as its first argument and otherwise falls
 back to `out\pastree-server.exe` resolved relative to its own exe; each prints a
@@ -406,8 +412,9 @@ log anything leaves its last words.
 ## Files
 
 - `PasTreeIdePlugin.dpk` / `.dproj` - package project, `Win32`.
-  `requires: rtl, vcl, designide`, its own seven units, and the shared
-  `..\..\source\PasLsp.ProductVersion.pas` - no PasTree, ever (see the top of
+  `requires: rtl, vcl, designide`, its own seven units, and the two shared
+  `..\..\source\PasLsp.ProductVersion.pas` and
+  `..\..\source\PasLsp.SourceText.pas` - no PasTree, ever (see the top of
   this file).
 - `PasTreeIdePlugin.Wizard.pas` - `TIDEWizard` (`IOTAWizard`): owns the
   single editor-menu action list (Find Declaration + Find References,
@@ -441,11 +448,12 @@ what lets `tests/` drive them against a real server outside the IDE:
   (this package's own `.dproj` plus the IDE source paths - the check that the
   `initializationOptions` harvest actually resolves `TActionList`,
   `IOTAWizard` and the project's own types). `VersionSmoke` needs nothing at
-  all - no server, no fixtures - and does two jobs: it pins `CompareVersions`
+  all - no server, no fixtures - and does three jobs: it pins `CompareVersions`
   (including the `0.10.0` vs `0.9.0` case plain string comparison gets wrong),
-  and by being a Win32 program over the shared version unit it fails to build if
-  that unit ever gains a PasTree dependency, which is the tripwire on this
-  package's one hard invariant.
+  it pins `PasLsp.SourceText` (the BOM rules, and "does this file hold the
+  buffer's text" over a temp file it writes itself), and by being a Win32
+  program over both shared units it fails to build if either ever gains a
+  PasTree dependency - the tripwire on this package's one hard invariant.
 - `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,

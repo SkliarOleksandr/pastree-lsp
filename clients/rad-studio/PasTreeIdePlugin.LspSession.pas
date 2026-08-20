@@ -96,6 +96,30 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 
 /// <summary>
+/// Starts the server for the active project and lets its first analysis begin,
+/// without any question to answer. Called when a project group finishes opening
+/// and when the active project changes.
+///
+/// This exists because the analysis is the expensive part and it used to be
+/// paid for by the user's first Ctrl+Click: on a 3757-unit project that is a
+/// ~15 s wait at the worst possible moment. Starting at project open spends the
+/// same time while nobody is waiting on an answer. It does NOT make the
+/// analysis cheaper - the work is identical - and a project opened only to be
+/// compiled now pays for an analysis nobody asked for. Deliberate: the wait it
+/// removes is the one a person actually feels.
+///
+/// Safe to call when there is no project, no server on disk, or a session
+/// already running. Nothing is queued: the server begins its build off the
+/// didOpen catch-up (see TLspDocumentSync.ResendAll), so there is no request to
+/// correlate and nothing to wait for.
+///
+/// SILENT when there is no active project - that is the normal state when this
+/// package loads, and saying so in the Build tab would be reporting a non-event
+/// (see Prewarm). A missing server exe is still reported.
+/// </summary>
+procedure LspPrewarm;
+
+/// <summary>
 /// The text of AFileName as the server currently sees it: the live buffer we
 /// last sent, or the file on disk if it was never open. Callers displaying a
 /// line the server pointed at must use this and not read the file directly - a
@@ -116,6 +140,7 @@ uses
   Winapi.Windows,
   PasTreeIdePlugin.LspClient,
   PasLsp.ProductVersion,
+  PasLsp.SourceText,
   PasTreeIdePlugin.LspDocuments;
 
 const
@@ -161,6 +186,7 @@ type
   public
     constructor Create;
     destructor Destroy; override;
+    procedure Prewarm;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
@@ -751,6 +777,31 @@ begin
   APendingId := LIssuedId;
 end;
 
+procedure TLspSession.Prewarm;
+var
+  LProject: IOTAProject;
+begin
+  // NO PROJECT IS NORMAL HERE, AND MUST STAY SILENT. This package loads before
+  // the IDE restores its project group, so the prewarm fired from TIDEWizard's
+  // constructor routinely finds nothing - and EnsureSession would put "no
+  // active project." in the Build tab for it. That message is exactly right for
+  // a Ctrl+Click that did nothing and pure noise for a warm-up nobody asked
+  // for; a panel that reports non-events is a panel people stop reading. The
+  // ofnEndProjectGroupOpen notification arrives moments later and does the
+  // real work.
+  LProject := GetActiveProject;
+  if not Assigned(LProject) then
+    Exit;
+  // The rest is EnsureSession: it spawns the server and issues the handshake,
+  // and the analysis then starts off the didOpen catch-up that OnReady
+  // performs. Nothing to pump - the transport marshals with TThread.Queue and
+  // the IDE's own idle processing dispatches that - so this returns at once and
+  // the build runs on the server's background session. A missing exe IS still
+  // reported: that one is worth hearing at project open rather than at the
+  // first navigation.
+  EnsureSession;
+end;
+
 procedure TLspSession.Definition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
@@ -786,6 +837,14 @@ begin
   FreeAndNil(GSession);
 end;
 
+procedure LspPrewarm;
+begin
+  // Silent when there is no session: this is fired by an IDE event, not by a
+  // user action, so there is nobody to tell and nothing they could do.
+  if Assigned(GSession) then
+    GSession.Prewarm;
+end;
+
 procedure LspDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
@@ -813,13 +872,10 @@ begin
   Result := '';
   if Assigned(GSession) and GSession.TryGetSentText(AFileName, Result) then
     Exit;
-  // Never opened in an editor, so disk IS what the server read.
-  try
-    if TFile.Exists(AFileName) then
-      Result := TFile.ReadAllText(AFileName);
-  except
-    Result := '';   // unreadable: callers degrade to no snippet
-  end;
+  // Never opened in an editor, so disk IS what the server read. Unreadable
+  // yields '' and callers degrade to no snippet - see TryReadTextNoBom.
+  if not TryReadTextNoBom(AFileName, Result) then
+    Result := '';
 end;
 
 end.

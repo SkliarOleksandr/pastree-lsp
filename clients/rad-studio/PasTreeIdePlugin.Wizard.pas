@@ -55,9 +55,38 @@ type
     destructor Destroy; override;
   end;
 
+  { Starts the analysis when a project finishes opening, instead of leaving the
+    user's first Ctrl+Click to pay for it (~15 s on a 3757-unit project). Two
+    notifications, because they are different events and only one of them fires
+    for the case you care about most:
+
+      ofnEndProjectGroupOpen  - a project group finished loading. This is the
+                                one that covers "the IDE just started with my
+                                project", and it fires AFTER the group is
+                                usable, so the active project is resolvable.
+      ofnActiveProjectChanged - switching the active project inside an open
+                                group. The server is per-configuration, so this
+                                is exactly the point at which it must restart -
+                                which EnsureSession already handles.
+
+    NOT gated on the IDE being otherwise idle, deliberately: measured, the
+    analysis is 8 cores for ~15 s, and whether that competes noticeably with
+    the IDE's own project-open work is a question about real projects on real
+    machines rather than about this code. IOTACompileNotifier
+    (IsBackgroundCompileActive) is the knob to reach for if it turns out to. }
+  TProjectOpenNotifier = class(TNotifierObject, IOTAIDENotifier)
+  public
+    procedure FileNotification(ANotifyCode: TOTAFileNotification;
+      const AFileName: string; var ACancel: Boolean);
+    procedure BeforeCompile(const AProject: IOTAProject; var ACancel: Boolean);
+    procedure AfterCompile(ASucceeded: Boolean);
+  end;
+
   TIDEWizard = class(TNotifierObject, IOTAWizard)
   private
     FMenuManager: TMenuManager;
+    FServices: IOTAServices;
+    FNotifierIndex: Integer;
   public
     constructor Create;
     destructor Destroy; override;
@@ -156,19 +185,55 @@ begin
   ExecuteFindReferences(FEditorServices.TopView);
 end;
 
+{ TProjectOpenNotifier }
+
+procedure TProjectOpenNotifier.FileNotification(
+  ANotifyCode: TOTAFileNotification; const AFileName: string;
+  var ACancel: Boolean);
+begin
+  if ANotifyCode in [ofnEndProjectGroupOpen, ofnActiveProjectChanged] then
+    LspPrewarm;
+end;
+
+procedure TProjectOpenNotifier.BeforeCompile(const AProject: IOTAProject;
+  var ACancel: Boolean);
+begin
+end;
+
+procedure TProjectOpenNotifier.AfterCompile(ASucceeded: Boolean);
+begin
+end;
+
 { TIDEWizard }
 
 constructor TIDEWizard.Create;
 begin
   FMenuManager := TMenuManager.Create;
-  // Creates the session object only - no server is spawned until the first
-  // navigation request, so loading this package costs nothing.
+  // Creates the session object only - the server is spawned by the first
+  // prewarm or the first navigation request, so loading this package costs
+  // nothing on its own.
   InitializeLspSession;
   InitializeGotoDeclaration;
+
+  FNotifierIndex := -1;
+  if Supports(BorlandIDEServices, IOTAServices, FServices) then
+    FNotifierIndex := FServices.AddNotifier(TProjectOpenNotifier.Create);
+
+  // A project can already be open when this package loads - installing it into
+  // a running IDE, or an IDE that restored its project group before the
+  // packages finished loading. No notification is coming for that one, so it
+  // is prewarmed here. Harmless when there is no project: LspPrewarm is silent.
+  LspPrewarm;
 end;
 
 destructor TIDEWizard.Destroy;
 begin
+  // Before anything else, and for the same reason the editor notifier and the
+  // history items are unregistered: a notification arriving after this BPL
+  // unloads calls into freed code. RemoveNotifier releases our instance.
+  if (FNotifierIndex >= 0) and Assigned(FServices) then
+    FServices.RemoveNotifier(FNotifierIndex);
+  FServices := nil;
   FinalizeGotoDeclaration;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server

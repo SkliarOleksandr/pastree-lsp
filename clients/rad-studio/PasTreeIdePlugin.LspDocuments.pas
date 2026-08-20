@@ -132,7 +132,8 @@ uses
   System.Classes,
   System.JSON,
   Winapi.ActiveX,
-  IStreams;
+  IStreams,
+  PasLsp.SourceText;
 
 procedure IdeToLsp(ARow, ACol: Integer; out ALine, ACharacter: Integer);
 begin
@@ -195,15 +196,11 @@ begin
     LMemStream.Read(LFileContent[1], Length(LFileContent));
   Result := UTF8ToString(LFileContent);
 
-  // A leading BOM must never reach the server. It is not text, and PasTree's
-  // position index treats it as though it were: a document opened with one
-  // makes IdentAt fail for EVERY position in the file, not just line 1 - i.e.
-  // navigation in that file stops working entirely, with the log saying only
-  // "no identifier at". Measured against the real server; the buffer stream has
-  // not been seen to carry one, which is exactly why this is worth a line of
-  // code rather than a comment saying it cannot happen.
-  if (Result <> '') and (Result[1] = #$FEFF) then
-    Delete(Result, 1, 1);
+  // A leading BOM must never reach the server - see PasLsp.SourceText for what
+  // it costs. The server strips one too as of 0.5.3, so this is now a belt on
+  // top of braces rather than the only defence; it stays because it is free
+  // and because it keeps what this client SENDS honest, whatever it talks to.
+  Result := StripLeadingBom(Result);
 end;
 
 { TLspDocumentSync }
@@ -227,6 +224,7 @@ var
   LModule: IOTAModule;
   LList: TObjectList<TSentDocument>;
   LDoc: TSentDocument;
+  LActive: string;
   I: Integer;
 begin
   Result := nil;
@@ -258,6 +256,23 @@ begin
         // disk. That is a safe degradation, and there is no single right place
         // to report it from shared plumbing.
       end;
+    end;
+    // The file the user is LOOKING AT goes last, and that ordering is load-
+    // bearing rather than cosmetic. Every didOpen the server receives before
+    // it has anything analyzed schedules the build again and OVERWRITES the
+    // pending priority file, so the last one sent is the one AnalyzeStaged
+    // front-loads. Sending the active editor last therefore means the first
+    // Ctrl+Click has the best chance of being answerable early - which is the
+    // whole point of starting the analysis at project open.
+    if Assigned(LModuleServices.CurrentModule) then
+    begin
+      LActive := LModuleServices.CurrentModule.FileName;
+      for I := 0 to LList.Count - 2 do
+        if SameText(LList[I].Path, LActive) then
+        begin
+          LList.Move(I, LList.Count - 1);
+          Break;
+        end;
     end;
     Result := LList.ToArray;
   finally

@@ -1,0 +1,38 @@
+# Line endings, declared rather than left to whoever cloned this.
+#
+# WHY THIS FILE EXISTS. Without it, what lands in a working copy depends on the
+# machine's own core.autocrlf, so two clones of one commit can differ - and the
+# consumer here is RAD Studio, which writes CRLF for everything it touches. A
+# tool that edits a source with LF then leaves the IDE re-saving it with CRLF,
+# and the next diff is the whole file. The same rule is declared in the PasTree
+# repo (object-pascal-tree/.gitattributes); keep the two in step.
+#
+# Everything is normalized to LF IN THE REPOSITORY; eol= controls what the
+# working copy gets. Delphi sources and anything cmd.exe parses get CRLF.
+
+* text=auto
+
+# Delphi sources and projects - CRLF, the way the IDE writes them.
+*.pas   text eol=crlf
+*.dpr   text eol=crlf
+*.dpk   text eol=crlf
+*.inc   text eol=crlf
+*.dproj text eol=crlf
+*.dfm   text eol=crlf
+
+# Batch files: cmd.exe is the one interpreter here that can genuinely misparse
+# an LF-only file, and every build in this repo goes through one.
+*.bat   text eol=crlf
+
+# Documentation and the VS Code client - LF, which is what their own tooling
+# and every diff viewer expect.
+*.md    text eol=lf
+*.json  text eol=lf
+*.js    text eol=lf
+*.ts    text eol=lf
+LICENSE text eol=lf
+
+# Compiled/binary output that may end up tracked: never touched.
+*.res   binary
+*.ico   binary
+*.vsix  binary
