@@ -12,33 +12,32 @@ and a place in the IDE to put it.
 
 ## Versioning
 
-**Every commit bumps the MINOR component of `cPluginVersion`**
-(`PasTreeIdePlugin.Version.pas`). `0.2.0` → `0.3.0` → `0.4.0`, one step per
-commit, no exceptions and no judgement call about whether a change "deserves"
-it. The same rule holds in all three repositories (PasTree, the LSP server,
-this package), each counting its own commits.
+`cPluginVersion` lives in `PasTreeIdePlugin.Version.pas`. Two rules, and the
+same two hold in all three repositories (PasTree, the LSP server, this package),
+each counting its own commits:
 
-The point is that a version identifies a build, unambiguously. This plugin is
-deployed as one half of a pair and rebuilt inside a live IDE that does not
-reliably pick up the new BPL, so "which build is the IDE actually running" is a
-question that comes up constantly — and a number that only moves on release
-cannot answer it. One bump per commit makes the number a commit counter, and a
-commit counter is exactly what that question needs.
+- **Every commit bumps the PATCH.** `0.2.1` → `0.2.2` → `0.2.3`, mechanically,
+  no judgement call about whether a change "deserves" it.
+- **A substantial change bumps the MINOR** and resets the patch: a new feature,
+  a new IDE surface, a reworked subsystem.
 
-The consequence is worth stating plainly, so nobody reads the number as more
-than it is: **MINOR here does not mean "new capability"**, the way plain semver
-would have it. It means "a commit happened". Two things follow:
+The per-commit patch bump exists so that a version identifies a **build**. This
+package is rebuilt inside a live IDE that does not reliably pick up the new BPL,
+so "which build is the IDE actually running" is a question that comes up
+constantly, and a number that only moved on release could not answer it. (The
+build stamp next to it answers the same question independently, and without
+depending on anyone remembering to bump — the two are deliberate belt and
+braces.)
+
+The minor component keeps its ordinary semver meaning, so:
 
 - **Compatibility lives in the `cMin*` constants, not in the version.**
-  `cMinServerVersion` moves only when the plugin starts depending on something
-  a server did not previously provide. It is not touched by ordinary commits,
-  and it must never be raised to "whatever I just built" — that would reject
-  working deployments and turn the mismatch warning into noise, which is how a
-  real mismatch goes unread.
-- **PATCH stays reserved** for a fix issued against an already-tagged version
-  without the commits that followed it. Nothing in this workflow needs that
-  yet; the component exists so that the day it is needed, the meaning is
-  already agreed.
+  `cMinServerVersion` moves only when the plugin starts depending on something a
+  server did not previously provide. Ordinary commits do not touch it, and it
+  must never be raised to "whatever I just built" — that would reject working
+  deployments and turn the mismatch warning into noise, which is how a real
+  mismatch goes unread. It may legitimately name a *patch* version: a server-side
+  fix is a patch there and can still be a hard requirement here.
 
 ## How to read this
 

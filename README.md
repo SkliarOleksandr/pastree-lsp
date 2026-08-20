@@ -311,11 +311,11 @@ analyze.
 ## Versions
 
 Three repositories, three independent versions - PasTree, `pastree-lsp-server`,
-this package - each counting its own commits: **one MINOR bump per commit**, so
-the number identifies a build rather than a feature set. `SPEC.md` has the
-policy and its consequences. What ties the three together is not a shared
-number but a **stated minimum** in each consumer, which does *not* move with
-the per-commit bumps:
+this package - each counting its own commits: **one PATCH bump per commit**, so
+the number identifies a build, and a MINOR bump for a substantial change.
+`SPEC.md` has the policy. What ties the three together is not a shared number
+but a **stated minimum** in each consumer, which does *not* move with the
+per-commit bumps:
 
 | Where | Declares | Checked |
 |---|---|---|
@@ -327,8 +327,8 @@ Both halves announce themselves in the Build tab, so a bug report names the
 pair that was running:
 
 ```
-[pastree-lsp] plugin 0.1.0, built 2026-08-20 12:14
-[pastree-lsp] server ready: pastree-lsp-server 0.3.0 (PasTree 0.1.0)
+[pastree-lsp] plugin 0.2.1, built 2026-08-20 12:40
+[pastree-lsp] server ready: pastree-lsp-server 0.4.1 (PasTree 0.2.1)
 ```
 
 A server older than `cMinServerVersion` produces a warning, not a refusal: an

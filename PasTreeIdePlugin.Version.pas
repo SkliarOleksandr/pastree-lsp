@@ -36,13 +36,14 @@ const
   /// <summary>
   /// This package's version. Reported to the Build tab at session start next
   /// to the server's own, so a bug report says which pair was running.
-  /// BUMP THE MINOR IN EVERY COMMIT, mechanically - see SPEC.md's Versioning
-  /// section. It is a commit counter, which is what lets it identify the BPL
-  /// the IDE actually loaded (rebuilding inside a live IDE session does not
-  /// reliably take effect here, so that is a real question); what this package
-  /// REQUIRES is cMinServerVersion, below, which does not move with it.
+  /// BUMP THE PATCH IN EVERY COMMIT, mechanically; bump the MINOR for a
+  /// substantial change - see SPEC.md's Versioning section. The patch component
+  /// is what lets this identify the BPL the IDE actually loaded (rebuilding
+  /// inside a live IDE session does not reliably take effect here, so that is a
+  /// real question); what this package REQUIRES is cMinServerVersion, below,
+  /// which does not move with it.
   /// </summary>
-  cPluginVersion = '0.2.0';
+  cPluginVersion = '0.2.1';
 
   /// <summary>
   /// The oldest pastree-server.exe this package can work with.
