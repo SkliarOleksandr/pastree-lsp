@@ -194,6 +194,16 @@ begin
   if LMemStream.Size <> 0 then
     LMemStream.Read(LFileContent[1], Length(LFileContent));
   Result := UTF8ToString(LFileContent);
+
+  // A leading BOM must never reach the server. It is not text, and PasTree's
+  // position index treats it as though it were: a document opened with one
+  // makes IdentAt fail for EVERY position in the file, not just line 1 - i.e.
+  // navigation in that file stops working entirely, with the log saying only
+  // "no identifier at". Measured against the real server; the buffer stream has
+  // not been seen to carry one, which is exactly why this is worth a line of
+  // code rather than a comment saying it cannot happen.
+  if (Result <> '') and (Result[1] = #$FEFF) then
+    Delete(Result, 1, 1);
 end;
 
 { TLspDocumentSync }

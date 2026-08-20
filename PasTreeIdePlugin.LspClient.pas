@@ -39,7 +39,8 @@ uses
   System.Classes,
   System.JSON,
   System.Generics.Collections,
-  PasTreeIdePlugin.LspTransport;
+  PasTreeIdePlugin.LspTransport,
+  PasTreeIdePlugin.Version;
 
 type
   /// <summary>
@@ -106,6 +107,8 @@ type
     FPending: TObjectDictionary<Int64, TPendingRequest>;
     FOutbox: TList<string>;   // frames held back until the handshake lands
     FServerInfo: string;
+    FServerVersion: string;
+    FPasTreeVersion: string;
     // Connections replaced but not yet freed, and how deeply we are currently
     // nested inside a connection's own callback - see RetireConnection.
     FRetired: TObjectList<TLspConnection>;
@@ -207,6 +210,10 @@ type
 
     property State: TLspClientState read FState;
     property ServerInfo: string read FServerInfo;
+    /// <summary>The server's own semver, and the PasTree it was built
+    /// against - both '' until a handshake has completed.</summary>
+    property ServerVersion: string read FServerVersion;
+    property PasTreeVersion: string read FPasTreeVersion;
     property OnNotification: TLspNotifyProc read FOnNotification
       write FOnNotification;
 
@@ -239,8 +246,17 @@ function FindServerExe(const ANearDir: string): string;
 function PathToLspUri(const APath: string): string;
 function LspUriToPath(const AUri: string): string;
 
+/// <summary>
+/// The raw value of PASTREE_LSP_SERVER ('' if unset) - so a caller reporting a
+/// missing server can say WHICH failure it is: no variable and nothing next to
+/// the BPL, or a variable pointing at a file that is not there. Those need
+/// different fixes, and one message for both sends people to the wrong one.
+/// </summary>
+function ServerExeOverride: string;
+
 const
   cLspServerExeName = 'pastree-server.exe';
+  cLspServerEnvVar = 'PASTREE_LSP_SERVER';
   cLspMethodNotFound = -32601;
   cLspRequestCancelled = -32800;
 
@@ -257,14 +273,25 @@ const
   cMaxRestartAttempts = 5;
   cBackoffBaseMs = 1000;
   cBackoffCapMs = 30000;
+  // Fixed name, next to the server log - see StdErrPathFor.
+  cStdErrLogName = 'pastree-lsp-stderr.log';
+
+function ServerExeOverride: string;
+begin
+  Result := GetEnvironmentVariable(cLspServerEnvVar);
+end;
 
 function FindServerExe(const ANearDir: string): string;
 var
   LEnv, LCandidate: string;
 begin
-  LEnv := GetEnvironmentVariable('PASTREE_LSP_SERVER');
+  LEnv := ServerExeOverride;
   if LEnv <> '' then
   begin
+    // Set-but-wrong does NOT fall back to the directory search, deliberately:
+    // silently running a different exe than the one the variable names is how
+    // a typo turns into an afternoon of debugging the wrong binary. The caller
+    // distinguishes the two cases in its message - see ServerExeOverride.
     if TFile.Exists(LEnv) then
       Exit(LEnv);
     Exit('');
@@ -479,6 +506,18 @@ begin
   Teardown;
 end;
 
+/// <summary>
+/// Where to append the server's stderr, given the server log path we asked it
+/// to write: the same directory, fixed name. '' in, '' out - the transport then
+/// picks its own %TEMP% fallback.
+/// </summary>
+function StdErrPathFor(const ALogFile: string): string;
+begin
+  if ALogFile = '' then
+    Exit('');
+  Result := TPath.Combine(ExtractFilePath(ALogFile), cStdErrLogName);
+end;
+
 function TLspClient.Connect: Boolean;
 begin
   // Never overwrite a live connection. Teardown and FailAllPending both invoke
@@ -511,7 +550,11 @@ begin
         finally
           Dec(FDispatchDepth);
         end;
-      end);
+      end,
+      // The child's stderr goes next to the server log the caller chose (so
+      // both halves of a failed start are found in one place); with no log
+      // configured the transport falls back to its own %TEMP% file.
+      StdErrPathFor(FOptions.LogFile));
   except
     on E: ELspTransport do
     begin
@@ -664,8 +707,17 @@ begin
 
   if (AResult is TJSONObject) and
      TJSONObject(AResult).TryGetValue<TJSONObject>('serverInfo', LInfo) then
+  begin
+    FServerVersion := LInfo.GetValue<string>('version', '');
+    // pastreeVersion is this server's own extension to serverInfo, and the
+    // number that actually answers "does it have the analysis fix I need" -
+    // absent from any other LSP server, hence the empty default.
+    FPasTreeVersion := LInfo.GetValue<string>('pastreeVersion', '');
     FServerInfo := LInfo.GetValue<string>('name', '?') + ' ' +
       LInfo.GetValue<string>('version', '?');
+    if FPasTreeVersion <> '' then
+      FServerInfo := FServerInfo + ' (PasTree ' + FPasTreeVersion + ')';
+  end;
 
   FState := lcsReady;
   // A completed handshake is what "working" means, so the whole failure
@@ -683,6 +735,17 @@ begin
   if FServerInfo <> '' then
     LReady := LReady + ': ' + FServerInfo;
   Log(LReady);
+
+  // The compatibility gate, at the only moment it can be checked - see the
+  // header of PasTreeIdePlugin.Version. A warning, not a refusal: an old server
+  // still answers what it knows, and the alternative failure mode ("nothing
+  // happens on Ctrl+Click") is the one this project keeps having to debug.
+  if (FServerVersion <> '') and
+     (CompareVersions(FServerVersion, cMinServerVersion) < 0) then
+    Log(Format('WARNING: this server is %s but the plugin (%s) needs %s or '
+      + 'newer - some navigation will not work. Update pastree-server.exe '
+      + 'next to the package''s BPL.',
+      [FServerVersion, cPluginVersion, cMinServerVersion]));
 
   // Before the queued requests: a restarted server knows nothing about the
   // documents the editor has open, and answering a queued request against

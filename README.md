@@ -173,8 +173,30 @@ when the last of them went. The four LSP units are described in "Files";
   namespaces and unit aliases all come from the project file. That is
   strictly more than the in-process path ever managed: it guessed the real
   `.dpr`/`.dpk` by naming convention and never read the project's defines at
-  all. Only the IDE's own RTL/VCL/ToolsAPI source location has to be passed
-  separately, as extra `searchPaths` - no `.dproj` lists it.
+  all. What no `.dproj` lists is everything the IDE finds through its own
+  **Library** configuration, so that is read from the IDE and passed as extra
+  `searchPaths`: the **Browsing Path** (RTL/VCL/ToolsAPI source) and the
+  **Search Path** (every third-party library the user has installed), for the
+  project's platform, with `$(...)` macros expanded - including the user's own
+  Environment Variables overrides, which is how a real installation points at
+  its third-party source. `GetIDELibraryPaths` in
+  `PasTreeIdePlugin.LspSession.pas`.
+
+  This list is not a detail. Getting it wrong is indistinguishable, from the
+  editor, from the whole plugin being broken: Ctrl+Click answers "no
+  identifier/declaration resolved at cursor" for every type not declared in
+  the project's own units, and the reason - a wall of `F1027 Unit not found` -
+  appears only in the server log. That was the state until 2026-08-20, when
+  the three hardcoded paths this used to send (`source\rtl`, `source\vcl`,
+  `source\ToolsAPI`) turned out not to include the RTL at all: the RTL sources
+  live in `source\rtl\sys`, `\common`, `\win`, not in `source\rtl` itself.
+
+- **The server log goes next to the project**, as `pastree-lsp.log`, with the
+  server's stderr beside it as `pastree-lsp-stderr.log`. Both are appended to,
+  with a separator line per server run, so history survives a restart and the
+  name stays stable enough to keep open in a tail. Same reason as above: the
+  log is the only place the real cause of a failed navigation shows up, so it
+  lives where someone will actually look rather than in `%TEMP%`.
 
 ### Why the in-process path had to go
 
@@ -247,7 +269,18 @@ contrast, needs no restart: the session re-looks for the server on every
 request until it finds one, precisely so that fixing this does not cost an IDE
 restart on top of everything else.
 
-If neither is in place, both features log to the Build tab and do nothing else.
+**The environment variable is the setup in actual use**, with the server left
+in its own `out\` directory and never copied anywhere. That keeps one binary in
+one place: `build.bat` writes it, the IDE runs it, `pastree-server --version`
+identifies it, and there is no second copy to go stale behind a rebuild.
+
+If neither is in place, both features log to the Build tab and do nothing else -
+naming which case it is, since the two need different fixes:
+
+```
+[pastree-lsp] PASTREE_LSP_SERVER points at "C:\...\out\pastree-server.exe", which does not exist.
+[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\Bpl\) - put it there or point PASTREE_LSP_SERVER at it.
+```
 
 ## Building and testing
 
@@ -275,6 +308,63 @@ and `LspProjectSmoke` need a built server; `LspProjectSmoke` also needs this
 repo's own `.dproj` to be buildable, since that is what it asks the server to
 analyze.
 
+## Versions
+
+Three repositories, three independent versions - PasTree, `pastree-lsp-server`,
+this package - each counting its own commits: **one MINOR bump per commit**, so
+the number identifies a build rather than a feature set. `SPEC.md` has the
+policy and its consequences. What ties the three together is not a shared
+number but a **stated minimum** in each consumer, which does *not* move with
+the per-commit bumps:
+
+| Where | Declares | Checked |
+|---|---|---|
+| `PasTree.Version.pas` | `PasTreeVersion` | - |
+| `PasLsp.Version.pas` | `PasLspServerVersion`, `cMinPasTreeVersion` | at server startup - PasTree is linked in, so a stale sibling checkout is a build/startup problem |
+| `PasTreeIdePlugin.Version.pas` | `cPluginVersion`, `cMinServerVersion` | at the initialize handshake - the only moment it can be, since the server is whatever exe is on disk |
+
+Both halves announce themselves in the Build tab, so a bug report names the
+pair that was running:
+
+```
+[pastree-lsp] plugin 0.1.0, built 2026-08-20 12:14
+[pastree-lsp] server ready: pastree-lsp-server 0.3.0 (PasTree 0.1.0)
+```
+
+A server older than `cMinServerVersion` produces a warning, not a refusal: an
+old server still answers what it knows, and a plugin that disabled itself over
+a version string would turn a partial degradation into the exact symptom
+everything else here also produces - "nothing happens on Ctrl+Click".
+
+`pastree-server.exe --version` answers the same question without speaking
+JSON-RPC, which is how to check which exe is actually deployed next to the BPL.
+The build stamp comes from the binary's own timestamp rather than a compile-time
+constant (Delphi has no compile-date macro), and it answers the question a
+semver cannot during development: whether the IDE is running the BPL you just
+built - which, given that rebuilding inside a live IDE session is unreliable
+here, is worth being able to check.
+
+## When a navigation does nothing
+
+The editor's own report is deliberately thin - `[pastree] Goto Declaration: no
+identifier/declaration resolved at cursor` in the Build tab is all a miss ever
+says, because it fires on every Ctrl+Click. The actual reason is in
+**`pastree-lsp.log`, in the same folder as the `.dproj`**, and it is worth
+reading before assuming the resolver is at fault:
+
+- `F1027 Unit not found: 'X'` on a `uses` line means the search paths are
+  wrong, not the analysis: nothing declared in that unit can resolve. Compare
+  the `configured: ... paths=N` line against the IDE's Library paths.
+- `'X' at Y(l,c) did not resolve to a source declaration` means the identifier
+  was found but has no declaration reachable from there - usually the same
+  cause one step later, sometimes an honest answer (a compiler builtin has no
+  source declaration anywhere).
+- `no identifier at Y(l,c)` means the position index has nothing there at all,
+  which points at the position or the text rather than the resolver.
+
+`pastree-lsp-stderr.log`, beside it, is where a server that dies before it can
+log anything leaves its last words.
+
 ## Known first-pass limitations
 
 - **The server must be found.** It is looked for next to the package's BPL, or
@@ -297,8 +387,10 @@ analyze.
 ## Files
 
 - `PasTreeIdePlugin.dpk` / `.dproj` - package project, `Win32`.
-  `requires: rtl, vcl, designide` and its own seven units - no PasTree, no
+  `requires: rtl, vcl, designide` and its own eight units - no PasTree, no
   sibling checkout (see "Repo layout" above).
+- `PasTreeIdePlugin.Version.pas` - this package's version, the minimum server
+  version it accepts, and `CompareVersions`. See "Versions" below.
 - `PasTreeIdePlugin.Wizard.pas` - `TIDEWizard` (`IOTAWizard`): owns the
   single editor-menu action list (Find Declaration + Find References,
   both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP
@@ -323,14 +415,16 @@ what lets `tests/` drive them against a real server outside the IDE:
   replacement for `BuildNavigator`: harvests `initializationOptions` from
   ToolsAPI, restarts the server when the project configuration changes, and
   exposes `LspDefinition`/`LspReferences` as callback-style requests.
-- `tests/` - three console harnesses, each built with `dcc32` and run
+- `tests/` - four console harnesses, each built with `dcc32` and run
   directly (no IDE, no package): `LspTransportSmoke` (graceful round trip,
   abrupt teardown with the server live, server killed behind our back),
   `LspClientSmoke` (handshake with a request queued behind it, real
   navigation over `tests/fixtures/`, lazy restart), and `LspProjectSmoke`
   (this package's own `.dproj` plus the IDE source paths - the check that the
   `initializationOptions` harvest actually resolves `TActionList`,
-  `IOTAWizard` and the project's own types).
+  `IOTAWizard` and the project's own types). `VersionSmoke` needs nothing at
+  all - no server, no fixtures - and pins the compatibility gate, including
+  the `0.10.0` vs `0.9.0` case that plain string comparison gets wrong.
 - `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,

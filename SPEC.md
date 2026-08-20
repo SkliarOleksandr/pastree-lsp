@@ -10,6 +10,36 @@ list. This one walks the **ToolsAPI** inventory and says which IDE surfaces
 could show the answers. A capability needs both halves: a server that can answer
 and a place in the IDE to put it.
 
+## Versioning
+
+**Every commit bumps the MINOR component of `cPluginVersion`**
+(`PasTreeIdePlugin.Version.pas`). `0.2.0` → `0.3.0` → `0.4.0`, one step per
+commit, no exceptions and no judgement call about whether a change "deserves"
+it. The same rule holds in all three repositories (PasTree, the LSP server,
+this package), each counting its own commits.
+
+The point is that a version identifies a build, unambiguously. This plugin is
+deployed as one half of a pair and rebuilt inside a live IDE that does not
+reliably pick up the new BPL, so "which build is the IDE actually running" is a
+question that comes up constantly — and a number that only moves on release
+cannot answer it. One bump per commit makes the number a commit counter, and a
+commit counter is exactly what that question needs.
+
+The consequence is worth stating plainly, so nobody reads the number as more
+than it is: **MINOR here does not mean "new capability"**, the way plain semver
+would have it. It means "a commit happened". Two things follow:
+
+- **Compatibility lives in the `cMin*` constants, not in the version.**
+  `cMinServerVersion` moves only when the plugin starts depending on something
+  a server did not previously provide. It is not touched by ordinary commits,
+  and it must never be raised to "whatever I just built" — that would reject
+  working deployments and turn the mismatch warning into noise, which is how a
+  real mismatch goes unread.
+- **PATCH stays reserved** for a fix issued against an already-tagged version
+  without the commits that followed it. Nothing in this workflow needs that
+  yet; the component exists so that the day it is needed, the meaning is
+  already agreed.
+
 ## How to read this
 
 Every entry below is one of:
@@ -382,7 +412,9 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
   not raise the IDE's stack-trace dialog or offer to file a report. For a plugin
   whose server can die under it, ours should descend from this.
 - **`IOTAServices.GetLocalApplicationDataDirectory`** — `7343`. The right home
-  for the server's log and any cache. We currently put stderr in `%TEMP%`.
+  home for a *cache*. Not for the log: that now goes next to the project as
+  `pastree-lsp.log`, with stderr beside it, because a log is only useful where
+  the person debugging a failed navigation will look for it.
 - **`INTAIDEUIServices.ThemeAwareColors[]`** — `ToolsAPI.UI.pas:99`, over
   `itcRed`/`itcYellow`/`itcBlue`/`itcGray`. Anything we paint on a raw canvas is
   unthemed by default; hardcoded `clRed` is unreadable in the dark theme. Pair

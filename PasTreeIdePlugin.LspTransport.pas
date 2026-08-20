@@ -136,9 +136,16 @@ type
     /// Spawns AExePath and starts reading. Raises ELspTransport if the exe is
     /// missing or the process cannot be started - nothing is left running.
     /// AOnFrame/AOnGone are invoked on the main thread.
+    ///
+    /// AStdErrPath is where the child's stderr is appended. Pass '' for the
+    /// legacy per-process file under %TEMP% - callers that know a better home
+    /// (the plugin puts it next to the project, beside the server log) should
+    /// name one, because a %TEMP% file with a pid in its name is exactly the
+    /// diagnostic nobody finds when they need it.
     /// </summary>
     constructor Create(const AExePath, AWorkDir: string;
-      const AOnFrame: TLspFrameProc; const AOnGone: TLspGoneProc);
+      const AOnFrame: TLspFrameProc; const AOnGone: TLspGoneProc;
+      const AStdErrPath: string = '');
     destructor Destroy; override;
 
     /// <summary>
@@ -443,7 +450,8 @@ end;
 { TLspConnection }
 
 constructor TLspConnection.Create(const AExePath, AWorkDir: string;
-  const AOnFrame: TLspFrameProc; const AOnGone: TLspGoneProc);
+  const AOnFrame: TLspFrameProc; const AOnGone: TLspGoneProc;
+  const AStdErrPath: string);
 var
   LChildIn, LChildOut: THandle;
   LSA: TSecurityAttributes;
@@ -471,8 +479,15 @@ begin
     // Child stderr: an append-mode file, shared for reading so it can be
     // tailed live. FILE_APPEND_DATA rather than GENERIC_WRITE so concurrent
     // servers cannot overwrite each other's lines.
-    FStdErrPath := TPath.Combine(TPath.GetTempPath,
-      Format('pastree-lsp-stderr-%d.log', [GetCurrentProcessId]));
+    // Append mode is what makes a single fixed name safe: two servers writing
+    // the same file interleave lines instead of truncating each other, so the
+    // caller-supplied path needs no pid in it.
+    FStdErrPath := AStdErrPath;
+    if FStdErrPath = '' then
+      FStdErrPath := TPath.Combine(TPath.GetTempPath,
+        Format('pastree-lsp-stderr-%d.log', [GetCurrentProcessId]));
+    if ExtractFilePath(FStdErrPath) <> '' then
+      ForceDirectories(ExtractFilePath(FStdErrPath));
     LSA.nLength := SizeOf(LSA);
     LSA.lpSecurityDescriptor := nil;
     LSA.bInheritHandle := True;

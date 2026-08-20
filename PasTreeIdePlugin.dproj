@@ -95,6 +95,7 @@
         <DCCReference Include="rtl.dcp"/>
         <DCCReference Include="vcl.dcp"/>
         <DCCReference Include="designide.dcp"/>
+        <DCCReference Include="PasTreeIdePlugin.Version.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Wizard.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspTransport.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspClient.pas"/>

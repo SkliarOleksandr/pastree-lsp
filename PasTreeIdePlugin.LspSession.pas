@@ -26,9 +26,18 @@ unit PasTreeIdePlugin.LspSession;
   search paths, defines, namespaces and unit aliases all come from the project
   file rather than being reconstructed here. That is strictly more than the
   in-process version managed: it had to resolve the real .dpr by convention and
-  never read the project's defines at all. What the .dproj cannot supply is the
-  IDE's own RTL/VCL/ToolsAPI source location, so that is passed as extra
-  searchPaths.
+  never read the project's defines at all. What the .dproj cannot supply is
+  everything the IDE finds through its own Library configuration - RTL/VCL/
+  ToolsAPI source and every third-party library on the Search/Browsing Path -
+  so those are read from the IDE and passed as extra searchPaths. See
+  GetIDELibraryPaths: getting that list wrong is indistinguishable, from the
+  editor, from navigation being broken.
+
+  WHERE THE SERVER LOG GOES. Next to the project being analyzed, as
+  pastree-lsp.log (LogPathFor), with the server's stderr beside it. The log is
+  the only place the real cause of a failed navigation appears - the editor only
+  ever says "nothing resolved" - so it is deliberately somewhere a person will
+  actually look, not a timestamped file in %TEMP%.
 }
 
 interface
@@ -102,9 +111,16 @@ uses
   System.Classes,
   System.IOUtils,
   System.JSON,
+  System.Generics.Collections,
+  System.Win.Registry,
   Winapi.Windows,
   PasTreeIdePlugin.LspClient,
+  PasTreeIdePlugin.Version,
   PasTreeIdePlugin.LspDocuments;
+
+const
+  // Persistent, so it can be left open in a tail across server restarts.
+  cLspLogName = 'pastree-lsp.log';
 
 /// <summary>
 /// Goes to the IDE's own default Messages tab (nil group = the "Build" tab),
@@ -174,23 +190,196 @@ begin
 end;
 
 /// <summary>
-/// RTL/VCL/ToolsAPI source directories, rooted at the IDE's own install
-/// location (IOTAServices.GetRootDirectory - portable across machines and
-/// versions, no hardcoded version number). The .dproj cannot supply these:
-/// without them any identifier declared outside the project itself - anything
-/// from the RTL or VCL, IOTAWizard, TActionList - fails to resolve, because
-/// `uses` cannot find a unit there is no search path for.
+/// Where the server log goes: beside the project file, fixed name. See the
+/// comment at the assignment in BuildOptions for why that beats %TEMP%.
 /// </summary>
-function GetIDESourcePaths: TArray<string>;
+function LogPathFor(const AProjectFile: string): string;
+var
+  LDir: string;
+begin
+  LDir := ExtractFilePath(AProjectFile);
+  if (LDir = '') or not TDirectory.Exists(LDir) then
+    LDir := TPath.GetTempPath;
+  Result := TPath.Combine(LDir, cLspLogName);
+end;
+
+/// <summary>
+/// Every directory the IDE itself would search for source outside the project:
+/// the Library <b>Search Path</b> and <b>Browsing Path</b> for APlatform, read
+/// from the IDE's own configuration and macro-expanded.
+///
+/// THIS IS WHAT MAKES ANYTHING OUTSIDE THE PROJECT RESOLVE AT ALL, and an
+/// earlier version of it got the shape wrong in a way worth recording. It
+/// passed three fixed directories - source\rtl, source\vcl, source\ToolsAPI -
+/// on the assumption that the RTL sources sit in source\rtl. They do not: they
+/// sit in source\rtl\sys, \common, \win, \net, so System.SysUtils was NOT on
+/// the search path, and neither was any third-party library the user had added
+/// to the IDE (SynEdit, VirtualTreeView). The visible symptom was Ctrl+Click
+/// answering "no identifier/declaration resolved at cursor" for practically
+/// every type not declared in the project's own units, with the real cause
+/// only in the server log as a wall of F1027 "Unit not found".
+///
+/// The two registry values together are exactly the right answer, and for two
+/// distinct reasons: Browsing Path is where the IDE keeps the RTL/VCL/ToolsAPI
+/// source subdirectories (its whole purpose is source the compiler does not
+/// need but navigation does), and Search Path is where third-party source
+/// lives. Read via IOTAServices.GetBaseRegistryKey rather than a hardcoded
+/// key, so this follows whatever IDE version and installation the package is
+/// loaded into.
+/// </summary>
+function GetIDELibraryPaths(const APlatform, AFallbackPlatform: string): TArray<string>;
 var
   LServices: IOTAServices;
-  LRoot: string;
+  LSeen: TDictionary<string, Byte>;
+  LResult: TStringList;
+  LReg: TRegistry;
+  LKey, LRoot, LSubDir: string;
+  LMacros, LNames: TStringList;
+
+  /// <summary>
+  /// $(name) expansion for one path. Three sources, in this order, because
+  /// each covers what the previous cannot:
+  ///   1. $(Platform) - not a variable at all, it is the platform the paths are
+  ///      being read for.
+  ///   2. The IDE's own "Environment Variables" overrides (Tools > Options >
+  ///      Environment Variables). These are the ones a real installation
+  ///      actually depends on - this machine resolves every third-party library
+  ///      through a $(avi3rdlib) override - and they are IDE settings, not
+  ///      process environment variables, so nothing outside the IDE's own
+  ///      configuration knows them.
+  ///   3. ExpandRootMacro for the built-ins ($(BDS), $(BDSLIB),
+  ///      $(BDSCOMMONDIR), ...).
+  /// Applied repeatedly because an override may itself be written in terms of
+  /// another one; a fixed small bound rather than "until stable" so a variable
+  /// defined in terms of itself cannot spin here.
+  /// </summary>
+  function ExpandMacros(const APath: string): string;
+  var
+    LPass, LIdx: Integer;
+  begin
+    Result := APath;
+    for LPass := 1 to 4 do
+    begin
+      if not Result.Contains('$(') then
+        Break;
+      Result := StringReplace(Result, '$(Platform)', APlatform,
+        [rfReplaceAll, rfIgnoreCase]);
+      for LIdx := 0 to LMacros.Count - 1 do
+        Result := StringReplace(Result,
+          '$(' + LMacros.Names[LIdx] + ')', LMacros.ValueFromIndex[LIdx],
+          [rfReplaceAll, rfIgnoreCase]);
+      Result := LServices.ExpandRootMacro(Result);
+    end;
+  end;
+
+  procedure AddPathList(const AValue: string);
+  var
+    LRaw, LPath: string;
+  begin
+    for LRaw in AValue.Split([';']) do
+    begin
+      LPath := Trim(LRaw);
+      if LPath = '' then
+        Continue;
+      LPath := ExpandMacros(LPath);
+      // An unexpanded macro left over means a variable we cannot resolve;
+      // passing it on would just make the server look for a literal '$'.
+      if LPath.Contains('$(') then
+        Continue;
+      // GetFullPath throws on a syntactically invalid path, and these lists
+      // are hand-edited settings that accumulate junk over an installation's
+      // life - one bad entry must cost that entry, not the whole path list.
+      try
+        LPath := ExcludeTrailingPathDelimiter(TPath.GetFullPath(LPath));
+      except
+        Continue;
+      end;
+      // Only real directories: same reason, plus every path the server accepts
+      // is a directory it stats on each unit lookup.
+      if not TDirectory.Exists(LPath) then
+        Continue;
+      if LSeen.ContainsKey(LowerCase(LPath)) then
+        Continue;
+      LSeen.Add(LowerCase(LPath), 0);
+      LResult.Add(LPath);
+    end;
+  end;
+
 begin
   Result := nil;
   if not Supports(BorlandIDEServices, IOTAServices, LServices) then
     Exit;
-  LRoot := IncludeTrailingPathDelimiter(LServices.GetRootDirectory) + 'source\';
-  Result := [LRoot + 'rtl', LRoot + 'vcl', LRoot + 'ToolsAPI'];
+
+  LSeen := TDictionary<string, Byte>.Create;
+  LResult := TStringList.Create;
+  LMacros := TStringList.Create;
+  try
+    LReg := TRegistry.Create(KEY_READ);
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+
+      // The user's own macro overrides, loaded before any path is expanded -
+      // see ExpandMacros for why ExpandRootMacro alone is not enough.
+      LMacros.NameValueSeparator := '=';
+      LKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
+        + 'Environment Variables';
+      if LReg.OpenKeyReadOnly(LKey) then
+      begin
+        LNames := TStringList.Create;
+        try
+          LReg.GetValueNames(LNames);
+          for LSubDir in LNames do
+            LMacros.Values[LSubDir] := LReg.ReadString(LSubDir);
+        finally
+          LNames.Free;
+        end;
+        LReg.CloseKey;
+      end;
+
+      LRoot := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
+        + 'Library\';
+      LKey := LRoot + APlatform;
+      // A platform the IDE offers but has no Library key for (never selected,
+      // so never written) falls back to the folded name, which for the Win64
+      // family is the same paths anyway.
+      if not LReg.KeyExists(LKey) and (AFallbackPlatform <> '') then
+        LKey := LRoot + AFallbackPlatform;
+      if LReg.OpenKeyReadOnly(LKey) then
+      begin
+        // Browsing Path first: RTL/VCL/ToolsAPI source, i.e. the paths most
+        // lookups will hit. Order is only a performance hint - the server
+        // resolves a unit by the first path that has it, and a unit present on
+        // both lists is the same file either way.
+        AddPathList(LReg.ReadString('Browsing Path'));
+        AddPathList(LReg.ReadString('Search Path'));
+      end;
+    finally
+      LReg.Free;
+    end;
+
+    // Last resort if the configuration could not be read at all: the source
+    // tree under the IDE root, enumerated rather than assumed flat (the bug
+    // described above). Better than nothing, and nothing is what the previous
+    // three-path version effectively gave for the RTL.
+    if LResult.Count = 0 then
+    begin
+      LRoot := IncludeTrailingPathDelimiter(LServices.GetRootDirectory)
+        + 'source';
+      if TDirectory.Exists(LRoot) then
+      begin
+        AddPathList(LRoot);
+        for LSubDir in TDirectory.GetDirectories(LRoot, '*',
+          TSearchOption.soAllDirectories) do
+          AddPathList(LSubDir);
+      end;
+    end;
+
+    Result := LResult.ToStringArray;
+  finally
+    LMacros.Free;
+    LResult.Free;
+    LSeen.Free;
+  end;
 end;
 
 /// <summary>
@@ -228,7 +417,11 @@ end;
 /// Where the package's own BPL lives - the default place to look for
 /// pastree-server.exe, so a matched pair can simply be deployed together.
 /// </summary>
-function PackageDir: string;
+/// <summary>
+/// This BPL's own full path. HInstance inside a package is the package module,
+/// not the IDE's exe, which is what makes both this and PackageDir work.
+/// </summary>
+function PackageFileName: string;
 var
   LBuffer: array[0..MAX_PATH] of Char;
   LLen: DWORD;
@@ -236,17 +429,35 @@ begin
   LLen := GetModuleFileName(HInstance, @LBuffer[0], Length(LBuffer));
   if LLen = 0 then
     Exit('');
-  Result := ExtractFilePath(string(LBuffer));
+  Result := string(LBuffer);
+end;
+
+function PackageDir: string;
+begin
+  Result := ExtractFilePath(PackageFileName);
 end;
 
 { TLspSession }
 
 constructor TLspSession.Create;
+var
+  LBuilt: string;
 begin
   inherited Create;
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
+
+  // Said once per IDE session, at package load. The server announces itself
+  // (and the PasTree it was built against) at its own handshake; this is the
+  // other half of the pair, and the build stamp is what distinguishes "the fix
+  // is in" from "the IDE is still running the BPL from before the rebuild" -
+  // a distinction this project has spent real time on, since rebuilding the
+  // package inside a live IDE session does not reliably take effect.
+  LBuilt := BinaryBuiltOn(PackageFileName);
+  if LBuilt <> '' then
+    LBuilt := ', built ' + LBuilt;
+  LogDiagnostic(Format('plugin %s%s', [cPluginVersion, LBuilt]));
 end;
 
 destructor TLspSession.Destroy;
@@ -281,8 +492,19 @@ begin
   Result.ProjectFile := AProject.FileName;
   Result.Platform := APlatform;
   Result.Config := AConfig;
-  Result.SearchPaths := GetIDESourcePaths;
-  Result.LogFile := TPath.Combine(TPath.GetTempPath, 'pastree-lsp-server.log');
+  // The IDE's own platform id, NOT the normalized one: the registry key and
+  // the $(Platform) macro are named after what the IDE calls the platform
+  // (Win64x has its own Library key), while APlatform has already been folded
+  // onto the nearest name PasTree can parse.
+  Result.SearchPaths := GetIDELibraryPaths(AProject.CurrentPlatform, APlatform);
+  // NEXT TO THE PROJECT, under a fixed name - not %TEMP%. The log only earns
+  // its keep if it is where someone looks: the same folder as the .dproj being
+  // analyzed, so "which project was this" needs no timestamp archaeology, and
+  // a stable name so it can be left open in a tail/editor across restarts. The
+  // server appends with a separator per run rather than truncating, so history
+  // survives too. Falls back to %TEMP% only for a project with no directory,
+  // which in practice means an unsaved one.
+  Result.LogFile := LogPathFor(Result.ProjectFile);
 end;
 
 function TLspSession.EnsureSession: Boolean;
@@ -305,8 +527,17 @@ begin
     FExePath := FindServerExe(PackageDir);
     if FExePath = '' then
     begin
-      LogDiagnostic(Format('%s not found - put it next to the package''s BPL '
-        + 'or point PASTREE_LSP_SERVER at it.', [cLspServerExeName]));
+      if ServerExeOverride <> '' then
+        // The variable is set and the file is not there. Naming the path is the
+        // whole point: this is nearly always a typo or a moved build output,
+        // and the generic message sends people to check the BPL directory that
+        // is not even being looked at.
+        LogDiagnostic(Format('%s points at "%s", which does not exist.',
+          [cLspServerEnvVar, ServerExeOverride]))
+      else
+        LogDiagnostic(Format('%s not found next to the package''s BPL (%s) - '
+          + 'put it there or point %s at it.',
+          [cLspServerExeName, PackageDir, cLspServerEnvVar]));
       Exit;
     end;
   end;

@@ -38,6 +38,7 @@ requires
   the target project's scale. That also drops this repo's build-time dependency
   on a sibling object-pascal-tree checkout - the server owns it instead. }
 contains
+  PasTreeIdePlugin.Version in 'PasTreeIdePlugin.Version.pas',
   PasTreeIdePlugin.Wizard in 'PasTreeIdePlugin.Wizard.pas',
   PasTreeIdePlugin.LspTransport in 'PasTreeIdePlugin.LspTransport.pas',
   PasTreeIdePlugin.LspClient in 'PasTreeIdePlugin.LspClient.pas',
