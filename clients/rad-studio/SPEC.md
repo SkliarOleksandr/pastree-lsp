@@ -255,13 +255,39 @@ The costs are real and should be stated before anyone commits:
   column; only `IOTAAsyncCodeInsightManager290.AsyncGotoDefinitionEx` (`10782`)
   gives a column.
 
-**The recommendation is to sit beside it, and revisit.** Our own menu items,
-Ctrl+Click, and panes are working and cost nothing in regression risk. Code
-Insight is the right destination for completion and signature help specifically
-— because those have no good home outside the native UI — and it should be
-approached as its own project, after the server can actually answer completion
-(a tier-3 item on the server side, blocked on position-in-invalid-text). Nothing
-below depends on this decision except the two entries that say so.
+**DECIDED 2026-08-21: sit beside it for now, and becoming the manager IS the
+destination.** Not "revisit someday" — the manager route is the committed
+endgame, deferred only until the server answers enough of the interface to
+replace what a user would lose by switching. The gate is **completion** (a
+tier-3 item on the server side, blocked on position-in-invalid-text): a manager
+that navigates brilliantly but cannot complete is a regression the moment the
+user selects it, because selecting a manager replaces the IDE's engine for
+Pascal wholesale, not per-feature.
+
+What the migration buys and costs, worked out in advance so the future
+implementer does not re-derive it:
+
+- **Superseded by the manager** — `GotoDefinition`/`AsyncGotoDefinitionEx` is
+  the IDE's own Ctrl+Click: the mouse-notifier override in
+  `PasTreeIdePlugin.GotoDeclaration` (down/up suppression, position mapping)
+  and the `cEdMenuCatIdentifier` menu takeover in `PasTreeIdePlugin.Wizard` both
+  get **deleted**, and with them the one-way-door caveat. The IDE draws the
+  Ctrl+hover underline from OUR resolver (today it underlines from the native
+  engine while the click resolves through ours — a visible disagreement we
+  currently just live with), navigates, and feeds its own history.
+- **Not covered by the manager, stays ours either way** — Find References
+  (no references in the interface; our Messages-panel tree remains the
+  surface), the decl↔impl toggle key binding (not a Code Insight concept), and
+  the project-open prewarm.
+- **The price of entry** — all ~30 methods of `IOTACodeInsightManager100`
+  (registration takes the synchronous interface; the async one is a companion
+  offered via `Supports`), a local symbol cache for the per-keystroke
+  synchronous calls (`SetFilter`/`FindIdent`), and hint text for Ctrl+hover.
+  Delegating the parts we lack to the built-in manager (discoverable via
+  `GetCodeInsightManager(Index)`) was considered and rejected: DelphiLSP's
+  manager is not designed to be driven through a foreign wrapper, and the
+  manager-selection order for two `HandlesFile('.pas')` claimants is
+  undocumented.
 
 ## The open experiment, worth running first
 
@@ -307,7 +333,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Go to declaration | Have | editor menu + Ctrl+Click | `OnEditorMouseDownEx`/`UpEx` — the `Handled` overloads (`ToolsAPI.Editor.pas:807`/`831`); the no-`Handled` pair at `622`/`661` cannot suppress the IDE |
+| Go to declaration | Have | editor menu + Ctrl+Click | `OnEditorMouseDownEx`/`UpEx` — the `Handled` overloads (`ToolsAPI.Editor.pas:807`/`831`); the no-`Handled` pair at `622`/`661` cannot suppress the IDE. Interim by decision: superseded when we become the Code Insight manager (see the fork) |
 | Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
 | Type definition | Ready | a menu item | server answers it, crossing units |
