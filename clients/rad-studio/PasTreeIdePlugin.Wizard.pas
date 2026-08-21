@@ -35,7 +35,7 @@ uses
   System.SysUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -293,6 +293,9 @@ begin
   // nothing on its own.
   InitializeLspSession;
   InitializeGotoDeclaration;
+  // No-op unless PASTREE_CODEINSIGHT=1 - the gated Code Insight manager
+  // skeleton (COMPLETION.md phase B.2).
+  InitializeCodeInsight;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -325,6 +328,10 @@ begin
     FKeyboardServices.RemoveKeyboardBinding(FKeyBindingIndex);
   FKeyboardServices := nil;
   FinalizeGotoDeclaration;
+  // Before FinalizeLspSession on purpose: the session's teardown fails every
+  // pending request synchronously, and those callbacks must find the manager
+  // already unregistered (and its closures gated off - see GAlive there).
+  FinalizeCodeInsight;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running

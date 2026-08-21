@@ -83,7 +83,7 @@ one contractual thing right: the replace span is the real typed token, so the
    PasTree replaces the keyword provider, everything but the literal labels
    must keep passing unchanged.
 
-## Plugin (phase B — step 1 done 2026-08-21; the manager is next)
+## Plugin (phase B — done 2026-08-21: LspCompletion plus the gated manager)
 
 1. **`PasTreeIdePlugin.LspSession`** (done): add `LspCompletion(AFileName, ARow,
    ACol, ATriggerChar, AOnDone)` on the existing `Ask` pattern — its own
@@ -93,7 +93,10 @@ one contractual thing right: the replace span is the real typed token, so the
    existing design, nothing new to build). Parses the `CompletionList` into a
    plain record array (`TLspCompletionItem`: label, kind, detail, replace
    span) — no JSON escapes past the session boundary, same as `TLspHit`.
-2. **`PasTreeIdePlugin.CodeInsight`** (new): `TPasCodeInsightManager`
+2. **`PasTreeIdePlugin.CodeInsight`** (built; awaiting its first gated
+   bring-up in a live IDE — the AsyncInvoke* coordinate convention is assumed
+   from TOTACharPos and is the first suspect if completion lands a column
+   off): `TPasCodeInsightManager`
    implementing `IOTACodeInsightManager100` (registration takes the sync
    interface) and offering `IOTAAsyncCodeInsightManager`/`…290` via
    `Supports` — the async shape is the whole point. The method map:

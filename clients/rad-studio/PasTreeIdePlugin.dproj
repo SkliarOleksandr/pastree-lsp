@@ -111,6 +111,7 @@
         <DCCReference Include="PasTreeIdePlugin.LspSession.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.CodeInsight.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
