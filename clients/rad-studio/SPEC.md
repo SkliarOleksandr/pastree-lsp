@@ -338,7 +338,7 @@ file-trait question above).
 | Go to declaration | Have | editor menu + Ctrl+Click | `OnEditorMouseDownEx`/`UpEx` — the `Handled` overloads (`ToolsAPI.Editor.pas:807`/`831`); the no-`Handled` pair at `622`/`661` cannot suppress the IDE. Interim by decision: superseded when we become the Code Insight manager (see the fork) |
 | Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
-| Type definition | Ready | a menu item | server answers it, crossing units |
+| Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |
 | Peek definition | Spike | `IOTACodeBrowsePreview` (`8851`) | three out-params; behind the trait wall |
 | Back/Forward across jumps | Have | `IOTAHistoryServices` | we supply our own captioned `IOTAHistoryItem` |
 

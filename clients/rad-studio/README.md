@@ -80,7 +80,7 @@ unofficial/community API surface.
 
 ### Menu
 
-Both "Find Declaration" and "Find References" live
+"Find Declaration", "Find Type Declaration" and "Find References" live
 together at the top of the editor's right-click menu, in the Identifier
 category (`cEdMenuCatIdentifier` in `ToolsAPI.pas`) - the exact slot RAD
 Studio's native "Find Declaration" used to occupy alone. The captions

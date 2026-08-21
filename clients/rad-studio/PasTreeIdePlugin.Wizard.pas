@@ -3,9 +3,9 @@ unit PasTreeIdePlugin.Wizard;
 {
   Replaces the native "Find Declaration" menu item (Identifier category,
   first in the editor's right-click menu) with our own PasTree-backed one,
-  and adds "Find References" right alongside it in that same
-  category; plus the Ctrl+Click "Go to Declaration" override (see
-  PasTreeIdePlugin.GotoDeclaration).
+  and adds "Find Type Declaration" and "Find References" right alongside it
+  in that same category; plus the Ctrl+Click "Go to Declaration" override
+  (see PasTreeIdePlugin.GotoDeclaration).
 
   The replacement works via INTAEditorLocalMenu.UnregisterActionList
   (cEdMenuCatIdentifier) - removing whatever action list the IDE itself
@@ -51,6 +51,8 @@ type
     procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure OnFindReferencesExecute(Sender: TObject);
     procedure OnFindReferencesUpdate(Sender: TObject);
+    procedure OnFindTypeDeclarationExecute(Sender: TObject);
+    procedure OnFindTypeDeclarationUpdate(Sender: TObject);
   public
     constructor Create;
     destructor Destroy; override;
@@ -146,6 +148,18 @@ begin
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
 
+  // Between declaration and references, deliberately: the type jump is a
+  // navigation sibling of Find Declaration, and the menu reads best with the
+  // two jumps adjacent.
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeFindTypeDeclaration';
+  LAction.Caption := 'Find Type Declaration';
+  LAction.Category := 'PasTreeFindTypeDeclaration';
+  LAction.OnUpdate := OnFindTypeDeclarationUpdate;
+  LAction.OnExecute := OnFindTypeDeclarationExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
+
   LAction := TAction.Create(FActionList);
   LAction.Name := 'PasTreeFindReferences';
   LAction.Caption := 'Find References';
@@ -201,6 +215,16 @@ end;
 procedure TMenuManager.OnFindDeclarationExecute(Sender: TObject);
 begin
   ExecuteGotoDeclaration(FEditorServices.TopView);
+end;
+
+procedure TMenuManager.OnFindTypeDeclarationUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+end;
+
+procedure TMenuManager.OnFindTypeDeclarationExecute(Sender: TObject);
+begin
+  ExecuteTypeDefinition(FEditorServices.TopView);
 end;
 
 procedure TMenuManager.OnFindReferencesUpdate(Sender: TObject);

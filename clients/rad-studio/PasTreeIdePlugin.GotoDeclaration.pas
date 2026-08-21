@@ -83,6 +83,15 @@ procedure FinalizeGotoDeclaration;
 procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
 
 /// <summary>
+/// Entry point for the "Find Type Declaration" editor menu item
+/// (PasTreeIdePlugin.Wizard): jumps to the declaration of the TYPE of the
+/// identifier at the cursor - `S: TStringList` on a use of S lands on
+/// TStringList - through the same history-aware navigation as everything
+/// else here, so Alt+Left/Alt+Right work across it.
+/// </summary>
+procedure ExecuteTypeDefinition(const AView: IOTAEditView);
+
+/// <summary>
 /// The decl&lt;-&gt;impl toggle, bound to Ctrl+Shift+Down (AToImpl) and
 /// Ctrl+Shift+Up in PasTreeIdePlugin.Wizard - the two keys RAD Studio uses for
 /// its own version of this jump, taken over the same way the native "Find
@@ -432,6 +441,43 @@ begin
     Exit;
   ResolveAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
     AView.Buffer.EditPosition.Column);
+end;
+
+procedure ExecuteTypeDefinition(const AView: IOTAEditView);
+var
+  LFileName: string;
+  LRow, LCol: Integer;
+begin
+  if not Assigned(AView) then
+    Exit;
+  LFileName := AView.Buffer.FileName;
+  LRow := AView.Buffer.EditPosition.Row;
+  LCol := AView.Buffer.EditPosition.Column;
+  try
+    LspTypeDefinition(LFileName, LRow, LCol,
+      // Same closure-per-call discipline as ResolveAndNavigate: the history's
+      // "jumped from" is where the menu was invoked, not where the cursor
+      // sits when the answer lands.
+      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
+        const AError: string)
+      begin
+        if not ASuccess then
+          LogDiagnostic('Type Declaration: ' + AError)
+        else if Length(AHits) = 0 then
+          // Legitimate for a unit name, a keyword, or a builtin whose type
+          // has no source declaration - logged so "the click did nothing"
+          // has a reason somewhere.
+          LogDiagnostic('Type Declaration: no typed identifier resolved '
+            + 'at cursor.')
+        else
+          PushHistoryAndNavigate(LFileName, LRow, LCol, AHits[0].FilePath,
+            AHits[0].Row, AHits[0].Col);
+      end);
+  except
+    on E: Exception do
+      LogDiagnostic(Format('Type Declaration: unhandled %s: %s',
+        [E.ClassName, E.Message]));
+  end;
 end;
 
 { The toggle, with ONE RETRY IN THE OPPOSITE DIRECTION.

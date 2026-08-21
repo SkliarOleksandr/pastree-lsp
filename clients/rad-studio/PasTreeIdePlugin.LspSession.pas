@@ -130,6 +130,15 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
   AToImpl: Boolean; const AOnDone: TLspHitsProc);
 
 /// <summary>
+/// Asks where the TYPE of the identifier at an IDE position is declared -
+/// `var S: TStringList` on a use of S lands on TStringList's declaration,
+/// crossing units. Zero or one hit; zero is legitimate (the identifier has
+/// no resolvable type, e.g. a unit name or a keyword).
+/// </summary>
+procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHitsProc);
+
+/// <summary>
 /// Asks for completion items at an IDE position - the plumbing half of
 /// COMPLETION.md, ahead of any IDE surface that shows them (the Code Insight
 /// manager is that surface, and it is gated until the server answers well).
@@ -225,6 +234,7 @@ type
     // Both directions of the decl<->impl toggle share one slot: they are the
     // same gesture, so a jump the other way supersedes an unanswered one.
     FPendingToggle: Int64;
+    FPendingTypeDefinition: Int64;
     FPendingCompletion: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
@@ -243,6 +253,8 @@ type
       AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
     procedure Toggle(const AFileName: string; ARow, ACol: Integer;
       AToImpl: Boolean; const AOnDone: TLspHitsProc);
+    procedure TypeDefinition(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspHitsProc);
     procedure Completion(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspCompletionProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
@@ -813,6 +825,11 @@ begin
         if FPendingReferences = LIssuedId then
           FPendingReferences := 0;
       end
+      else if AMethod = 'textDocument/typeDefinition' then
+      begin
+        if FPendingTypeDefinition = LIssuedId then
+          FPendingTypeDefinition := 0;
+      end
       else
         // implementation / declaration - the toggle, one slot for both.
         if FPendingToggle = LIssuedId then
@@ -978,6 +995,13 @@ begin
   Ask(cMethod[AToImpl], AFileName, ARow, ACol, False, FPendingToggle, AOnDone);
 end;
 
+procedure TLspSession.TypeDefinition(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspHitsProc);
+begin
+  Ask('textDocument/typeDefinition', AFileName, ARow, ACol, False,
+    FPendingTypeDefinition, AOnDone);
+end;
+
 function TLspSession.TryGetSentText(const APath: string;
   out AText: string): Boolean;
 begin
@@ -1038,6 +1062,17 @@ begin
     Exit;
   end;
   GSession.Toggle(AFileName, ARow, ACol, AToImpl, AOnDone);
+end;
+
+procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHitsProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.TypeDefinition(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;

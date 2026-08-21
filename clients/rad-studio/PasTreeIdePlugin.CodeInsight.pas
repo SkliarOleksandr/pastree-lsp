@@ -676,13 +676,9 @@ var
 begin
   Inc(FNextId);
   LId := FNextId;
-  // Bring-up diagnostic for the browse path (the mouse override stands down
-  // when we are the provider, so this firing at all is the thing under
-  // test), plus the raw parameters - completion's parameters proved
-  // untrustworthy, and this is where the browse convention gets pinned.
-  // Remove once a live run confirms where the jump lands.
-  LogDiagnostic(Format('browse via Code Insight manager: %s raw params (%d,%d)',
-    [ExtractFileName(AFileName), ALine, ACharIndex]));
+  // Browse parameters CONFIRMED live (2026-08-21): 1-based line, 0-based
+  // char index - the +1 below landed the jump exactly. (Completion's
+  // parameters remain untrusted; it reads the caret instead - see above.)
   LspDefinition(AFileName, ALine, ACharIndex + 1,
     procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
       const AError: string)
