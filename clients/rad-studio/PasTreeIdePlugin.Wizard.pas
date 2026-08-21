@@ -32,7 +32,8 @@ procedure Register;
 implementation
 
 uses
-  System.SysUtils, Vcl.ActnList, Vcl.Dialogs, Vcl.Forms, ToolsAPI, ToolsAPI.UI,
+  System.SysUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
+  Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.LspSession;
 
@@ -82,11 +83,38 @@ type
     procedure AfterCompile(ASucceeded: Boolean);
   end;
 
+  { Ctrl+Shift+Up / Ctrl+Shift+Down - RAD Studio's own keys for the decl<->impl
+    jump, routed through our LSP instead, for the same reason the native "Find
+    Declaration" menu item was replaced: on a large project the IDE's version is
+    the thing people complain about.
+
+    btPartial, NOT btComplete: a partial binding layers over whatever keymap the
+    user has instead of replacing it, so nothing else in their bindings moves,
+    and the IDE lists it on Tools > Options > Editor > Key Mappings where it can
+    be reordered or switched off. btComplete would mean "this IS the keymap",
+    which is emphatically not what a two-key feature should claim.
+
+    One KeyProc for both keys, dispatching on the shortcut it was handed: the
+    two directions differ by a single Boolean, and a second near-identical
+    handler is a second place to forget something. }
+  TToggleKeyBinding = class(TNotifierObject, IOTAKeyboardBinding)
+  private
+    procedure ToggleProc(const AContext: IOTAKeyContext; AKeyCode: TShortCut;
+      var ABindingResult: TKeyBindingResult);
+  public
+    function GetBindingType: TBindingType;
+    function GetDisplayName: string;
+    function GetName: string;
+    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
+  end;
+
   TIDEWizard = class(TNotifierObject, IOTAWizard)
   private
     FMenuManager: TMenuManager;
     FServices: IOTAServices;
     FNotifierIndex: Integer;
+    FKeyboardServices: IOTAKeyboardServices;
+    FKeyBindingIndex: Integer;
   public
     constructor Create;
     destructor Destroy; override;
@@ -185,6 +213,57 @@ begin
   ExecuteFindReferences(FEditorServices.TopView);
 end;
 
+{ TToggleKeyBinding }
+
+function TToggleKeyBinding.GetBindingType: TBindingType;
+begin
+  Result := btPartial;
+end;
+
+function TToggleKeyBinding.GetDisplayName: string;
+begin
+  // What the user sees in the Key Mappings list, so it has to say which keys
+  // it takes over - that page is where someone goes to find out why
+  // Ctrl+Shift+Up stopped behaving the way it used to.
+  Result := 'PasTree: declaration/implementation (Ctrl+Shift+Up/Down)';
+end;
+
+function TToggleKeyBinding.GetName: string;
+begin
+  Result := 'PasTreeIdePlugin.ToggleKeyBinding';
+end;
+
+procedure TToggleKeyBinding.BindKeyboard(
+  const ABindingServices: IOTAKeyBindingServices);
+begin
+  ABindingServices.AddKeyBinding([ShortCut(VK_DOWN, [ssCtrl, ssShift])],
+    ToggleProc, nil);
+  ABindingServices.AddKeyBinding([ShortCut(VK_UP, [ssCtrl, ssShift])],
+    ToggleProc, nil);
+end;
+
+procedure TToggleKeyBinding.ToggleProc(const AContext: IOTAKeyContext;
+  AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
+var
+  LView: IOTAEditView;
+begin
+  // krHandled unconditionally once we recognise the key, even when there is
+  // nothing to jump to: krUnhandled would hand the keystroke back to the IDE,
+  // which would then run ITS decl<->impl jump - so a position our analysis
+  // cannot answer would silently fall back to the implementation this replaces,
+  // and the two disagreeing would be indistinguishable from ours misbehaving.
+  ABindingResult := krHandled;
+  if not Assigned(AContext) or not Assigned(AContext.EditBuffer) then
+    Exit;
+  LView := AContext.EditBuffer.TopView;
+  if not Assigned(LView) then
+    Exit;
+  // Down goes to the body, Up back to the header - and either key falls back to
+  // the other direction when the cursor is already at that end (see
+  // ExecuteToggle).
+  ExecuteToggle(LView, AKeyCode = ShortCut(VK_DOWN, [ssCtrl, ssShift]));
+end;
+
 { TProjectOpenNotifier }
 
 procedure TProjectOpenNotifier.FileNotification(
@@ -219,6 +298,11 @@ begin
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
     FNotifierIndex := FServices.AddNotifier(TProjectOpenNotifier.Create);
 
+  FKeyBindingIndex := -1;
+  if Supports(BorlandIDEServices, IOTAKeyboardServices, FKeyboardServices) then
+    FKeyBindingIndex :=
+      FKeyboardServices.AddKeyboardBinding(TToggleKeyBinding.Create);
+
   // A project can already be open when this package loads - installing it into
   // a running IDE, or an IDE that restored its project group before the
   // packages finished loading. No notification is coming for that one, so it
@@ -234,6 +318,12 @@ begin
   if (FNotifierIndex >= 0) and Assigned(FServices) then
     FServices.RemoveNotifier(FNotifierIndex);
   FServices := nil;
+  // Same rule as every other registration here: a keystroke dispatched into
+  // unloaded package code is an immediate crash, so the binding goes before
+  // anything it could call.
+  if (FKeyBindingIndex >= 0) and Assigned(FKeyboardServices) then
+    FKeyboardServices.RemoveKeyboardBinding(FKeyBindingIndex);
+  FKeyboardServices := nil;
   FinalizeGotoDeclaration;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server

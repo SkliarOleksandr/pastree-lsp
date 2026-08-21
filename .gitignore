@@ -31,3 +31,7 @@ node_modules/
 
 # Local-only notes (never committed, same convention as the PasTree repo)
 local/
+
+# Server logs, written next to the .dproj being analyzed (see "What the log
+# contains" in README.md). The harnesses leave them wherever they ran.
+*.log

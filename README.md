@@ -145,15 +145,18 @@ a unit nobody has open is exactly what breaks navigation in the file they do
 have open). The configuration block lists the search paths themselves, not just
 how many.
 
-Every navigation line names **both ends**:
+Every navigation line names **both ends**, prefixed by the LSP method exactly as
+it arrived on the wire:
 
 ```
-definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3)
+textDocument/definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3)
 ```
 
 A line that gave only the target could not be checked - `TArray` resolving into
 `System.Generics.Collections` looks reasonable until you know the click was on
-`TArray<T>`, which belongs in `System.pas`.
+`TArray<T>`, which belongs in `System.pas`. And the full method name rather than
+a label of our own means one grep answers "what did the client actually ask
+for", and that the prefix cannot drift from the request it describes.
 
 ## Requirements
 

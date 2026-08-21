@@ -1055,10 +1055,10 @@ begin
   LDiffers := LText <> LDisk;
   FDocs.Open(LPath, LText, LVersion, LDisk, LDiffers);
   if LDiffers then
-    Log(Format('didOpen %s v%d (unsaved: %d chars here, %d on disk)',
+    Log(Format('textDocument/didOpen %s v%d (unsaved: %d chars here, %d on disk)',
       [LPath, LVersion, Length(LText), Length(LDisk)]))
   else
-    Log(Format('didOpen %s v%d', [LPath, LVersion]));
+    Log(Format('textDocument/didOpen %s v%d', [LPath, LVersion]));
   // Schedule when this buffer is unsaved work the analysis has not seen, OR
   // when nothing has been analyzed yet - the first file opened is what starts
   // the initial build, and without this clause a workspace whose files all
@@ -1126,10 +1126,10 @@ begin
   FDocs.Change(LPath, LText, LVersion, LOld.DiskText,
     not LHadDoc or (LText <> LOld.DiskText));
   if LFullReplace then
-    Log(Format('didChange %s v%d (full, %d chars)',
+    Log(Format('textDocument/didChange %s v%d (full, %d chars)',
       [LPath, LVersion, Length(LText)]))
   else
-    Log(Format('didChange %s v%d (%d edits, now %d chars)',
+    Log(Format('textDocument/didChange %s v%d (%d edits, now %d chars)',
       [LPath, LVersion, LChanges.Count, Length(LText)]));
   // Rebuild only on a real text change - the version always bumps, but a
   // no-op edit must not cost a build.
@@ -1149,7 +1149,7 @@ begin
   LDiffered := FDocs.TryGet(LPath, LDoc) and LDoc.Differs;
   FDocs.Close(LPath);
   PublishEmptyDiagnostics(LPath);
-  Log('didClose ' + LPath);
+  Log('textDocument/didClose ' + LPath);
   // The disk file is the truth again — a rebuild is due only if the overlay
   // ever DIFFERED from it (analysis results built from unsaved text now
   // describe content that no longer exists anywhere).
@@ -1178,7 +1178,7 @@ begin
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
   begin
-    Log('definition: file not in the analyzed closure: ' + LPath);
+    Log(AMsg.Method + ': file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
@@ -1186,18 +1186,18 @@ begin
   // log — "F12 did nothing" is otherwise undebuggable from the outside.
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
   begin
-    Log(Format('definition: %s no identifier at that position',
+    Log(Format(AMsg.Method + ': %s no identifier at that position',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   if not FNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
   begin
-    Log(Format('definition: %s ''%s'' did not resolve to a source'
+    Log(Format(AMsg.Method + ': %s ''%s'' did not resolve to a source'
       + ' declaration (unresolved name, or a builtin with none)',
       [PosTag(LPath, LPasLine, LPasCol), LIdent.Name]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  Log(Format('definition: %s ''%s'' -> %s',
+  Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
@@ -1282,7 +1282,7 @@ begin
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
-  Log(Format('references(%s): %s ''%s'' -> %d hits',
+  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits',
     [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits)]));
   LSB := TStringBuilder.Create;
   try
@@ -1321,10 +1321,11 @@ var
   LTarget: TPasNavTarget;
   LFound: Boolean;
 begin
-  if AToImpl then
-    LWhat := 'implementation'
-  else
-    LWhat := 'declaration';
+  // The method as it came off the wire, not a label of our own: every log line
+  // and error message in here then names something a person can grep for in
+  // SPEC.md or in a client's own trace, and it cannot drift from what was
+  // actually asked (which a hand-written 'implementation' silently could).
+  LWhat := AMsg.Method;
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
@@ -1519,7 +1520,7 @@ begin
   for LScopeIdx := 0 to LModel.Scopes.Count - 1 do
     if LModel.Scopes[LScopeIdx].Kind = sckImplementation then
       AddScope(LScopeIdx);
-  Log(Format('documentSymbol: %s -> %d bytes of outline',
+  Log(Format(AMsg.Method + ': %s -> %d bytes of outline',
     [TPath.GetFileName(LPath), Length(LItems)]));
   Result := BuildResponse(AMsg.IdJson, '[' + LItems + ']');
 end;
@@ -1764,7 +1765,7 @@ begin
   if (LSym.TypeNode <> NIL_NODE) and
      FNav.ResolveDecl(LTMid, LSym.TypeNode, LTarget) then
   begin
-    Log(Format('typeDefinition: %s ''%s'' -> %s',
+    Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
@@ -1778,7 +1779,7 @@ begin
   if (LSym.Kind <> skType) and (LSym.TypeSym <> NIL_SYM) and
      FNav.DeclHit(LTMid, LSym.TypeSym, LHit) then
   begin
-    Log(Format('typeDefinition: %s ''%s'' -> %s via the resolved type symbol',
+    Log(Format(AMsg.Method + ': %s ''%s'' -> %s via the resolved type symbol',
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
@@ -1786,7 +1787,7 @@ begin
         LHit.HiTo - LHit.HiFrom)));
   end;
 
-  Log(Format('typeDefinition: %s no type declaration reachable for ''%s''',
+  Log(Format(AMsg.Method + ': %s no type declaration reachable for ''%s''',
     [PosTag(LPath, LPasLine, LPasCol), LName]));
   Result := BuildResponse(AMsg.IdJson, 'null');
 end;
@@ -1862,7 +1863,7 @@ begin
           LHits[LIdx].HiTo - LHits[LIdx].HiFrom)]));
     end;
     LSB.Append(']');
-    Log(Format('documentHighlight: %s ''%s'' -> %d in this file',
+    Log(Format(AMsg.Method + ': %s ''%s'' -> %d in this file',
       [PosTag(LPath, LPasLine, LPasCol), LName, LCount]));
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally

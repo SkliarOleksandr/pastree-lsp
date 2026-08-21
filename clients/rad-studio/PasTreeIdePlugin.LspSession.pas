@@ -96,6 +96,20 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 
 /// <summary>
+/// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
+/// (AToImpl) or from anywhere inside the body back to its header. AOnDone
+/// receives zero or one hit - zero is a legitimate answer, not a failure: a
+/// routine declared only once has no other half.
+///
+/// Deliberately NOT definition. Definition asks "where is this name declared"
+/// and follows a resolved reference across the closure; this asks about the
+/// routine the cursor is standing in and never leaves the unit, because the
+/// language puts the body there. Same distinction the server draws.
+/// </summary>
+procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
+  AToImpl: Boolean; const AOnDone: TLspHitsProc);
+
+/// <summary>
 /// Starts the server for the active project and lets its first analysis begin,
 /// without any question to answer. Called when a project group finishes opening
 /// and when the active project changes.
@@ -176,6 +190,9 @@ type
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingReferences: Int64;
+    // Both directions of the decl<->impl toggle share one slot: they are the
+    // same gesture, so a jump the other way supersedes an unanswered one.
+    FPendingToggle: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -191,6 +208,8 @@ type
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
       AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
+    procedure Toggle(const AFileName: string; ARow, ACol: Integer;
+      AToImpl: Boolean; const AOnDone: TLspHitsProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
@@ -760,14 +779,23 @@ begin
         eventually call PushHistoryAndNavigate. The editor would jump to the
         stale target and push a bogus Backward/Forward entry alongside the real
         one. }
+      // Dispatched by method rather than through the var parameter: an
+      // anonymous method cannot capture a var parameter, which is what a
+      // "clear whichever slot this was" closure would need.
       if AMethod = 'textDocument/definition' then
       begin
         if FPendingDefinition = LIssuedId then
           FPendingDefinition := 0;
       end
-      else
+      else if AMethod = 'textDocument/references' then
+      begin
         if FPendingReferences = LIssuedId then
           FPendingReferences := 0;
+      end
+      else
+        // implementation / declaration - the toggle, one slot for both.
+        if FPendingToggle = LIssuedId then
+          FPendingToggle := 0;
 
       if ASuccess then
         AOnDone(True, ParseHits(AResult), '')
@@ -814,6 +842,19 @@ procedure TLspSession.References(const AFileName: string; ARow, ACol: Integer;
 begin
   Ask('textDocument/references', AFileName, ARow, ACol, AIncludeDeclaration,
     FPendingReferences, AOnDone);
+end;
+
+procedure TLspSession.Toggle(const AFileName: string; ARow, ACol: Integer;
+  AToImpl: Boolean; const AOnDone: TLspHitsProc);
+const
+  // Two LSP methods, not one: the server answers "where is the other half of
+  // the routine I am standing in" in a specific direction. See its own
+  // HandleToggle - these are pure CST walks that never cross units, unlike
+  // definition, which follows a resolved reference anywhere in the closure.
+  cMethod: array[Boolean] of string =
+    ('textDocument/declaration', 'textDocument/implementation');
+begin
+  Ask(cMethod[AToImpl], AFileName, ARow, ACol, False, FPendingToggle, AOnDone);
 end;
 
 function TLspSession.TryGetSentText(const APath: string;
@@ -865,6 +906,17 @@ begin
     Exit;
   end;
   GSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+end;
+
+procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
+  AToImpl: Boolean; const AOnDone: TLspHitsProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.Toggle(AFileName, ARow, ACol, AToImpl, AOnDone);
 end;
 
 function LspSourceTextOf(const AFileName: string): string;

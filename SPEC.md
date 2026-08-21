@@ -191,7 +191,8 @@ order they were understood:
   and by way of the fix above. The gate correctly concludes "no edit, so no
   rebuild" — but the analysis then keeps its own ANSI reading of a file the
   editor has open, and no rebuild is ever due to correct it. The log said
-  `DemoUnicode.pas(31,31) no identifier at that position` for a column that was
+  `textDocument/definition: DemoUnicode.pas(31,31) no identifier at that
+  position` for a column that was
   right: 31 is where `Wrap` sits in UTF-16 code units, while the analysis, with
   13 Cyrillic characters inflated to 26, had it at 44.
 - *the fix, and why it is not here:* the server cannot paper over this — it

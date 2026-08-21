@@ -82,6 +82,17 @@ procedure FinalizeGotoDeclaration;
 /// </summary>
 procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
 
+/// <summary>
+/// The decl&lt;-&gt;impl toggle, bound to Ctrl+Shift+Down (AToImpl) and
+/// Ctrl+Shift+Up in PasTreeIdePlugin.Wizard - the two keys RAD Studio uses for
+/// its own version of this jump, taken over the same way the native "Find
+/// Declaration" menu item was.
+///
+/// Navigates through the same history-aware path as Ctrl+Click, so Alt+Left /
+/// Alt+Right work across these jumps too.
+/// </summary>
+procedure ExecuteToggle(const AView: IOTAEditView; AToImpl: Boolean);
+
 implementation
 
 uses
@@ -421,6 +432,62 @@ begin
     Exit;
   ResolveAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
     AView.Buffer.EditPosition.Column);
+end;
+
+{ The toggle, with ONE RETRY IN THE OPPOSITE DIRECTION.
+
+  The server answers a direction: implementation is header -> body, declaration
+  is body -> header, and each says "nothing here" for the other case. Bound
+  literally, Ctrl+Shift+Down would do nothing whenever the cursor is already in
+  a body - which is most of the time, and reads as a broken key rather than as a
+  direction that did not apply. So a null answer retries the other way, and both
+  keys behave as the toggle people expect from the IDE while still preferring
+  the direction that was actually pressed when both are possible.
+
+  The retry costs a second round trip only in the case that would otherwise have
+  done nothing at all, and the analysis is already built by then, so it is
+  answered from the same in-memory model. }
+procedure ToggleAndNavigate(const AFileName: string; ARow, ACol: Integer;
+  AToImpl, ARetried: Boolean);
+begin
+  try
+    LspToggle(AFileName, ARow, ACol, AToImpl,
+      // Same closure-per-call discipline as ResolveAndNavigate above: the
+      // "jumped from" position must be where the key was pressed, not wherever
+      // the cursor sits when the answer lands.
+      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
+        const AError: string)
+      begin
+        if not ASuccess then
+          LogDiagnostic('Toggle decl/impl: ' + AError)
+        else if Length(AHits) = 0 then
+        begin
+          if not ARetried then
+            ToggleAndNavigate(AFileName, ARow, ACol, not AToImpl, True)
+          else
+            // Both directions came back empty: the cursor is not inside a
+            // routine that has two halves. Logged, because "the key did
+            // nothing" needs a reason somewhere.
+            LogDiagnostic('Toggle decl/impl: no routine with a separate '
+              + 'declaration and body at cursor.');
+        end
+        else
+          PushHistoryAndNavigate(AFileName, ARow, ACol, AHits[0].FilePath,
+            AHits[0].Row, AHits[0].Col);
+      end);
+  except
+    on E: Exception do
+      LogDiagnostic(Format('Toggle decl/impl: unhandled %s: %s',
+        [E.ClassName, E.Message]));
+  end;
+end;
+
+procedure ExecuteToggle(const AView: IOTAEditView; AToImpl: Boolean);
+begin
+  if not Assigned(AView) then
+    Exit;
+  ToggleAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
+    AView.Buffer.EditPosition.Column, AToImpl, False);
 end;
 
 procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
