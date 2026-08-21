@@ -43,7 +43,12 @@ const
   /// an older PasTree reads a different string out of the same file and every
   /// position after a non-ASCII character on the line is off, silently. Exactly
   /// the "wrong answers instead of a compile error" case above.
-  cMinPasTreeVersion = '0.2.3';
+  ///
+  /// Raised to 0.4.3 on 2026-08-21: PasLsp.Completion now runs PasTree's
+  /// completion engine (PasTree.Sema.Complete, the bridged overlay pipeline),
+  /// which stabilized at that version. An older sibling fails to compile
+  /// anyway (the unit did not exist); the gate makes the requirement explicit.
+  cMinPasTreeVersion = '0.4.3';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

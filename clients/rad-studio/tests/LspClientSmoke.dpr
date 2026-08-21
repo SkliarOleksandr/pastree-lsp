@@ -543,56 +543,66 @@ begin
   SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
 end;
 
-{ 5b. Completion: the interim keyword provider proves the plumbing.
+{ 5b. Completion: PasTree's engine over the live overlay, bridged.
 
-  What is pinned here is the CONTRACT, not the vocabulary (COMPLETION.md): the
-  request answers without waiting for any analysis, items are filtered by the
-  typed prefix, every item carries a textEdit whose range is exactly the
-  partially-typed token, and that range survives the UTF-16 column conversion
-  on a line with a Cyrillic literal - the same line the definition columns are
-  pinned on. When PasTree replaces the keyword provider, every check but the
-  literal 'begin'/'try' labels must keep passing unchanged. }
-procedure TestCompletionKeywords;
+  What is pinned here is the CONTRACT (COMPLETION.md): the request answers
+  without waiting for any analysis; a mid-word invocation's textEdit range
+  covers the WHOLE word (the clangd behavior - the client filters by the
+  typed prefix, the server does not); scope symbols prove the real engine
+  answers (a keyword list knows no parameters); a comment interior refuses;
+  and the replace span survives the UTF-16 column conversion on a line with
+  a Cyrillic literal - the same line the definition columns are pinned on. }
+procedure TestCompletion;
 var
   LUnitFile, LUniFile, LPatched: string;
   LLine, LChar: Integer;
 begin
   Writeln;
-  Writeln('=== 5b. completion answers keywords with a real replace span ===');
+  Writeln('=== 5b. completion: the PasTree engine over the overlay ===');
   LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
   LUniFile := TPath.Combine(GFixtureDir, 'DemoUnicode.pas');
 
-  // Cursor after 'beg' of Greet's 'begin': prefix filtering plus the span.
+  // Cursor after 'beg' of Greet's 'begin' - a prefix inside a keyword.
   FindPos(LUnitFile, 'begin', 'begin', LLine, LChar);
   Check(Ask('textDocument/completion',
     PositionParams(LUnitFile, LLine, LChar + 3)),
     'completion answered');
   Check(GOk and GResultJson.Contains('"label":"begin"'),
-    'prefix ''beg'' offers begin');
-  Check(GOk and not GResultJson.Contains('"label":"until"'),
-    'and does not offer keywords outside the prefix');
+    'the statement keyword is offered');
+  Check(GOk and GResultJson.Contains('"label":"AName"'),
+    'the enclosing routine''s parameter is offered - the real engine, '
+    + 'not a word list');
   Check(GOk and GResultJson.Contains(
     Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
-    'the textEdit range starts where the token starts');
+    'the textEdit range starts where the word starts');
   Check(GOk and GResultJson.Contains(
-    Format('"end":{"line":%d,"character":%d}', [LLine, LChar + 3])),
-    'and ends at the cursor');
+    Format('"end":{"line":%d,"character":%d}', [LLine, LChar + 5])),
+    'and covers the whole word, not just the typed prefix');
+
+  // A comment interior is a refusal, not a keyword dump.
+  FindPos(LUnitFile, 'Fixture for tests', 'Fixture', LLine, LChar);
+  Check(Ask('textDocument/completion',
+    PositionParams(LUnitFile, LLine, LChar + 3)),
+    'completion answered inside a comment');
+  Check(GOk and GResultJson.Contains('"items":[]'),
+    'and honestly offered nothing there');
 
   // The same span discipline past a Cyrillic literal: append a token to the
   // Shout line IN THE OVERLAY ONLY and complete right after it. A byte-counting
   // bug anywhere in the chain would misplace the range by the literal's extra
   // UTF-8 bytes.
   LPatched := TFile.ReadAllText(LUniFile)
-    .Replace('Wrap(AText);', 'Wrap(AText); { tr }');
-  Check(LPatched.Contains('{ tr }'), 'fixture patch applied in memory');
+    .Replace('Wrap(AText);', 'Wrap(AText); tr');
+  Check(LPatched.Contains('; tr'), 'fixture patch applied in memory');
   SendDidChange(LUniFile, LPatched);
   try
-    FindPosInText(LPatched, '{ tr }', 'tr }', LLine, LChar);
+    FindPosInText(LPatched, 'Wrap(AText); tr', '; tr', LLine, LChar);
+    Inc(LChar, 2);   // the 'tr' after '; '
     Check(Ask('textDocument/completion',
       PositionParams(LUniFile, LLine, LChar + 2)),
       'completion answered on the Cyrillic line');
     Check(GOk and GResultJson.Contains('"label":"try"'),
-      'prefix ''tr'' offers try');
+      'prefix ''tr'' has try among the statement keywords');
     Check(GOk and GResultJson.Contains(
       Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
       'the replace span lands on ''tr'' despite the Cyrillic literal');
@@ -809,7 +819,7 @@ begin
       TestNonAsciiPositions;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
-      TestCompletionKeywords;
+      TestCompletion;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

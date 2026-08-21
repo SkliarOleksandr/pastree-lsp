@@ -35,15 +35,23 @@ the partially-typed token the item replaces. LSP clients edit by `textEdit`
 range, and a provider that only returns names forces every client to re-derive
 tokenization; the provider computed it anyway.
 
-Until the API lands, the unit ships the **interim keyword provider**, on by
-default (decided 2026-08-21, revising this plan's earlier stub-by-default: the
-mechanism has to be SEEN working end-to-end — wire format, spans, viewer —
-and an answer that is always empty proves nothing to a person). It returns
-Delphi's reserved words filtered by the identifier prefix left of the cursor,
-and it is deliberately word-list-dumb — it reads nothing but the request
-line, so nobody can mistake it for scope-aware completion — while getting the
-one contractual thing right: the replace span is the real typed token, so the
-`textEdit` machinery is exercised for real, Cyrillic columns and all.
+**The engine is wired (2026-08-21).** The seam now runs
+`PasTree.Sema.Complete` — per request: preprocess+parse the live overlay
+text into a fresh model (so "as analyzed" and "as typed" are the same text),
+then `TPasCompletion` BRIDGED to the last completed closure analysis, where
+every name leaving the overlay (inherited members, used units' types)
+resolves through the project. No analysis yet degrades to standalone mode:
+locals, own-unit names and keywords still answer. The replace span comes
+from the engine's caret primitive (mid-word invocation spans the whole word,
+the clangd behavior; the server never filters by prefix — clients do).
+Buckets map to `sortText` (`00`–`09` + lowercased name), so precedence-aware
+clients sort by resolution precedence. `cMinPasTreeVersion` is pinned at the
+engine's stabilization version.
+
+The interim keyword provider this plan shipped first (revising its own
+stub-by-default: a mechanism has to be SEEN working) served its purpose —
+every wiring fix from the wire format to the RAD viewer's columns landed
+against it — and was deleted the day the engine arrived.
 
 ## Server (phase A — done 2026-08-21, on the keyword provider)
 

@@ -75,6 +75,9 @@ type
     // TPasAsyncSession's double-buffering contract).
     FProject: TPasSemaProject;      // last COMPLETED analysis (may be nil)
     FNav: TPasNavigator;
+    // The completion seam's engine (PasLsp.Completion) - configuration-
+    // derived, so created lazily once and kept for the session.
+    FCompletion: TLspCompletionEngine;
     FSession: TPasAsyncSession;     // in-flight analysis, nil when idle
     FDirty: Boolean;                // docs changed since FSession started
     FCancels: TLspCancelSet;        // shared with the reader thread
@@ -182,6 +185,7 @@ destructor TLspServer.Destroy;
 begin
   if FClientHandle <> 0 then
     CloseHandle(FClientHandle);
+  FCompletion.Free;
   InvalidateAnalysis;
   FOutgoing.Free;
   FDocs.Free;
@@ -1208,22 +1212,23 @@ begin
       Length(LTarget.Name)));
 end;
 
-{ textDocument/completion — the plumbing half of COMPLETION.md; the answers
-  come from PasLsp.Completion (today: the interim keyword provider, later:
-  PasTree through the same seam).
+{ textDocument/completion — the answers come from PasLsp.Completion, which
+  runs PasTree's completion engine over a fresh single-file parse of the live
+  overlay text, BRIDGED to the last completed analysis when this file is in
+  its closure (see that unit's header for the pipeline).
 
   THE ONE DELIBERATE DIFFERENCE from every other request handler: NO
   WaitAnalyzed. That helper flushes the pending rebuild and blocks until the
   whole closure is analyzed — right for a click on stable code, wrong per
   keystroke (a full rebuild is ~15 s on the reference project). Completion
   answers from what exists RIGHT NOW: the live overlay text always (that is
-  what the user is typing into), the analysis snapshot only if one happens to
-  be ready — and the keyword provider needs no snapshot at all. It does not
-  schedule a rebuild either; didChange already did. }
+  what the user is typing into), bridged to whatever analysis snapshot is
+  ready — or standalone (locals, own-unit names, keywords) when none is. It
+  does not schedule a rebuild either; didChange already did. }
 function TLspServer.HandleCompletion(const AMsg: TLspIncoming): string;
 var
   LPath, LText: string;
-  LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
+  LLine, LChar, LPasLine, LPasCol, LIdx, LMid: Integer;
   LDoc: TLspDocument;
   LAnswer: TLspCompletionAnswer;
   LStart: UInt64;
@@ -1252,7 +1257,23 @@ begin
     LAnswer.Provider := 'no text';
   end
   else
-    LAnswer := CompleteAt(LText, LPasLine, LPasCol);
+  begin
+    if FCompletion = nil then
+      FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+        FDefines);
+    // Bridge only when the last-good analysis actually holds this file;
+    // otherwise standalone — a half-bridge (project without a model id)
+    // has nothing to anchor cross-unit answers to.
+    LMid := -1;
+    if FNav <> nil then
+      LMid := FNav.ModelIdOf(LPath);
+    if (FProject <> nil) and (LMid >= 0) then
+      LAnswer := FCompletion.CompleteAt(LPath, LText, LPasLine, LPasCol,
+        FProject, LMid)
+    else
+      LAnswer := FCompletion.CompleteAt(LPath, LText, LPasLine, LPasCol,
+        nil, -1);
+  end;
 
   LSB := TStringBuilder.Create;
   try
@@ -1264,10 +1285,11 @@ begin
       // provider's to declare, and it survives a cursor that moved while the
       // answer was in flight (COMPLETION.md).
       LSB.Append(Format(
-        '{"label":%s,"kind":%d,"detail":%s,'
+        '{"label":%s,"kind":%d,"detail":%s,"sortText":%s,'
         + '"textEdit":{"range":%s,"newText":%s}}',
         [JsonQuote(LAnswer.Items[LIdx].ItemLabel), LAnswer.Items[LIdx].Kind,
          JsonQuote(LAnswer.Items[LIdx].Detail),
+         JsonQuote(LAnswer.Items[LIdx].SortText),
          RangeJson(LPasLine, LAnswer.ReplaceColFrom,
            LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom),
          JsonQuote(LAnswer.Items[LIdx].ItemLabel)]));
