@@ -159,6 +159,33 @@ Per the decision recorded in clients/rad-studio/SPEC.md: the mouse-notifier Ctrl
 underline from our resolver, and the one-way-door caveat retires with the code
 that carried it.
 
+## Deferred polish (TODO)
+
+**Rich row coloring in the RAD viewer** (noted 2026-08-21, first big-project
+run: the list works but reads flat next to the native one, which colors the
+signature's type names). The chain, in dependency order:
+
+1. **PasTree**: completion items need signature data — parameter list and
+   result type for routines, the declared type for vars/fields/properties.
+   The model holds it; the engine just does not emit it yet. (PasTree-side
+   work, coordinate with that repo's plan.)
+2. **Server**: put the signature in the item verbatim — `detail` (and LSP
+   `labelDetails.detail`) for VS Code, and it rides the same field to the
+   plugin's `TLspCompletionItem.Detail`.
+3. **Plugin**: feed the signature to `SymbolTypeText` (the glued-after-name
+   slot IS where the native viewer shows it — layout comes free), then bring
+   back `INTACustomDrawCodeInsightViewer.DrawLine` — this time not for
+   layout but for COLOR: draw the name bold as stock does, then lex the
+   signature client-side (identifier/symbol/keyword char classes are enough)
+   and paint type names with the editor's own theme-aware palette
+   (`INTACodeEditorOptions.FontColor[]`, `INTAIDEUIServices.ThemeAwareColors`
+   — clients/rad-studio/SPEC.md lists both). The earlier custom-draw attempt
+   was backed out because it fought the stock LAYOUT; coloring on top of the
+   stock layout is the right use of that interface.
+
+Not before the signature data exists — coloring an empty string is step 3 of
+a 3-step chain.
+
 ## Deliberately not in this plan
 
 - **`completionItem/resolve`** — until the provider defers documentation
