@@ -293,8 +293,8 @@ begin
   // nothing on its own.
   InitializeLspSession;
   InitializeGotoDeclaration;
-  // No-op unless PASTREE_CODEINSIGHT=1 - the gated Code Insight manager
-  // skeleton (COMPLETION.md phase B.2).
+  // Registers the Code Insight manager (COMPLETION.md phase B.2); inert
+  // until the user selects "PasTree" as the Insight Provider in Options.
   InitializeCodeInsight;
 
   FNotifierIndex := -1;

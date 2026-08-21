@@ -7,14 +7,14 @@ unit PasTreeIdePlugin.CodeInsight;
   override and the editor-menu takeover get deleted, because the IDE calls
   the manager for both.
 
-  GATED: InitializeCodeInsight registers nothing unless the environment
-  variable PASTREE_CODEINSIGHT=1 is set. Two reasons, both from SPEC.md's
-  wrapper-rejection note: the manager-selection order between two managers
-  claiming '.pas' is undocumented, and a half-implemented manager visible in
-  Tools > Options > Editor > Source > Insight Provider is an invitation to
-  select a regression. Registration alone takes nothing over even when gated
-  on - the user must still pick the provider in Options - but the gate keeps
-  the choice out of sight until it would be an upgrade.
+  ALWAYS REGISTERED (2026-08-21, revising COMPLETION.md's original
+  environment-variable gate at the user's call: an uninstall is recovery
+  enough for a dev-stage plugin, and the gate was one more thing to explain).
+  The real safety is the IDE's own: registration alone takes nothing over -
+  the manager only ANSWERS once the user selects "PasTree" under
+  Tools > Options > Editor > Source > Insight Provider, and switching back
+  is the same combobox. The registration is logged to the Build tab with
+  that instruction, since selecting the provider is the step people miss.
 
   WHAT IT ANSWERS TODAY, honestly and nothing more:
     - Code completion  -> textDocument/completion via LspCompletion (the
@@ -692,8 +692,6 @@ procedure InitializeCodeInsight;
 var
   LServices: IOTACodeInsightServices;
 begin
-  if GetEnvironmentVariable('PASTREE_CODEINSIGHT') <> '1' then
-    Exit;
   if Assigned(GManager) then
     Exit;
   if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
@@ -701,11 +699,10 @@ begin
   GManager := TPasCodeInsightManager.Create;
   GManagerIndex := LServices.AddCodeInsightManager(GManager);
   GAlive := True;
-  // Loud on purpose: the gate means whoever sees this line asked for it, and
-  // the next step (picking the provider in Options) is easy to forget.
-  LogDiagnostic('Code Insight manager registered (PASTREE_CODEINSIGHT=1). '
-    + 'Select "PasTree" under Tools > Options > Editor > Source > '
-    + 'Insight Provider to use it.');
+  // Loud on purpose: registering changes nothing by itself, and picking the
+  // provider in Options is exactly the step people miss.
+  LogDiagnostic('Code Insight manager registered. Select "PasTree" under '
+    + 'Tools > Options > Editor > Source > Insight Provider to use it.');
 end;
 
 procedure FinalizeCodeInsight;

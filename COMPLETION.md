@@ -114,21 +114,20 @@ one contractual thing right: the replace span is the real typed token, so the
    - Everything the server cannot answer yet — parameter insight, hint text —
      declines honestly (`AllowCodeInsight` says no for those invocations), so
      the IDE shows nothing rather than something wrong.
-3. **Gated registration.** `AddCodeInsightManager` runs only when opted in
-   (environment variable `PASTREE_CODEINSIGHT=1` for bring-up). Two reasons:
-   the manager-selection order between two `HandlesFile('.pas')` claimants is
-   undocumented (the wrapper-rejection note in clients/rad-studio/SPEC.md),
-   and a half-implemented manager visible in Tools > Options is an invitation
-   to select a regression. The user additionally has to pick the provider in
-   Options — registration alone takes nothing over.
+3. **Registration** — always on (revised 2026-08-21 at the user's call; the
+   plan originally gated it behind `PASTREE_CODEINSIGHT=1`, and the gate was
+   judged more ceremony than safety for a dev-stage plugin whose recovery
+   path is uninstalling it). The IDE's own selection step is the real gate:
+   registration alone takes nothing over — the manager only answers once the
+   user picks "PasTree" under Tools > Options > Editor > Source > Insight
+   Provider, and the same combobox switches back.
 4. **Teardown**, per the standing rule: `RemoveCodeInsightManager` before the
    BPL unloads, ordered with the other unregistrations in
    `TIDEWizard.Destroy`.
 
 ## Phase C — the switch (after PasTree lands and quality clears the bar)
 
-Per the decision recorded in clients/rad-studio/SPEC.md: registration stops
-being gated, and the mouse-notifier Ctrl+Click override plus the
+Per the decision recorded in clients/rad-studio/SPEC.md: the mouse-notifier Ctrl+Click override plus the
 `cEdMenuCatIdentifier` menu takeover are **deleted** — the manager's
 `GotoDefinition` becomes the one navigation path, the IDE draws the Ctrl+hover
 underline from our resolver, and the one-way-door caveat retires with the code
