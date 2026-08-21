@@ -256,7 +256,9 @@ The costs are real and should be stated before anyone commits:
   gives a column.
 
 **DECIDED 2026-08-21: sit beside it for now, and becoming the manager IS the
-destination.** Not "revisit someday" — the manager route is the committed
+destination.** The concrete build plan — server plumbing, the
+`PasTreeIdePlugin.CodeInsight` manager skeleton, gated registration, and the
+final switch — is [COMPLETION.md](../../COMPLETION.md) at the repository root. Not "revisit someday" — the manager route is the committed
 endgame, deferred only until the server answers enough of the interface to
 replace what a user would lose by switching. The gate is **completion** (a
 tier-3 item on the server side, blocked on position-in-invalid-text): a manager

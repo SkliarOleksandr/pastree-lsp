@@ -294,7 +294,9 @@ All four shipped. Two notes worth keeping:
   clause. The scopes and member scopes are all there; what is missing is a
   scope lookup AT A POSITION in text that usually does NOT parse — a buffer
   mid-typing is invalid by definition, and that is a different requirement
-  from anything the analyzer does today.
+  from anything the analyzer does today. **The server/plugin half is planned
+  in [COMPLETION.md](COMPLETION.md)** — built against a seam so the PasTree
+  API (planned in that repository) drops into one unit when it lands.
 - **`textDocument/semanticTokens/full|range|full/delta`.** Semantic
   highlighting is a strong fit — the model knows what every identifier
   resolved to, and the demo's own PasTree highlighter is the precedent — but
