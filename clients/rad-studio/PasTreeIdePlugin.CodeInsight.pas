@@ -40,11 +40,15 @@ unit PasTreeIdePlugin.CodeInsight;
   instead of the async path, that finding goes here and the answer is a
   cached-list fallback, not blocking the main thread.
 
-  COORDINATES, unverified until the first gated bring-up: AsyncInvoke* hand
-  over (ALine, ACharIndex) with no documentation of base. This unit assumes
-  the TOTACharPos convention - 1-based line, 0-based char index - matching
-  AsyncGotoDefinitionEx's reply, whose CharIndex plainly is one. If completion
-  lands one column off in the bring-up, this assumption is the first suspect.
+  COORDINATES: AsyncInvoke* hand over (ALine, ACharIndex) with no
+  documentation of base, and the first live bring-up (2026-08-21) proved the
+  guessed convention wrong - the parameters did not point at the text under
+  the caret, so the server saw an empty prefix. Completion now reads the
+  CARET (EditPosition.Row/Column, IDE convention by definition) and logs the
+  raw parameters alongside; once a few logged pairs pin the convention down,
+  the note here gets replaced with the answer. Goto-definition still trusts
+  the parameters (a browse can be invoked at a click point, not the caret) -
+  if it lands off by one, the same logs are the evidence.
 }
 
 interface
@@ -283,7 +287,7 @@ type
     // (LspSession cancels the LSP request, this id gate drops the callback).
     FNextId: Integer;
     FActiveId: Integer;
-    function CurrentFileName: string;
+    function CurrentView: IOTAEditView;
   public
     constructor Create;
     { IOTACodeInsightManager100 }
@@ -349,18 +353,13 @@ begin
   FEnabled := True;
 end;
 
-function TPasCodeInsightManager.CurrentFileName: string;
+function TPasCodeInsightManager.CurrentView: IOTAEditView;
 var
   LServices: IOTACodeInsightServices;
-  LView: IOTAEditView;
 begin
-  Result := '';
+  Result := nil;
   if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
-  begin
-    LServices.GetEditView(LView);
-    if Assigned(LView) then
-      Result := LView.Buffer.FileName;
-  end;
+    LServices.GetEditView(Result);
 end;
 
 function TPasCodeInsightManager.GetName: string;
@@ -423,6 +422,14 @@ procedure TPasCodeInsightManager.GetSymbolList(
   out SymbolList: IOTACodeInsightSymbolList);
 begin
   SymbolList := FSymbols;
+  // Bring-up diagnostics: this pull is the step between our callback and a
+  // visible viewer, so its presence/absence in the Build tab is the divide
+  // between "IDE ignored the answer" and "the viewer got an empty list".
+  if Assigned(FSymbols) then
+    LogDiagnostic(Format('GetSymbolList pulled: %d items visible',
+      [FSymbols.Count]))
+  else
+    LogDiagnostic('GetSymbolList pulled: no list (no answer yet)');
 end;
 
 procedure TPasCodeInsightManager.OnEditorKey(Key: Char;
@@ -528,6 +535,7 @@ var
   LViewer: IOTACodeInsightViewer;
 begin
   DisplayParams := False;
+  LogDiagnostic(Format('Done: accepted=%s', [BoolToStr(Accepted, True)]));
   if not Accepted then
     Exit;
   // Insertion is the manager's job (the interface comment says so): take the
@@ -571,18 +579,31 @@ function TPasCodeInsightManager.AsyncInvokeCodeCompletion(
   AHowInvoked: TOTAInvokeType; var AStr: string; ALine, ACharIndex: Integer;
   ACallback: TOTACodeCompleteCallBack): Integer;
 var
-  LId: Integer;
+  LId, LRow, LCol: Integer;
+  LView: IOTAEditView;
   LFileName: string;
 begin
-  LFileName := CurrentFileName;
-  if LFileName = '' then
+  LView := CurrentView;
+  if not Assigned(LView) then
     Exit(-1);
+  LFileName := LView.Buffer.FileName;
+  // THE POSITION COMES FROM THE CARET, NOT FROM THE PARAMETERS. The first
+  // live bring-up (2026-08-21) showed why: with the caret after `beg` the
+  // parameters carried a position whose text was NOT `beg` - the server saw
+  // an empty prefix and answered all 64 keywords - and the parameters' base
+  // (0- or 1-based line, char index vs column) is documented nowhere.
+  // Completion is only ever invoked at the caret, and the caret's own
+  // coordinates are already in IDE convention, so use those and log the raw
+  // parameters alongside until the convention is understood.
+  LRow := LView.Buffer.EditPosition.Row;
+  LCol := LView.Buffer.EditPosition.Column;
   Inc(FNextId);
   LId := FNextId;
   FActiveId := LId;
-  // Coordinate assumption documented in the unit header: 1-based line,
-  // 0-based char index (TOTACharPos convention).
-  LspCompletion(LFileName, ALine, ACharIndex + 1,
+  LogDiagnostic(Format(
+    'completion invoke #%d: caret (%d,%d), raw params (%d,%d), seed "%s"',
+    [LId, LRow, LCol, ALine, ACharIndex, AStr]));
+  LspCompletion(LFileName, LRow, LCol,
     procedure(ASuccess: Boolean; const AItems: TArray<TLspCompletionItem>;
       const AError: string)
     begin
@@ -591,14 +612,21 @@ begin
       // A superseded or cancelled invocation must not call back: the IDE has
       // already moved on, and LspSession has already cancelled the request.
       if FActiveId <> LId then
+      begin
+        LogDiagnostic(Format('completion answer #%d dropped (superseded)',
+          [LId]));
         Exit;
+      end;
       FActiveId := 0;
       if ASuccess then
         FSymbols := TPasSymbolList.Create(AItems)
       else
         FSymbols := nil;
+      LogDiagnostic(Format('completion answer #%d: success=%s, %d items - '
+        + 'calling the IDE back', [LId, BoolToStr(ASuccess, True),
+        Length(AItems)]));
       if Assigned(ACallback) then
-        ACallback(nil, LId, not ASuccess, AError);
+        ACallback(Self, LId, not ASuccess, AError);
     end);
   Result := LId;
 end;
@@ -630,9 +658,9 @@ begin
       if not Assigned(ACallBack) then
         Exit;
       if ASuccess and (Length(AHits) > 0) then
-        ACallBack(nil, LId, AHits[0].FilePath, AHits[0].Row, False, '')
+        ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row, False, '')
       else
-        ACallBack(nil, LId, '', 0, True, AError);
+        ACallBack(Self, LId, '', 0, True, AError);
     end);
   Result := LId;
 end;
@@ -652,10 +680,10 @@ begin
         Exit;
       if ASuccess and (Length(AHits) > 0) then
         // Col back to the 0-based char index the callback expects.
-        ACallBack(nil, LId, AHits[0].FilePath, AHits[0].Row,
+        ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row,
           AHits[0].Col - 1, False, '')
       else
-        ACallBack(nil, LId, '', 0, 0, True, AError);
+        ACallBack(Self, LId, '', 0, 0, True, AError);
     end);
   Result := LId;
 end;
