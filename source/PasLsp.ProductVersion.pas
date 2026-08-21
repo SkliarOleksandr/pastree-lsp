@@ -20,12 +20,17 @@
   entire reason the analysis moved out of process). Anything this unit `uses`
   must therefore be available in a plain Win32 designtime BPL.
 
-    DO NOT ADD A `uses` CLAUSE BEYOND System.SysUtils / System.IOUtils.
+    RTL AND Winapi ONLY - System.SysUtils, System.IOUtils, Winapi.Windows.
+    NEVER A UNIT FROM THIS PRODUCT, AND ABOVE ALL NEVER PasTree.
 
-  Adding PasTree.Version here - which looks harmless, since the version is
-  "just a string" - would break the package build. What belongs with PasTree
-  lives in PasLsp.Version instead (cMinPasTreeVersion, the startup check, the
-  banner), which only the server compiles.
+  Winapi.Windows is here for one call, GetModuleFileName in ThisBinaryPath, and
+  is as available in a designtime BPL as SysUtils is. The line that must not be
+  crossed is a PROJECT dependency: adding PasTree.Version - which looks harmless,
+  since the version is "just a string" - would break the package build outright.
+  What belongs with PasTree lives in PasLsp.Version instead (cMinPasTreeVersion,
+  the startup check, the banner), which only the server compiles.
+  tests/VersionSmoke is the tripwire either way: it links this unit into a Win32
+  program, so it stops compiling the moment that line is crossed.
 
   VERSIONING POLICY: patch in every commit, minor for a substantial change. See
   SPEC.md. PasTree keeps its own independent version - it is a general-purpose
@@ -47,7 +52,7 @@ const
   /// Bump the MINOR for a substantial change; that component keeps its ordinary
   /// semver meaning.
   /// </summary>
-  PasTreeLspVersion = '0.6.1';
+  PasTreeLspVersion = '0.6.2';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than
@@ -77,11 +82,25 @@ function CompareVersions(const A, B: string): Integer;
 /// </summary>
 function BinaryBuiltOn(const APath: string): string;
 
+/// <summary>
+/// The full path of the binary THIS CODE IS LINKED INTO - the .bpl inside the
+/// designtime package, the .exe inside the server - which is what makes it the
+/// right argument for BinaryBuiltOn above. HInstance in a package is the package
+/// module rather than the host's exe, which is the whole reason this works from
+/// inside a BPL loaded by RAD Studio.
+///
+/// Here rather than in the package because both halves ask the same question,
+/// and it had already been written twice by the time anyone noticed. Empty
+/// string if the OS declines to answer.
+/// </summary>
+function ThisBinaryPath: string;
+
 implementation
 
 uses
   System.SysUtils,
-  System.IOUtils;
+  System.IOUtils,
+  Winapi.Windows;   // GetModuleFileName only - see ThisBinaryPath
 
 function CompareVersions(const A, B: string): Integer;
 
@@ -135,6 +154,17 @@ begin
   except
     Result := '';   // a build stamp is never worth an exception
   end;
+end;
+
+function ThisBinaryPath: string;
+var
+  LBuffer: array[0..MAX_PATH] of Char;
+  LLen: DWORD;
+begin
+  LLen := GetModuleFileName(HInstance, @LBuffer[0], Length(LBuffer));
+  if LLen = 0 then
+    Exit('');
+  Result := string(LBuffer);
 end;
 
 end.

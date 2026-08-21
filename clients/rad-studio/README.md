@@ -42,11 +42,19 @@ The analysis itself lives in `pastree-server.exe`; **both features run through
 it**. See "Architecture" below.
 
 A RAD Studio IDE package that surfaces PasTree's analysis inside the Delphi
-editor itself. Two features so far: **Find References** (the feature
-already available in `object-pascal-tree`'s `demo/`) and **Go to
-Declaration**, replacing RAD
-Studio's own DelphiLSP-based navigation (reported to work poorly on large
-projects) - both the native menu item and Ctrl+Click.
+editor itself. Three features so far:
+
+- **Find References** (the feature already available in
+  `object-pascal-tree`'s `demo/`);
+- **Go to Declaration**, replacing RAD Studio's own DelphiLSP-based navigation
+  (reported to work poorly on large projects) - both the native menu item and
+  Ctrl+Click;
+- **the decl↔impl jump** on Ctrl+Shift+Up/Down, the IDE's own keys for it,
+  taken over the same way.
+
+The analysis starts when a project finishes opening rather than on the first
+navigation, so the closure is usually already built by the time anyone asks it
+anything.
 
 ## Status: working over LSP, confirmed in the IDE
 
@@ -336,13 +344,24 @@ commit, minor for a substantial change - `SPEC.md` has the policy and the
 reasoning. PasTree versions itself separately, and is the one dependency the
 product states a minimum against.
 
-Both halves announce themselves in the Build tab, so a bug report names the pair
-that was running:
+One line per session in the Build tab, naming the server, the PasTree it was
+built against, and the project it was started for:
 
 ```
-[pastree-lsp] package 0.5.0, built 2026-08-20 13:15
-[pastree-lsp] server ready: pastree-lsp-server 0.5.0 (PasTree 0.2.1)
+[pastree-lsp] server ready: pastree-lsp-server 0.6.2 (PasTree 0.2.4) for AVImark.dproj
 ```
+
+The project name is there because there is **one server per project
+configuration** and the restart on a project switch is otherwise silent - a line
+that did not say which project would leave the reader guessing which server they
+are looking at. By name only; the full path is already in the configuration
+block at the top of the server's own log.
+
+The package used to announce itself with its own version and build stamp on
+every load. That line is gone: it was paid for on every IDE start to answer a
+question nobody has except in the minutes after a rebuild, and the version
+check below already catches the case that matters. Its build stamp now rides
+along with the mismatch warning, which is the moment it is actionable.
 
 **Unequal versions mean a stale binary, not an incompatibility** - both are
 built from one commit, so the client compares the server's reported version with
@@ -405,9 +424,11 @@ log anything leaves its last words.
   Uninstall step. This has cost real debugging time more than once, and the
   symptom is misleading: a change that appears not to work, or an access
   violation in unrelated IDE code, because the previously loaded BPL is
-  still live. The build stamp in the Build tab exists partly to make this
-  answerable - if it does not name the build you just made, the IDE is
-  running the old package.
+  still live. What makes this answerable is the version mismatch warning: a
+  fresh server against a stale package is exactly what `build.bat` plus a
+  not-restarted IDE produces, and the warning names the package's build stamp,
+  so a stamp older than the build you just ran says the stale half is the BPL
+  and only an IDE restart will fix it.
 
 ## Files
 

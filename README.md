@@ -58,7 +58,7 @@ Phases 1 and 2 are complete and exercised live.
 | `textDocument/didOpen` / `didChange` / `didClose` | incremental sync; open documents become versioned overlay buffers, and the disk file is never read for them |
 | `textDocument/definition` | where the name under the cursor is declared |
 | `textDocument/references` | the three-identity model: symbol / unit / compiler builtin |
-| `textDocument/implementation`, `textDocument/declaration` | the Pascal decl-impl toggle |
+| `textDocument/implementation`, `textDocument/declaration` | the Pascal decl-impl toggle; the RAD Studio client binds it to Ctrl+Shift+Up/Down |
 | `textDocument/documentSymbol` | the unit outline, types with their members |
 | `textDocument/hover` | the declaration under the cursor |
 | `textDocument/publishDiagnostics` | for open documents, after each analysis |
@@ -107,7 +107,7 @@ producing quietly wrong answers).
 pastree-server --version          -> pastree-lsp-server 0.5.0 (PasTree 0.2.1, built 2026-08-20 13:15)
 initialize response, serverInfo   -> {"name":"pastree-lsp-server","version":"0.5.0","pastreeVersion":"0.2.1"}
 first line of the log             -> the --version banner
-IDE Build tab                     -> package 0.5.0, built ... / server ready: pastree-lsp-server 0.5.0 (PasTree 0.2.1)
+IDE Build tab                     -> server ready: pastree-lsp-server 0.5.0 (PasTree 0.2.1) for MyApp.dproj
 ```
 
 Both numbers are reported everywhere on purpose: "the server is 0.5.0" does not

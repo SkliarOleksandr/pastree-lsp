@@ -697,7 +697,7 @@ procedure TLspClient.OnInitializeAnswered(ASuccess: Boolean;
   AResult: TJSONValue; const AError: string);
 var
   LInfo: TJSONObject;
-  LReady: string;
+  LReady, LBuilt: string;
 begin
   if not ASuccess then
   begin
@@ -741,6 +741,13 @@ begin
   LReady := 'server ready';
   if FServerInfo <> '' then
     LReady := LReady + ': ' + FServerInfo;
+  // Which project this server is FOR, by name only - one server per project
+  // configuration, so a line that does not say which one leaves the reader
+  // guessing after a project switch (the restart is silent by design). The path
+  // is deliberately dropped: it is already in the configuration block at the
+  // top of the server's own log, and this panel is narrow.
+  if FOptions.ProjectFile <> '' then
+    LReady := LReady + ' for ' + ExtractFileName(FOptions.ProjectFile);
   Log(LReady);
 
   { THE STALE-DEPLOYMENT CHECK, at the only moment it can run.
@@ -763,10 +770,21 @@ begin
     the confusion this diagnostic work exists to remove. An empty version means
     a server too old to report one, which is also a mismatch by definition. }
   if FServerVersion <> PasTreeLspVersion then
-    Log(Format('WARNING: this package is %s but the server reports "%s" - one '
-      + 'of the two binaries is a stale build, so behaviour will not match '
+  begin
+    // The package's own build time goes here rather than in an unconditional
+    // startup line: this is the one moment it answers something. "The IDE is
+    // still running the BPL from before the rebuild" and "the exe was not
+    // rebuilt" produce the same warning, and the stamp is what tells them
+    // apart - if it predates the build you just ran, the stale half is the
+    // package, and only restarting the IDE will fix it.
+    LBuilt := BinaryBuiltOn(ThisBinaryPath);
+    if LBuilt <> '' then
+      LBuilt := ' (built ' + LBuilt + ')';
+    Log(Format('WARNING: this package is %s%s but the server reports "%s" - '
+      + 'one of the two binaries is a stale build, so behaviour will not match '
       + 'either version. Rebuild both (build.bat) and restart the IDE.',
-      [PasTreeLspVersion, FServerVersion]));
+      [PasTreeLspVersion, LBuilt, FServerVersion]));
+  end;
 
   // Before the queued requests: a restarted server knows nothing about the
   // documents the editor has open, and answering a queued request against

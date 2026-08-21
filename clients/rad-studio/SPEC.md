@@ -192,10 +192,14 @@ wrong for anything continuous, and these are the surfaces that fix it.
 - **`IOTAProjectNotifier`** — `3928`: `ModuleAdded`, `ModuleRemoved`,
   `ModuleRenamed`. Feeds `workspace/didChangeWatchedFiles` precisely instead of
   the server guessing from a file watcher.
-- **`IOTAIDENotifier80`** — `5929`: `ofnActiveProjectChanged` and the
-  file-open/close notifications, plus `AfterCompile` carrying the project.
-  A real project-switch signal, replacing our "compare the harvested config on
-  every request".
+- ~~**`IOTAIDENotifier80`** — `5929`~~ — **partly adopted 2026-08-21.**
+  `TProjectOpenNotifier` (a plain `IOTAIDENotifier`) starts the analysis on
+  `ofnEndProjectGroupOpen` and `ofnActiveProjectChanged`, so the ~15 s a large
+  closure costs is spent while nobody is waiting instead of inside the user's
+  first Ctrl+Click. What is still NOT adopted is using it to replace "compare
+  the harvested config on every request" — `EnsureSession` still does that, and
+  it is what makes the notifier-driven restart correct rather than a second
+  source of truth.
 - **`IOTACompileNotifier`** — `9793`, and `IsBackgroundCompileActive`. Worth
   having in order to *stop* analysing while the IDE compiles in the background,
   rather than competing with it for the machine.
@@ -400,7 +404,7 @@ properly and knows which branches are really dead.
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Shortcuts for our commands | Ready | `IOTAKeyboardBinding` (`7594`) with `btPartial` (`1432`) | partial bindings do not displace the user's keymap; chords supported |
+| Shortcuts for our commands | **Done 2026-08-21** | `IOTAKeyboardBinding` (`7594`) with `btPartial` (`1432`) | `TToggleKeyBinding` takes Ctrl+Shift+Up/Down for the decl↔impl jump. `btPartial` layers over the user's keymap instead of replacing it and shows up on Key Mappings, where it can be reordered or switched off; `btComplete` would claim to *be* the keymap. Returns `krHandled` even with nowhere to go — `krUnhandled` hands the key back to the IDE, which would then run its own version of the jump, and the two disagreeing is indistinguishable from ours misbehaving |
 | Trigger characters | Server | `cevKeyboardEvents` + `EditorKeyDown` (`848`) | coordinate with `IOTACodeTemplateServices.AutoComplete` (`CodeTemplateAPI.pas:290`) and read the user's template trigger keys (`303`–`311`) so we do not shadow snippet expansion |
 
 ## Infrastructure to adopt regardless of feature order

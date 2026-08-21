@@ -463,46 +463,32 @@ end;
 /// pastree-server.exe, so a matched pair can simply be deployed together.
 /// </summary>
 /// <summary>
-/// This BPL's own full path. HInstance inside a package is the package module,
-/// not the IDE's exe, which is what makes both this and PackageDir work.
+/// The directory this BPL sits in - where a matched pastree-server.exe is
+/// looked for. The path itself comes from PasLsp.ProductVersion.ThisBinaryPath,
+/// which both halves of the product share.
 /// </summary>
-function PackageFileName: string;
-var
-  LBuffer: array[0..MAX_PATH] of Char;
-  LLen: DWORD;
-begin
-  LLen := GetModuleFileName(HInstance, @LBuffer[0], Length(LBuffer));
-  if LLen = 0 then
-    Exit('');
-  Result := string(LBuffer);
-end;
-
 function PackageDir: string;
 begin
-  Result := ExtractFilePath(PackageFileName);
+  Result := ExtractFilePath(ThisBinaryPath);
 end;
 
 { TLspSession }
 
 constructor TLspSession.Create;
-var
-  LBuilt: string;
 begin
   inherited Create;
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
-
-  // Said once per IDE session, at package load. The server announces itself
-  // (and the PasTree it was built against) at its own handshake; this is the
-  // other half of the pair, and the build stamp is what distinguishes "the fix
-  // is in" from "the IDE is still running the BPL from before the rebuild" -
-  // a distinction this project has spent real time on, since rebuilding the
-  // package inside a live IDE session does not reliably take effect.
-  LBuilt := BinaryBuiltOn(PackageFileName);
-  if LBuilt <> '' then
-    LBuilt := ', built ' + LBuilt;
-  LogDiagnostic(Format('package %s%s', [PasTreeLspVersion, LBuilt]));
+  // NOTHING IS ANNOUNCED HERE. This used to log "package <version>, built
+  // <stamp>" on every package load, to distinguish "the fix is in" from "the
+  // IDE is still running the BPL from before the rebuild" - a real distinction,
+  // since rebuilding this package inside a live IDE session does not reliably
+  // take effect. But it paid that cost on every single IDE start, to answer a
+  // question nobody has except in the minutes after a rebuild, and the version
+  // mismatch check at the handshake already catches the case that matters (a
+  // fresh server against a stale package, which is what build.bat produces).
+  // The build stamp now rides along with THAT warning, where it is actionable.
 end;
 
 destructor TLspSession.Destroy;
