@@ -490,12 +490,27 @@ begin
     AView.Buffer.EditPosition.Column, AToImpl, False);
 end;
 
+/// <summary>
+/// True only for a left click whose keyboard chord is EXACTLY Ctrl - masking
+/// to the modifier keys first, because in mouse events Shift also carries
+/// button-state flags (ssLeft etc.) that must not affect the comparison. A
+/// bare `ssCtrl in Shift` would also swallow Ctrl+Shift+Click and
+/// Ctrl+Alt+Click, silently taking those chords away from the IDE or any
+/// other plugin that binds them; this override claims plain Ctrl+Click and
+/// nothing else.
+/// </summary>
+function IsPlainCtrlLeftClick(Shift: TShiftState; Button: TMouseButton): Boolean;
+begin
+  Result := (Button = mbLeft)
+    and (Shift * [ssShift, ssCtrl, ssAlt] = [ssCtrl]);
+end;
+
 procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
 begin
   // Suppress default down-side handling only (e.g. starting a text
   // selection drag) - the actual navigation happens on mouse-up, below.
-  if (ssCtrl in Shift) and (Button = mbLeft) then
+  if IsPlainCtrlLeftClick(Shift, Button) then
     Handled := True;
 end;
 
@@ -505,7 +520,7 @@ var
   LView: IOTAEditView;
   LRow, LCol: Integer;
 begin
-  if not ((ssCtrl in Shift) and (Button = mbLeft)) then
+  if not IsPlainCtrlLeftClick(Shift, Button) then
     Exit;
 
   // Always suppress the native handler for Ctrl+Left-click, even if we end
