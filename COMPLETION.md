@@ -186,6 +186,35 @@ signature's type names). The chain, in dependency order:
 Not before the signature data exists — coloring an empty string is step 3 of
 a 3-step chain.
 
+**Parameter insight** (Ctrl+Shift+Space; requested 2026-08-21). LSP side is
+`textDocument/signatureHelp` — a tier-3 SPEC.md item whose blocker
+(position-in-invalid-text) the overlay pipeline has since dissolved: the
+caret primitive already anchors the innermost node, what is missing is a
+PasTree query "which call encloses this position, which routine(s) does it
+target, which parameter index is the caret on" (coordinate with the PasTree
+plan). Server: a `signatureHelp` handler on the same no-WaitAnalyzed rule.
+Manager: implement `GetParameterList`/`AsyncInvokeParameterCodeInsight` over
+`IOTACodeInsightParameterList100` (it carries real parameter ranges) and
+stop declining key `#1` in `AllowCodeInsight`.
+
+**Tooltip Insight** (Ctrl+hover hints; requested 2026-08-21). The CHEAPEST
+of the three: the server has answered `textDocument/hover` since the LSP
+move (`HandleHover`) — this is plugin-only work. Manager: implement
+`GetHintText`/`AsyncGetHintText` over an `LspHover` call in LspSession (the
+Ask pattern, one more slot) and stop declining key `#3`. Hint coordinates
+arrive as `HintLine`/`HintCol` — same convention caveat as every other
+manager position, verify on bring-up.
+
+**Auto-parenthesis on accept** (requested 2026-08-21). When the accepted
+completion is a routine WITH parameters, insert `Name()` and land the caret
+between the parentheses (then parameter insight, above, should fire — that
+is the native behavior being mirrored). Where: the manager's `Done`, which
+already owns insertion via `InsertText`; the caret move is
+`EditPosition.MoveRelative`. Needs to know the item takes parameters — a
+`HasParams`-style flag on the wire, which rides the same signature data the
+coloring TODO needs, so these land together. Honor the IDE's own "Auto
+parenthesis" editor option rather than adding a setting of ours.
+
 ## Deliberately not in this plan
 
 - **`completionItem/resolve`** — until the provider defers documentation
