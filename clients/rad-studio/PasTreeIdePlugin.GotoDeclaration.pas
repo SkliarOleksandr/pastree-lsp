@@ -98,7 +98,7 @@ implementation
 uses
   System.SysUtils, System.Types, System.Classes, System.UITypes,
   System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight;
 
 type
   // AllowedEvents can only be customized by overriding it - there is no
@@ -510,7 +510,10 @@ procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
 begin
   // Suppress default down-side handling only (e.g. starting a text
   // selection drag) - the actual navigation happens on mouse-up, below.
-  if IsPlainCtrlLeftClick(Shift, Button) then
+  // Stands down when OUR Code Insight manager is the selected provider -
+  // see the matching check in DoMouseUp for the whole story.
+  if IsPlainCtrlLeftClick(Shift, Button)
+     and not PasTreeIsActiveInsightProvider then
     Handled := True;
 end;
 
@@ -521,6 +524,18 @@ var
   LRow, LCol: Integer;
 begin
   if not IsPlainCtrlLeftClick(Shift, Button) then
+    Exit;
+
+  { THE PHASE-C STEPPING STONE (COMPLETION.md): when the user has selected
+    PasTree as the IDE's Insight Provider, this override stands down and the
+    native click chain runs - which now ends in OUR manager's
+    AsyncGotoDefinitionEx, so the resolver is the same and the IDE draws the
+    Ctrl+hover underline, navigates and keeps history itself. That exercises
+    the manager's browse path for real, which is the last unknown before the
+    endgame deletes this unit's mouse machinery entirely. With any other
+    provider selected (or none resolvable), behavior is unchanged: intercept
+    and navigate ourselves. }
+  if PasTreeIsActiveInsightProvider then
     Exit;
 
   // Always suppress the native handler for Ctrl+Left-click, even if we end

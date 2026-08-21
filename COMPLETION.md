@@ -135,6 +135,16 @@ one contractual thing right: the replace span is the real typed token, so the
 
 ## Phase C — the switch (after PasTree lands and quality clears the bar)
 
+**Stepping stone in place (2026-08-21):** the mouse override stands down
+whenever OUR manager is the selected Insight Provider
+(`PasTreeIsActiveInsightProvider`), so the native click chain reaches
+`AsyncGotoDefinitionEx` and the manager's browse path — the last untested
+piece of the switch — is exercised live while every user who never touched
+Options keeps the old behavior bit for bit. A bring-up log line in
+`AsyncGotoDefinitionEx` records the raw position parameters (completion's
+proved untrustworthy; browse's convention still needs pinning) and comes out
+once a run confirms where the jump lands.
+
 Per the decision recorded in clients/rad-studio/SPEC.md: the mouse-notifier Ctrl+Click override plus the
 `cEdMenuCatIdentifier` menu takeover are **deleted** — the manager's
 `GotoDefinition` becomes the one navigation path, the IDE draws the Ctrl+hover

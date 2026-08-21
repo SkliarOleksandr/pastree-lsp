@@ -61,6 +61,15 @@ procedure InitializeCodeInsight;
   after the session died would ask questions nothing can answer. }
 procedure FinalizeCodeInsight;
 
+{ True when OUR manager is the IDE's current Insight Provider - the switch
+  the Ctrl+Click mouse override checks to stand down (PasTreeIdePlugin.
+  GotoDeclaration): with PasTree selected in Options the native click chain
+  must reach AsyncGotoDefinitionEx, and intercepting it would test nothing.
+  Conservative on every doubt (no manager registered, no services, nil
+  current manager): False, meaning the override keeps handling the click -
+  the behavior every user who never touched Options already has. }
+function PasTreeIsActiveInsightProvider: Boolean;
+
 implementation
 
 uses
@@ -667,6 +676,13 @@ var
 begin
   Inc(FNextId);
   LId := FNextId;
+  // Bring-up diagnostic for the browse path (the mouse override stands down
+  // when we are the provider, so this firing at all is the thing under
+  // test), plus the raw parameters - completion's parameters proved
+  // untrustworthy, and this is where the browse convention gets pinned.
+  // Remove once a live run confirms where the jump lands.
+  LogDiagnostic(Format('browse via Code Insight manager: %s raw params (%d,%d)',
+    [ExtractFileName(AFileName), ALine, ACharIndex]));
   LspDefinition(AFileName, ALine, ACharIndex + 1,
     procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
       const AError: string)
@@ -726,6 +742,24 @@ begin
   // provider in Options is exactly the step people miss.
   LogDiagnostic('Code Insight manager registered. Select "PasTree" under '
     + 'Tools > Options > Editor > Source > Insight Provider to use it.');
+end;
+
+function PasTreeIsActiveInsightProvider: Boolean;
+var
+  LServices: IOTACodeInsightServices;
+  LCurrent: IOTACodeInsightManager;
+begin
+  Result := False;
+  if not Assigned(GManager) then
+    Exit;
+  if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+    Exit;
+  LCurrent := nil;
+  LServices.GetCurrentCodeInsightManager(LCurrent);
+  // By IDString, not interface identity: the services may hand back a
+  // different interface reference onto the same registered manager.
+  Result := Assigned(LCurrent)
+    and SameText(LCurrent.GetIDString, GManager.GetIDString);
 end;
 
 procedure FinalizeCodeInsight;
