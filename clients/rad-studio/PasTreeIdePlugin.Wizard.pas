@@ -3,7 +3,7 @@ unit PasTreeIdePlugin.Wizard;
 {
   Replaces the native "Find Declaration" menu item (Identifier category,
   first in the editor's right-click menu) with our own PasTree-backed one,
-  and adds "Find References (PasTree)" right alongside it in that same
+  and adds "Find References" right alongside it in that same
   category; plus the Ctrl+Click "Go to Declaration" override (see
   PasTreeIdePlugin.GotoDeclaration).
 
@@ -139,7 +139,7 @@ begin
   // mechanism and its one-way-door caveat.
   LAction := TAction.Create(FActionList);
   LAction.Name := 'PasTreeFindDeclaration';
-  LAction.Caption := 'Find Declaration (PasTree)';
+  LAction.Caption := 'Find Declaration';
   LAction.Category := 'PasTreeFindDeclaration';
   LAction.OnUpdate := OnFindDeclarationUpdate;
   LAction.OnExecute := OnFindDeclarationExecute;
@@ -148,7 +148,7 @@ begin
 
   LAction := TAction.Create(FActionList);
   LAction.Name := 'PasTreeFindReferences';
-  LAction.Caption := 'Find References (PasTree)';
+  LAction.Caption := 'Find References';
   LAction.Category := 'PasTreeFindReferences';
   LAction.OnUpdate := OnFindReferencesUpdate;
   LAction.OnExecute := OnFindReferencesExecute;

@@ -1,7 +1,7 @@
 unit PasTreeIdePlugin.FindReferences;
 
 {
-  Find References entry point, wired to the "Find References (PasTree)" editor
+  Find References entry point, wired to the "Find References" editor
   menu item (see PasTreeIdePlugin.Wizard).
 
   Runs OUT OF PROCESS since the LSP move: ExecuteFindReferences asks

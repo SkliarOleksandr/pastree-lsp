@@ -74,7 +74,7 @@ procedure InitializeGotoDeclaration;
 procedure FinalizeGotoDeclaration;
 
 /// <summary>
-/// Entry point for the "Find Declaration (PasTree)" editor menu item
+/// Entry point for the "Find Declaration" editor menu item
 /// (PasTreeIdePlugin.Wizard - the replacement for RAD Studio's native "Find
 /// Declaration") - runs the exact same resolve+navigate logic as the
 /// Ctrl+Click override, from the cursor position, but through an explicit
@@ -387,7 +387,7 @@ end;
 
 /// <summary>
 /// The actual resolve+navigate logic, shared by the Ctrl+Click override
-/// (DoMouseUp) and the "Find Declaration (PasTree)" menu item
+/// (DoMouseUp) and the "Find Declaration" menu item
 /// (ExecuteGotoDeclaration) - see this unit's header for why both exist.
 /// Only logs on failure (LogDiagnostic/[pastree]) - this fires on every
 /// Ctrl+Click, so logging every successful step would be far noisier than

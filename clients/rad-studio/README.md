@@ -80,10 +80,13 @@ unofficial/community API surface.
 
 ### Menu
 
-Both "Find Declaration (PasTree)" and "Find References (PasTree)" live
+Both "Find Declaration" and "Find References" live
 together at the top of the editor's right-click menu, in the Identifier
 category (`cEdMenuCatIdentifier` in `ToolsAPI.pas`) - the exact slot RAD
-Studio's native "Find Declaration" used to occupy alone. See "Go to
+Studio's native "Find Declaration" used to occupy alone. The captions
+carry no "(PasTree)" suffix - these ARE the menu's Find Declaration/Find
+References now; a miss is reported in the Messages panel tagged
+`[pastree]`, which is where the origin shows. See "Go to
 Declaration" below for how the native item got replaced.
 
 ### Find References
