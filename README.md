@@ -16,7 +16,7 @@ It serves two kinds of clients with the same protocol:
 ## Layout
 
 ```
-pastree-server.dpr, source/       the server (Win64)
+pastree-server.dpr, .dproj, source/  the server (Win64)
 source/PasLsp.ProductVersion.pas  one version for the server and both clients
 source/PasLsp.SourceText.pas      BOM and buffer-vs-file rules, shared likewise
 clients/rad-studio/               the RAD Studio designtime package + its tests
@@ -133,6 +133,13 @@ running IDE holds the `.bpl`, and a live LSP session holds
 One script for both halves is deliberate. The failure it prevents is exactly a
 half-rebuild, and the equality check above only means something if a normal
 build produces both halves from the same commit.
+
+`pastree-server.dproj` exists so the server can be opened, edited and debugged
+in the IDE, and it is configured to match: Win64 only (it links PasTree, which
+is Win64-only), the sibling `..\object-pascal-tree\source` on its search path,
+the exe in `out\` and its `.dcu` files in `out\dcu\win64`. It is **not** the
+reference build - `build.bat` is, because it is the only thing that produces
+both halves at once.
 
 ## What the log contains
 
