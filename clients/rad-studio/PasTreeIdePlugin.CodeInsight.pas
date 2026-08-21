@@ -43,12 +43,13 @@ unit PasTreeIdePlugin.CodeInsight;
   COORDINATES: AsyncInvoke* hand over (ALine, ACharIndex) with no
   documentation of base, and the first live bring-up (2026-08-21) proved the
   guessed convention wrong - the parameters did not point at the text under
-  the caret, so the server saw an empty prefix. Completion now reads the
-  CARET (EditPosition.Row/Column, IDE convention by definition) and logs the
-  raw parameters alongside; once a few logged pairs pin the convention down,
-  the note here gets replaced with the answer. Goto-definition still trusts
-  the parameters (a browse can be invoked at a click point, not the caret) -
-  if it lands off by one, the same logs are the evidence.
+  the caret, so the server saw an empty prefix and answered all 64 keywords.
+  Completion reads the CARET instead (EditPosition.Row/Column, IDE convention
+  by definition); the second bring-up run confirmed that end to end - viewer,
+  prefix filtering, accept-replaces-prefix all behave. Goto-definition still
+  trusts the parameters, because a browse can be invoked at a click point
+  rather than the caret; it is unexercised until the mouse-notifier override
+  retires (phase C), and off-by-one there is the first thing to check.
 }
 
 interface
@@ -250,21 +251,34 @@ end;
 
 function TPasSymbolList.GetSymbolTypeText(Index: Integer): string;
 begin
-  if (Index >= 0) and (Index <= High(FVisible)) then
-    Result := FAll[FVisible[Index]].Detail
-  else
-    Result := '';
+  // Drawn GLUED right after the symbol text (the first bring-up rendered
+  // "beginreserved word" when the annotation sat here). That glued slot is
+  // exactly where the native viewer shows a symbol's signature -
+  // "(pFileName: ...): THandle;" straight after the bold name - so this
+  // stays empty until the server sends real signatures, and then they go
+  // here verbatim, separator included.
+  Result := '';
 end;
 
 function TPasSymbolList.GetSymbolClassText(I: Integer): string;
 begin
-  // The viewer's left-hand class column ('var', 'function', ...). The server
-  // already words this in Detail; keywords read better with the column empty.
-  if ((I >= 0) and (I <= High(FVisible))) and
-     (FAll[FVisible[I]].Kind <> 14) then
-    Result := FAll[FVisible[I]].Detail
+  // The viewer's left-hand class column, in the exact vocabulary the native
+  // DelphiLSP list uses ('keyword', 'function', 'const', ...) - matching it
+  // is what makes our rows read like the IDE's own.
+  if (I < 0) or (I > High(FVisible)) then
+    Exit('');
+  case FAll[FVisible[I]].Kind of
+    2, 3:   Result := 'function';    // Method, Function
+    4:      Result := 'constructor';
+    5, 6:   Result := 'var';         // Field, Variable
+    7, 8:   Result := 'type';        // Class, Interface
+    9:      Result := 'unit';        // Module
+    10:     Result := 'property';
+    14:     Result := 'keyword';
+    21:     Result := 'const';
   else
     Result := '';
+  end;
 end;
 
 function TPasSymbolList.GetSymbolDocumentation(I: Integer): string;
@@ -422,14 +436,6 @@ procedure TPasCodeInsightManager.GetSymbolList(
   out SymbolList: IOTACodeInsightSymbolList);
 begin
   SymbolList := FSymbols;
-  // Bring-up diagnostics: this pull is the step between our callback and a
-  // visible viewer, so its presence/absence in the Build tab is the divide
-  // between "IDE ignored the answer" and "the viewer got an empty list".
-  if Assigned(FSymbols) then
-    LogDiagnostic(Format('GetSymbolList pulled: %d items visible',
-      [FSymbols.Count]))
-  else
-    LogDiagnostic('GetSymbolList pulled: no list (no answer yet)');
 end;
 
 procedure TPasCodeInsightManager.OnEditorKey(Key: Char;
@@ -535,7 +541,6 @@ var
   LViewer: IOTACodeInsightViewer;
 begin
   DisplayParams := False;
-  LogDiagnostic(Format('Done: accepted=%s', [BoolToStr(Accepted, True)]));
   if not Accepted then
     Exit;
   // Insertion is the manager's job (the interface comment says so): take the
@@ -600,9 +605,6 @@ begin
   Inc(FNextId);
   LId := FNextId;
   FActiveId := LId;
-  LogDiagnostic(Format(
-    'completion invoke #%d: caret (%d,%d), raw params (%d,%d), seed "%s"',
-    [LId, LRow, LCol, ALine, ACharIndex, AStr]));
   LspCompletion(LFileName, LRow, LCol,
     procedure(ASuccess: Boolean; const AItems: TArray<TLspCompletionItem>;
       const AError: string)
@@ -612,19 +614,12 @@ begin
       // A superseded or cancelled invocation must not call back: the IDE has
       // already moved on, and LspSession has already cancelled the request.
       if FActiveId <> LId then
-      begin
-        LogDiagnostic(Format('completion answer #%d dropped (superseded)',
-          [LId]));
         Exit;
-      end;
       FActiveId := 0;
       if ASuccess then
         FSymbols := TPasSymbolList.Create(AItems)
       else
         FSymbols := nil;
-      LogDiagnostic(Format('completion answer #%d: success=%s, %d items - '
-        + 'calling the IDE back', [LId, BoolToStr(ASuccess, True),
-        Length(AItems)]));
       if Assigned(ACallback) then
         ACallback(Self, LId, not ASuccess, AError);
     end);

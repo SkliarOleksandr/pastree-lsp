@@ -93,10 +93,18 @@ one contractual thing right: the replace span is the real typed token, so the
    existing design, nothing new to build). Parses the `CompletionList` into a
    plain record array (`TLspCompletionItem`: label, kind, detail, replace
    span) — no JSON escapes past the session boundary, same as `TLspHit`.
-2. **`PasTreeIdePlugin.CodeInsight`** (built; awaiting its first gated
-   bring-up in a live IDE — the AsyncInvoke* coordinate convention is assumed
-   from TOTACharPos and is the first suspect if completion lands a column
-   off): `TPasCodeInsightManager`
+2. **`PasTreeIdePlugin.CodeInsight`** (built; live bring-up CONFIRMED
+   2026-08-21 — viewer, prefix filtering and accept-replaces-prefix all
+   behave. Two findings a future reader needs: the undocumented AsyncInvoke*
+   position parameters do NOT point at the caret's text, so completion reads
+   EditPosition instead; and the native row layout is reproduced by the STOCK
+   renderer once the columns are fed natively — SymbolClassText carries the
+   left-hand class word in DelphiLSP's own vocabulary ('keyword', 'function',
+   'const', …), SymbolTypeText is the glued-after-the-name slot where real
+   signatures will go verbatim. Custom drawing was tried and backed out: the
+   stock look IS the native look. The native viewer's bottom key-legend panel
+   is that window's own chrome — nothing in ToolsAPI reaches it, managers get
+   the classic window): `TPasCodeInsightManager`
    implementing `IOTACodeInsightManager100` (registration takes the sync
    interface) and offering `IOTAAsyncCodeInsightManager`/`…290` via
    `Supports` — the async shape is the whole point. The method map:
