@@ -543,6 +543,64 @@ begin
   SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
 end;
 
+{ 5b. Completion: the interim keyword provider proves the plumbing.
+
+  What is pinned here is the CONTRACT, not the vocabulary (COMPLETION.md): the
+  request answers without waiting for any analysis, items are filtered by the
+  typed prefix, every item carries a textEdit whose range is exactly the
+  partially-typed token, and that range survives the UTF-16 column conversion
+  on a line with a Cyrillic literal - the same line the definition columns are
+  pinned on. When PasTree replaces the keyword provider, every check but the
+  literal 'begin'/'try' labels must keep passing unchanged. }
+procedure TestCompletionKeywords;
+var
+  LUnitFile, LUniFile, LPatched: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5b. completion answers keywords with a real replace span ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LUniFile := TPath.Combine(GFixtureDir, 'DemoUnicode.pas');
+
+  // Cursor after 'beg' of Greet's 'begin': prefix filtering plus the span.
+  FindPos(LUnitFile, 'begin', 'begin', LLine, LChar);
+  Check(Ask('textDocument/completion',
+    PositionParams(LUnitFile, LLine, LChar + 3)),
+    'completion answered');
+  Check(GOk and GResultJson.Contains('"label":"begin"'),
+    'prefix ''beg'' offers begin');
+  Check(GOk and not GResultJson.Contains('"label":"until"'),
+    'and does not offer keywords outside the prefix');
+  Check(GOk and GResultJson.Contains(
+    Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
+    'the textEdit range starts where the token starts');
+  Check(GOk and GResultJson.Contains(
+    Format('"end":{"line":%d,"character":%d}', [LLine, LChar + 3])),
+    'and ends at the cursor');
+
+  // The same span discipline past a Cyrillic literal: append a token to the
+  // Shout line IN THE OVERLAY ONLY and complete right after it. A byte-counting
+  // bug anywhere in the chain would misplace the range by the literal's extra
+  // UTF-8 bytes.
+  LPatched := TFile.ReadAllText(LUniFile)
+    .Replace('Wrap(AText);', 'Wrap(AText); { tr }');
+  Check(LPatched.Contains('{ tr }'), 'fixture patch applied in memory');
+  SendDidChange(LUniFile, LPatched);
+  try
+    FindPosInText(LPatched, '{ tr }', 'tr }', LLine, LChar);
+    Check(Ask('textDocument/completion',
+      PositionParams(LUniFile, LLine, LChar + 2)),
+      'completion answered on the Cyrillic line');
+    Check(GOk and GResultJson.Contains('"label":"try"'),
+      'prefix ''tr'' offers try');
+    Check(GOk and GResultJson.Contains(
+      Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
+      'the replace span lands on ''tr'' despite the Cyrillic literal');
+  finally
+    SendDidChange(LUniFile, TFile.ReadAllText(LUniFile));
+  end;
+end;
+
 { 6. Cancellation hygiene.
 
   TLspSession cancels a superseded request on every new one, so the invariant
@@ -751,6 +809,7 @@ begin
       TestNonAsciiPositions;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
+      TestCompletionKeywords;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

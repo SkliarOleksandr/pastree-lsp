@@ -45,6 +45,7 @@ uses
   PasTree.Sema.Nav,
   PasLsp.Protocol,
   PasLsp.Documents,
+  PasLsp.Completion,
   PasLsp.SourceText,
   PasLsp.ProductVersion,
   PasLsp.Version,
@@ -137,6 +138,7 @@ type
     function HandleHover(const AMsg: TLspIncoming): string;
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
+    function HandleCompletion(const AMsg: TLspIncoming): string;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -1001,7 +1003,8 @@ begin
       '"documentSymbolProvider":true,' +
       '"hoverProvider":true,' +
       '"typeDefinitionProvider":true,' +
-      '"documentHighlightProvider":true' +
+      '"documentHighlightProvider":true,' +
+      '"completionProvider":{"triggerCharacters":["."]}' +
     // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
     // because a client's real question is never "which server build is this"
     // but "does it have the analysis fix I need", and that lives in PasTree.
@@ -1203,6 +1206,80 @@ begin
   Result := BuildResponse(AMsg.IdJson,
     LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
       Length(LTarget.Name)));
+end;
+
+{ textDocument/completion — the plumbing half of COMPLETION.md; the answers
+  come from PasLsp.Completion (today: the interim keyword provider, later:
+  PasTree through the same seam).
+
+  THE ONE DELIBERATE DIFFERENCE from every other request handler: NO
+  WaitAnalyzed. That helper flushes the pending rebuild and blocks until the
+  whole closure is analyzed — right for a click on stable code, wrong per
+  keystroke (a full rebuild is ~15 s on the reference project). Completion
+  answers from what exists RIGHT NOW: the live overlay text always (that is
+  what the user is typing into), the analysis snapshot only if one happens to
+  be ready — and the keyword provider needs no snapshot at all. It does not
+  schedule a rebuild either; didChange already did. }
+function TLspServer.HandleCompletion(const AMsg: TLspIncoming): string;
+var
+  LPath, LText: string;
+  LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
+  LDoc: TLspDocument;
+  LAnswer: TLspCompletionAnswer;
+  LStart: UInt64;
+  LSB: TStringBuilder;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'completion: textDocument.uri and position required'));
+
+  LStart := GetTickCount64;
+  // The overlay is the truth for an open document; a file nobody opened is
+  // its disk text (tolerant decode, BOM never content). Unreadable answers
+  // empty rather than erroring: mid-typing is the wrong moment for a toast.
+  if FDocs.TryGet(LPath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(LPath, LText) then
+    LText := '';
+
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if LText = '' then
+  begin
+    LAnswer := Default(TLspCompletionAnswer);
+    LAnswer.Provider := 'no text';
+  end
+  else
+    LAnswer := CompleteAt(LText, LPasLine, LPasCol);
+
+  LSB := TStringBuilder.Create;
+  try
+    for LIdx := 0 to High(LAnswer.Items) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      // Always textEdit, never bare insertText: the replace span is the
+      // provider's to declare, and it survives a cursor that moved while the
+      // answer was in flight (COMPLETION.md).
+      LSB.Append(Format(
+        '{"label":%s,"kind":%d,"detail":%s,'
+        + '"textEdit":{"range":%s,"newText":%s}}',
+        [JsonQuote(LAnswer.Items[LIdx].ItemLabel), LAnswer.Items[LIdx].Kind,
+         JsonQuote(LAnswer.Items[LIdx].Detail),
+         RangeJson(LPasLine, LAnswer.ReplaceColFrom,
+           LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom),
+         JsonQuote(LAnswer.Items[LIdx].ItemLabel)]));
+    end;
+    Log(Format('completion: %s -> %d items in %d ms (%s)',
+      [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Items),
+       GetTickCount64 - LStart, LAnswer.Provider]));
+    Result := BuildResponse(AMsg.IdJson,
+      '{"isIncomplete":false,"items":[' + LSB.ToString + ']}');
+  finally
+    LSB.Free;
+  end;
 end;
 
 // One TPasRefHit as an LSP Location. The highlight span HiFrom..HiTo (0-based
@@ -1967,6 +2044,8 @@ begin
         Exit(HandleDocumentSymbol(LMsg));
       if LMsg.Method = 'textDocument/hover' then
         Exit(HandleHover(LMsg));
+      if LMsg.Method = 'textDocument/completion' then
+        Exit(HandleCompletion(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then

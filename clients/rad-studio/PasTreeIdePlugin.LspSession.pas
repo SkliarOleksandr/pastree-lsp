@@ -65,6 +65,26 @@ type
   TLspHitsProc = reference to procedure(ASuccess: Boolean;
     const AHits: TArray<TLspHit>; const AError: string);
 
+  /// <summary>
+  /// One completion item, already in IDE coordinates. The replace span
+  /// (Row/ColFrom..ColTo, 1-based, ColTo exclusive) is the partially-typed
+  /// token the item replaces - the server always answers with a textEdit, so
+  /// a consumer inserts by REPLACING that span with ItemLabel, never by
+  /// appending at the caret (which would double the prefix already typed).
+  /// </summary>
+  TLspCompletionItem = record
+    ItemLabel: string;
+    Kind: Integer;      // LSP CompletionItemKind (14 = keyword, ...)
+    Detail: string;
+    Row: Integer;
+    ColFrom: Integer;
+    ColTo: Integer;
+  end;
+
+  /// <summary>Same delivery contract as TLspHitsProc.</summary>
+  TLspCompletionProc = reference to procedure(ASuccess: Boolean;
+    const AItems: TArray<TLspCompletionItem>; const AError: string);
+
 /// <summary>
 /// Creates the session object. Call once from TIDEWizard.Create. Does NOT
 /// start a server - that happens on the first request, so loading the package
@@ -108,6 +128,18 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
   AToImpl: Boolean; const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// Asks for completion items at an IDE position - the plumbing half of
+/// COMPLETION.md, ahead of any IDE surface that shows them (the Code Insight
+/// manager is that surface, and it is gated until the server answers well).
+/// Today the server's interim provider returns Delphi's reserved words
+/// filtered by the typed prefix; the call shape will not change when PasTree
+/// starts answering for real. A new request supersedes an unanswered one,
+/// same as every other feature here.
+/// </summary>
+procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspCompletionProc);
 
 /// <summary>
 /// Starts the server for the active project and lets its first analysis begin,
@@ -193,6 +225,7 @@ type
     // Both directions of the decl<->impl toggle share one slot: they are the
     // same gesture, so a jump the other way supersedes an unanswered one.
     FPendingToggle: Int64;
+    FPendingCompletion: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -210,6 +243,8 @@ type
       AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
     procedure Toggle(const AFileName: string; ARow, ACol: Integer;
       AToImpl: Boolean; const AOnDone: TLspHitsProc);
+    procedure Completion(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspCompletionProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
@@ -791,6 +826,106 @@ begin
   APendingId := LIssuedId;
 end;
 
+/// <summary>
+/// A CompletionList (or a bare item array - both are legal result shapes)
+/// into IDE-coordinate items. Items without a textEdit are dropped: OUR
+/// server always sends one, so its absence means a server this plugin does
+/// not match, and an item with no replace span cannot be inserted correctly
+/// anyway (see TLspCompletionItem).
+/// </summary>
+function ParseCompletionItems(AResult: TJSONValue): TArray<TLspCompletionItem>;
+var
+  LItems: TJSONArray;
+  LValue: TJSONValue;
+  LObj, LRange, LStart, LEnd: TJSONObject;
+  LItem: TLspCompletionItem;
+  LLine, LChar, LEndLine, LEndChar, LDummyRow: Integer;
+begin
+  Result := nil;
+  LItems := nil;
+  if AResult is TJSONArray then
+    LItems := TJSONArray(AResult)
+  else if (AResult is TJSONObject) and
+     not TJSONObject(AResult).TryGetValue<TJSONArray>('items', LItems) then
+    Exit;
+  if LItems = nil then
+    Exit;
+
+  for LValue in LItems do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LItem.ItemLabel := LObj.GetValue<string>('label', '');
+    if LItem.ItemLabel = '' then
+      Continue;
+    LItem.Kind := LObj.GetValue<Integer>('kind', 0);
+    LItem.Detail := LObj.GetValue<string>('detail', '');
+    if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
+       not LRange.TryGetValue<TJSONObject>('start', LStart) or
+       not LRange.TryGetValue<TJSONObject>('end', LEnd) then
+      Continue;
+    LLine := LStart.GetValue<Integer>('line', -1);
+    LChar := LStart.GetValue<Integer>('character', -1);
+    LEndLine := LEnd.GetValue<Integer>('line', -1);
+    LEndChar := LEnd.GetValue<Integer>('character', -1);
+    // A multi-line replace span never comes out of completion; treat one as
+    // the malformed answer it would be rather than guessing.
+    if (LLine < 0) or (LChar < 0) or (LEndLine <> LLine) or
+       (LEndChar < LChar) then
+      Continue;
+    LspToIde(LLine, LChar, LItem.Row, LItem.ColFrom);
+    LspToIde(LEndLine, LEndChar, LDummyRow, LItem.ColTo);
+    Result := Result + [LItem];
+  end;
+end;
+
+procedure TLspSession.Completion(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspCompletionProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+
+  // Fresh text first, then supersede the previous question - the same order
+  // and the same reasons as Ask. Completion is the request this matters most
+  // for: it fires while the user is actively typing.
+  FDocs.Sync;
+  if FPendingCompletion <> 0 then
+    FClient.Cancel(FPendingCompletion);
+
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/completion', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      // Clear the slot only if it still holds THIS request - the stale-answer
+      // guard Ask documents at length.
+      if FPendingCompletion = LIssuedId then
+        FPendingCompletion := 0;
+      if ASuccess then
+        AOnDone(True, ParseCompletionItems(AResult), '')
+      else
+        AOnDone(False, nil, AError);
+    end);
+  FPendingCompletion := LIssuedId;
+end;
+
 procedure TLspSession.Prewarm;
 var
   LProject: IOTAProject;
@@ -903,6 +1038,17 @@ begin
     Exit;
   end;
   GSession.Toggle(AFileName, ARow, ACol, AToImpl, AOnDone);
+end;
+
+procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspCompletionProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.Completion(AFileName, ARow, ACol, AOnDone);
 end;
 
 function LspSourceTextOf(const AFileName: string): string;

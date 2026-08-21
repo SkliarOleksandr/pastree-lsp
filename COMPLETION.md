@@ -35,19 +35,17 @@ the partially-typed token the item replaces. LSP clients edit by `textEdit`
 range, and a provider that only returns names forces every client to re-derive
 tokenization; the provider computed it anyway.
 
-Until the API lands, the unit ships two providers behind one function
-signature:
+Until the API lands, the unit ships the **interim keyword provider**, on by
+default (decided 2026-08-21, revising this plan's earlier stub-by-default: the
+mechanism has to be SEEN working end-to-end — wire format, spans, viewer —
+and an answer that is always empty proves nothing to a person). It returns
+Delphi's reserved words filtered by the identifier prefix left of the cursor,
+and it is deliberately word-list-dumb — it reads nothing but the request
+line, so nobody can mistake it for scope-aware completion — while getting the
+one contractual thing right: the replace span is the real typed token, so the
+`textEdit` machinery is exercised for real, Cyrillic columns and all.
 
-- **The stub** (default): returns no items. The honest answer, wired
-  end-to-end.
-- **The debug provider**, enabled only by `initializationOptions`
-  (`pastree.debugCompletion: true`): returns a fixed, deterministic item set
-  echoing the position it was asked at. Exists so the harness and the plugin
-  can be tested end-to-end — request shape, UTF-16 columns, cancellation,
-  viewer plumbing — with zero PasTree involvement. Never on by default:
-  plausible-looking fake completions in a real IDE would be worse than none.
-
-## Server (phase A — no dependencies, start any time)
+## Server (phase A — done 2026-08-21, on the keyword provider)
 
 1. **Advertise** `completionProvider: {"triggerCharacters": ["."]}` in the
    `initialize` response (`PasLsp.Server.pas:994`). No `resolveProvider` yet —
@@ -77,15 +75,17 @@ signature:
 5. **Log line**: `completion <file>:<line>:<col> in <N> ms -> <M> items
    (<provider>)` — same discipline as `analysis done`/navigation lines; the
    log is the diagnosis surface for "completion shows nothing".
-6. **Harness** (`LspClientSmoke`, new section): capability flag present;
-   pre-analysis request answers empty-incomplete without blocking; debug
-   provider round-trips items; the replace span survives the UTF-16 column
-   conversion on the Cyrillic fixture line (`DemoUnicode.pas` — same line the
-   decode split was pinned on); a superseded request answers cancelled.
+6. **Harness** (`LspClientSmoke`, section 5b): the request answers; items are
+   filtered by the typed prefix; every item's `textEdit` range is exactly the
+   typed token; and the replace span survives the UTF-16 column conversion on
+   the Cyrillic fixture line (`DemoUnicode.pas` — same line the decode split
+   was pinned on). The checks pin the CONTRACT, not the vocabulary: when
+   PasTree replaces the keyword provider, everything but the literal labels
+   must keep passing unchanged.
 
-## Plugin (phase B — independent of phase A ordering)
+## Plugin (phase B — step 1 done 2026-08-21; the manager is next)
 
-1. **`PasTreeIdePlugin.LspSession`**: add `LspCompletion(AFileName, ARow,
+1. **`PasTreeIdePlugin.LspSession`** (done): add `LspCompletion(AFileName, ARow,
    ACol, ATriggerChar, AOnDone)` on the existing `Ask` pattern — its own
    pending-id slot, supersede-cancels-the-previous, closure-per-call capture,
    `FDocs.Sync` before send (sync-on-request already guarantees the server
@@ -136,9 +136,10 @@ that carried it.
 - **`completionItem/resolve`** — until the provider defers documentation
   loading there is nothing to resolve; advertising it buys latency for
   nothing.
-- **An interim word-scan/keyword provider as the default** — completions that
-  ignore scope teach the user to distrust the feature before the real one
-  arrives. The debug provider exists for wiring tests only.
+- **A word-scan-the-buffer provider** — identifiers harvested textually would
+  LOOK scope-aware while ignoring scope, which teaches distrust. The keyword
+  provider skirts this by being visibly, unmistakably just the reserved
+  words; anything smarter waits for PasTree.
 - **`textDocument/signatureHelp`** — same seam, separate feature; it enters
   this plan only after completion itself is real.
 - **Incremental reanalysis** — the freshness gap is owned by the PasTree plan;
