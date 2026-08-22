@@ -890,24 +890,29 @@ begin
   Result := LId;
 end;
 
-{ Draws a parameter list the way the native window colors one: parameter
-  NAMES in the base color, TYPE text (everything between ':' and the next
-  ';'/'='/end) in the accent, the const/var/out modifiers and all
-  punctuation dimmed, default values back in base. A flat tokenizer over
-  the signature text is enough - the server sends the declaration's own
-  source span, so the ':'/';'/'=' structure is real Pascal, not a guess. }
+{ Draws a parameter list the way the NATIVE completion window colors one
+  (matched against it live, 2026-08-22): parameter names and punctuation in
+  the base text color, TYPE text (between ':' and the next ';'/'='/end) in
+  the warm type accent, default VALUES in blue, the const/var/out modifiers
+  bold like the editor draws reserved words. A flat tokenizer over the
+  signature text is enough - the server sends the declaration's own source
+  span, so the ':'/';'/'=' structure is real Pascal, not a guess. }
 procedure DrawColoredSignature(ACanvas: TCanvas; var AX: Integer;
-  ATop: Integer; const AText: string; ABase, ADim, AAccent: TColor);
+  ATop: Integer; const AText: string; ABase, ATypeColor, AValueColor: TColor);
 type
   TMode = (mName, mType, mDefault);
 
-  procedure Put(const ARun: string; AColor: TColor);
+  procedure Put(const ARun: string; AColor: TColor; ABold: Boolean = False);
   begin
     if ARun = '' then
       Exit;
+    if ABold then
+      ACanvas.Font.Style := [TFontStyle.fsBold];
     ACanvas.Font.Color := AColor;
     ACanvas.TextOut(AX, ATop, ARun);
     Inc(AX, ACanvas.TextWidth(ARun));
+    if ABold then
+      ACanvas.Font.Style := [];
   end;
 
 var
@@ -928,16 +933,16 @@ begin
       LRun := Copy(AText, LFrom, LIdx - LFrom);
       case LMode of
         mType:
-          Put(LRun, AAccent);
-        mName:
-          // The parameter-group modifiers are furniture, like punctuation.
-          if SameText(LRun, 'const') or SameText(LRun, 'var') or
-             SameText(LRun, 'out') then
-            Put(LRun, ADim)
-          else
-            Put(LRun, ABase);
+          Put(LRun, ATypeColor);
+        mDefault:
+          Put(LRun, AValueColor);
       else
-        Put(LRun, ABase);
+        // The parameter-group modifiers read as reserved words: bold.
+        if SameText(LRun, 'const') or SameText(LRun, 'var') or
+           SameText(LRun, 'out') then
+          Put(LRun, ABase, True)
+        else
+          Put(LRun, ABase);
       end;
     end
     else
@@ -948,11 +953,11 @@ begin
         '=': LMode := mDefault;
       end;
       // 'array of', 'TArray<Integer>' - keep type-mode spaces/brackets in
-      // the accent so a compound type reads as one colored phrase.
+      // the type color so a compound type reads as one colored phrase.
       if (LMode = mType) and (AText[LIdx] <> ':') then
-        Put(AText[LIdx], AAccent)
+        Put(AText[LIdx], ATypeColor)
       else
-        Put(AText[LIdx], ADim);
+        Put(AText[LIdx], ABase);
       Inc(LIdx);
     end;
   end;
@@ -975,11 +980,8 @@ const
 var
   LClass, LName, LDetail, LParamsText, LTypeText, LTail: string;
   LColWidth, LX, LTop, LCut: Integer;
-  LSelected: Boolean;
-  LServices: IOTACodeInsightServices;
-  LViewer: IOTACodeInsightViewer;
   LUI: INTAIDEUIServices;
-  LBase, LDim, LAccent: TColor;
+  LBase, LDim, LTypeColor, LValueColor: TColor;
 begin
   if not Assigned(FSymbols) or (Index < 0) or (Index >= FSymbols.Count) then
   begin
@@ -1006,28 +1008,21 @@ begin
     Exit;
   end;
 
-  LSelected := False;
-  if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
-  begin
-    LViewer := nil;
-    LServices.GetViewer(LViewer);
-    LSelected := Assigned(LViewer) and LViewer.GetSelected(Index);
-  end;
-
-  // The viewer prepared Canvas for this row (highlight brush and text color
-  // on the selected row) - LBase is whatever it chose.
+  // The viewer prepared Canvas for this row (highlight brush on the
+  // selected row) - LBase is whatever it chose. Colors STAY on the selected
+  // row: the native window keeps its signature colors under the highlight
+  // bar, and the first pass here that flattened them read as the coloring
+  // "disappearing" on selection.
   LBase := Canvas.Font.Color;
-  if LSelected or DrawingHintText then
+  LDim := clGrayText;
+  LTypeColor := LBase;
+  LValueColor := LBase;
+  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
   begin
-    LDim := LBase;
-    LAccent := LBase;
-  end
-  else
-  begin
-    LDim := clGrayText;
-    LAccent := LBase;
-    if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-      LAccent := LUI.ThemeAwareColors[itcBlue];
+    // The native palette: types in the warm accent, values in blue - both
+    // theme-aware so the dark theme gets its own variants.
+    LTypeColor := LUI.ThemeAwareColors[itcOrange];
+    LValueColor := LUI.ThemeAwareColors[itcBlue];
   end;
 
   LTop := Rect.Top + (Rect.Height - Canvas.TextHeight('Ag')) div 2;
@@ -1078,20 +1073,20 @@ begin
       LParamsText := LDetail;   // unknown shape: draw plainly, never lose it
 
     if LParamsText <> '' then
-      DrawColoredSignature(Canvas, LX, LTop, LParamsText, LBase, LDim,
-        LAccent);
+      DrawColoredSignature(Canvas, LX, LTop, LParamsText, LBase, LTypeColor,
+        LValueColor);
     if LTypeText <> '' then
     begin
-      Canvas.Font.Color := LDim;
+      Canvas.Font.Color := LBase;   // ': ' is code furniture, like native
       Canvas.TextOut(LX, LTop, ': ');
       Inc(LX, Canvas.TextWidth(': '));
-      Canvas.Font.Color := LAccent;
+      Canvas.Font.Color := LTypeColor;
       Canvas.TextOut(LX, LTop, LTypeText);
       Inc(LX, Canvas.TextWidth(LTypeText));
     end;
     if LTail <> '' then
     begin
-      Canvas.Font.Color := LDim;
+      Canvas.Font.Color := LDim;   // '(+N)' is ours, not code - stays dim
       Canvas.TextOut(LX, LTop, LTail);
     end;
   end;
