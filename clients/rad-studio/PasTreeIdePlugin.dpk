@@ -54,6 +54,7 @@ contains
   PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
   PasTreeIdePlugin.CodeInsight in 'PasTreeIdePlugin.CodeInsight.pas',
-  PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas';
+  PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
+  PasTreeIdePlugin.Diagnostics in 'PasTreeIdePlugin.Diagnostics.pas';
 
 end.

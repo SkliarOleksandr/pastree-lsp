@@ -131,6 +131,19 @@ type
     const ASymbols: TArray<TLspWorkspaceSymbol>; const AError: string);
 
   /// <summary>
+  /// One diagnostic of an open document, in IDE coordinates (1-based row and
+  /// columns, ColTo exclusive). Severity is LSP's: 1 error, 2 warning,
+  /// 3 information/hint.
+  /// </summary>
+  TLspDiagnostic = record
+    Row: Integer;
+    ColFrom: Integer;
+    ColTo: Integer;
+    Severity: Integer;
+    Text: string;
+  end;
+
+  /// <summary>
   /// Hover delivery: AText is PLAIN text ready for a tooltip - the session
   /// strips the server's markdown dressing (code fence, italics) so no
   /// caller renders markup. '' with ASuccess=True means "nothing under the
@@ -191,6 +204,15 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// The last diagnostics the server PUSHED for APath (publishDiagnostics
+/// arrives unsolicited after every analysis). False when the server never
+/// reported for that file - distinct from an empty array, which means "it
+/// reported: clean". Read by the IOTAModuleErrors file-trait spike.
+/// </summary>
+function LspTryGetDiagnostics(const APath: string;
+  out ADiags: TArray<TLspDiagnostic>): Boolean;
 
 /// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
@@ -318,10 +340,14 @@ type
     FPendingHover: Int64;
     FPendingSignature: Int64;
     FPendingWorkspace: Int64;
+    // Path (lower-cased, full) -> the server's last publishDiagnostics for
+    // it. Filled by the notification handler, read by the file-trait spike.
+    FDiagnostics: TDictionary<string, TArray<TLspDiagnostic>>;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
     function EnsureSession: Boolean;
+    procedure StoreDiagnostics(AParams: TJSONValue);
     procedure Ask(const AMethod: string; const AFileName: string;
       ARow, ACol: Integer; AIncludeDeclaration: Boolean;
       var APendingId: Int64; const AOnDone: TLspHitsProc);
@@ -346,6 +372,8 @@ type
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
+    function TryGetDiagnostics(const APath: string;
+      out ADiags: TArray<TLspDiagnostic>): Boolean;
   end;
 
 var
@@ -642,7 +670,63 @@ begin
   // still be delivering into this object would be the wrong order.
   FreeAndNil(FClient);
   FreeAndNil(FDocs);
+  FreeAndNil(FDiagnostics);
   inherited;
+end;
+
+{ publishDiagnostics params -> the per-file cache: uri, then per diagnostic
+  range.start/end (LSP 0-based) and severity/message. Diagnostics never span
+  lines in this server; one that somehow did would degrade to its first
+  line's tail. }
+procedure TLspSession.StoreDiagnostics(AParams: TJSONValue);
+var
+  LUri, LPath: string;
+  LArr: TJSONArray;
+  LValue: TJSONValue;
+  LDiags: TArray<TLspDiagnostic>;
+  LDiag: TLspDiagnostic;
+  LLine, LChar, LCount, LDummyRow: Integer;
+begin
+  if (AParams = nil) or
+     not AParams.TryGetValue<string>('uri', LUri) then
+    Exit;
+  LPath := LspUriToPath(LUri);
+  if LPath = '' then
+    Exit;
+  if not AParams.TryGetValue<TJSONArray>('diagnostics', LArr) then
+    Exit;
+  SetLength(LDiags, LArr.Count);
+  LCount := 0;
+  for LValue in LArr do
+  begin
+    LLine := LValue.GetValue<Integer>('range.start.line', -1);
+    LChar := LValue.GetValue<Integer>('range.start.character', -1);
+    if (LLine < 0) or (LChar < 0) then
+      Continue;
+    LspToIde(LLine, LChar, LDiag.Row, LDiag.ColFrom);
+    LChar := LValue.GetValue<Integer>('range.end.character', LChar);
+    LspToIde(LLine, LChar, LDummyRow, LDiag.ColTo);
+    if LDiag.ColTo < LDiag.ColFrom then
+      LDiag.ColTo := LDiag.ColFrom;
+    LDiag.Severity := LValue.GetValue<Integer>('severity', 3);
+    if (LDiag.Severity < 1) or (LDiag.Severity > 3) then
+      LDiag.Severity := 3;
+    LDiag.Text := LValue.GetValue<string>('message', '');
+    LDiags[LCount] := LDiag;
+    Inc(LCount);
+  end;
+  SetLength(LDiags, LCount);
+  if FDiagnostics = nil then
+    FDiagnostics := TDictionary<string, TArray<TLspDiagnostic>>.Create;
+  FDiagnostics.AddOrSetValue(LowerCase(LPath), LDiags);
+end;
+
+function TLspSession.TryGetDiagnostics(const APath: string;
+  out ADiags: TArray<TLspDiagnostic>): Boolean;
+begin
+  ADiags := nil;
+  Result := (FDiagnostics <> nil) and
+    FDiagnostics.TryGetValue(LowerCase(APath), ADiags);
 end;
 
 function TLspSession.BuildOptions(const AProject: IOTAProject;
@@ -733,37 +817,23 @@ begin
         FDocs.ResendAll;
       end;
 
-    { DIAGNOSTICS ARE DELIBERATELY DROPPED, for now.
-
-      textDocument/publishDiagnostics is the only notification this server
-      sends, and it is unsolicited by design - a client cannot ask it to stop,
-      and it computes them after every analysis anyway. So "ignore them" is not
-      one option among several, it is the whole available design space until
-      there is somewhere to put them.
-
-      And there isn't yet - though NOT for lack of API, which an earlier version
-      of this comment wrongly claimed. ToolsAPI has supported painting in the
-      code editor since 11.3, on the very same notifier this plugin already
-      registers for Ctrl+Click (INTACodeEditorEvents, ToolsAPI.Editor.pas): add
-      cevPaintLineEvents or cevPaintTextEvents to AllowedEvents and PaintLine /
-      PaintText arrive with an INTACodeEditorPaintContext carrying FileName,
-      LogicalLineNum (fold-aware, so it matches a diagnostic's own line
-      numbers), a TCanvas and CellSize - everything a squiggle under a column
-      range needs. PaintGutter covers an error mark in the gutter too.
-
-      So this is deferred because it is a FEATURE TO DESIGN - severity
-      filtering, what clears when, navigation, and a paint path that does a
-      dictionary lookup per visible line without allocating - not because the
-      editor cannot be drawn on.
-
-      Handled EXPLICITLY rather than left unassigned so that (a) it reads as a
-      decision instead of an oversight, and (b) anything else the server starts
-      notifying about surfaces in the Build tab instead of vanishing silently. }
+    { publishDiagnostics is CACHED here for the IOTAModuleErrors file-trait
+      spike (PasTreeIdePlugin.Diagnostics): the server pushes them after
+      every analysis, unsolicited by design, and the cache is the pull side
+      the trait answers the editor from. The painted-squiggle route
+      (PaintText/PaintLine on INTACodeEditorEvents) remains the fallback if
+      the spike answers "the IDE never consults the trait" - see
+      clients/rad-studio/SPEC.md's "open experiment". Anything else the
+      server starts notifying about surfaces in the Build tab instead of
+      vanishing silently. }
     FClient.OnNotification :=
       procedure(const AMethod: string; AParams: TJSONValue)
       begin
         if AMethod = 'textDocument/publishDiagnostics' then
+        begin
+          StoreDiagnostics(AParams);
           Exit;
+        end;
         LogDiagnostic('unhandled server notification: ' + AMethod);
       end;
   end;
@@ -1443,6 +1513,13 @@ begin
     Exit;
   end;
   GSession.Hover(AFileName, ARow, ACol, AOnDone);
+end;
+
+function LspTryGetDiagnostics(const APath: string;
+  out ADiags: TArray<TLspDiagnostic>): Boolean;
+begin
+  ADiags := nil;
+  Result := Assigned(GSession) and GSession.TryGetDiagnostics(APath, ADiags);
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;

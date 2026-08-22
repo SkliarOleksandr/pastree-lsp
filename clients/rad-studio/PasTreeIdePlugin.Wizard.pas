@@ -33,7 +33,7 @@ uses
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.Diagnostics, PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -294,6 +294,9 @@ begin
   InitializeCodeInsight;
   // Project-wide symbol search in the IDE Insight dialog (Ctrl+.).
   InitializeIdeInsight;
+  // The IOTAModuleErrors file-trait spike - see that unit's header for the
+  // question it answers and how to read the result.
+  InitializeDiagnosticsTrait;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -332,6 +335,7 @@ begin
   // closures gated off - see the GAlive flags in each unit).
   FinalizeIdeInsight;
   FinalizeCodeInsight;
+  FinalizeDiagnosticsTrait;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
