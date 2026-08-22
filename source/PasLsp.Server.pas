@@ -917,11 +917,12 @@ end;
 procedure TLspServer.PublishDiagnostics;
 var
   LDoc: TLspDocument;
-  LMid, LIdx, LFileId, LLine, LChar: Integer;
+  LMid, LIdx, LFileId, LLine, LChar, LEndChar, LEndLine: Integer;
   LModel: TPasSemaModel;
   LDiagFile, LKey: string;
   LSB: TStringBuilder;
-  LFirst: Boolean;
+  LFirst, LMainIsDoc: Boolean;
+  LIdent: TPasNavIdent;
 begin
   for LDoc in FDocs.All do
   begin
@@ -933,6 +934,10 @@ begin
       begin
         LModel := FProject.Model(LMid);
         LKey := LowerCase(LDoc.Path);
+        // Whether this open doc IS the model's main file - the only space
+        // IdentAt's coordinates live in. False for an open $I include.
+        LMainIsDoc := LowerCase(TPath.GetFullPath(
+          FProject.ModelFile(LMid))) = LKey;
         for LIdx := 0 to High(LModel.Diags) do
         begin
           // FileId indexes the MODEL'S own file table ($I includes) — see
@@ -956,11 +961,30 @@ begin
           LFirst := False;
           PasTreeToLsp(LModel.Diags[LIdx].Line, LModel.Diags[LIdx].Col,
             LLine, LChar);
+          // The range END: most diagnostics anchor on an identifier
+          // (E2003 and family), and a one-character range draws as a
+          // stub of a squiggle (first live run of the painted route,
+          // 2026-08-22 - the "very small line" was THIS, not the client's
+          // pixel math). IdentAt at the diagnostic's own position hands
+          // back the identifier's full span; anything without one
+          // (a missing ';', a structural error) keeps the one-character
+          // range, which is also what dcc's own caret amounts to.
+          LEndChar := LChar + 1;
+          if LMainIsDoc and
+             FNav.IdentAt(LMid, LModel.Diags[LIdx].Line,
+               LModel.Diags[LIdx].Col, LIdent) and
+             (LIdent.Line = LModel.Diags[LIdx].Line) and
+             (LIdent.ColTo > LIdent.ColFrom) then
+          begin
+            PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
+            if LEndChar <= LChar then
+              LEndChar := LChar + 1;
+          end;
           LSB.Append(Format(
             '{"range":{"start":{"line":%d,"character":%d},' +
             '"end":{"line":%d,"character":%d}},' +
             '"severity":%d,"code":%s,"source":"pastree","message":%s}',
-            [LLine, LChar, LLine, LChar + 1,
+            [LLine, LChar, LLine, LEndChar,
              DiagSeverity(LModel.Diags[LIdx].Code),
              JsonQuote(LModel.Diags[LIdx].Code),
              JsonQuote(LModel.Diags[LIdx].Msg)]));

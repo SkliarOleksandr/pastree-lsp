@@ -40,7 +40,10 @@ uses
 const
   // Long enough that a typing burst coalesces into one didChange, short
   // enough that the analysis starts while the pause still feels like one.
-  cIdleMs = 600;
+  // 600 on the first live run read as sluggish next to the server's own
+  // 300 ms rebuild debounce behind it; 250 puts the whole chain near the
+  // half-second the request path already conditioned the user to.
+  cIdleMs = 250;
 
 type
   TIdleSyncDispatch = class

@@ -83,7 +83,7 @@ var
   LX, LAmp, LStep, LYLow, LYHigh: Integer;
   LUp: Boolean;
 begin
-  LAmp := Max(2, ALineHeight div 8);    // 16-20px line -> 2, 150% -> 3+
+  LAmp := Max(2, ALineHeight div 6);    // 16-20px line -> 3, scales up
   LStep := LAmp;                        // ~45-degree zigzag
   if AXTo - AXFrom < LStep then
     Exit;
