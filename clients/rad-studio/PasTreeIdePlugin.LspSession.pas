@@ -882,7 +882,7 @@ var
   LValue: TJSONValue;
   LObj, LRange, LStart, LEnd: TJSONObject;
   LItem: TLspCompletionItem;
-  LLine, LChar, LEndLine, LEndChar, LDummyRow: Integer;
+  LLine, LChar, LEndLine, LEndChar, LDummyRow, LCount: Integer;
 begin
   Result := nil;
   LItems := nil;
@@ -894,6 +894,11 @@ begin
   if LItems = nil then
     Exit;
 
+  // Counted growth: answers reach thousands of items, and appending managed
+  // records one by one re-copies the whole array (with string refcounting)
+  // per element.
+  SetLength(Result, LItems.Count);
+  LCount := 0;
   for LValue in LItems do
   begin
     if not (LValue is TJSONObject) then
@@ -921,8 +926,10 @@ begin
       Continue;
     LspToIde(LLine, LChar, LItem.Row, LItem.ColFrom);
     LspToIde(LEndLine, LEndChar, LDummyRow, LItem.ColTo);
-    Result := Result + [LItem];
+    Result[LCount] := LItem;
+    Inc(LCount);
   end;
+  SetLength(Result, LCount);
 end;
 
 procedure TLspSession.Completion(const AFileName: string; ARow, ACol: Integer;

@@ -142,6 +142,7 @@ type
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     function HandleCompletion(const AMsg: TLspIncoming): string;
+    procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
     procedure HandleDidClose(AParams: TJSONValue);
@@ -1228,6 +1229,23 @@ end;
 // The item's data member (',"data":{...}') - our own side channel: the
 // routine head word for the RAD viewer's class column, hasParams for its
 // auto-parenthesis. '' when there is nothing to carry.
+procedure TLspServer.SyncCompletionOverlays;
+var
+  LDocs: TArray<TLspDocument>;
+  LPaths, LTexts: TArray<string>;
+  LIdx: Integer;
+begin
+  LDocs := FDocs.All;
+  SetLength(LPaths, Length(LDocs));
+  SetLength(LTexts, Length(LDocs));
+  for LIdx := 0 to High(LDocs) do
+  begin
+    LPaths[LIdx] := LDocs[LIdx].Path;
+    LTexts[LIdx] := LDocs[LIdx].Text;
+  end;
+  FCompletion.SetOverlays(LPaths, LTexts);
+end;
+
 function CompletionDataJson(const AItem: TLspCompletionEntry): string;
 begin
   Result := '';
@@ -1245,7 +1263,7 @@ end;
 
 function TLspServer.HandleCompletion(const AMsg: TLspIncoming): string;
 var
-  LPath, LText: string;
+  LPath, LText, LRangeJson, LQuotedLabel: string;
   LLine, LChar, LPasLine, LPasCol, LIdx, LMid: Integer;
   LDoc: TLspDocument;
   LAnswer: TLspCompletionAnswer;
@@ -1279,6 +1297,10 @@ begin
     if FCompletion = nil then
       FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
         FDefines);
+    // Document truth for the overlay parse too: an $I include open with
+    // unsaved edits must be preprocessed from its live text, exactly as the
+    // analysis session sees it.
+    SyncCompletionOverlays;
     // Bridge only when the last-good analysis actually holds this file;
     // otherwise standalone — a half-bridge (project without a model id)
     // has nothing to anchor cross-unit answers to.
@@ -1295,10 +1317,16 @@ begin
 
   LSB := TStringBuilder.Create;
   try
+    // Loop-invariant: the replace range is the same for every item, and the
+    // label is quoted once per item (it appears as both label and newText) -
+    // this loop runs thousands of times for a statement-scope answer.
+    LRangeJson := RangeJson(LPasLine, LAnswer.ReplaceColFrom,
+      LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom);
     for LIdx := 0 to High(LAnswer.Items) do
     begin
       if LIdx > 0 then
         LSB.Append(',');
+      LQuotedLabel := JsonQuote(LAnswer.Items[LIdx].ItemLabel);
       // Always textEdit, never bare insertText: the replace span is the
       // provider's to declare, and it survives a cursor that moved while the
       // answer was in flight (COMPLETION.md). The routine head word rides
@@ -1307,12 +1335,10 @@ begin
       LSB.Append(Format(
         '{"label":%s,"kind":%d,"detail":%s,"sortText":%s,'
         + '"textEdit":{"range":%s,"newText":%s}%s}',
-        [JsonQuote(LAnswer.Items[LIdx].ItemLabel), LAnswer.Items[LIdx].Kind,
+        [LQuotedLabel, LAnswer.Items[LIdx].Kind,
          JsonQuote(LAnswer.Items[LIdx].Detail),
          JsonQuote(LAnswer.Items[LIdx].SortText),
-         RangeJson(LPasLine, LAnswer.ReplaceColFrom,
-           LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom),
-         JsonQuote(LAnswer.Items[LIdx].ItemLabel),
+         LRangeJson, LQuotedLabel,
          CompletionDataJson(LAnswer.Items[LIdx])]));
     end;
     Log(Format('completion: %s -> %d items in %d ms (%s)',

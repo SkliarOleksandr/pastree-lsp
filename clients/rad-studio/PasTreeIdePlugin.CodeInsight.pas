@@ -78,6 +78,7 @@ uses
   System.SysUtils,
   System.Types,
   System.UITypes,
+  System.Classes,
   System.Generics.Collections,
   System.Generics.Defaults,
   Vcl.Graphics,
@@ -85,6 +86,28 @@ uses
   ToolsAPI.UI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments;
+
+{ RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
+  callback SYNCHRONOUSLY when the request cannot even be issued (no server
+  exe, no active project, a send that fails outright). Passed straight
+  through, the IDE would be called back with an operation id BEFORE the
+  AsyncInvoke* call that created it has returned that id - re-entrant into
+  the IDE's own bookkeeping, which has no reason to tolerate it. So every
+  async entry point sets AInInvoke=True for the duration of the issuing call:
+  a callback that fires inside that window is deferred one main-thread queue
+  pump (ForceQueue), landing after the id has been returned; the normal
+  asynchronous path is not delayed by anything. }
+procedure DeliverToIde(AInInvoke: Boolean; const ADeliver: TProc);
+begin
+  if AInInvoke then
+    TThread.ForceQueue(nil,
+      procedure
+      begin
+        ADeliver();
+      end)
+  else
+    ADeliver();
+end;
 
 var
   // The teardown guard for async closures. A completion callback captures
@@ -147,24 +170,34 @@ begin
   inherited Create;
   FAll := AItems;
   FSortOrder := soAlpha;
+  // Sorted ONCE, here: SetFilter runs per keystroke on the UI thread with
+  // whole-RTL-sized lists, and a prefix filter preserves order - so Rebuild
+  // never needs to sort, only scan. (soScope grouping, when it comes, means
+  // a second precomputed permutation, not a per-keystroke sort.)
+  TArray.Sort<TLspCompletionItem>(FAll,
+    TComparer<TLspCompletionItem>.Construct(
+      function(const A, B: TLspCompletionItem): Integer
+      begin
+        Result := CompareText(A.ItemLabel, B.ItemLabel);
+      end));
   Rebuild('');
 end;
 
 procedure TPasSymbolList.Rebuild(const AFilter: string);
 var
-  LIdx: Integer;
+  LIdx, LCount: Integer;
 begin
-  FVisible := nil;
+  // Counted growth, not per-element appends: this runs per keystroke and
+  // FAll can hold thousands of rows.
+  SetLength(FVisible, Length(FAll));
+  LCount := 0;
   for LIdx := 0 to High(FAll) do
     if (AFilter = '') or FAll[LIdx].ItemLabel.StartsWith(AFilter, True) then
-      FVisible := FVisible + [LIdx];
-  // Alphabetical either way: the only scope the interim provider knows is
-  // "reserved word", so soScope has nothing to group by yet.
-  TArray.Sort<Integer>(FVisible, TComparer<Integer>.Construct(
-    function(const A, B: Integer): Integer
     begin
-      Result := CompareText(FAll[A].ItemLabel, FAll[B].ItemLabel);
-    end));
+      FVisible[LCount] := LIdx;
+      Inc(LCount);
+    end;
+  SetLength(FVisible, LCount);
 end;
 
 procedure TPasSymbolList.Clear;
@@ -343,6 +376,13 @@ type
     // fields the interface does not expose. The interface reference owns
     // the lifetime; this one is only ever read alongside it.
     FSymbolsObj: TPasSymbolList;
+    // The list the VIEWER actually pulled (GetSymbolList) - a late async
+    // answer may replace FSymbols while a popup built from the previous
+    // list is still open, and Done's auto-parenthesis must consult what the
+    // user was LOOKING AT, not the newest answer. The interface reference
+    // keeps the shown object alive.
+    FShownSymbols: IOTACodeInsightSymbolList;
+    FShownObj: TPasSymbolList;
     // The one in-flight async completion; a later invocation supersedes it
     // (LspSession cancels the LSP request, this id gate drops the callback).
     FNextId: Integer;
@@ -475,7 +515,11 @@ end;
 
 function TPasCodeInsightManager.IsViewerBrowsable(Index: Integer): Boolean;
 begin
-  Result := False;   // a reserved word has no declaration to browse to
+  // Deliberately not yet: real symbols DO have declarations now, but the
+  // sync GotoDefinition below declines (async is the only resolve path), so
+  // advertising browseability would offer a gesture that goes nowhere.
+  // Revisit with phase C, when GotoDefinition becomes the one navigation.
+  Result := False;
 end;
 
 function TPasCodeInsightManager.GetMultiSelect: Boolean;
@@ -487,6 +531,10 @@ procedure TPasCodeInsightManager.GetSymbolList(
   out SymbolList: IOTACodeInsightSymbolList);
 begin
   SymbolList := FSymbols;
+  // Whatever the viewer takes now is what Done must judge later - see
+  // FShownSymbols.
+  FShownSymbols := FSymbols;
+  FShownObj := FSymbolsObj;
 end;
 
 procedure TPasCodeInsightManager.OnEditorKey(Key: Char;
@@ -513,7 +561,10 @@ end;
 
 function TPasCodeInsightManager.GetLongestItem: string;
 begin
-  Result := 'resourcestring';   // the widest thing the keyword provider sends
+  // Per the interface doc this is the longest CLASS text ('constructor' vs
+  // 'var'), not the longest item - and 'constructor' is the widest word our
+  // class column ever shows.
+  Result := 'constructor';
 end;
 
 procedure TPasCodeInsightManager.GetParameterList(
@@ -616,12 +667,18 @@ begin
   // the server (the declaration's real nkParams), so a parameterless
   // procedure stays bare - `LoadSettings;` never becomes `LoadSettings();`.
   // Applied only on the keyboard accept (Enter/Tab, per OnEditorKey): a
-  // future '(' close-key accept must not double the paren.
-  if Assigned(FSymbolsObj) and FSymbolsObj.TryGetByName(LSelected, LItem) and
+  // future '(' close-key accept must not double the paren. Judged against
+  // the list the VIEWER displayed (FShownObj), not the newest answer - a
+  // late re-invoke may have replaced FSymbolsObj under the open popup.
+  if Assigned(FShownObj) and FShownObj.TryGetByName(LSelected, LItem) and
      LItem.HasParams then
   begin
     LView := CurrentView;
-    if Assigned(LView) then
+    // The completed name may sit in an EXISTING call - caret inside the
+    // identifier of `LoadSettings(True);` - where appending `()` would
+    // produce `LoadSettings()(True)`. If a paren already follows the
+    // caret, the native behavior is to add nothing.
+    if Assigned(LView) and (LView.Buffer.EditPosition.Character <> '(') then
     begin
       LView.Buffer.EditPosition.InsertText('()');
       LView.Buffer.EditPosition.MoveRelative(0, -1);
@@ -664,6 +721,7 @@ var
   LId, LRow, LCol: Integer;
   LView: IOTAEditView;
   LFileName: string;
+  LInInvoke: Boolean;
 begin
   LView := CurrentView;
   if not Assigned(LView) then
@@ -682,6 +740,7 @@ begin
   Inc(FNextId);
   LId := FNextId;
   FActiveId := LId;
+  LInInvoke := True;
   LspCompletion(LFileName, LRow, LCol,
     procedure(ASuccess: Boolean; const AItems: TArray<TLspCompletionItem>;
       const AError: string)
@@ -703,9 +762,14 @@ begin
         FSymbols := nil;
         FSymbolsObj := nil;
       end;
-      if Assigned(ACallback) then
-        ACallback(Self, LId, not ASuccess, AError);
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if GAlive and Assigned(ACallback) then
+            ACallback(Self, LId, not ASuccess, AError);
+        end);
     end);
+  LInInvoke := False;
   Result := LId;
 end;
 
@@ -722,6 +786,7 @@ var
   LId: Integer;
   LView: IOTAEditView;
   LFileName: string;
+  LInInvoke: Boolean;
 begin
   // Tooltip Insight: the server's hover, as plain text. The position is the
   // HOVERED token's, not the caret's, so the parameters must be trusted -
@@ -735,6 +800,7 @@ begin
   Inc(FNextId);
   LId := FNextId;
   FActiveHintId := LId;
+  LInInvoke := True;
   LspHover(LFileName, HintLine, HintCol + 1,
     procedure(ASuccess: Boolean; const AText: string; const AError: string)
     begin
@@ -743,9 +809,14 @@ begin
       if FActiveHintId <> LId then
         Exit;   // superseded by a newer hover
       FActiveHintId := 0;
-      if Assigned(ACallBack) then
-        ACallBack(Self, LId, AText, not ASuccess, AError);
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if GAlive and Assigned(ACallBack) then
+            ACallBack(Self, LId, AText, not ASuccess, AError);
+        end);
     end);
+  LInInvoke := False;
   Result := LId;
 end;
 
@@ -753,20 +824,29 @@ function TPasCodeInsightManager.AsyncGotoDefinition(const AFileName: string;
   ALine, ACharIndex: Integer; ACallBack: TOTAGotoDefinitionCallBack): Integer;
 var
   LId: Integer;
+  LInInvoke: Boolean;
 begin
   Inc(FNextId);
   LId := FNextId;
+  LInInvoke := True;
   LspDefinition(AFileName, ALine, ACharIndex + 1,
     procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
       const AError: string)
     begin
-      if not Assigned(ACallBack) then
-        Exit;
-      if ASuccess and (Length(AHits) > 0) then
-        ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row, False, '')
-      else
-        ACallBack(Self, LId, '', 0, True, AError);
+      if not GAlive then
+        Exit;   // package unloading - Self may be gone (see GAlive)
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if not (GAlive and Assigned(ACallBack)) then
+            Exit;
+          if ASuccess and (Length(AHits) > 0) then
+            ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row, False, '')
+          else
+            ACallBack(Self, LId, '', 0, True, AError);
+        end);
     end);
+  LInInvoke := False;
   Result := LId;
 end;
 
@@ -774,9 +854,11 @@ function TPasCodeInsightManager.AsyncGotoDefinitionEx(const AFileName: string;
   ALine, ACharIndex: Integer; ACallBack: TOTAGotoDefinitionCallBackEx): Integer;
 var
   LId: Integer;
+  LInInvoke: Boolean;
 begin
   Inc(FNextId);
   LId := FNextId;
+  LInInvoke := True;
   // Browse parameters CONFIRMED live (2026-08-21): 1-based line, 0-based
   // char index - the +1 below landed the jump exactly. (Completion's
   // parameters remain untrusted; it reads the caret instead - see above.)
@@ -784,15 +866,22 @@ begin
     procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
       const AError: string)
     begin
-      if not Assigned(ACallBack) then
-        Exit;
-      if ASuccess and (Length(AHits) > 0) then
-        // Col back to the 0-based char index the callback expects.
-        ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row,
-          AHits[0].Col - 1, False, '')
-      else
-        ACallBack(Self, LId, '', 0, 0, True, AError);
+      if not GAlive then
+        Exit;   // package unloading - Self may be gone (see GAlive)
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if not (GAlive and Assigned(ACallBack)) then
+            Exit;
+          if ASuccess and (Length(AHits) > 0) then
+            // Col back to the 0-based char index the callback expects.
+            ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row,
+              AHits[0].Col - 1, False, '')
+          else
+            ACallBack(Self, LId, '', 0, 0, True, AError);
+        end);
     end);
+  LInInvoke := False;
   Result := LId;
 end;
 
@@ -811,7 +900,7 @@ procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
 const
   cPad = 4;
 var
-  LClass, LName, LDetail, LTypeText, LTail: string;
+  LClass, LName, LDetail, LParamsText, LTypeText, LTail: string;
   LColWidth, LX, LTop, LCut: Integer;
   LSelected: Boolean;
   LServices: IOTACodeInsightServices;
@@ -883,26 +972,53 @@ begin
 
   if LDetail <> '' then
   begin
-    // ': TFoo (+2)' -> ': ' and ' (+2)' in the dim color, the type name in
-    // the accent - the same three-way split the native window draws.
-    LTypeText := LDetail;
+    { The Detail shapes the server sends: '(params)', '(params): T', ': T' -
+      each optionally tailed by ' (+N)'. Split into params (base color,
+      regular weight - they are code, like the native window draws them),
+      ': ' furniture and the overload tail (dim), and the TYPE name (accent).
+      The tail is matched from the END: a parameter list could contain a
+      literal ' (+' of its own. }
     LTail := '';
-    LCut := Pos(' (+', LTypeText);
-    if LCut > 0 then
+    LCut := LDetail.LastIndexOf(' (+');
+    if (LCut >= 0) and LDetail.EndsWith(')') and
+       (LCut >= LDetail.Length - 8) then
     begin
-      LTail := Copy(LTypeText, LCut, MaxInt);
-      LTypeText := Copy(LTypeText, 1, LCut - 1);
+      LTail := LDetail.Substring(LCut);
+      LDetail := LDetail.Substring(0, LCut);
     end;
-    if LTypeText.StartsWith(': ') then
+    LParamsText := '';
+    LTypeText := '';
+    if LDetail.StartsWith('(') then
+    begin
+      LCut := LDetail.LastIndexOf('): ');
+      if LCut >= 0 then
+      begin
+        LParamsText := LDetail.Substring(0, LCut + 1);
+        LTypeText := LDetail.Substring(LCut + 3);
+      end
+      else
+        LParamsText := LDetail;
+    end
+    else if LDetail.StartsWith(': ') then
+      LTypeText := LDetail.Substring(2)
+    else
+      LParamsText := LDetail;   // unknown shape: draw plainly, never lose it
+
+    if LParamsText <> '' then
+    begin
+      Canvas.Font.Color := LBase;
+      Canvas.TextOut(LX, LTop, LParamsText);
+      Inc(LX, Canvas.TextWidth(LParamsText));
+    end;
+    if LTypeText <> '' then
     begin
       Canvas.Font.Color := LDim;
       Canvas.TextOut(LX, LTop, ': ');
       Inc(LX, Canvas.TextWidth(': '));
-      Delete(LTypeText, 1, 2);
+      Canvas.Font.Color := LAccent;
+      Canvas.TextOut(LX, LTop, LTypeText);
+      Inc(LX, Canvas.TextWidth(LTypeText));
     end;
-    Canvas.Font.Color := LAccent;
-    Canvas.TextOut(LX, LTop, LTypeText);
-    Inc(LX, Canvas.TextWidth(LTypeText));
     if LTail <> '' then
     begin
       Canvas.Font.Color := LDim;

@@ -78,6 +78,12 @@ type
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths, ADefines: TArray<string>);
     destructor Destroy; override;
+    { Replaces the engine's overlay set with the given open documents. Called
+      by the server before each CompleteAt so an $I include with unsaved
+      edits is preprocessed from its LIVE text, not from disk - the same
+      document-truth rule the analysis session enforces via SetBuffer
+      (review finding, 2026-08-22). }
+    procedure SetOverlays(const APaths, ATexts: TArray<string>);
     { The completion answer at a 1-based (line, col) of AText - the LIVE
       overlay text of AFileName. AProject/AProjectMid bridge to the last-good
       analysis (nil/-1 = standalone). Never raises; a position that offers
@@ -259,6 +265,16 @@ begin
   inherited;
 end;
 
+procedure TLspCompletionEngine.SetOverlays(const APaths,
+  ATexts: TArray<string>);
+var
+  LIdx: Integer;
+begin
+  FSourceManager.ClearBuffers;
+  for LIdx := 0 to High(APaths) do
+    FSourceManager.SetBuffer(APaths[LIdx], ATexts[LIdx]);
+end;
+
 function TLspCompletionEngine.CompleteAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
   AProjectMid: Integer): TLspCompletionAnswer;
@@ -276,12 +292,17 @@ var
   LWithTypes: Boolean;
   LX: TSemaXType;
   LItemModel: TPasSemaModel;
-  LParamsNode: Integer;
+  LParamsNode, LTypeSym: Integer;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
   Result.ReplaceColTo := APasCol;
   Result.Provider := 'pastree/none';
+  // A malformed client position must not reach the engine: nothing in this
+  // repository pins how it treats a zero/negative coordinate, and the old
+  // provider's explicit guard was lost in the engine swap (review finding).
+  if (APasLine < 1) or (APasCol < 1) then
+    Exit;
 
   // The fresh overlay: mid-keystroke text, parsed error-tolerantly. Parse
   // diagnostics are EXPECTED here (the buffer is invalid by definition) and
@@ -373,6 +394,21 @@ begin
             LX := AProject.SubstX(LX, LItems[LIdx].Ctx, 0);
           if XValid(LX) then
             LEntry.Detail := LEntry.Detail + ': ' + AProject.XTypeText(LX);
+        end
+        // OVERLAY-declared symbols - the edited file's own locals, params
+        // and members, i.e. the rows the user looks at most - have no
+        // project mid, but the fresh model resolved their declared type
+        // intra-unit: TypeSym's name is the honest (if unexpanded) answer.
+        // Without this branch the mixed list reads as types randomly
+        // missing (review finding, 2026-08-22).
+        else if (LItems[LIdx].Mid < 0) and (LItems[LIdx].Sym <> NIL_SYM) and
+           (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
+             skProperty, skRoutine]) then
+        begin
+          LTypeSym := LModel.Symbols[LItems[LIdx].Sym].TypeSym;
+          if LTypeSym <> NIL_SYM then
+            LEntry.Detail := LEntry.Detail + ': '
+              + LModel.Symbols[LTypeSym].Name;
         end;
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail

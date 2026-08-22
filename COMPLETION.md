@@ -209,6 +209,21 @@ stop declining key `#1` in `AllowCodeInsight`.
 (Tooltip Insight and auto-parenthesis were queued here and are delivered —
 see above.)
 
+## Handed to the PasTree plan (deep-review outcome, 2026-08-22)
+
+The seam currently carries its own copies of AST geometry the engine keeps
+private: `RoutineNodeOf` (verbatim from `PasTree.Sema.Complete`),
+`ParamsNodeOf`/`HasParamChild` (note: PasTree's public `RoutineHasParams`
+counts an empty `()` as having params; ours deliberately requires a real
+`nkParam`, which is the right semantics for auto-parenthesis), and
+`NodeSpanText` (the third span-to-text implementation; the navigator's
+private `RTSpanText` is the second). A drifted copy fails SILENTLY — the
+engine's own suites keep passing while our Detail/hasParams go empty — so
+the standing ask to the PasTree session is: public `ItemParamsText` /
+`ItemHasParams` beside `ItemHeadWord`, and a public span-text helper beside
+`NodeText`. When those land, the copies here get deleted and
+`cMinPasTreeVersion` rises.
+
 ## Deliberately not in this plan
 
 - **`completionItem/resolve`** — until the provider defers documentation
