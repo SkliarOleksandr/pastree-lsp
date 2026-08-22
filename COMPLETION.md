@@ -209,6 +209,15 @@ stop declining key `#1` in `AllowCodeInsight`.
 (Tooltip Insight and auto-parenthesis were queued here and are delivered —
 see above.)
 
+**Colored tooltips (noted 2026-08-22, wanted but blocked in ToolsAPI):** the
+manager's hint path (`GetHintText`/`AsyncGetHintText`) accepts a bare string
+and no custom-draw hook exists for the editor's hint window - the colored
+hover the native IDE shows is the new LSP window's private UI, same class as
+its bottom key-legend panel. The only route is a hint window of OUR OWN
+(mouse-hover via the editor notifier, anchored with `GetCharacterPosPx`,
+painted by `DrawColoredSignature`) - roughly a day, and it owns its
+positioning/dismissal/theming. Queued behind parameter insight if wanted.
+
 ## Handed to the PasTree plan (deep-review outcome, 2026-08-22)
 
 The seam currently carries its own copies of AST geometry the engine keeps
