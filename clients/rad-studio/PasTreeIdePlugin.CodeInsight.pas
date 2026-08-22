@@ -1,11 +1,11 @@
 unit PasTreeIdePlugin.CodeInsight;
 
 {
-  The Code Insight manager skeleton - phase B.2 of COMPLETION.md, and the
-  vehicle for the endgame decided in SPEC.md: once this manager answers well
-  enough to be the Insight Provider for Pascal, the mouse-notifier Ctrl+Click
-  override and the editor-menu takeover get deleted, because the IDE calls
-  the manager for both.
+  The Code Insight manager - since phase C (2026-08-22, COMPLETION.md) THE
+  navigation and insight path of this plugin: the mouse-notifier Ctrl+Click
+  override and the editor-menu takeover are deleted, and when the user
+  selects "PasTree" as the Insight Provider the IDE routes completion,
+  browse (Ctrl+Click), parameter insight and tooltips here.
 
   ALWAYS REGISTERED (2026-08-21, revising COMPLETION.md's original
   environment-variable gate at the user's call: an uninstall is recovery
@@ -64,15 +64,6 @@ procedure InitializeCodeInsight;
   TIDEWizard.Destroy, because a viewer callback dispatched into this unit
   after the session died would ask questions nothing can answer. }
 procedure FinalizeCodeInsight;
-
-{ True when OUR manager is the IDE's current Insight Provider - the switch
-  the Ctrl+Click mouse override checks to stand down (PasTreeIdePlugin.
-  GotoDeclaration): with PasTree selected in Options the native click chain
-  must reach AsyncGotoDefinitionEx, and intercepting it would test nothing.
-  Conservative on every doubt (no manager registered, no services, nil
-  current manager): False, meaning the override keeps handling the click -
-  the behavior every user who never touched Options already has. }
-function PasTreeIsActiveInsightProvider: Boolean;
 
 implementation
 
@@ -1470,24 +1461,6 @@ begin
   // provider in Options is exactly the step people miss.
   LogDiagnostic('Code Insight manager registered. Select "PasTree" under '
     + 'Tools > Options > Editor > Source > Insight Provider to use it.');
-end;
-
-function PasTreeIsActiveInsightProvider: Boolean;
-var
-  LServices: IOTACodeInsightServices;
-  LCurrent: IOTACodeInsightManager;
-begin
-  Result := False;
-  if not Assigned(GManager) then
-    Exit;
-  if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
-    Exit;
-  LCurrent := nil;
-  LServices.GetCurrentCodeInsightManager(LCurrent);
-  // By IDString, not interface identity: the services may hand back a
-  // different interface reference onto the same registered manager.
-  Result := Assigned(LCurrent)
-    and SameText(LCurrent.GetIDString, GManager.GetIDString);
 end;
 
 procedure FinalizeCodeInsight;

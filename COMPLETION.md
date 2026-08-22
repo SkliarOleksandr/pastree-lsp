@@ -141,23 +141,21 @@ against it — and was deleted the day the engine arrived.
    BPL unloads, ordered with the other unregistrations in
    `TIDEWizard.Destroy`.
 
-## Phase C — the switch (after PasTree lands and quality clears the bar)
+## Phase C — DONE 2026-08-22
 
-**Stepping stone in place (2026-08-21):** the mouse override stands down
-whenever OUR manager is the selected Insight Provider
-(`PasTreeIsActiveInsightProvider`), so the native click chain reaches
-`AsyncGotoDefinitionEx` and the manager's browse path — the last untested
-piece of the switch — is exercised live while every user who never touched
-Options keeps the old behavior bit for bit. A bring-up log line in
-`AsyncGotoDefinitionEx` records the raw position parameters (completion's
-proved untrustworthy; browse's convention still needs pinning) and comes out
-once a run confirms where the jump lands.
-
-Per the decision recorded in clients/rad-studio/SPEC.md: the mouse-notifier Ctrl+Click override plus the
-`cEdMenuCatIdentifier` menu takeover are **deleted** — the manager's
-`GotoDefinition` becomes the one navigation path, the IDE draws the Ctrl+hover
-underline from our resolver, and the one-way-door caveat retires with the code
-that carried it.
+The mouse-notifier Ctrl+Click override and the `cEdMenuCatIdentifier` menu
+takeover are deleted (the stepping stone — the override standing down when
+PasTree was the selected provider — proved the manager's browse path live
+first). The manager is the one navigation path: the IDE draws the
+Ctrl+hover underline from our resolver, navigates, and keeps history; the
+native "Find Declaration" menu item is back in its native slot and routes
+by provider selection like everything else; the one-way-door caveat retired
+with the code that carried it. "Find Type Declaration" and "Find
+References" are not Code Insight concepts, so they stay ours — now under
+the plugin's OWN menu category, cleanly unregistered at unload. The
+provider contract cuts both ways and is accepted: selecting DelphiLSP gives
+native navigation everywhere, PasTree gives ours everywhere — one combobox,
+the whole insight family.
 
 ## Deferred polish (TODO)
 

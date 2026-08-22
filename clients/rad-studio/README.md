@@ -80,12 +80,12 @@ unofficial/community API surface.
 
 ### Menu
 
-"Find Declaration", "Find Type Declaration" and "Find References" live
-together at the top of the editor's right-click menu, in the Identifier
-category (`cEdMenuCatIdentifier` in `ToolsAPI.pas`) - the exact slot RAD
-Studio's native "Find Declaration" used to occupy alone. The captions
-carry no "(PasTree)" suffix - these ARE the menu's Find Declaration/Find
-References now; a miss is reported in the Messages panel tagged
+"Find Type Declaration" and "Find References" live in the editor's
+right-click menu under the plugin's own category, ALONGSIDE the native
+items (since phase C, 2026-08-22, nothing native is replaced - the native
+"Find Declaration" is back in its own slot and, like Ctrl+Click, routes
+through our Code Insight manager whenever "PasTree" is the selected
+Insight Provider). A miss is reported in the Messages panel tagged
 `[pastree]`, which is where the origin shows. See "Go to
 Declaration" below for how the native item got replaced.
 

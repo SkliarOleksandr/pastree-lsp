@@ -1,28 +1,25 @@
 unit PasTreeIdePlugin.Wizard;
 
 {
-  Replaces the native "Find Declaration" menu item (Identifier category,
-  first in the editor's right-click menu) with our own PasTree-backed one,
-  and adds "Find Type Declaration" and "Find References" right alongside it
-  in that same category; plus the Ctrl+Click "Go to Declaration" override
-  (see PasTreeIdePlugin.GotoDeclaration).
+  Adds "Find Type Declaration" and "Find References" to the editor's
+  right-click menu under OUR OWN category, binds the Ctrl+Shift+Up/Down
+  decl<->impl toggle, prewarms the analysis at project open, and registers
+  the Code Insight manager (PasTreeIdePlugin.CodeInsight).
 
-  The replacement works via INTAEditorLocalMenu.UnregisterActionList
-  (cEdMenuCatIdentifier) - removing whatever action list the IDE itself
-  registered under that category - followed by RegisterActionList of our
-  own TActionList under that SAME category string, so both of our entries
-  land in that exact (first) menu position. CAVEAT: this is a one-way door
-  within a running IDE session - we have no handle to the native action
-  list to restore it, so if this package is ever uninstalled without an IDE
-  restart, "Find Declaration" would be gone until the IDE restarts (which
-  the project's own workflow already does after every rebuild anyway - see
-  the README on rebuilding: an Uninstall/Build/Install cycle inside a live IDE
-  session is not reliable here, so a rebuild means restarting the IDE).
+  PHASE C (2026-08-22, COMPLETION.md): this unit used to REPLACE the native
+  "Find Declaration" menu item (UnregisterActionList on
+  cEdMenuCatIdentifier, a one-way door within a session) and pair it with a
+  Ctrl+Click mouse override. Both are gone: declaration navigation belongs
+  to the IDE's own gestures, served by our Code Insight manager when the
+  user selects "PasTree" as the Insight Provider. The native menu item and
+  action list are untouched now - no takeover, no one-way door - and our two
+  remaining items (references and the type jump are NOT Code Insight
+  concepts, so they stay ours) live under cMenuCategory, unregistered
+  cleanly at unload.
 
   Modelled on the official samples shipped with RAD Studio:
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Local Menu Demo
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Raw Read Demo
-    Samples\Object Pascal\ToolsAPI\Editor Demos\KeyboardMouse Events Demo
 }
 
 interface
@@ -47,8 +44,6 @@ type
     FEditorServices: IOTAEditorServices;
     FRegistered: Boolean;
     procedure AddActions;
-    procedure OnFindDeclarationExecute(Sender: TObject);
-    procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure OnFindReferencesExecute(Sender: TObject);
     procedure OnFindReferencesUpdate(Sender: TObject);
     procedure OnFindTypeDeclarationExecute(Sender: TObject);
@@ -137,20 +132,6 @@ procedure TMenuManager.AddActions;
 var
   LAction: TAction;
 begin
-  // Replaces the native "Find Declaration" - see unit header for the
-  // mechanism and its one-way-door caveat.
-  LAction := TAction.Create(FActionList);
-  LAction.Name := 'PasTreeFindDeclaration';
-  LAction.Caption := 'Find Declaration';
-  LAction.Category := 'PasTreeFindDeclaration';
-  LAction.OnUpdate := OnFindDeclarationUpdate;
-  LAction.OnExecute := OnFindDeclarationExecute;
-  LAction.Enabled := True;
-  LAction.ActionList := FActionList;
-
-  // Between declaration and references, deliberately: the type jump is a
-  // navigation sibling of Find Declaration, and the menu reads best with the
-  // two jumps adjacent.
   LAction := TAction.Create(FActionList);
   LAction.Name := 'PasTreeFindTypeDeclaration';
   LAction.Caption := 'Find Type Declaration';
@@ -178,10 +159,10 @@ begin
   if Supports(BorlandIDEServices, IOTAEditorServices, FEditorServices) then
   begin
     var LLocalMenuIntf := FEditorServices.GetEditorLocalMenu;
-    // Remove the native "Find Declaration" action list and take over its
-    // category slot with our own (see unit header for the caveat).
-    LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
-    LLocalMenuIntf.RegisterActionList(FActionList, cEdMenuCatIdentifier);
+    // Our own category, ALONGSIDE the native items - phase C removed the
+    // cEdMenuCatIdentifier takeover, so the IDE's own "Find Declaration"
+    // is back in its native slot and nothing needs restoring at unload.
+    LLocalMenuIntf.RegisterActionList(FActionList, cMenuCategory);
     FRegistered := True;
     AddActions;
   end
@@ -200,21 +181,11 @@ begin
     if Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
     begin
       var LLocalMenuIntf := LEditorServices.GetEditorLocalMenu;
-      LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
+      LLocalMenuIntf.UnregisterActionList(cMenuCategory);
     end;
   end;
   FreeAndNil(FActionList);
   inherited;
-end;
-
-procedure TMenuManager.OnFindDeclarationUpdate(Sender: TObject);
-begin
-  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
-end;
-
-procedure TMenuManager.OnFindDeclarationExecute(Sender: TObject);
-begin
-  ExecuteGotoDeclaration(FEditorServices.TopView);
 end;
 
 procedure TMenuManager.OnFindTypeDeclarationUpdate(Sender: TObject);
@@ -316,9 +287,9 @@ begin
   // prewarm or the first navigation request, so loading this package costs
   // nothing on its own.
   InitializeLspSession;
-  InitializeGotoDeclaration;
-  // Registers the Code Insight manager (COMPLETION.md phase B.2); inert
-  // until the user selects "PasTree" as the Insight Provider in Options.
+  // Registers the Code Insight manager; inert until the user selects
+  // "PasTree" as the Insight Provider in Options - and since phase C that
+  // selection is what carries ALL declaration navigation.
   InitializeCodeInsight;
 
   FNotifierIndex := -1;

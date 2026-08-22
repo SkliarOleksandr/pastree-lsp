@@ -335,7 +335,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Go to declaration | Have | editor menu + Ctrl+Click | `OnEditorMouseDownEx`/`UpEx` — the `Handled` overloads (`ToolsAPI.Editor.pas:807`/`831`); the no-`Handled` pair at `622`/`661` cannot suppress the IDE. Interim by decision: superseded when we become the Code Insight manager (see the fork) |
+| Go to declaration | Have | the Code Insight manager (phase C, 2026-08-22) | Ctrl+Click and the native menu item route through `AsyncGotoDefinitionEx` when PasTree is the selected Insight Provider; the mouse-notifier override and the menu takeover are deleted |
 | Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
 | Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |

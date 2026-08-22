@@ -1,47 +1,31 @@
 unit PasTreeIdePlugin.GotoDeclaration;
 
 {
-  Ctrl+Click "Go to Declaration" override, backed by PasTree instead of RAD
-  Studio's own DelphiLSP-based navigation (reported to work poorly on large
-  projects - the whole reason for this unit).
+  PasTree-backed navigation entry points: the "Find Type Declaration" menu
+  item and the Ctrl+Shift+Up/Down decl<->impl toggle, plus the history-aware
+  NavigateToPosition/PushHistoryAndNavigate machinery they (and Alt+Left/
+  Alt+Right) run on.
 
-  Mechanism: INTACodeEditorServices.AddEditorEventsNotifier with a
-  TNTACodeEditorNotifier subclass (ToolsAPI.Editor.pas), hooked on
-  OnEditorMouseDownEx/OnEditorMouseUpEx - both carry a `var Handled: Boolean`
-  documented as "Set to True to mark the event as handled and prevent
-  further processing" (ToolsAPI.Editor.pas:804-806, on the 370 notifier
-  interface). Same technique RAD Studio's own official "KeyboardMouse
-  Events Demo" sample uses (Samples\...\Editor Demos\KeyboardMouse Events
-  Demo) - just for navigation instead of a status readout.
+  THE CTRL+CLICK MOUSE OVERRIDE IS GONE - PHASE C (2026-08-22, COMPLETION.md).
+  From 2026-08-15 to phase C this unit intercepted Ctrl+Click through a
+  TNTACodeEditorNotifier mouse hook (with a stepping-stone period where the
+  hook stood down when PasTree was the selected Insight Provider). Since
+  phase C, Ctrl+Click navigation belongs entirely to the IDE's own click
+  chain, which ends in PasTreeIdePlugin.CodeInsight.AsyncGotoDefinitionEx
+  when the user has selected "PasTree" under Tools > Options > Editor >
+  Source > Insight Provider - the IDE draws the Ctrl+hover underline,
+  navigates, and keeps history itself. With another provider selected, the
+  native navigation runs; that is the provider contract, not a regression:
+  one combobox decides the whole insight family.
 
-  Split across the two events:
-    - MouseDown with Ctrl+Left: only sets Handled := True (suppress
-      whatever default down-side processing exists, e.g. starting a text
-      selection) - no navigation here.
-    - MouseUp with Ctrl+Left: sets Handled := True AND starts the actual
-      resolve+navigate, now as an LSP textDocument/definition request
-      (PasTreeIdePlugin.LspSession) instead of an in-process
-      BuildNavigator call. A compiler builtin still navigates nowhere -
-      it has no source declaration anywhere - and native behavior is
-      still suppressed (Handled stays True) rather than falling back to
-      the slow/broken native path.
+  ASYNCHRONOUS: each entry point returns immediately and the jump happens on
+  a later main-thread turn, when the server answers. By then the cursor may
+  have moved, so the "jumped from" history position is captured at
+  invocation time - see the closure comments below.
 
-  ASYNCHRONOUS SINCE THE LSP MOVE. The mouse handler returns immediately and
-  the jump happens on a later main-thread turn, when the server answers. In
-  practice that is milliseconds, but it is a real behavior change: the click
-  no longer blocks the IDE while the project is analyzed, and by the time the
-  answer lands the cursor may have moved. The "jumped from" position recorded
-  in the history is therefore captured at click time, not at answer time -
-  see the closure comment in ResolveAndNavigate.
-
-  CONFIRMED WORKING (2026-08-15): this override does intercept RAD Studio's
-  native Ctrl+Click declaration navigation via this TCodeEditorEvents mouse
-  chain - not just a documented-but-untested claim anymore.
-
-  Failures here are deliberately quiet (logged, not shown as a dialog): this
-  fires on every Ctrl+Click, far more often than the Find References menu
-  item, so a modal popup on every miss would be much more disruptive than
-  useful. See LogDiagnostic.
+  Failures are deliberately quiet (logged, not shown as a dialog): these run
+  on high-frequency gestures, and a modal popup per miss would be much more
+  disruptive than useful. See LogDiagnostic.
 
   Backward/Forward history (2026-08-15): a successful jump registers with
   IOTAHistoryServices (PushHistoryAndNavigate/TPasHistoryItem), the same
@@ -61,26 +45,11 @@ uses
   ToolsAPI;
 
 /// <summary>
-/// Registers the Ctrl+Click override for the lifetime of the package. Call
-/// once (from PasTreeIdePlugin.Wizard's TIDEWizard.Create).
-/// </summary>
-procedure InitializeGotoDeclaration;
-
-/// <summary>
-/// Unregisters the override. Call once (from TIDEWizard.Destroy) - must be
-/// called before the package unloads, same reason the editor local menu's
-/// action list must be unregistered (see PasTreeIdePlugin.Wizard).
+/// Removes every history item this unit handed to the IDE. Call once (from
+/// TIDEWizard.Destroy) BEFORE the package unloads - a stale entry would
+/// call .Execute on freed package code from Alt+Left/Alt+Right.
 /// </summary>
 procedure FinalizeGotoDeclaration;
-
-/// <summary>
-/// Entry point for the "Find Declaration" editor menu item
-/// (PasTreeIdePlugin.Wizard - the replacement for RAD Studio's native "Find
-/// Declaration") - runs the exact same resolve+navigate logic as the
-/// Ctrl+Click override, from the cursor position, but through an explicit
-/// menu click.
-/// </summary>
-procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
 
 /// <summary>
 /// Entry point for the "Find Type Declaration" editor menu item
@@ -93,44 +62,26 @@ procedure ExecuteTypeDefinition(const AView: IOTAEditView);
 
 /// <summary>
 /// The decl&lt;-&gt;impl toggle, bound to Ctrl+Shift+Down (AToImpl) and
-/// Ctrl+Shift+Up in PasTreeIdePlugin.Wizard - the two keys RAD Studio uses for
-/// its own version of this jump, taken over the same way the native "Find
-/// Declaration" menu item was.
-///
-/// Navigates through the same history-aware path as Ctrl+Click, so Alt+Left /
-/// Alt+Right work across these jumps too.
+/// Ctrl+Shift+Up in PasTreeIdePlugin.Wizard - the two keys RAD Studio uses
+/// for its own version of this jump. Navigates through the same
+/// history-aware path as everything here, so Alt+Left/Alt+Right work across
+/// these jumps too.
 /// </summary>
 procedure ExecuteToggle(const AView: IOTAEditView; AToImpl: Boolean);
 
 implementation
 
 uses
-  System.SysUtils, System.Types, System.Classes, System.UITypes,
-  System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
-  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight;
-
-type
-  // AllowedEvents can only be customized by overriding it - there is no
-  // event property for it on TNTACodeEditorNotifier, unlike the mouse/
-  // keyboard callbacks below (see the official KeyboardMouse Events Demo,
-  // which does the same subclassing for the same reason).
-  TGotoDeclarationNotifier = class(TNTACodeEditorNotifier)
-  protected
-    function AllowedEvents: TCodeEditorEvents; override;
-  end;
-
-function TGotoDeclarationNotifier.AllowedEvents: TCodeEditorEvents;
-begin
-  Result := [cevMouseEvents];
-end;
+  System.SysUtils, System.Generics.Collections,
+  PasTreeIdePlugin.LspSession;
 
 /// <summary>
 /// Goes to the IDE's own default Messages tab (nil group = the "Build" tab)
 /// rather than a dedicated tab of our own, tagged "[pastree]" to stay
 /// identifiable alongside compiler/linker noise - same convention as
 /// PasTreeIdePlugin.FindReferences's own LogDiagnostic. Deliberately no
-/// ShowMessageView: this fires on every Ctrl+Click, so forcing the Messages
-/// panel open on a miss would be far more disruptive than the miss itself.
+/// ShowMessageView: these run on high-frequency gestures, so forcing the
+/// Messages panel open on a miss would be far more disruptive than the miss.
 /// </summary>
 procedure LogDiagnostic(const AMessage: string);
 var
@@ -140,65 +91,13 @@ begin
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
-type
-  TGotoDeclarationManager = class
-  private
-    FEditorServices: INTACodeEditorServices;
-    FNotifier: TGotoDeclarationNotifier;
-    FNotifierIndex: Integer;
-    function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
-      out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
-    procedure DoMouseDown(const Editor: TWinControl; Button: TMouseButton;
-      Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
-    procedure DoMouseUp(const Editor: TWinControl; Button: TMouseButton;
-      Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
-  public
-    constructor Create;
-    destructor Destroy; override;
-  end;
-
-var
-  GManager: TGotoDeclarationManager;
-
-function TGotoDeclarationManager.TryGetPosition(const Editor: TWinControl; X, Y: Integer;
-  out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
-var
-  LState: INTACodeEditorState;
-  LLineState: INTACodeEditorLineState;
-  LColumn, LVisibleLine: Integer;
-begin
-  Result := False;
-  AView := FEditorServices.GetViewForEditor(Editor);
-  if not Assigned(AView) then
-    Exit;
-
-  LState := FEditorServices.EditorState[Editor];
-  if not Assigned(LState) then
-    Exit;
-  if not LState.PointToCharacterPos(Point(X, Y), LColumn, LVisibleLine) then
-    Exit;
-
-  // LVisibleLine is a screen-visible line index, which can differ from the
-  // file's own line numbering under code folding (elided sections). Convert
-  // through LineState to get the LogicalLineNum PasTree's row numbers
-  // actually correspond to.
-  LLineState := LState.LineState[LVisibleLine];
-  if not Assigned(LLineState) then
-    Exit;
-
-  ARow := LLineState.LogicalLineNum;
-  ACol := LColumn;
-  Result := True;
-end;
-
 /// <summary>
-/// Standalone (not tied to the mouse-notifier instance) so the Ctrl+Click
-/// path, the explicit menu item, and TPasHistoryItem.Execute (below - what
-/// actually runs when the user presses Alt+Left/Alt+Right through the
-/// history stack) all share the exact same logic and logging. Takes a
-/// plain file/row/col rather than a TPasRefHit so a history item (which
-/// only ever stores/replays a position, never re-resolves anything) can
-/// call it without depending on PasTree.Sema.Nav.
+/// Standalone so the menu items, the toggle, and TPasHistoryItem.Execute
+/// (below - what actually runs when the user presses Alt+Left/Alt+Right
+/// through the history stack) all share the exact same logic and logging.
+/// Takes a plain file/row/col so a history item (which only ever stores and
+/// replays a position, never re-resolves anything) can call it without
+/// depending on PasTree.Sema.Nav.
 /// </summary>
 procedure NavigateToPosition(const AFileName: string; ARow, ACol: Integer);
 var
@@ -394,55 +293,6 @@ begin
     NavigateToPosition(AToFile, AToRow, AToCol);
 end;
 
-/// <summary>
-/// The actual resolve+navigate logic, shared by the Ctrl+Click override
-/// (DoMouseUp) and the "Find Declaration" menu item
-/// (ExecuteGotoDeclaration) - see this unit's header for why both exist.
-/// Only logs on failure (LogDiagnostic/[pastree]) - this fires on every
-/// Ctrl+Click, so logging every successful step would be far noisier than
-/// useful; a miss is still always visible and says where it happened.
-/// </summary>
-procedure ResolveAndNavigate(const AFileName: string; ARow, ACol: Integer);
-begin
-  try
-    // The three-identity resolve (unit before symbol, builtins declining to
-    // have a declaration at all) now lives in the server's HandleDefinition -
-    // one implementation for both this plugin and any other LSP client,
-    // instead of the same ordering rule written twice.
-    LspDefinition(AFileName, ARow, ACol,
-      // Captures AFileName/ARow/ACol, which are parameters of THIS call, so
-      // every Ctrl+Click gets its own closure frame and its own "jumped from"
-      // position. Capturing a shared local instead would send the history
-      // entry to wherever the cursor happened to be when the answer arrived.
-      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
-        const AError: string)
-      begin
-        if not ASuccess then
-          LogDiagnostic('Goto Declaration: ' + AError)
-        else if Length(AHits) = 0 then
-          // Also the honest answer for a compiler builtin: no source
-          // declaration exists anywhere, so there is nothing to navigate to.
-          LogDiagnostic('Goto Declaration: no identifier/declaration '
-            + 'resolved at cursor.')
-        else
-          PushHistoryAndNavigate(AFileName, ARow, ACol, AHits[0].FilePath,
-            AHits[0].Row, AHits[0].Col);
-      end);
-  except
-    on E: Exception do
-      LogDiagnostic(Format('Goto Declaration: unhandled %s: %s',
-        [E.ClassName, E.Message]));
-  end;
-end;
-
-procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
-begin
-  if not Assigned(AView) then
-    Exit;
-  ResolveAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
-    AView.Buffer.EditPosition.Column);
-end;
-
 procedure ExecuteTypeDefinition(const AView: IOTAEditView);
 var
   LFileName: string;
@@ -536,96 +386,8 @@ begin
     AView.Buffer.EditPosition.Column, AToImpl, False);
 end;
 
-/// <summary>
-/// True only for a left click whose keyboard chord is EXACTLY Ctrl - masking
-/// to the modifier keys first, because in mouse events Shift also carries
-/// button-state flags (ssLeft etc.) that must not affect the comparison. A
-/// bare `ssCtrl in Shift` would also swallow Ctrl+Shift+Click and
-/// Ctrl+Alt+Click, silently taking those chords away from the IDE or any
-/// other plugin that binds them; this override claims plain Ctrl+Click and
-/// nothing else.
-/// </summary>
-function IsPlainCtrlLeftClick(Shift: TShiftState; Button: TMouseButton): Boolean;
-begin
-  Result := (Button = mbLeft)
-    and (Shift * [ssShift, ssCtrl, ssAlt] = [ssCtrl]);
-end;
-
-procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
-  Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
-begin
-  // Suppress default down-side handling only (e.g. starting a text
-  // selection drag) - the actual navigation happens on mouse-up, below.
-  // Stands down when OUR Code Insight manager is the selected provider -
-  // see the matching check in DoMouseUp for the whole story.
-  if IsPlainCtrlLeftClick(Shift, Button)
-     and not PasTreeIsActiveInsightProvider then
-    Handled := True;
-end;
-
-procedure TGotoDeclarationManager.DoMouseUp(const Editor: TWinControl;
-  Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
-var
-  LView: IOTAEditView;
-  LRow, LCol: Integer;
-begin
-  if not IsPlainCtrlLeftClick(Shift, Button) then
-    Exit;
-
-  { THE PHASE-C STEPPING STONE (COMPLETION.md): when the user has selected
-    PasTree as the IDE's Insight Provider, this override stands down and the
-    native click chain runs - which now ends in OUR manager's
-    AsyncGotoDefinitionEx, so the resolver is the same and the IDE draws the
-    Ctrl+hover underline, navigates and keeps history itself. That exercises
-    the manager's browse path for real, which is the last unknown before the
-    endgame deletes this unit's mouse machinery entirely. With any other
-    provider selected (or none resolvable), behavior is unchanged: intercept
-    and navigate ourselves. }
-  if PasTreeIsActiveInsightProvider then
-    Exit;
-
-  // Always suppress the native handler for Ctrl+Left-click, even if we end
-  // up resolving nothing below - the whole point is to stop the slow/broken
-  // LSP-based one from running, not to fall back to it on a miss.
-  Handled := True;
-
-  if not TryGetPosition(Editor, X, Y, LView, LRow, LCol) then
-  begin
-    LogDiagnostic('Goto Declaration: could not resolve click position to a file/row/col.');
-    Exit;
-  end;
-
-  ResolveAndNavigate(LView.Buffer.FileName, LRow, LCol);
-end;
-
-constructor TGotoDeclarationManager.Create;
-begin
-  inherited;
-  FNotifierIndex := -1;
-  if not Supports(BorlandIDEServices, INTACodeEditorServices, FEditorServices) then
-    Exit;
-  FNotifier := TGotoDeclarationNotifier.Create;
-  FNotifier.OnEditorMouseDownEx := DoMouseDown;
-  FNotifier.OnEditorMouseUpEx := DoMouseUp;
-  FNotifierIndex := FEditorServices.AddEditorEventsNotifier(FNotifier);
-end;
-
-destructor TGotoDeclarationManager.Destroy;
-begin
-  if Assigned(FEditorServices) and (FNotifierIndex >= 0) then
-    FEditorServices.RemoveEditorEventsNotifier(FNotifierIndex);
-  inherited;
-end;
-
-procedure InitializeGotoDeclaration;
-begin
-  if not Assigned(GManager) then
-    GManager := TGotoDeclarationManager.Create;
-end;
-
 procedure FinalizeGotoDeclaration;
 begin
-  FreeAndNil(GManager);
   ClearHistoryItems;
 end;
 
