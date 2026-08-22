@@ -4,6 +4,14 @@ unit DemoUnit;
 
 interface
 
+type
+  TBox = record
+    Value: string;
+  end;
+
+const
+  CAnswer = 42;
+
 function Greet(const AName: string): string;
 
 implementation

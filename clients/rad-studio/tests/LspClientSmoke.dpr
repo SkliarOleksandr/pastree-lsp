@@ -578,6 +578,16 @@ begin
     'Greet''s row carries its parameter list verbatim');
   Check(GOk and GResultJson.Contains('"hasParams":true'),
     'and the hasParams flag');
+  // The bare-row fallbacks (2026-08-22): a type row names its definition's
+  // head, a const row its value, a builtin routine its curated result.
+  Check(GOk and GResultJson.Contains('"label":"TBox"'), 'TBox is offered');
+  Check(GOk and GResultJson.Contains(' = record'),
+    'and its row names the definition head');
+  Check(GOk and GResultJson.Contains('"label":"CAnswer"'),
+    'CAnswer is offered');
+  Check(GOk and GResultJson.Contains(' = 42'), 'and its row shows the value');
+  Check(GOk and GResultJson.Contains('(const S: <string|array>): Integer'),
+    'the Length builtin shows params AND the curated result type');
   Check(GOk and GResultJson.Contains(
     Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
     'the textEdit range starts where the word starts');

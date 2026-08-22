@@ -129,6 +129,7 @@ uses
   PasTree.Ast,
   PasTree.Sema.Model,
   PasTree.Sema.Resolver,
+  PasTree.Sema.Builtins,
   PasTree.Sema.Complete;
 
 { LSP CompletionItemKind for a PasTree symbol kind. }
@@ -168,6 +169,152 @@ begin
   Result := AText;
   if Length(Result) > cCap then
     Result := Copy(Result, 1, cCap - 3) + '...';
+end;
+
+{ ---- bare-row fallbacks (user ask, 2026-08-22) -----------------------------
+
+  Every completion row should say what it IS, and the declared-type paths
+  leave real gaps: a TYPE row never had a Detail at all, a CONST row said
+  its type but not its value, and a var/property whose declared type is
+  anonymous (`AbstractErrorProc: procedure`) has no X-type to render. These
+  read the answer straight off the declaration's PUBLIC AST - node kinds
+  and NodeSpanText, nothing the engine keeps private. }
+
+type
+  TNodeKinds = set of TPasNodeKind;
+
+{ The enclosing declaration node of a symbol - DeclNode may point at the
+  name inside it, so climb until a wanted kind (the engine's own recipe). }
+function DeclOfKinds(AModel: TPasSemaModel; ASym: Integer;
+  const AKinds: TNodeKinds): Integer;
+begin
+  Result := AModel.Symbols[ASym].DeclNode;
+  while (Result <> NIL_NODE) and
+        not (AModel.Tree.Nodes[Result].Kind in AKinds) do
+    Result := AModel.Tree.Nodes[Result].Parent;
+end;
+
+{ The type expression child of a var/field/param/property declaration: the
+  first child whose PRECEDING visible token is the ':'. Kind alone cannot
+  split it out - the names before it are nkIdent and a type alias after it
+  is nkIdent too. NIL_NODE when the declaration carries no ':' (an untyped
+  `var` parameter, an inferred inline var). }
+function DeclTypeExprNode(AModel: TPasSemaModel; ADecl: Integer): Integer;
+var
+  LPrev: Integer;
+begin
+  Result := AModel.Tree.Nodes[ADecl].FirstChild;
+  while Result <> NIL_NODE do
+  begin
+    LPrev := AModel.Tree.Nodes[Result].FirstToken - 1;
+    if LPrev >= 0 then
+      with AModel.Tree.Source.Visible[LPrev] do
+        if AModel.Tree.Source.Files[FileId].Tokens[TokenIndex].Kind =
+             tkColon then
+          Exit;
+    Result := AModel.Tree.Nodes[Result].NextSibling;
+  end;
+end;
+
+{ The initializer text of a const declaration. nkConstDecl/nkInlineConst
+  children are [attrs] name [TypeExpr] init [hints]; the init is the LAST
+  child that is neither attribute nor hint directive, which sidesteps
+  telling a leading type from an untyped value. '' when malformed. }
+function ConstValueText(AModel: TPasSemaModel; ADecl: Integer): string;
+var
+  LChild, LInit: Integer;
+  LSeenName: Boolean;
+begin
+  Result := '';
+  LInit := NIL_NODE;
+  LSeenName := False;
+  LChild := AModel.Tree.Nodes[ADecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if not (AModel.Tree.Nodes[LChild].Kind in [nkAttrGroup, nkDirective]) then
+      if not LSeenName then
+        LSeenName := True
+      else
+        LInit := LChild;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if LInit <> NIL_NODE then
+    Result := CapDisplay(AModel.Tree.NodeSpanText(LInit));
+end;
+
+{ The head of a type DEFINITION for a completion row: the whole span for the
+  small shapes ('tagABC', '0..255', 'set of TFoo', 'procedure of object'),
+  the head word plus heritage for the struct kinds - their span is an entire
+  body, and slicing whole classes for thousands of rows is exactly the cost
+  NodeSpanText must not pay here. '' when the declaration is malformed. }
+function TypeDefHeadText(AModel: TPasSemaModel; ADecl: Integer): string;
+var
+  LExpr, LChild: Integer;
+  LSeenName: Boolean;
+  LRefs, LLast: string;
+begin
+  Result := '';
+  // nkTypeDecl children: [attrs] name [generic params] TypeExpr [hints].
+  LExpr := AModel.Tree.Nodes[ADecl].FirstChild;
+  LSeenName := False;
+  while LExpr <> NIL_NODE do
+  begin
+    if not (AModel.Tree.Nodes[LExpr].Kind in
+         [nkAttrGroup, nkGenericParams, nkDirective]) then
+      if LSeenName then
+        Break
+      else
+        LSeenName := True;
+    LExpr := AModel.Tree.Nodes[LExpr].NextSibling;
+  end;
+  if LExpr = NIL_NODE then
+    Exit;
+  case AModel.Tree.Nodes[LExpr].Kind of
+    nkClassType:  Result := 'class';
+    nkRecordType: Result := 'record';
+    nkObjectType: Result := 'object';
+    nkInterfaceType:
+      if AModel.Tree.Nodes[LExpr].Aux = 1 then
+        Result := 'dispinterface'
+      else
+        Result := 'interface';
+    nkHelperType:
+      if AModel.Tree.Nodes[LExpr].Aux = 1 then
+        Result := 'record helper'
+      else
+        Result := 'class helper';
+  else
+    Exit(CapDisplay(AModel.Tree.NodeSpanText(LExpr)));
+  end;
+  // Heritage: the leading type-ref children. For a helper the last of them
+  // is the `for` target; for the rest they are the ancestor list.
+  LRefs := '';
+  LLast := '';
+  LChild := AModel.Tree.Nodes[LExpr].FirstChild;
+  while (LChild <> NIL_NODE) and
+        (AModel.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    if LLast <> '' then
+    begin
+      if LRefs <> '' then
+        LRefs := LRefs + ', ';
+      LRefs := LRefs + LLast;
+    end;
+    LLast := AModel.Tree.NodeSpanText(LChild);
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if AModel.Tree.Nodes[LExpr].Kind = nkHelperType then
+  begin
+    if LLast <> '' then
+      Result := Result + ' for ' + LLast;
+  end
+  else if LLast <> '' then
+  begin
+    if LRefs <> '' then
+      LRefs := LRefs + ', ';
+    Result := Result + '(' + LRefs + LLast + ')';
+  end;
+  Result := CapDisplay(Result);
 end;
 
 { '(const A, B: Integer; var S: string)' -> individual parameter labels
@@ -311,8 +458,10 @@ var
   LEntry: TLspCompletionEntry;
   LWithTypes: Boolean;
   LX: TSemaXType;
-  LParamsText: string;
-  LTypeSym: Integer;
+  LParamsText, LText: string;
+  LTypeSym, LDecl: Integer;
+  LItemModel: TPasSemaModel;
+  LSig: TPasBuiltinSig;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -418,6 +567,71 @@ begin
           if LTypeSym <> NIL_SYM then
             LEntry.Detail := LEntry.Detail + ': '
               + LModel.Symbols[LTypeSym].Name;
+        end;
+        // Rows the paths above leave bare still say what they ARE (user
+        // ask, 2026-08-22): a type its definition head, a const its VALUE
+        // (always, appended after the type when one rendered), a
+        // var/property its declared type read off the declaration, a
+        // builtin routine its curated result type.
+        if LItems[LIdx].Sym <> NIL_SYM then
+        begin
+          if LItems[LIdx].Mid < 0 then
+            LItemModel := LModel
+          else if AProject <> nil then
+            LItemModel := AProject.Model(LItems[LIdx].Mid)
+          else
+            LItemModel := nil;
+          if LItemModel <> nil then
+            case LItems[LIdx].Kind of
+              skType:
+                if LEntry.Detail = '' then
+                begin
+                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
+                    [nkTypeDecl]);
+                  if LDecl <> NIL_NODE then
+                  begin
+                    LText := TypeDefHeadText(LItemModel, LDecl);
+                    if LText <> '' then
+                    begin
+                      // Distinct alias (`= type Base`, nkTypeDecl Aux = 1).
+                      if LItemModel.Tree.Nodes[LDecl].Aux = 1 then
+                        LText := 'type ' + LText;
+                      LEntry.Detail := ' = ' + LText;
+                    end;
+                  end;
+                end;
+              skConst:
+                begin
+                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
+                    [nkConstDecl, nkInlineConst]);
+                  if LDecl <> NIL_NODE then
+                  begin
+                    LText := ConstValueText(LItemModel, LDecl);
+                    if LText <> '' then
+                      LEntry.Detail := LEntry.Detail + ' = ' + LText;
+                  end;
+                end;
+              skVar, skField, skParam, skProperty:
+                if LEntry.Detail = '' then
+                begin
+                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
+                    [nkVarDecl, nkParam, nkPropertyDecl, nkInlineVar]);
+                  if LDecl <> NIL_NODE then
+                  begin
+                    LDecl := DeclTypeExprNode(LItemModel, LDecl);
+                    if LDecl <> NIL_NODE then
+                      LEntry.Detail := ': '
+                        + CapDisplay(LItemModel.Tree.NodeSpanText(LDecl));
+                  end;
+                end;
+              skRoutine:
+                if (sfBuiltin in
+                     LItemModel.Symbols[LItems[LIdx].Sym].Flags) and
+                   PasBuiltinSignature(
+                     LItemModel.Symbols[LItems[LIdx].Sym].NameLower, LSig) and
+                   (LSig.ResultType <> '') then
+                  LEntry.Detail := LEntry.Detail + ': ' + LSig.ResultType;
+            end;
         end;
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail
