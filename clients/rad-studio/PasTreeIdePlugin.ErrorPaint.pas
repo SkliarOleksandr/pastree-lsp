@@ -29,6 +29,7 @@ procedure FinalizeErrorPaint;
 implementation
 
 uses
+  Winapi.Windows,
   System.SysUtils,
   System.Types,
   System.Math,
@@ -71,26 +72,37 @@ begin
   end;
 end;
 
-{ The classic squiggle: a 2px-amplitude zigzag along the baseline. AY is the
-  CENTER row of the wave; the pen walks x in 2px steps alternating +-1. }
-procedure DrawSquiggle(ACanvas: TCanvas; AXFrom, AXTo, AY: Integer;
-  AColor: TColor);
+{ The classic squiggle: a zigzag hugging the bottom of the line rect. SIZED
+  FROM THE RECT, not from constants - the paint canvas is in device pixels,
+  so a hardcoded 2px wave that looks right at 96 DPI reads as a hairline at
+  150% (first live run, 2026-08-22). ALineHeight is the run rect's height;
+  amplitude and half-period scale with it. }
+procedure DrawSquiggle(ACanvas: TCanvas; AXFrom, AXTo, ABottom,
+  ALineHeight: Integer; AColor: TColor);
 var
-  LX, LPhase: Integer;
+  LX, LAmp, LStep, LYLow, LYHigh: Integer;
+  LUp: Boolean;
 begin
-  if AXTo - AXFrom < 2 then
+  LAmp := Max(2, ALineHeight div 8);    // 16-20px line -> 2, 150% -> 3+
+  LStep := LAmp;                        // ~45-degree zigzag
+  if AXTo - AXFrom < LStep then
     Exit;
+  LYLow := ABottom - 1;                 // wave lives inside the line rect
+  LYHigh := LYLow - LAmp;
   ACanvas.Pen.Color := AColor;
-  ACanvas.Pen.Width := 1;
+  ACanvas.Pen.Width := Max(1, ALineHeight div 16);
   ACanvas.Pen.Style := psSolid;
-  LPhase := 1;
-  ACanvas.MoveTo(AXFrom, AY + 1);
-  LX := AXFrom + 2;
+  ACanvas.MoveTo(AXFrom, LYLow);
+  LUp := True;
+  LX := AXFrom + LStep;
   while LX <= AXTo do
   begin
-    ACanvas.LineTo(LX, AY - LPhase);
-    LPhase := -LPhase;
-    Inc(LX, 2);
+    if LUp then
+      ACanvas.LineTo(LX, LYHigh)
+    else
+      ACanvas.LineTo(LX, LYLow);
+    LUp := not LUp;
+    Inc(LX, LStep);
   end;
 end;
 
@@ -114,7 +126,7 @@ procedure TPasErrorPaintNotifier.HandlePaintText(const ARect: TRect;
   const AContext: INTACodeEditorPaintContext);
 var
   LDiags: TArray<TLspDiagnostic>;
-  LIdx, LRow, LFrom, LTo, LColTo, LCellW, LXFrom, LXTo: Integer;
+  LIdx, LRow, LFrom, LTo, LColTo, LXFrom, LXTo: Integer;
 begin
   // AFTER the IDE painted the run - underlining is an overlay, never a
   // replacement (AllowDefaultPainting stays untouched).
@@ -127,9 +139,6 @@ begin
   if not LspTryGetDiagnostics(AContext.FileName, LDiags) then
     Exit;
   LRow := AContext.LogicalLineNum;
-  LCellW := AContext.CellSize.cx;
-  if LCellW <= 0 then
-    Exit;
   for LIdx := 0 to High(LDiags) do
   begin
     if LDiags[LIdx].Row <> LRow then
@@ -144,10 +153,16 @@ begin
     LTo := Min(LColTo, AColNum + Length(AText));
     if LTo <= LFrom then
       Continue;
-    LXFrom := ARect.Left + (LFrom - AColNum) * LCellW;
-    LXTo := ARect.Left + (LTo - AColNum) * LCellW;
+    // Columns -> pixels PROPORTIONALLY within the run's own rect. The rect
+    // is device pixels while CellSize answers unscaled units, so cell
+    // arithmetic drew the wave at ~2/3 width on a scaled monitor (first
+    // live run); the run's width over its own character count cannot drift.
+    LXFrom := ARect.Left
+      + MulDiv(LFrom - AColNum, ARect.Width, Length(AText));
+    LXTo := ARect.Left
+      + MulDiv(LTo - AColNum, ARect.Width, Length(AText));
     DrawSquiggle(AContext.Canvas, Max(LXFrom, ARect.Left),
-      Min(LXTo, ARect.Right), ARect.Bottom - 2,
+      Min(LXTo, ARect.Right), ARect.Bottom, ARect.Height,
       SeverityColor(LDiags[LIdx].Severity));
   end;
 end;

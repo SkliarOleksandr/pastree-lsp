@@ -250,6 +250,15 @@ procedure LspSetDiagnosticsChangedListener(
   const AListener: TLspDiagnosticsChangedProc);
 
 /// <summary>
+/// Pushes the live open-document texts to a RUNNING server - didChange for
+/// whatever differs from the last sent text. The idle-typing hook behind
+/// live diagnostics (PasTreeIdePlugin.IdleSync). No server, or one still in
+/// its handshake, makes this a silent no-op: idle typing never STARTS a
+/// server.
+/// </summary>
+procedure LspIdleSync;
+
+/// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
 /// logged server-side) - the data behind the IDE Insight (Ctrl+.) category.
 /// The answer can be tens of thousands of records; callers cache it rather
@@ -412,6 +421,7 @@ type
     function TryGetSentText(const APath: string; out AText: string): Boolean;
     function TryGetDiagnostics(const APath: string;
       out ADiags: TArray<TLspDiagnostic>): Boolean;
+    procedure IdleSync;
   end;
 
 var
@@ -1650,6 +1660,23 @@ procedure LspSetDiagnosticsChangedListener(
   const AListener: TLspDiagnosticsChangedProc);
 begin
   GDiagnosticsListener := AListener;
+end;
+
+procedure TLspSession.IdleSync;
+begin
+  // PASSIVE by design: pushes the live buffers to a server that is already
+  // up and past its handshake, and starts nothing - idle typing must not
+  // spawn a server the user never asked a question of. Requests keep their
+  // own EnsureSession+Sync pairing.
+  if (FClient <> nil) and FClient.IsReady and (FDocs <> nil) and
+     not FDestroying then
+    FDocs.Sync;
+end;
+
+procedure LspIdleSync;
+begin
+  if Assigned(GSession) then
+    GSession.IdleSync;
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;

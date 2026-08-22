@@ -33,7 +33,8 @@ uses
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
+  PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.LspSession;
 
 const
@@ -300,6 +301,9 @@ begin
   // the module answers that interface natively; SPEC.md, closed
   // experiment.)
   InitializeErrorPaint;
+  // Idle-debounced didChange - keeps the squiggles (and every other answer)
+  // tracking the buffer as it is typed, not as it was last saved.
+  InitializeIdleSync;
   // The Structure pane outline for the active source file.
   InitializeOutline;
 
@@ -341,6 +345,9 @@ begin
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;
+  // The idle timer before the session: a tick after FinalizeLspSession
+  // would sync against a dead client.
+  FinalizeIdleSync;
   FinalizeErrorPaint;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server

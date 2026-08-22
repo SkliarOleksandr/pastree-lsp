@@ -581,9 +581,15 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    closed ones on disk with the BOM rules of `PasLsp.SourceText`.
    `IOTASyncEditPoints` stays the cheap same-file variant later.
 6. **Find References results upgrade** (hierarchy + match highlight in the
-   snippet), **custom colored hint window**, **EditorIdle-driven
-   `didChange` + `IOTAEditLineTracker`** — carried over from the old order,
-   still queued.
+   snippet), **custom colored hint window** — carried over from the old
+   order, still queued. **Idle-debounced `didChange` DELIVERED 2026-08-22**
+   (`PasTreeIdePlugin.IdleSync`: `EditorViewModified` + 600 ms timer →
+   `LspIdleSync`, a no-op without a running server) — first live run
+   found squiggles updating only on save, because the doc sync ran only in
+   front of requests. `IOTAEditLineTracker` stays queued: between an edit
+   and the next publishDiagnostics the painted ranges are stale by
+   whatever lines were inserted above them; the tracker is what would
+   shift them live.
 
 ## Non-goals
 
