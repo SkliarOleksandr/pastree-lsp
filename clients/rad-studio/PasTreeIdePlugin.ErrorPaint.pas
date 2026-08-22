@@ -80,29 +80,36 @@ end;
 procedure DrawSquiggle(ACanvas: TCanvas; AXFrom, AXTo, ABottom,
   ALineHeight: Integer; AColor: TColor);
 var
-  LX, LAmp, LStep, LYLow, LYHigh: Integer;
+  LX, LAmp, LStep, LYLow, LYHigh, LPass: Integer;
   LUp: Boolean;
 begin
   LAmp := Max(2, ALineHeight div 6);    // 16-20px line -> 3, scales up
   LStep := LAmp;                        // ~45-degree zigzag
   if AXTo - AXFrom < LStep then
     Exit;
-  LYLow := ABottom - 1;                 // wave lives inside the line rect
-  LYHigh := LYLow - LAmp;
   ACanvas.Pen.Color := AColor;
-  ACanvas.Pen.Width := Max(1, ALineHeight div 16);
+  ACanvas.Pen.Width := 1;
   ACanvas.Pen.Style := psSolid;
-  ACanvas.MoveTo(AXFrom, LYLow);
-  LUp := True;
-  LX := AXFrom + LStep;
-  while LX <= AXTo do
+  // TWO passes one pixel apart: a single 1px zigzag reads as washed-out
+  // next to the editor's text (live feedback, 2026-08-22), while a wide
+  // pen draws blocky joints at the peaks. Double-stroking is how the
+  // classic squiggle gets its weight.
+  for LPass := 0 to 1 do
   begin
-    if LUp then
-      ACanvas.LineTo(LX, LYHigh)
-    else
-      ACanvas.LineTo(LX, LYLow);
-    LUp := not LUp;
-    Inc(LX, LStep);
+    LYLow := ABottom - 1 - LPass;       // wave lives inside the line rect
+    LYHigh := LYLow - LAmp;
+    ACanvas.MoveTo(AXFrom, LYLow);
+    LUp := True;
+    LX := AXFrom + LStep;
+    while LX <= AXTo do
+    begin
+      if LUp then
+        ACanvas.LineTo(LX, LYHigh)
+      else
+        ACanvas.LineTo(LX, LYLow);
+      LUp := not LUp;
+      Inc(LX, LStep);
+    end;
   end;
 end;
 
