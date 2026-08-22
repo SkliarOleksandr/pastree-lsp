@@ -33,7 +33,8 @@ uses
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.Diagnostics, PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.Diagnostics, PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -297,6 +298,8 @@ begin
   // The IOTAModuleErrors file-trait spike - see that unit's header for the
   // question it answers and how to read the result.
   InitializeDiagnosticsTrait;
+  // The Structure pane outline for the active source file.
+  InitializeOutline;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -333,6 +336,7 @@ begin
   // every pending request synchronously, and those callbacks must find the
   // manager and the Insight notifier already unregistered (and their
   // closures gated off - see the GAlive flags in each unit).
+  FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;
   FinalizeDiagnosticsTrait;

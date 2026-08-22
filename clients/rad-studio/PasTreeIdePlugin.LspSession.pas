@@ -131,6 +131,22 @@ type
     const ASymbols: TArray<TLspWorkspaceSymbol>; const AError: string);
 
   /// <summary>
+  /// One node of a document's outline (textDocument/documentSymbol), in IDE
+  /// coordinates. Children are the type's members, one level deep - the
+  /// same shape the server builds.
+  /// </summary>
+  TLspDocSymbol = record
+    Name: string;
+    KindWord: string;
+    Row: Integer;
+    Col: Integer;
+    Children: TArray<TLspDocSymbol>;
+  end;
+
+  TLspDocSymbolsProc = reference to procedure(ASuccess: Boolean;
+    const ASymbols: TArray<TLspDocSymbol>; const AError: string);
+
+  /// <summary>
   /// One diagnostic of an open document, in IDE coordinates (1-based row and
   /// columns, ColTo exclusive). Severity is LSP's: 1 error, 2 warning,
   /// 3 information/hint.
@@ -204,6 +220,13 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// Asks for APath's outline (unit-level declarations, types with their
+/// members) - what the Structure pane shows.
+/// </summary>
+procedure LspDocumentSymbols(const AFileName: string;
+  const AOnDone: TLspDocSymbolsProc);
 
 /// <summary>
 /// The last diagnostics the server PUSHED for APath (publishDiagnostics
@@ -340,6 +363,7 @@ type
     FPendingHover: Int64;
     FPendingSignature: Int64;
     FPendingWorkspace: Int64;
+    FPendingDocSymbols: Int64;
     // Path (lower-cased, full) -> the server's last publishDiagnostics for
     // it. Filled by the notification handler, read by the file-trait spike.
     FDiagnostics: TDictionary<string, TArray<TLspDiagnostic>>;
@@ -371,6 +395,8 @@ type
       const AOnDone: TLspSignatureHelpProc);
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
+    procedure DocumentSymbols(const AFileName: string;
+      const AOnDone: TLspDocSymbolsProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
     function TryGetDiagnostics(const APath: string;
       out ADiags: TArray<TLspDiagnostic>): Boolean;
@@ -1328,6 +1354,75 @@ begin
   SetLength(Result, LCount);
 end;
 
+function ParseDocSymbols(AArr: TJSONArray): TArray<TLspDocSymbol>;
+var
+  LValue: TJSONValue;
+  LSym: TLspDocSymbol;
+  LChildren: TJSONArray;
+  LLine, LChar, LCount: Integer;
+begin
+  Result := nil;
+  if AArr = nil then
+    Exit;
+  SetLength(Result, AArr.Count);
+  LCount := 0;
+  for LValue in AArr do
+  begin
+    LSym := Default(TLspDocSymbol);
+    LSym.Name := LValue.GetValue<string>('name', '');
+    if LSym.Name = '' then
+      Continue;
+    LSym.KindWord := WorkspaceKindWord(LValue.GetValue<Integer>('kind', 0));
+    LLine := LValue.GetValue<Integer>('selectionRange.start.line', -1);
+    LChar := LValue.GetValue<Integer>('selectionRange.start.character', -1);
+    if (LLine < 0) or (LChar < 0) then
+      Continue;
+    LspToIde(LLine, LChar, LSym.Row, LSym.Col);
+    if LValue.TryGetValue<TJSONArray>('children', LChildren) then
+      LSym.Children := ParseDocSymbols(LChildren);
+    Result[LCount] := LSym;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
+procedure TLspSession.DocumentSymbols(const AFileName: string;
+  const AOnDone: TLspDocSymbolsProc);
+var
+  LParams, LDoc: TJSONObject;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+
+  FDocs.Sync;
+  if FPendingDocSymbols <> 0 then
+    FClient.Cancel(FPendingDocSymbols);
+
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/documentSymbol', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if FPendingDocSymbols = LIssuedId then
+        FPendingDocSymbols := 0;
+      if ASuccess and (AResult is TJSONArray) then
+        AOnDone(True, ParseDocSymbols(TJSONArray(AResult)), '')
+      else if ASuccess then
+        AOnDone(True, nil, '')
+      else
+        AOnDone(False, nil, AError);
+    end);
+  FPendingDocSymbols := LIssuedId;
+end;
+
 procedure TLspSession.WorkspaceSymbols(const AQuery: string;
   const AOnDone: TLspWorkspaceSymbolsProc);
 var
@@ -1513,6 +1608,17 @@ begin
     Exit;
   end;
   GSession.Hover(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspDocumentSymbols(const AFileName: string;
+  const AOnDone: TLspDocSymbolsProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.DocumentSymbols(AFileName, AOnDone);
 end;
 
 function LspTryGetDiagnostics(const APath: string;
