@@ -1225,6 +1225,24 @@ end;
   what the user is typing into), bridged to whatever analysis snapshot is
   ready — or standalone (locals, own-unit names, keywords) when none is. It
   does not schedule a rebuild either; didChange already did. }
+// The item's data member (',"data":{...}') - our own side channel: the
+// routine head word for the RAD viewer's class column, hasParams for its
+// auto-parenthesis. '' when there is nothing to carry.
+function CompletionDataJson(const AItem: TLspCompletionEntry): string;
+begin
+  Result := '';
+  if AItem.HeadWord <> '' then
+    Result := '"head":' + JsonQuote(AItem.HeadWord);
+  if AItem.HasParams then
+  begin
+    if Result <> '' then
+      Result := Result + ',';
+    Result := Result + '"hasParams":true';
+  end;
+  if Result <> '' then
+    Result := ',"data":{' + Result + '}';
+end;
+
 function TLspServer.HandleCompletion(const AMsg: TLspIncoming): string;
 var
   LPath, LText: string;
@@ -1295,9 +1313,7 @@ begin
          RangeJson(LPasLine, LAnswer.ReplaceColFrom,
            LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom),
          JsonQuote(LAnswer.Items[LIdx].ItemLabel),
-         IfThen(LAnswer.Items[LIdx].HeadWord <> '',
-           ',"data":{"head":' + JsonQuote(LAnswer.Items[LIdx].HeadWord) + '}',
-           '')]));
+         CompletionDataJson(LAnswer.Items[LIdx])]));
     end;
     Log(Format('completion: %s -> %d items in %d ms (%s)',
       [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Items),

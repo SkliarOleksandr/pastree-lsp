@@ -572,6 +572,12 @@ begin
   Check(GOk and GResultJson.Contains('"label":"AName"'),
     'the enclosing routine''s parameter is offered - the real engine, '
     + 'not a word list');
+  // The routine's row carries its declaration's real signature and the
+  // hasParams flag the RAD client's auto-parenthesis reads.
+  Check(GOk and GResultJson.Contains('(const AName: string)'),
+    'Greet''s row carries its parameter list verbatim');
+  Check(GOk and GResultJson.Contains('"hasParams":true'),
+    'and the hasParams flag');
   Check(GOk and GResultJson.Contains(
     Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
     'the textEdit range starts where the word starts');
@@ -609,6 +615,32 @@ begin
   finally
     SendDidChange(LUniFile, TFile.ReadAllText(LUniFile));
   end;
+end;
+
+{ 5c. Hover: the shape Tooltip Insight parses.
+
+  The RAD plugin's hint path (PasTreeIdePlugin.LspSession.HoverPlainText)
+  strips exactly this shape - a ```pascal fence around the declaration line
+  plus an italic note - so the fence markers and the note's underscores are
+  part of the contract, not decoration. }
+procedure TestHover;
+var
+  LUnitFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5c. hover carries the declaration line and a kind note ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  FindPos(LUnitFile, 'Result := ''Hello', 'Result', LLine, LChar);
+  // Hover over Greet's call-site-free body is dull; ask about Greet itself
+  // at its implementation header instead.
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
+    'hover answered');
+  Check(GOk and GResultJson.Contains('```pascal'),
+    'the declaration rides in a pascal code fence');
+  Check(GOk and GResultJson.Contains('function Greet'),
+    'and is the declaration line itself');
 end;
 
 { 6. Cancellation hygiene.
@@ -820,6 +852,7 @@ begin
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
       TestCompletion;
+      TestHover;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

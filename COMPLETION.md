@@ -173,9 +173,27 @@ punctuation dimmed, type name in the theme-aware blue, the selected row left
 in the viewer's own highlight for contrast — which is what the native window
 does too.
 
-Still open from the original idea: FULL routine signatures — `(params):
-TResult` instead of the declared type — which is the same engine data
-parameter insight needs, so it lands with that feature, not here.
+**Full routine signatures — delivered 2026-08-22, same day:** the parameter
+list turned out to need no new engine API either — the declaration's
+`nkParams` span read verbatim from the source text (whitespace-collapsed,
+capped) IS the signature, so a routine row now reads
+`(const AName: string): string` like the native list. The same walk decides
+`hasParams`, which rides the item's `data`.
+
+**Tooltip Insight — delivered 2026-08-22** (was queued below): plugin-only,
+as predicted — `LspHover` on the Ask pattern, the session strips the
+server's markdown to tooltip plain text, `AsyncGetHintText` serves it and
+key `#3` stopped declining. The hint position trusts the browse-confirmed
+parameter convention; if a tooltip ever describes the neighbor token, that
+conversion is the first suspect.
+
+**Auto-parenthesis — delivered 2026-08-22** (was queued below): `Done`
+inserts `()` and steps the caret inside when the accepted item's
+`hasParams` says so — a parameterless routine stays bare. Two recorded
+deviations from the original note: the IDE's own "Auto parenthesis" option
+is NOT honored (nothing in ToolsAPI exposes its value — searched), and
+parens apply only on keyboard accepts (Enter/Tab), so a future close-key
+`(` accept cannot double the paren.
 
 **Parameter insight** (Ctrl+Shift+Space; requested 2026-08-21). LSP side is
 `textDocument/signatureHelp` — a tier-3 SPEC.md item whose blocker
@@ -188,23 +206,8 @@ Manager: implement `GetParameterList`/`AsyncInvokeParameterCodeInsight` over
 `IOTACodeInsightParameterList100` (it carries real parameter ranges) and
 stop declining key `#1` in `AllowCodeInsight`.
 
-**Tooltip Insight** (Ctrl+hover hints; requested 2026-08-21). The CHEAPEST
-of the three: the server has answered `textDocument/hover` since the LSP
-move (`HandleHover`) — this is plugin-only work. Manager: implement
-`GetHintText`/`AsyncGetHintText` over an `LspHover` call in LspSession (the
-Ask pattern, one more slot) and stop declining key `#3`. Hint coordinates
-arrive as `HintLine`/`HintCol` — same convention caveat as every other
-manager position, verify on bring-up.
-
-**Auto-parenthesis on accept** (requested 2026-08-21). When the accepted
-completion is a routine WITH parameters, insert `Name()` and land the caret
-between the parentheses (then parameter insight, above, should fire — that
-is the native behavior being mirrored). Where: the manager's `Done`, which
-already owns insertion via `InsertText`; the caret move is
-`EditPosition.MoveRelative`. Needs to know the item takes parameters — a
-`HasParams`-style flag on the wire, which rides the same signature data the
-coloring TODO needs, so these land together. Honor the IDE's own "Auto
-parenthesis" editor option rather than adding a setting of ours.
+(Tooltip Insight and auto-parenthesis were queued here and are delivered —
+see above.)
 
 ## Deliberately not in this plan
 

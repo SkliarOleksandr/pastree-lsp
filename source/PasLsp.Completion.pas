@@ -50,6 +50,9 @@ type
       data field for OUR client (the RAD viewer's class column) while other
       clients simply ignore it. }
     HeadWord: string;
+    { True when the item is a routine declared WITH parameters - what the
+      RAD client's auto-parenthesis reads to insert `()` and step inside. }
+    HasParams: Boolean;
   end;
 
   TLspCompletionAnswer = record
@@ -122,6 +125,100 @@ begin
   Result := Format('%.2d%s', [Ord(ABucket), LowerCase(AName)]);
 end;
 
+{ The declaring nkRoutine node of a routine symbol - DeclNode may point at
+  the name inside it, so climb (the engine's own RoutineNodeOf recipe). }
+function RoutineNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
+begin
+  Result := AModel.Symbols[ASym].DeclNode;
+  while (Result <> NIL_NODE) and
+        (AModel.Tree.Nodes[Result].Kind <> nkRoutine) do
+    Result := AModel.Tree.Nodes[Result].Parent;
+end;
+
+{ The nkParams child of a routine symbol's declaration; NIL_NODE if the
+  routine declares none. }
+function ParamsNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
+var
+  LRoutine: Integer;
+begin
+  LRoutine := RoutineNodeOf(AModel, ASym);
+  if LRoutine = NIL_NODE then
+    Exit(NIL_NODE);
+  Result := AModel.Tree.Nodes[LRoutine].FirstChild;
+  while (Result <> NIL_NODE) and
+        (AModel.Tree.Nodes[Result].Kind <> nkParams) do
+    Result := AModel.Tree.Nodes[Result].NextSibling;
+end;
+
+function HasParamChild(AModel: TPasSemaModel; AParamsNode: Integer): Boolean;
+var
+  LChild: Integer;
+begin
+  Result := False;
+  if AParamsNode = NIL_NODE then
+    Exit;
+  LChild := AModel.Tree.Nodes[AParamsNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkParam then
+      Exit(True);
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ The source text of a node's full token span, whitespace runs collapsed to
+  one space, capped for display. '' when the span crosses files (a decl split
+  over an $I include - not worth reconstructing) or is degenerate. }
+function NodeSpanText(const ATree: TPasTree; ANode: Integer): string;
+const
+  cCap = 100;
+var
+  LNode: TPasNode;
+  LFrom, LTo: TPasVisibleToken;
+  LText: string;
+  LIdx, LOut: Integer;
+  LCh: Char;
+  LWasSpace: Boolean;
+begin
+  Result := '';
+  LNode := ATree.Nodes[ANode];
+  if (LNode.FirstToken < 0) or (LNode.LastToken < LNode.FirstToken) or
+     (LNode.LastToken > High(ATree.Source.Visible)) then
+    Exit;
+  LFrom := ATree.Source.Visible[LNode.FirstToken];
+  LTo := ATree.Source.Visible[LNode.LastToken];
+  if LFrom.FileId <> LTo.FileId then
+    Exit;
+  with ATree.Source.Files[LFrom.FileId] do
+    LText := Copy(Source, Tokens[LFrom.TokenIndex].Start + 1,
+      Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
+  // Collapse whitespace runs in place - a multi-line param list must read
+  // as one display line.
+  SetLength(Result, Length(LText));
+  LOut := 0;
+  LWasSpace := False;
+  for LIdx := 1 to Length(LText) do
+  begin
+    LCh := LText[LIdx];
+    if CharInSet(LCh, [#9, #10, #13, ' ']) then
+      LWasSpace := True
+    else
+    begin
+      if LWasSpace and (LOut > 0) then
+      begin
+        Inc(LOut);
+        Result[LOut] := ' ';
+      end;
+      LWasSpace := False;
+      Inc(LOut);
+      Result[LOut] := LCh;
+    end;
+  end;
+  SetLength(Result, LOut);
+  if Length(Result) > cCap then
+    Result := Copy(Result, 1, cCap - 3) + '...';
+end;
+
 function ContextName(AContext: TPasComplContext): string;
 begin
   case AContext of
@@ -178,6 +275,8 @@ var
   LEntry: TLspCompletionEntry;
   LWithTypes: Boolean;
   LX: TSemaXType;
+  LItemModel: TPasSemaModel;
+  LParamsNode: Integer;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -239,9 +338,31 @@ begin
           else
             LEntry.Kind := LspKindOf(LItems[LIdx].Kind);
         end;
+        // A routine's PARAMETER LIST, verbatim from its declaration's source
+        // span - '(const AName: string; ACount: Integer)' - for the overlay
+        // model and every bridged project model alike. Also decides
+        // HasParams, which drives the RAD client's auto-parenthesis.
+        if (LItems[LIdx].Kind = skRoutine) and
+           (LItems[LIdx].Sym <> NIL_SYM) then
+        begin
+          if LItems[LIdx].Mid < 0 then
+            LItemModel := LModel
+          else if AProject <> nil then
+            LItemModel := AProject.Model(LItems[LIdx].Mid)
+          else
+            LItemModel := nil;
+          if LItemModel <> nil then
+          begin
+            LParamsNode := ParamsNodeOf(LItemModel, LItems[LIdx].Sym);
+            LEntry.HasParams := HasParamChild(LItemModel, LParamsNode);
+            if LParamsNode <> NIL_NODE then
+              LEntry.Detail := NodeSpanText(LItemModel.Tree, LParamsNode);
+          end;
+        end;
         // ': <declared type>' - the demo's own recipe: the project resolves
         // the symbol's declared type on demand, through the instantiation
-        // frame when the item came from a generic instance.
+        // frame when the item came from a generic instance. For a routine
+        // this is its RESULT type, appended after the parameter list.
         if LWithTypes and (LItems[LIdx].Mid >= 0) and
            (LItems[LIdx].Sym <> NIL_SYM) and
            (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
@@ -251,7 +372,7 @@ begin
           if LItems[LIdx].Ctx <> NIL_INST then
             LX := AProject.SubstX(LX, LItems[LIdx].Ctx, 0);
           if XValid(LX) then
-            LEntry.Detail := ': ' + AProject.XTypeText(LX);
+            LEntry.Detail := LEntry.Detail + ': ' + AProject.XTypeText(LX);
         end;
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail

@@ -24,9 +24,11 @@ unit PasTreeIdePlugin.CodeInsight;
       over the same LspDefinition path the current override uses - but
       returning the target to the IDE, which then navigates and keeps history
       itself. That is the migration seam.
-    - Parameter insight and hint text -> declined (AllowCodeInsight says no),
-      so the IDE shows nothing rather than something wrong. They join when
-      the server grows signatureHelp/hover-for-hints.
+    - Hint text (Tooltip Insight) -> AsyncGetHintText over the server's
+      hover, stripped to tooltip plain text by the session.
+    - Parameter insight -> declined (AllowCodeInsight says no), so the IDE
+      shows nothing rather than something wrong. It joins when the server
+      grows signatureHelp.
 
   The sync-interface methods (SetFilter/FindIdent on the symbol list, called
   per keystroke while the viewer is open) answer from the cached array the
@@ -128,6 +130,11 @@ type
     function FindIdent(const AnIdent: string): Integer;
     function FindSymIndex(const Ident: string; var Index: Integer): Boolean;
     procedure SetFilter(const FilterText: string);
+    { The full item behind a viewer row - what Done reads to decide
+      auto-parenthesis. Searches ALL items, not the filtered view: the
+      viewer's selected string exists regardless of the current filter. }
+    function TryGetByName(const AName: string;
+      out AItem: TLspCompletionItem): Boolean;
     function GetSymbolText(Index: Integer): string;
     function GetSymbolTypeText(Index: Integer): string;
     function GetSymbolClassText(I: Integer): string;
@@ -301,6 +308,20 @@ begin
   end;
 end;
 
+function TPasSymbolList.TryGetByName(const AName: string;
+  out AItem: TLspCompletionItem): Boolean;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(FAll) do
+    if SameText(FAll[LIdx].ItemLabel, AName) then
+    begin
+      AItem := FAll[LIdx];
+      Exit(True);
+    end;
+  Result := False;
+end;
+
 function TPasSymbolList.GetSymbolDocumentation(I: Integer): string;
 begin
   Result := '';   // nothing deferred server-side yet - see COMPLETION.md
@@ -318,10 +339,15 @@ type
   private
     FEnabled: Boolean;
     FSymbols: IOTACodeInsightSymbolList;
+    // The same object as FSymbols, typed - Done and DrawLine need item
+    // fields the interface does not expose. The interface reference owns
+    // the lifetime; this one is only ever read alongside it.
+    FSymbolsObj: TPasSymbolList;
     // The one in-flight async completion; a later invocation supersedes it
     // (LspSession cancels the LSP request, this id gate drops the callback).
     FNextId: Integer;
     FActiveId: Integer;
+    FActiveHintId: Integer;
     function CurrentView: IOTAEditView;
   public
     constructor Create;
@@ -434,10 +460,11 @@ end;
 procedure TPasCodeInsightManager.AllowCodeInsight(var Allow: Boolean;
   const Key: Char);
 begin
-  // #0 completion, #2 browse, '.' the trigger character. #1 (parameters) and
-  // #3 (hints) decline honestly until the server answers them - the IDE then
-  // shows nothing rather than something wrong.
-  Allow := (Key = #0) or (Key = #2) or (Key = '.');
+  // #0 completion, #2 browse, #3 hints (Tooltip Insight, over the server's
+  // hover), '.' the trigger character. #1 (parameters) still declines
+  // honestly until the server answers signatureHelp - the IDE then shows
+  // nothing rather than something wrong.
+  Allow := (Key = #0) or (Key = #2) or (Key = #3) or (Key = '.');
 end;
 
 function TPasCodeInsightManager.PreValidateCodeInsight(
@@ -563,6 +590,9 @@ procedure TPasCodeInsightManager.Done(Accepted: Boolean;
 var
   LServices: IOTACodeInsightServices;
   LViewer: IOTACodeInsightViewer;
+  LSelected: string;
+  LItem: TLspCompletionItem;
+  LView: IOTAEditView;
 begin
   DisplayParams := False;
   if not Accepted then
@@ -571,12 +601,34 @@ begin
   // viewer's selection and let the IDE replace the token under the caret -
   // the same replace-the-typed-prefix contract the LSP textEdit span carries
   // for VS Code, expressed through the IDE's own InsertText.
-  if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+  if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+    Exit;
+  LViewer := nil;
+  LServices.GetViewer(LViewer);
+  if not Assigned(LViewer) then
+    Exit;
+  LSelected := LViewer.GetSelectedString;
+  if LSelected = '' then
+    Exit;
+  LServices.InsertText(LSelected, True);
+  // AUTO-PARENTHESIS: a routine WITH parameters gets `()` and the caret
+  // lands between them, mirroring the native behavior. hasParams came from
+  // the server (the declaration's real nkParams), so a parameterless
+  // procedure stays bare - `LoadSettings;` never becomes `LoadSettings();`.
+  // Applied only on the keyboard accept (Enter/Tab, per OnEditorKey): a
+  // future '(' close-key accept must not double the paren.
+  if Assigned(FSymbolsObj) and FSymbolsObj.TryGetByName(LSelected, LItem) and
+     LItem.HasParams then
   begin
-    LViewer := nil;
-    LServices.GetViewer(LViewer);
-    if Assigned(LViewer) and (LViewer.GetSelectedString <> '') then
-      LServices.InsertText(LViewer.GetSelectedString, True);
+    LView := CurrentView;
+    if Assigned(LView) then
+    begin
+      LView.Buffer.EditPosition.InsertText('()');
+      LView.Buffer.EditPosition.MoveRelative(0, -1);
+      // Repaint now rather than on the next natural refresh: the insertion
+      // came from a popup, and a stale caret is visibly wrong.
+      LView.Paint;
+    end;
   end;
 end;
 
@@ -596,7 +648,8 @@ end;
 function TPasCodeInsightManager.AsyncCanInvoke(
   AInsightType: TOTACodeInsightType): Boolean;
 begin
-  Result := AInsightType in [citCodeInsight, citBrowseCodeInsight];
+  Result := AInsightType in [citCodeInsight, citBrowseCodeInsight,
+    citHintCodeInsight];
 end;
 
 function TPasCodeInsightManager.AsyncEnabled: Boolean;
@@ -641,9 +694,15 @@ begin
         Exit;
       FActiveId := 0;
       if ASuccess then
-        FSymbols := TPasSymbolList.Create(AItems)
+      begin
+        FSymbolsObj := TPasSymbolList.Create(AItems);
+        FSymbols := FSymbolsObj;
+      end
       else
+      begin
         FSymbols := nil;
+        FSymbolsObj := nil;
+      end;
       if Assigned(ACallback) then
         ACallback(Self, LId, not ASuccess, AError);
     end);
@@ -659,8 +718,35 @@ end;
 
 function TPasCodeInsightManager.AsyncGetHintText(HintLine, HintCol: Integer;
   ACallBack: TOTAHintTextCallBack): Integer;
+var
+  LId: Integer;
+  LView: IOTAEditView;
+  LFileName: string;
 begin
-  Result := -1;
+  // Tooltip Insight: the server's hover, as plain text. The position is the
+  // HOVERED token's, not the caret's, so the parameters must be trusted -
+  // assumed to follow the browse convention confirmed live (1-based line,
+  // 0-based char index); if a tooltip ever describes the neighbor token,
+  // this conversion is the first suspect.
+  LView := CurrentView;
+  if not Assigned(LView) then
+    Exit(-1);
+  LFileName := LView.Buffer.FileName;
+  Inc(FNextId);
+  LId := FNextId;
+  FActiveHintId := LId;
+  LspHover(LFileName, HintLine, HintCol + 1,
+    procedure(ASuccess: Boolean; const AText: string; const AError: string)
+    begin
+      if not GAlive then
+        Exit;   // package unloading - Self may be gone (see GAlive)
+      if FActiveHintId <> LId then
+        Exit;   // superseded by a newer hover
+      FActiveHintId := 0;
+      if Assigned(ACallBack) then
+        ACallBack(Self, LId, AText, not ASuccess, AError);
+    end);
+  Result := LId;
 end;
 
 function TPasCodeInsightManager.AsyncGotoDefinition(const AFileName: string;
@@ -839,6 +925,8 @@ begin
   // server the moment a newer request went out.
   if FActiveId = AId then
     FActiveId := 0;
+  if FActiveHintId = AId then
+    FActiveHintId := 0;
 end;
 
 function TPasCodeInsightManager.ShowCalculating: Boolean;

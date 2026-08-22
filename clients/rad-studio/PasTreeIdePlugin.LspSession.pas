@@ -79,6 +79,9 @@ type
     // The routine's head keyword ('constructor', 'operator', ...) when the
     // server knows one - carried in the item's data field; '' otherwise.
     Head: string;
+    // True for a routine declared WITH parameters - what auto-parenthesis
+    // reads on accept.
+    HasParams: Boolean;
     Row: Integer;
     ColFrom: Integer;
     ColTo: Integer;
@@ -87,6 +90,15 @@ type
   /// <summary>Same delivery contract as TLspHitsProc.</summary>
   TLspCompletionProc = reference to procedure(ASuccess: Boolean;
     const AItems: TArray<TLspCompletionItem>; const AError: string);
+
+  /// <summary>
+  /// Hover delivery: AText is PLAIN text ready for a tooltip - the session
+  /// strips the server's markdown dressing (code fence, italics) so no
+  /// caller renders markup. '' with ASuccess=True means "nothing under the
+  /// cursor", the common case for any hover machinery.
+  /// </summary>
+  TLspHoverProc = reference to procedure(ASuccess: Boolean;
+    const AText: string; const AError: string);
 
 /// <summary>
 /// Creates the session object. Call once from TIDEWizard.Create. Does NOT
@@ -140,6 +152,14 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// Asks what is under an IDE position - the declaration's source line plus a
+/// kind/location note, as tooltip-ready plain text. Feeds the Code Insight
+/// manager's hint path (Tooltip Insight).
+/// </summary>
+procedure LspHover(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverProc);
 
 /// <summary>
 /// Asks for completion items at an IDE position - the plumbing half of
@@ -239,6 +259,7 @@ type
     FPendingToggle: Int64;
     FPendingTypeDefinition: Int64;
     FPendingCompletion: Int64;
+    FPendingHover: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -260,6 +281,8 @@ type
       const AOnDone: TLspHitsProc);
     procedure Completion(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspCompletionProc);
+    procedure Hover(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspHoverProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
@@ -882,6 +905,7 @@ begin
     LItem.Kind := LObj.GetValue<Integer>('kind', 0);
     LItem.Detail := LObj.GetValue<string>('detail', '');
     LItem.Head := LObj.GetValue<string>('data.head', '');
+    LItem.HasParams := LObj.GetValue<Boolean>('data.hasParams', False);
     if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
        not LRange.TryGetValue<TJSONObject>('start', LStart) or
        not LRange.TryGetValue<TJSONObject>('end', LEnd) then
@@ -945,6 +969,82 @@ begin
         AOnDone(False, nil, AError);
     end);
   FPendingCompletion := LIssuedId;
+end;
+
+/// <summary>
+/// The server's hover markdown as tooltip plain text. The shape is OUR
+/// server's (one code fence plus an italic note line); anything else is
+/// passed through as-is rather than parsed - a hint is display-only.
+/// </summary>
+function HoverPlainText(AResult: TJSONValue): string;
+var
+  LValue: string;
+  LLines: TArray<string>;
+  LIdx: Integer;
+  LOut: string;
+begin
+  Result := '';
+  if (AResult = nil) or AResult.Null then
+    Exit;
+  if not AResult.TryGetValue<string>('contents.value', LValue) then
+    Exit;
+  LLines := LValue.Replace(#13#10, #10).Split([#10]);
+  LOut := '';
+  for LIdx := 0 to High(LLines) do
+  begin
+    if LLines[LIdx].StartsWith('```') then
+      Continue;   // fence markers carry no content
+    if (LLines[LIdx].Length >= 2) and LLines[LIdx].StartsWith('_') and
+       LLines[LIdx].EndsWith('_') then
+      LLines[LIdx] := Copy(LLines[LIdx], 2, LLines[LIdx].Length - 2);
+    if LLines[LIdx] = '' then
+      Continue;
+    if LOut <> '' then
+      LOut := LOut + sLineBreak;
+    LOut := LOut + LLines[LIdx];
+  end;
+  Result := LOut;
+end;
+
+procedure TLspSession.Hover(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, '', 'no LSP server available');
+    Exit;
+  end;
+
+  FDocs.Sync;
+  if FPendingHover <> 0 then
+    FClient.Cancel(FPendingHover);
+
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/hover', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if FPendingHover = LIssuedId then
+        FPendingHover := 0;
+      if ASuccess then
+        AOnDone(True, HoverPlainText(AResult), '')
+      else
+        AOnDone(False, '', AError);
+    end);
+  FPendingHover := LIssuedId;
 end;
 
 procedure TLspSession.Prewarm;
@@ -1088,6 +1188,17 @@ begin
     Exit;
   end;
   GSession.Completion(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspHover(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, '', 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.Hover(AFileName, ARow, ACol, AOnDone);
 end;
 
 function LspSourceTextOf(const AFileName: string): string;
