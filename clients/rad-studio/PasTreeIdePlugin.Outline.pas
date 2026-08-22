@@ -34,11 +34,16 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.Types,
+  System.UITypes,
   System.Generics.Collections,
   Winapi.Windows,
   Vcl.Menus,
+  Vcl.Graphics,
+  Vcl.Controls,
   DockForm,
   ToolsAPI,
+  ToolsAPI.UI,
   StructureViewAPI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
@@ -50,6 +55,13 @@ const
 var
   GNotifierIndex: Integer = -1;
   GAlive: Boolean = False;
+  // Runtime-drawn 16x16 kind badges (a colored disc with the kind's
+  // letter), registered with the structure view ONCE - AddImageList
+  // returns the base index our nodes offset from. Drawn rather than
+  // shipped: no resource pipeline, and the colors come from the IDE's
+  // theme-aware palette so dark themes get their variants.
+  GImages: TImageList = nil;
+  GImageBase: Integer = -1;
   // The context currently installed in the pane - kept so a stale async
   // answer (tab switched again before the outline arrived) can be told from
   // the current one by file path.
@@ -77,6 +89,7 @@ type
     FCaption: string;
     FFilePath: string;
     FRow, FCol: Integer;
+    FImageIndex: Integer;
     FChildren: TList<IOTAStructureNode>;
     // Raw, not counted: parent holds child interfaces, so a counted
     // back-reference would be a cycle no refcount ever collects.
@@ -201,6 +214,7 @@ begin
   FFilePath := AFilePath;
   FRow := ARow;
   FCol := ACol;
+  FImageIndex := -1;
   FChildren := TList<IOTAStructureNode>.Create;
   FExpanded := True;
 end;
@@ -273,7 +287,7 @@ end;
 
 function TPasOutlineNode.Get_ImageIndex: Integer;
 begin
-  Result := -1;   // no image list registered (v1)
+  Result := FImageIndex;
 end;
 
 function TPasOutlineNode.Get_Name: WideString;
@@ -431,23 +445,123 @@ end;
   Building and installing the outline
   --------------------------------------------------------------------------- }
 
+const
+  // Badge slots, in the order the image list is filled. imgGroup is the
+  // category header; the rest are declaration kinds.
+  imgGroup = 0;
+  imgType = 1;
+  imgRoutine = 2;
+  imgVar = 3;
+  imgConst = 4;
+  imgValue = 5;
+  imgProperty = 6;
+  imgField = 7;
+
+function BadgeIndexOf(const AKindWord: string): Integer;
+begin
+  if (AKindWord = 'class') or (AKindWord = 'interface') or
+     (AKindWord = 'record') or (AKindWord = 'enum') or
+     (AKindWord = 'array') then
+    Result := imgType
+  else if AKindWord = 'function' then
+    Result := imgRoutine
+  else if AKindWord = 'var' then
+    Result := imgVar
+  else if AKindWord = 'const' then
+    Result := imgConst
+  else if AKindWord = 'value' then
+    Result := imgValue
+  else if AKindWord = 'property' then
+    Result := imgProperty
+  else if AKindWord = 'field' then
+    Result := imgField
+  else
+    Result := imgGroup;
+end;
+
 function BuildNode(const AFilePath: string;
   const ASymbol: TLspDocSymbol): IOTAStructureNode;
 var
   LCaption: string;
+  LNode: TPasOutlineNode;
   LIdx: Integer;
 begin
   LCaption := ASymbol.Name;
   if ASymbol.KindWord <> '' then
     LCaption := LCaption + ' (' + ASymbol.KindWord + ')';
-  Result := TPasOutlineNode.Create(LCaption, AFilePath, ASymbol.Row,
+  LNode := TPasOutlineNode.Create(LCaption, AFilePath, ASymbol.Row,
     ASymbol.Col);
+  if GImageBase >= 0 then
+    LNode.FImageIndex := GImageBase + BadgeIndexOf(ASymbol.KindWord);
+  Result := LNode;
   for LIdx := 0 to High(ASymbol.Children) do
     Result.AddChildNode(BuildNode(AFilePath, ASymbol.Children[LIdx]), -1);
 end;
 
 var
   GViewMissingLogged: Boolean = False;
+
+procedure AddBadge(AImages: TImageList; const ALetter: string;
+  ABack: TColor);
+var
+  LBmp: TBitmap;
+begin
+  LBmp := TBitmap.Create;
+  try
+    LBmp.SetSize(16, 16);
+    LBmp.Canvas.Brush.Color := clFuchsia;   // the mask color
+    LBmp.Canvas.FillRect(Rect(0, 0, 16, 16));
+    LBmp.Canvas.Brush.Color := ABack;
+    LBmp.Canvas.Pen.Color := ABack;
+    LBmp.Canvas.Ellipse(1, 1, 15, 15);
+    LBmp.Canvas.Font.Name := 'Segoe UI';
+    LBmp.Canvas.Font.Size := 7;
+    LBmp.Canvas.Font.Style := [TFontStyle.fsBold];
+    LBmp.Canvas.Font.Color := clWhite;
+    LBmp.Canvas.Brush.Style := bsClear;
+    LBmp.Canvas.TextOut(8 - LBmp.Canvas.TextWidth(ALetter) div 2,
+      8 - LBmp.Canvas.TextHeight(ALetter) div 2, ALetter);
+    AImages.AddMasked(LBmp, clFuchsia);
+  finally
+    LBmp.Free;
+  end;
+end;
+
+// Register the badge list with the structure view the first time it is
+// reachable. -1 stays "no images" and nodes fall back to no icon.
+procedure EnsureImages(const AView: IOTAStructureView);
+var
+  LUI: INTAIDEUIServices;
+
+  function Themed(AColor: TIDEThemeColors; AFallback: TColor): TColor;
+  begin
+    if LUI <> nil then
+      Result := LUI.ThemeAwareColors[AColor]
+    else
+      Result := AFallback;
+  end;
+
+begin
+  if GImageBase >= 0 then
+    Exit;
+  if not Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+    LUI := nil;
+  if GImages = nil then
+  begin
+    GImages := TImageList.Create(nil);
+    GImages.Width := 16;
+    GImages.Height := 16;
+    AddBadge(GImages, '#', Themed(itcGray, clGray));       // group header
+    AddBadge(GImages, 'T', Themed(itcOrange, clWebOrange)); // types
+    AddBadge(GImages, 'R', Themed(itcBlue, clNavy));        // routines
+    AddBadge(GImages, 'V', Themed(itcGreen, clGreen));      // variables
+    AddBadge(GImages, 'C', Themed(itcViolet, clPurple));    // constants
+    AddBadge(GImages, 'E', Themed(itcGray, clGray));        // enum values
+    AddBadge(GImages, 'P', Themed(itcYellow, clOlive));     // properties
+    AddBadge(GImages, 'F', Themed(itcGreen, clTeal));       // fields
+  end;
+  GImageBase := AView.AddImageList(GImages.Handle, False);
+end;
 
 // Adds one 'Types'/'Routines'/... category root holding every top symbol
 // whose kind word is in AKinds - skipped entirely when none match, so the
@@ -475,6 +589,9 @@ begin
     if LGroup = nil then
     begin
       LGroup := TPasOutlineNode.Create(ACaption, AFilePath, 0, 0);
+      if GImageBase >= 0 then
+        TPasOutlineNode(LGroup as TObject).FImageIndex :=
+          GImageBase + imgGroup;
       AContext.AddRootNode(LGroup, -1);
     end;
     LGroup.AddChildNode(BuildNode(AFilePath, ASymbols[LIdx]), -1);
@@ -503,6 +620,7 @@ begin
     end;
     Exit;
   end;
+  EnsureImages(LView);
   LContext := TPasOutlineContext.Create(AFilePath);
   // Grouped the way the native Structure pane groups a unit: category
   // headers with the declarations under them; types keep their members as
@@ -607,6 +725,11 @@ var
   LServices: IOTAEditorServices80;
 begin
   GAlive := False;
+  // The image list handle was handed to the structure view; the view keeps
+  // its own copy semantics unknown, so the list itself is freed last thing
+  // at unload, after nothing can repaint with it.
+  FreeAndNil(GImages);
+  GImageBase := -1;
   if GNotifierIndex >= 0 then
   begin
     if Supports(BorlandIDEServices, IOTAEditorServices80, LServices) then
