@@ -37,8 +37,7 @@ uses
   PasTree.Platforms,
   PasTree.SourceManager,
   PasTree.Preprocessor,
-  PasTree.Sema.Project,
-  PasTree.Sema.Nav;
+  PasTree.Sema.Project;
 
 type
   TLspCompletionEntry = record
@@ -110,16 +109,16 @@ type
     function CompleteAt(const AFileName, AText: string;
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
       AProjectMid: Integer): TLspCompletionAnswer;
-    { Signature help at a position: the enclosing call located by a backward
-      walk over VISIBLE tokens (comments and strings are single tokens there,
-      nesting respected), the target resolved through the overlay's own
-      RefMap or - when the analyzed text still matches - the navigator.
-      INTERIM until PasTree's CallAt lands (its plan §8): a freshly typed
-      call to a cross-unit routine answers empty, honestly - bridged
-      designator resolution is the engine's to provide, not ours to copy. }
+    { Signature help at a position: the engine's CallAt locates the innermost
+      enclosing call (indexers, grouping parens and casts stepped over; a
+      declaration's parameter list refuses), counts the active argument, and
+      resolves the designator through the overlay+bridge - so member calls
+      and freshly typed cross-unit calls answer, the two cases the interim
+      backward-walk locator (retired 2026-08-22) never could. One signature
+      per overload; intrinsics answer from the engine's curated table. }
     function SignatureHelpAt(const AFileName, AText: string;
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
-      AProjectMid: Integer; ANav: TPasNavigator): TLspSignatureHelpAnswer;
+      AProjectMid: Integer): TLspSignatureHelpAnswer;
   end;
 
 implementation
@@ -160,96 +159,13 @@ begin
   Result := Format('%.2d%s', [Ord(ABucket), LowerCase(AName)]);
 end;
 
-{ The declaring nkRoutine node of a routine symbol - DeclNode may point at
-  the name inside it, so climb (the engine's own RoutineNodeOf recipe). }
-function RoutineNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
-begin
-  Result := AModel.Symbols[ASym].DeclNode;
-  while (Result <> NIL_NODE) and
-        (AModel.Tree.Nodes[Result].Kind <> nkRoutine) do
-    Result := AModel.Tree.Nodes[Result].Parent;
-end;
-
-{ The nkParams child of a routine symbol's declaration; NIL_NODE if the
-  routine declares none. }
-function ParamsNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
-var
-  LRoutine: Integer;
-begin
-  LRoutine := RoutineNodeOf(AModel, ASym);
-  if LRoutine = NIL_NODE then
-    Exit(NIL_NODE);
-  Result := AModel.Tree.Nodes[LRoutine].FirstChild;
-  while (Result <> NIL_NODE) and
-        (AModel.Tree.Nodes[Result].Kind <> nkParams) do
-    Result := AModel.Tree.Nodes[Result].NextSibling;
-end;
-
-function HasParamChild(AModel: TPasSemaModel; AParamsNode: Integer): Boolean;
-var
-  LChild: Integer;
-begin
-  Result := False;
-  if AParamsNode = NIL_NODE then
-    Exit;
-  LChild := AModel.Tree.Nodes[AParamsNode].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if AModel.Tree.Nodes[LChild].Kind = nkParam then
-      Exit(True);
-    LChild := AModel.Tree.Nodes[LChild].NextSibling;
-  end;
-end;
-
-{ The source text of a node's full token span, whitespace runs collapsed to
-  one space, capped for display. '' when the span crosses files (a decl split
-  over an $I include - not worth reconstructing) or is degenerate. }
-function NodeSpanText(const ATree: TPasTree; ANode: Integer): string;
+{ Display cap for a Detail column - the engine hands back the declaration's
+  full one-line span and leaves any length cap to the host (its words). }
+function CapDisplay(const AText: string): string;
 const
   cCap = 100;
-var
-  LNode: TPasNode;
-  LFrom, LTo: TPasVisibleToken;
-  LText: string;
-  LIdx, LOut: Integer;
-  LCh: Char;
-  LWasSpace: Boolean;
 begin
-  Result := '';
-  LNode := ATree.Nodes[ANode];
-  if (LNode.FirstToken < 0) or (LNode.LastToken < LNode.FirstToken) or
-     (LNode.LastToken > High(ATree.Source.Visible)) then
-    Exit;
-  LFrom := ATree.Source.Visible[LNode.FirstToken];
-  LTo := ATree.Source.Visible[LNode.LastToken];
-  if LFrom.FileId <> LTo.FileId then
-    Exit;
-  with ATree.Source.Files[LFrom.FileId] do
-    LText := Copy(Source, Tokens[LFrom.TokenIndex].Start + 1,
-      Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
-  // Collapse whitespace runs in place - a multi-line param list must read
-  // as one display line.
-  SetLength(Result, Length(LText));
-  LOut := 0;
-  LWasSpace := False;
-  for LIdx := 1 to Length(LText) do
-  begin
-    LCh := LText[LIdx];
-    if CharInSet(LCh, [#9, #10, #13, ' ']) then
-      LWasSpace := True
-    else
-    begin
-      if LWasSpace and (LOut > 0) then
-      begin
-        Inc(LOut);
-        Result[LOut] := ' ';
-      end;
-      LWasSpace := False;
-      Inc(LOut);
-      Result[LOut] := LCh;
-    end;
-  end;
-  SetLength(Result, LOut);
+  Result := AText;
   if Length(Result) > cCap then
     Result := Copy(Result, 1, cCap - 3) + '...';
 end;
@@ -395,8 +311,8 @@ var
   LEntry: TLspCompletionEntry;
   LWithTypes: Boolean;
   LX: TSemaXType;
-  LItemModel: TPasSemaModel;
-  LParamsNode, LTypeSym: Integer;
+  LParamsText: string;
+  LTypeSym: Integer;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -463,27 +379,16 @@ begin
           else
             LEntry.Kind := LspKindOf(LItems[LIdx].Kind);
         end;
-        // A routine's PARAMETER LIST, verbatim from its declaration's source
-        // span - '(const AName: string; ACount: Integer)' - for the overlay
-        // model and every bridged project model alike. Also decides
-        // HasParams, which drives the RAD client's auto-parenthesis.
-        if (LItems[LIdx].Kind = skRoutine) and
-           (LItems[LIdx].Sym <> NIL_SYM) then
-        begin
-          if LItems[LIdx].Mid < 0 then
-            LItemModel := LModel
-          else if AProject <> nil then
-            LItemModel := AProject.Model(LItems[LIdx].Mid)
-          else
-            LItemModel := nil;
-          if LItemModel <> nil then
-          begin
-            LParamsNode := ParamsNodeOf(LItemModel, LItems[LIdx].Sym);
-            LEntry.HasParams := HasParamChild(LItemModel, LParamsNode);
-            if LParamsNode <> NIL_NODE then
-              LEntry.Detail := NodeSpanText(LItemModel.Tree, LParamsNode);
-          end;
-        end;
+        // A routine's PARAMETER LIST as display text - the engine's own
+        // accessors (0.6.0): the declaration span for real routines, the
+        // curated seed-table signature for intrinsics (Copy, Inc, Writeln -
+        // rows the interim hand-rolled span reader always left blank).
+        // HasParams drives the RAD client's auto-parenthesis; an empty `()`
+        // and an all-optional intrinsic (Exit, Halt) both answer False.
+        LEntry.HasParams := LCompletion.ItemHasParams(LItems[LIdx]);
+        LParamsText := LCompletion.ItemParamsText(LItems[LIdx]);
+        if LParamsText <> '' then
+          LEntry.Detail := CapDisplay(LParamsText);
         // ': <declared type>' - the demo's own recipe: the project resolves
         // the symbol's declared type on demand, through the instantiation
         // frame when the item came from a generic instance. For a routine
@@ -532,244 +437,68 @@ end;
 
 function TLspCompletionEngine.SignatureHelpAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
-  AProjectMid: Integer; ANav: TPasNavigator): TLspSignatureHelpAnswer;
+  AProjectMid: Integer): TLspSignatureHelpAnswer;
 var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
   LDiags: TArray<TPasParseDiag>;
-  LModel, LTargetModel: TPasSemaModel;
+  LModel: TPasSemaModel;
   LCompletion: TPasCompletion;
-  LInfo: TPasCaretInfo;
-  LCaretOfs, LVisIdx, LOpenVis, LIdentVis, LDepth, LArgs, LSteps: Integer;
-  LIdentLine, LIdentCol, LTMid, LSym, LNext, LCount: Integer;
-  LIdentText, LNavName, LParamsText, LSuffix: string;
-  LTargetProject, LUsesFallback: Boolean;
+  LInfo: TPasCallInfo;
+  LIdx: Integer;
   LSig: TLspSignatureItem;
-
-  function VisKind(AVis: Integer): TPasTokenKind;
-  begin
-    with LTree.Source.Visible[AVis] do
-      Result := LTree.Source.Files[FileId].Tokens[TokenIndex].Kind;
-  end;
-
-  function VisStart(AVis: Integer): Integer;
-  begin
-    with LTree.Source.Visible[AVis] do
-      Result := LTree.Source.Files[FileId].Tokens[TokenIndex].Start;
-  end;
-
 begin
   Result := Default(TLspSignatureHelpAnswer);
-  Result.Provider := 'pastree-interim/none';
+  Result.Provider := 'pastree/no-call';
   if (APasLine < 1) or (APasCol < 1) then
     Exit;
 
+  // The same overlay pipeline as CompleteAt: the LIVE text, parsed
+  // error-tolerantly, bridged to the last-good analysis. CallAt does the
+  // rest - locating the call, counting the argument, resolving the
+  // designator (member calls and freshly typed cross-unit calls included),
+  // one target per overload with display fields already materialized.
   LPre := FPreprocessor.ProcessText(AFileName, AText);
   LTree := TPasParser.ParseFile(LPre, LDiags);
   LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   try
-    // The caret as an offset into the main file, clamped like every host
-    // position (LineStarts is the lexer's own line map).
-    with LTree.Source.Files[0] do
-    begin
-      if APasLine > Length(LineStarts) then
-        Exit;
-      LCaretOfs := LineStarts[APasLine - 1] + (APasCol - 1);
-    end;
-
-    { The last main-file visible token that STARTS before the caret - the
-      anchor of the backward walk. Comments never appear here (visible
-      stream), strings/numbers are single tokens, so the walk cannot be
-      fooled by parens inside either. }
-    LVisIdx := -1;
-    for LIdentVis := 0 to High(LTree.Source.Visible) do
-      if LTree.Source.Visible[LIdentVis].FileId = 0 then
-      begin
-        // Include-file tokens carry offsets into THEIR file - they must be
-        // skipped, never compared against the main file's caret offset.
-        if VisStart(LIdentVis) >= LCaretOfs then
-          Break;
-        LVisIdx := LIdentVis;
-      end;
-    if LVisIdx < 0 then
-      Exit;
-
-    // Backward: nesting over ()/[], top-level commas count arguments, and a
-    // statement boundary at depth 0 means the caret is in no call at all.
-    LOpenVis := -1;
-    LDepth := 0;
-    LArgs := 0;
-    LSteps := 0;
-    while (LVisIdx >= 0) and (LSteps < 2000) do
-    begin
-      if LTree.Source.Visible[LVisIdx].FileId = 0 then
-        case VisKind(LVisIdx) of
-          tkRParen, tkRBracket:
-            Inc(LDepth);
-          tkLBracket:
-            begin
-              if LDepth = 0 then
-                Exit;   // inside an indexer, not a call - v1 declines
-              Dec(LDepth);
-            end;
-          tkLParen:
-            begin
-              if LDepth = 0 then
-              begin
-                LOpenVis := LVisIdx;
-                Break;
-              end;
-              Dec(LDepth);
-            end;
-          tkComma:
-            if LDepth = 0 then
-              Inc(LArgs);
-          tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse:
-            if LDepth = 0 then
-              Exit;   // left the statement without meeting an open paren
-        end;
-      Dec(LVisIdx);
-      Inc(LSteps);
-    end;
-    if (LOpenVis <= 0) or
-       (LTree.Source.Visible[LOpenVis - 1].FileId <> 0) or
-       (VisKind(LOpenVis - 1) <> tkIdentifier) then
-      Exit;   // no call, or a designator shape v1 does not resolve
-    LIdentVis := LOpenVis - 1;
-
-    with LTree.Source.Visible[LIdentVis] do
-      LIdentText := LTree.Source.Files[FileId].TokenText(TokenIndex);
-    LTree.Source.Files[0].OffsetToLineCol(VisStart(LIdentVis),
-      LIdentLine, LIdentCol);
-    LTree.Source.Files[0].OffsetToLineCol(VisStart(LOpenVis),
-      Result.CallLine, Result.CallCol);
-
-    { Resolve the name. Overlay RefMap first (locals and own-unit routines,
-      correct even mid-typing); then the last-good navigator, accepted only
-      when the analyzed text still holds THIS identifier at THIS position -
-      otherwise a shifted buffer would show a neighbor's signature. }
-    LTargetModel := nil;
-    LTargetProject := False;
-    LUsesFallback := False;
-    LSym := NIL_SYM;
     LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
     try
-      if LCompletion.CaretAt(LIdentLine, LIdentCol + 1, LInfo) and
-         (LInfo.Kind = ckIdent) and (LInfo.Node <> NIL_NODE) and
-         (LInfo.Node <= High(LModel.RefMap)) then
-        LSym := LModel.RefMap[LInfo.Node];
-      if (LSym <> NIL_SYM) and (LModel.Symbols[LSym].Kind = skRoutine) then
-        LTargetModel := LModel
+      if not LCompletion.CallAt(APasLine, APasCol, LInfo) then
+        Exit;
+      Result.CallLine := LInfo.OpenLine;
+      Result.CallCol := LInfo.OpenCol;
+      Result.ActiveParam := LInfo.ArgIndex;
+      SetLength(Result.Signatures, Length(LInfo.Targets));
+      for LIdx := 0 to High(LInfo.Targets) do
+      begin
+        LSig.SigLabel := LInfo.Targets[LIdx].Name
+          + LInfo.Targets[LIdx].ParamsText;
+        if LInfo.Targets[LIdx].ResultText <> '' then
+          LSig.SigLabel := LSig.SigLabel + ': '
+            + LInfo.Targets[LIdx].ResultText;
+        LSig.Params := SplitParamLabels(LInfo.Targets[LIdx].ParamsText);
+        Result.Signatures[LIdx] := LSig;
+      end;
+      // Prefer the first overload that still has a parameter for the
+      // argument being typed; the first one otherwise.
+      Result.ActiveSignature := 0;
+      for LIdx := 0 to High(Result.Signatures) do
+        if Length(Result.Signatures[LIdx].Params) > LInfo.ArgIndex then
+        begin
+          Result.ActiveSignature := LIdx;
+          Break;
+        end;
+      // True with no targets is CallAt's honest "a call whose name nothing
+      // resolves" - the handler answers null either way, but the log line
+      // should say which of the two happened.
+      if Length(LInfo.Targets) = 0 then
+        Result.Provider := 'pastree/callat-unresolved'
       else
-      begin
-        LSym := NIL_SYM;
-        if (ANav <> nil) and (AProject <> nil) and (AProjectMid >= 0) and
-           ANav.SymbolAt(AProjectMid, LIdentLine, LIdentCol, LTMid, LSym,
-             LNavName) and SameText(LNavName, LIdentText) then
-        begin
-          LTargetModel := AProject.Model(LTMid);
-          LTargetProject := True;
-          if LTargetModel.Symbols[LSym].Kind <> skRoutine then
-          begin
-            LTargetModel := nil;
-            LSym := NIL_SYM;
-          end;
-        end
-        else
-          LSym := NIL_SYM;
-      end;
-
-      { Third try, and the one that makes a FRESHLY TYPED cross-unit call
-        work on the first keystroke (live finding, 2026-08-22: completion
-        inserts `AccessCheck()` and the position-based navigator knows
-        nothing until the next full rebuild lands - a ~15 s window on the
-        big project): resolve the NAME through the interface scopes of the
-        units this file USES, taken from its last-good PROJECT model, whose
-        UsesList is already alias/namespace-resolved. Reverse order - a
-        later unit shadows an earlier one, the language's own rule. Plain
-        identifiers only; member calls stay with the engine's future
-        CallAt. }
-      if (LTargetModel = nil) and (AProject <> nil) and (AProjectMid >= 0)
-         and ((LOpenVis < 2) or
-              (LTree.Source.Visible[LOpenVis - 2].FileId <> 0) or
-              (VisKind(LOpenVis - 2) <> tkDot)) then
-      begin
-        LTargetModel := AProject.Model(AProjectMid);
-        LTMid := AProjectMid;
-        if LTargetModel <> nil then
-          for LCount := High(LTargetModel.UsesList) downto 0 do
-            if LTargetModel.UsesList[LCount].UnitId >= 0 then
-            begin
-              LTMid := LTargetModel.UsesList[LCount].UnitId;
-              with AProject.Model(LTMid) do
-                if InterfaceScope <> NIL_SCOPE then
-                  LSym := ResolveAt(InterfaceScope, LowerCase(LIdentText), -1)
-                else
-                  LSym := NIL_SYM;
-              if (LSym <> NIL_SYM) and
-                 (AProject.Model(LTMid).Symbols[LSym].Kind = skRoutine) then
-                Break;
-              LSym := NIL_SYM;
-            end;
-        if LSym <> NIL_SYM then
-        begin
-          LTargetModel := AProject.Model(LTMid);
-          LTargetProject := True;
-          LUsesFallback := True;
-        end
-        else
-          LTargetModel := nil;
-      end;
-
-      if LTargetModel = nil then
-        Exit;   // honest empty: the engine's CallAt owns this case one day
-
-      // The overload chain, each as its own signature.
-      LNext := LSym;
-      LCount := 0;
-      while (LNext <> NIL_SYM) and (LCount < 16) do
-      begin
-        LParamsText := '';
-        LIdentVis := ParamsNodeOf(LTargetModel, LNext);
-        if LIdentVis <> NIL_NODE then
-          LParamsText := NodeSpanText(LTargetModel.Tree, LIdentVis);
-        LSuffix := '';
-        if LTargetProject then
-        begin
-          if XValid(AProject.SymDeclTypeX(LTMid, LNext)) then
-            LSuffix := ': '
-              + AProject.XTypeText(AProject.SymDeclTypeX(LTMid, LNext));
-        end
-        else if LTargetModel.Symbols[LNext].TypeSym <> NIL_SYM then
-          LSuffix := ': '
-            + LTargetModel.Symbols[LTargetModel.Symbols[LNext].TypeSym].Name;
-        LSig.SigLabel := LTargetModel.Symbols[LNext].Name + LParamsText
-          + LSuffix;
-        LSig.Params := SplitParamLabels(LParamsText);
-        Result.Signatures := Result.Signatures + [LSig];
-        LNext := LTargetModel.Symbols[LNext].NextOverload;
-        Inc(LCount);
-      end;
+        Result.Provider := 'pastree/callat';
     finally
       LCompletion.Free;
     end;
-
-    Result.ActiveParam := LArgs;
-    // Prefer the first overload that still has a parameter for the argument
-    // being typed; the first one otherwise.
-    Result.ActiveSignature := 0;
-    for LCount := 0 to High(Result.Signatures) do
-      if Length(Result.Signatures[LCount].Params) > LArgs then
-      begin
-        Result.ActiveSignature := LCount;
-        Break;
-      end;
-    if LUsesFallback then
-      Result.Provider := 'pastree-interim/uses'
-    else if LTargetProject then
-      Result.Provider := 'pastree-interim/project'
-    else
-      Result.Provider := 'pastree-interim/overlay';
   finally
     LModel.Free;
   end;

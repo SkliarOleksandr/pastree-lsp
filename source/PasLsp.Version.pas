@@ -51,7 +51,11 @@ const
   ///
   /// Raised to 0.5.0 on 2026-08-22: the seam adopted the CompleteAt overload
   /// that returns the caret info and ItemHeadWord - both new in 0.5.0.
-  cMinPasTreeVersion = '0.5.0';
+  ///
+  /// Raised to 0.6.0 later on 2026-08-22: signature help moved onto the
+  /// engine's CallAt, and completion rows onto ItemParamsText/ItemHasParams
+  /// (intrinsic signatures included) - all new in 0.6.0.
+  cMinPasTreeVersion = '0.6.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

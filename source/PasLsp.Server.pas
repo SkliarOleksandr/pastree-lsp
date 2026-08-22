@@ -1234,8 +1234,9 @@ end;
 // routine head word for the RAD viewer's class column, hasParams for its
 // auto-parenthesis. '' when there is nothing to carry.
 { textDocument/signatureHelp — same rules as completion: never WaitAnalyzed,
-  the live overlay text is the truth, answered by the seam's interim call
-  locator until PasTree's CallAt lands (COMPLETION.md / PasTree plan §8).
+  the live overlay text is the truth, answered by the engine's CallAt
+  through the seam (member calls and freshly typed cross-unit calls both
+  resolve; the interim locator this replaced could do neither).
   The call-open position rides the answer as "pastreeCall" for the RAD
   client's hint anchor; standard clients ignore unknown members. }
 function TLspServer.HandleSignatureHelp(const AMsg: TLspIncoming): string;
@@ -1274,10 +1275,10 @@ begin
     LMid := FNav.ModelIdOf(LPath);
   if (FProject <> nil) and (LMid >= 0) then
     LAnswer := FCompletion.SignatureHelpAt(LPath, LText, LPasLine, LPasCol,
-      FProject, LMid, FNav)
+      FProject, LMid)
   else
     LAnswer := FCompletion.SignatureHelpAt(LPath, LText, LPasLine, LPasCol,
-      nil, -1, nil);
+      nil, -1);
 
   Log(Format('signatureHelp: %s -> %d signatures, arg %d in %d ms (%s)',
     [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Signatures),

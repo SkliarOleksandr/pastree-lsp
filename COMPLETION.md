@@ -193,21 +193,18 @@ is NOT honored (nothing in ToolsAPI exposes its value — searched), and
 parens apply only on keyboard accepts (Enter/Tab), so a future close-key
 `(` accept cannot double the paren.
 
-**Parameter insight — plumbing delivered 2026-08-22, on an interim
-provider.** The full chain ships: `textDocument/signatureHelp` on the
+**Parameter insight — plumbing delivered 2026-08-22, real provider later
+the same day.** The full chain ships: `textDocument/signatureHelp` on the
 no-WaitAnalyzed rule (trigger chars `(` and `,`), the manager's
 `AsyncInvokeParameterCodeInsight` + both `IOTACodeInsightParameterList`
 views + key `#1` un-declined, and the active argument recounted server-side
 per request (`ParamIndex` answers -1 = reinvoke, so it cannot drift). The
-INTERIM seam provider locates the call by a backward walk over visible
-tokens and resolves the target through the overlay's RefMap or the
-navigator (accepted only when the analyzed text still holds that identifier
-at that position); overloads come from the `NextOverload` chain. The
-recorded gap: a freshly typed call to a cross-unit routine answers empty —
-that is the bridged-designator resolution only PasTree's `CallAt` can do,
-specced as §8B in its plan doc (written 2026-08-22 at the user's request).
-When `CallAt` lands, the seam's locator is deleted and nothing above it
-moves.
+provider is PasTree's `CallAt` (0.6.0, its plan §8B): innermost enclosing
+call with indexers/grouping parens/casts stepped over, designator resolved
+through the overlay+bridge — member calls and freshly typed cross-unit
+calls both answer, the two recorded gaps of the interim backward-walk
+locator, which was deleted as promised the day `CallAt` landed. Nothing
+above the seam moved in the swap.
 
 (Tooltip Insight and auto-parenthesis were queued here and are delivered —
 see above.)
@@ -221,29 +218,24 @@ its bottom key-legend panel. The only route is a hint window of OUR OWN
 painted by `DrawColoredSignature`) - roughly a day, and it owns its
 positioning/dismissal/theming. Queued behind parameter insight if wanted.
 
-**Intrinsics show no signatures (found live 2026-08-22).** Compiler-seeded
-routines (SetLength, Length, Inc, ...) have no source declaration, so every
-declaration-span consumer here shows them bare — no parameter text in
-completion, empty signatureHelp, hasParams=False (which also suppresses
-auto-parenthesis precisely on `SetLength(`). Fix belongs in PasTree's
-builtin seed table: curated display signatures + a takes-arguments flag —
-asked as §8C in its plan doc. Nothing to change on this side when it lands:
-the same accessors/spans start answering.
+**Intrinsics show no signatures (found live 2026-08-22) — FIXED the same
+day.** Compiler-seeded routines (SetLength, Length, Inc, ...) have no
+source declaration, so every declaration-span consumer here showed them
+bare. PasTree 0.6.0 ships curated display signatures for all 97 seeded
+intrinsics plus a takes-arguments flag (its plan §8C), and they flow
+through `ItemParamsText`/`ItemHasParams`/`CallAt` — so completion Detail,
+signatureHelp and auto-parenthesis all answer for `SetLength(` now, with
+all-optional intrinsics (Exit, Halt, Writeln) correctly staying bare.
 
 ## Handed to the PasTree plan (deep-review outcome, 2026-08-22)
 
-The seam currently carries its own copies of AST geometry the engine keeps
-private: `RoutineNodeOf` (verbatim from `PasTree.Sema.Complete`),
-`ParamsNodeOf`/`HasParamChild` (note: PasTree's public `RoutineHasParams`
-counts an empty `()` as having params; ours deliberately requires a real
-`nkParam`, which is the right semantics for auto-parenthesis), and
-`NodeSpanText` (the third span-to-text implementation; the navigator's
-private `RTSpanText` is the second). A drifted copy fails SILENTLY — the
-engine's own suites keep passing while our Detail/hasParams go empty — so
-the standing ask to the PasTree session is: public `ItemParamsText` /
-`ItemHasParams` beside `ItemHeadWord`, and a public span-text helper beside
-`NodeText`. When those land, the copies here get deleted and
-`cMinPasTreeVersion` rises.
+RESOLVED 2026-08-22: PasTree 0.6.0 shipped the whole ask — public
+`ItemParamsText`/`ItemHasParams` (empty `()` answers False, the
+auto-parenthesis semantics ours pioneered), `TPasTree.NodeSpanText`, and
+`CallAt`. The seam's private copies (`RoutineNodeOf`, `ParamsNodeOf`,
+`HasParamChild`, `NodeSpanText`) are deleted; `cMinPasTreeVersion` rose to
+0.6.0. The seam keeps only display concerns: the 100-char Detail cap and
+`SplitParamLabels` (params text → individual LSP parameter labels).
 
 ## Deliberately not in this plan
 

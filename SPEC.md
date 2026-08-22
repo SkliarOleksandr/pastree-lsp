@@ -170,6 +170,9 @@ IDE plugin first, VS Code second), not by protocol order.
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
 | `textDocument/typeDefinition` | via the declared type expression, so it crosses units |
 | `textDocument/documentHighlight` | occurrences in the current file |
+| `textDocument/completion` | PasTree's engine through the seam; [COMPLETION.md](COMPLETION.md) owns the story |
+| `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
+| `workspace/symbol` | project-wide substring query over the prefetched index |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
@@ -302,9 +305,9 @@ All four shipped. Two notes worth keeping:
   resolved to, and the demo's own PasTree highlighter is the precedent — but
   it means emitting every token of a file, plus the delta protocol to keep it
   affordable while typing.
-- **`textDocument/signatureHelp`.** Needs a formatted signature and
-  active-parameter tracking inside a call being typed: the same
-  position-in-invalid-text problem as completion.
+- **`textDocument/signatureHelp`.** DELIVERED 2026-08-22 alongside
+  completion (see [COMPLETION.md](COMPLETION.md)): PasTree's `CallAt`
+  answers through the same seam, active argument counted per request.
 - **`textDocument/selectionRange`.** Wants a declaration's full extent — the
   `NodeSpan` the PasTree To-do already lists, which is also the fix for
   `documentSymbol`'s name-only ranges.

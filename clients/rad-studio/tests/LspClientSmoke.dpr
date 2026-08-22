@@ -643,14 +643,15 @@ begin
     'and is the declaration line itself');
 end;
 
-{ 5d. Signature help: the interim call locator over the overlay.
+{ 5d. Signature help: the engine's CallAt through the seam.
 
   Pinned: a caret inside a call's arguments answers the target's real
   signature with individual parameter labels and the active argument; the
   call-open position rides as pastreeCall for the RAD hint anchor; a
-  position in no call answers null. The 'Greet' call resolves through the
-  NAVIGATOR (cross-unit, analyzed text unchanged) - the freshly-typed
-  cross-unit case is the recorded gap until PasTree's CallAt. }
+  position in no call answers null. The 'Greet' target resolves through the
+  bridged overlay (cross-unit), an intrinsic answers its curated table
+  signature, and the INNERMOST enclosing call wins - the three behaviors
+  that replaced the interim backward-walk locator on 2026-08-22. }
 procedure TestSignatureHelp;
 var
   LAppFile: string;
@@ -673,6 +674,16 @@ begin
     'and the first argument active');
   Check(GOk and GResultJson.Contains('"pastreeCall"'),
     'and the call anchor for the RAD hint window');
+
+  // On the 'Greet' designator itself the caret sits in WRITELN's argument
+  // list, not Greet's - the innermost-call rule - and Writeln answers from
+  // the engine's curated intrinsic signature table.
+  FindPos(LAppFile, 'Writeln(Greet(''world', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/signatureHelp',
+    PositionParams(LAppFile, LLine, LChar)),
+    'signatureHelp answered on the enclosing intrinsic call');
+  Check(GOk and GResultJson.Contains('"label":"Writeln([var F: Text;] Args)"'),
+    'the intrinsic''s curated signature');
 
   // A position inside no call is a null, not an invented signature.
   FindPos(LAppFile, 'begin', 'begin', LLine, LChar);
