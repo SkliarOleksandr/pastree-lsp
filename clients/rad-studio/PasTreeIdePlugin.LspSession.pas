@@ -1304,6 +1304,7 @@ function WorkspaceKindWord(AKind: Integer): string;
 begin
   case AKind of
     5:  Result := 'class';
+    6:  Result := 'function';   // Method - one word for all routines here
     7:  Result := 'property';
     8:  Result := 'field';
     10: Result := 'enum';
@@ -1311,6 +1312,7 @@ begin
     12: Result := 'function';
     13: Result := 'var';
     14: Result := 'const';
+    18: Result := 'array';
     22: Result := 'value';
     23: Result := 'record';
   else

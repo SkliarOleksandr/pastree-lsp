@@ -324,7 +324,10 @@ end;
 
 function TPasOutlineNode.Navigate: Boolean;
 begin
-  NavigateHistoryAware(FFilePath, FRow, FCol);
+  // Group headers (Types, Routines, ...) carry no position - Row 0 - and
+  // navigating them would jump to nowhere useful.
+  if FRow >= 1 then
+    NavigateHistoryAware(FFilePath, FRow, FCol);
   Result := True;
 end;
 
@@ -446,6 +449,38 @@ end;
 var
   GViewMissingLogged: Boolean = False;
 
+// Adds one 'Types'/'Routines'/... category root holding every top symbol
+// whose kind word is in AKinds - skipped entirely when none match, so the
+// pane never shows empty headers.
+procedure AddGroup(const AContext: TPasOutlineContext;
+  const AFilePath, ACaption: string; const ASymbols: TArray<TLspDocSymbol>;
+  const AKinds: array of string);
+var
+  LGroup: IOTAStructureNode;
+  LIdx, LK: Integer;
+  LMatch: Boolean;
+begin
+  LGroup := nil;
+  for LIdx := 0 to High(ASymbols) do
+  begin
+    LMatch := False;
+    for LK := 0 to High(AKinds) do
+      if ASymbols[LIdx].KindWord = AKinds[LK] then
+      begin
+        LMatch := True;
+        Break;
+      end;
+    if not LMatch then
+      Continue;
+    if LGroup = nil then
+    begin
+      LGroup := TPasOutlineNode.Create(ACaption, AFilePath, 0, 0);
+      AContext.AddRootNode(LGroup, -1);
+    end;
+    LGroup.AddChildNode(BuildNode(AFilePath, ASymbols[LIdx]), -1);
+  end;
+end;
+
 procedure InstallOutline(const AFilePath: string;
   const ASymbols: TArray<TLspDocSymbol>);
 var
@@ -469,8 +504,17 @@ begin
     Exit;
   end;
   LContext := TPasOutlineContext.Create(AFilePath);
-  for LIdx := 0 to High(ASymbols) do
-    LContext.AddRootNode(BuildNode(AFilePath, ASymbols[LIdx]), -1);
+  // Grouped the way the native Structure pane groups a unit: category
+  // headers with the declarations under them; types keep their members as
+  // children one level further down.
+  AddGroup(LContext, AFilePath, 'Types', ASymbols,
+    ['class', 'interface', 'record', 'enum', 'array']);
+  AddGroup(LContext, AFilePath, 'Routines', ASymbols, ['function']);
+  AddGroup(LContext, AFilePath, 'Variables', ASymbols, ['var']);
+  AddGroup(LContext, AFilePath, 'Constants', ASymbols, ['const']);
+  AddGroup(LContext, AFilePath, 'Values', ASymbols, ['value']);
+  AddGroup(LContext, AFilePath, 'Properties', ASymbols, ['property']);
+  AddGroup(LContext, AFilePath, 'Other', ASymbols, ['']);
   LView.SetStructureContext(LContext);
 end;
 
