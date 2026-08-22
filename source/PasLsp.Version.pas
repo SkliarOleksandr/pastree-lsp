@@ -48,7 +48,10 @@ const
   /// completion engine (PasTree.Sema.Complete, the bridged overlay pipeline),
   /// which stabilized at that version. An older sibling fails to compile
   /// anyway (the unit did not exist); the gate makes the requirement explicit.
-  cMinPasTreeVersion = '0.4.3';
+  ///
+  /// Raised to 0.5.0 on 2026-08-22: the seam adopted the CompleteAt overload
+  /// that returns the caret info and ItemHeadWord - both new in 0.5.0.
+  cMinPasTreeVersion = '0.5.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

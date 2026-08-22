@@ -75,7 +75,10 @@ type
   TLspCompletionItem = record
     ItemLabel: string;
     Kind: Integer;      // LSP CompletionItemKind (14 = keyword, ...)
-    Detail: string;
+    Detail: string;     // display-verbatim, e.g. ': TStringList (+2)'
+    // The routine's head keyword ('constructor', 'operator', ...) when the
+    // server knows one - carried in the item's data field; '' otherwise.
+    Head: string;
     Row: Integer;
     ColFrom: Integer;
     ColTo: Integer;
@@ -878,6 +881,7 @@ begin
       Continue;
     LItem.Kind := LObj.GetValue<Integer>('kind', 0);
     LItem.Detail := LObj.GetValue<string>('detail', '');
+    LItem.Head := LObj.GetValue<string>('data.head', '');
     if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
        not LRange.TryGetValue<TJSONObject>('start', LStart) or
        not LRange.TryGetValue<TJSONObject>('end', LEnd) then

@@ -43,8 +43,13 @@ type
   TLspCompletionEntry = record
     ItemLabel: string;   // "Label" collides with the Delphi keyword
     Kind: Integer;       // LSP CompletionItemKind
-    Detail: string;
+    Detail: string;      // ': <declared type>' [' (+N)'] - display-verbatim
     SortText: string;    // bucket-ranked; see BucketSort
+    { The routine's own head keyword ('constructor', 'operator', ...) when
+      the engine knows one - richer than any LSP kind, so it rides the item's
+      data field for OUR client (the RAD viewer's class column) while other
+      clients simply ignore it. }
+    HeadWord: string;
   end;
 
   TLspCompletionAnswer = record
@@ -62,6 +67,7 @@ type
     initialize. CompleteAt itself is stateless across calls. }
   TLspCompletionEngine = class
   private
+    FPlatform: TPasPlatform;
     FSourceManager: TPasSourceManager;
     FDefines: TPasDefines;
     FPreprocessor: TPasPreprocessor;
@@ -137,6 +143,7 @@ var
   LDefine: string;
 begin
   inherited Create;
+  FPlatform := APlatform;
   FSourceManager := TPasSourceManager.Create(ASearchPaths);
   // The platform's implicit defines plus the project's own - the same set
   // the analysis preprocesses with, so an $IFDEF cannot make the overlay
@@ -158,6 +165,11 @@ end;
 function TLspCompletionEngine.CompleteAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
   AProjectMid: Integer): TLspCompletionAnswer;
+const
+  // Declared-type detail is a cheap on-demand resolve PER ROW - worth it on
+  // a member list, noise-cost on a 1700-row scope dump (same guard, same
+  // number, as the PasTree demo's own completion popup).
+  cDetailLimit = 512;
 var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
@@ -169,6 +181,8 @@ var
   LItems: TArray<TPasComplItem>;
   LIdx: Integer;
   LEntry: TLspCompletionEntry;
+  LWithTypes: Boolean;
+  LX: TSemaXType;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -180,33 +194,65 @@ begin
   // deliberately discarded - the pushed diagnostics stay the analysis's.
   LPre := FPreprocessor.ProcessText(AFileName, AText);
   LTree := TPasParser.ParseFile(LPre, LDiags);
-  LModel := TPasSemaResolver.Analyze(LTree);
+  LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   try
     LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
     try
-      if not LCompletion.CaretAt(APasLine, APasCol, LInfo) then
-        Exit;   // comment/string/dead code/... - nothing here, span at caret
+      // One caret pass: the engine hands its own classification back, span
+      // included - a host must not re-derive tokenization (its words).
+      if not LCompletion.CompleteAt(APasLine, APasCol, LInfo, LContext,
+           LItems) then
+      begin
+        // ckNone keeps the span collapsed at the caret; any other refusal
+        // still carries the real span.
+        if LInfo.Kind <> ckNone then
+        begin
+          Result.ReplaceColFrom := LInfo.PrefixColFrom;
+          Result.ReplaceColTo := LInfo.PrefixColTo;
+        end;
+        Exit;
+      end;
       Result.ReplaceColFrom := LInfo.PrefixColFrom;
       Result.ReplaceColTo := LInfo.PrefixColTo;
-      if not LCompletion.CompleteAt(APasLine, APasCol, LContext, LItems) then
-        Exit;
       Result.Provider := 'pastree/' + ContextName(LContext);
+      LWithTypes := (AProject <> nil) and (Length(LItems) <= cDetailLimit);
       SetLength(Result.Items, Length(LItems));
       for LIdx := 0 to High(LItems) do
       begin
+        LEntry := Default(TLspCompletionEntry);
         LEntry.ItemLabel := LItems[LIdx].Name;
+        // The routine's real head word both refines the LSP kind and rides
+        // to the RAD viewer's class column verbatim.
+        if LItems[LIdx].Kind = skRoutine then
+          LEntry.HeadWord := LCompletion.ItemHeadWord(LItems[LIdx]);
         case LItems[LIdx].Bucket of
           cbKeyword:  LEntry.Kind := 14;   // Keyword
           cbUnitName: LEntry.Kind := 9;    // Module
         else
-          LEntry.Kind := LspKindOf(LItems[LIdx].Kind);
+          if LEntry.HeadWord = 'constructor' then
+            LEntry.Kind := 4               // Constructor
+          else if LEntry.HeadWord = 'operator' then
+            LEntry.Kind := 24              // Operator
+          else
+            LEntry.Kind := LspKindOf(LItems[LIdx].Kind);
         end;
-        // Collapsed overloads are worth a word; everything else the kind
-        // already says, and the RAD viewer needs no type text for now.
+        // ': <declared type>' - the demo's own recipe: the project resolves
+        // the symbol's declared type on demand, through the instantiation
+        // frame when the item came from a generic instance.
+        if LWithTypes and (LItems[LIdx].Mid >= 0) and
+           (LItems[LIdx].Sym <> NIL_SYM) and
+           (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
+             skProperty, skRoutine]) then
+        begin
+          LX := AProject.SymDeclTypeX(LItems[LIdx].Mid, LItems[LIdx].Sym);
+          if LItems[LIdx].Ctx <> NIL_INST then
+            LX := AProject.SubstX(LX, LItems[LIdx].Ctx, 0);
+          if XValid(LX) then
+            LEntry.Detail := ': ' + AProject.XTypeText(LX);
+        end;
         if LItems[LIdx].Overloads > 0 then
-          LEntry.Detail := Format('+%d overload(s)', [LItems[LIdx].Overloads])
-        else
-          LEntry.Detail := '';
+          LEntry.Detail := LEntry.Detail
+            + Format(' (+%d)', [LItems[LIdx].Overloads]);
         LEntry.SortText := BucketSort(LItems[LIdx].Bucket, LItems[LIdx].Name);
         Result.Items[LIdx] := LEntry;
       end;

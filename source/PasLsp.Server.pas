@@ -1283,16 +1283,21 @@ begin
         LSB.Append(',');
       // Always textEdit, never bare insertText: the replace span is the
       // provider's to declare, and it survives a cursor that moved while the
-      // answer was in flight (COMPLETION.md).
+      // answer was in flight (COMPLETION.md). The routine head word rides
+      // the item's data field - our RAD client reads it for the viewer's
+      // class column, every other client ignores data it did not create.
       LSB.Append(Format(
         '{"label":%s,"kind":%d,"detail":%s,"sortText":%s,'
-        + '"textEdit":{"range":%s,"newText":%s}}',
+        + '"textEdit":{"range":%s,"newText":%s}%s}',
         [JsonQuote(LAnswer.Items[LIdx].ItemLabel), LAnswer.Items[LIdx].Kind,
          JsonQuote(LAnswer.Items[LIdx].Detail),
          JsonQuote(LAnswer.Items[LIdx].SortText),
          RangeJson(LPasLine, LAnswer.ReplaceColFrom,
            LAnswer.ReplaceColTo - LAnswer.ReplaceColFrom),
-         JsonQuote(LAnswer.Items[LIdx].ItemLabel)]));
+         JsonQuote(LAnswer.Items[LIdx].ItemLabel),
+         IfThen(LAnswer.Items[LIdx].HeadWord <> '',
+           ',"data":{"head":' + JsonQuote(LAnswer.Items[LIdx].HeadWord) + '}',
+           '')]));
     end;
     Log(Format('completion: %s -> %d items in %d ms (%s)',
       [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Items),

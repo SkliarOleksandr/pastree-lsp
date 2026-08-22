@@ -74,9 +74,13 @@ implementation
 
 uses
   System.SysUtils,
+  System.Types,
+  System.UITypes,
   System.Generics.Collections,
   System.Generics.Defaults,
+  Vcl.Graphics,
   ToolsAPI,
+  ToolsAPI.UI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments;
 
@@ -260,22 +264,26 @@ end;
 
 function TPasSymbolList.GetSymbolTypeText(Index: Integer): string;
 begin
-  // Drawn GLUED right after the symbol text (the first bring-up rendered
-  // "beginreserved word" when the annotation sat here). That glued slot is
-  // exactly where the native viewer shows a symbol's signature -
-  // "(pFileName: ...): THandle;" straight after the bold name - so this
-  // stays empty until the server sends real signatures, and then they go
-  // here verbatim, separator included.
-  Result := '';
+  // Drawn GLUED right after the symbol text - exactly where the native
+  // viewer shows a symbol's type/signature, and exactly why the server
+  // sends Detail display-verbatim (': TStringList (+2)').
+  if (Index >= 0) and (Index <= High(FVisible)) then
+    Result := FAll[FVisible[Index]].Detail
+  else
+    Result := '';
 end;
 
 function TPasSymbolList.GetSymbolClassText(I: Integer): string;
 begin
   // The viewer's left-hand class column, in the exact vocabulary the native
   // DelphiLSP list uses ('keyword', 'function', 'const', ...) - matching it
-  // is what makes our rows read like the IDE's own.
+  // is what makes our rows read like the IDE's own. A routine's REAL head
+  // word (constructor/destructor/operator/...) arrives from the server in
+  // the item's data field and wins over the generic kind mapping.
   if (I < 0) or (I > High(FVisible)) then
     Exit('');
+  if FAll[FVisible[I]].Head <> '' then
+    Exit(FAll[FVisible[I]].Head);
   case FAll[FVisible[I]].Kind of
     2, 3:   Result := 'function';    // Method, Function
     4:      Result := 'constructor';
@@ -284,7 +292,10 @@ begin
     9:      Result := 'unit';        // Module
     10:     Result := 'property';
     14:     Result := 'keyword';
+    20:     Result := 'value';       // EnumMember
     21:     Result := 'const';
+    24:     Result := 'operator';
+    25:     Result := 'type';        // TypeParameter
   else
     Result := '';
   end;
@@ -302,7 +313,8 @@ end;
 type
   TPasCodeInsightManager = class(TInterfacedObject, IOTACodeInsightManager100,
     IOTACodeInsightManager, IOTACodeInsightSelection,
-    IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290)
+    IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
+    INTACustomDrawCodeInsightViewer)
   private
     FEnabled: Boolean;
     FSymbols: IOTACodeInsightSymbolList;
@@ -368,6 +380,9 @@ type
     function AsyncGotoDefinitionEx(const AFileName: string;
       ALine, ACharIndex: Integer;
       ACallBack: TOTAGotoDefinitionCallBackEx): Integer;
+    { INTACustomDrawCodeInsightViewer }
+    procedure DrawLine(Index: Integer; Canvas: TCanvas; var Rect: TRect;
+      DrawingHintText: Boolean; DoDraw: Boolean; var DefaultDraw: Boolean);
   end;
 
 constructor TPasCodeInsightManager.Create;
@@ -693,6 +708,122 @@ begin
         ACallBack(Self, LId, '', 0, 0, True, AError);
     end);
   Result := LId;
+end;
+
+{ The rich-coloring pass (COMPLETION.md's deferred-polish item, delivered
+  2026-08-22): the stock renderer draws every row in one color; the native
+  DelphiLSP window dims the class word and colors the type text. This draw
+  reproduces the STOCK LAYOUT exactly - fixed class column, bold name, the
+  type text glued after it - and only takes over the COLORS: class word and
+  the ': ' / '(+N)' furniture dimmed (clGrayText), the type name itself in
+  the IDE's theme-aware blue. On the selected row everything stays the
+  viewer's own highlight color: contrast beats decoration there, which is
+  also what the native window does. }
+procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
+  var Rect: TRect; DrawingHintText: Boolean; DoDraw: Boolean;
+  var DefaultDraw: Boolean);
+const
+  cPad = 4;
+var
+  LClass, LName, LDetail, LTypeText, LTail: string;
+  LColWidth, LX, LTop, LCut: Integer;
+  LSelected: Boolean;
+  LServices: IOTACodeInsightServices;
+  LViewer: IOTACodeInsightViewer;
+  LUI: INTAIDEUIServices;
+  LBase, LDim, LAccent: TColor;
+begin
+  if not Assigned(FSymbols) or (Index < 0) or (Index >= FSymbols.Count) then
+  begin
+    DefaultDraw := True;
+    Exit;
+  end;
+  DefaultDraw := False;
+  LClass := FSymbols.SymbolClassText[Index];
+  LName := FSymbols.SymbolText[Index];
+  LDetail := FSymbols.SymbolTypeText[Index];
+
+  // The class column is fixed-width - rows must align down the list, and
+  // 'constructor' is the widest word the column ever holds.
+  Canvas.Font.Style := [];
+  LColWidth := Canvas.TextWidth('constructor') + 2 * cPad;
+
+  if not DoDraw then
+  begin
+    Canvas.Font.Style := [TFontStyle.fsBold];
+    LX := Canvas.TextWidth(LName);
+    Canvas.Font.Style := [];
+    Rect.Right := Rect.Left + LColWidth + LX + Canvas.TextWidth(LDetail)
+      + 3 * cPad;
+    Exit;
+  end;
+
+  LSelected := False;
+  if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+  begin
+    LViewer := nil;
+    LServices.GetViewer(LViewer);
+    LSelected := Assigned(LViewer) and LViewer.GetSelected(Index);
+  end;
+
+  // The viewer prepared Canvas for this row (highlight brush and text color
+  // on the selected row) - LBase is whatever it chose.
+  LBase := Canvas.Font.Color;
+  if LSelected or DrawingHintText then
+  begin
+    LDim := LBase;
+    LAccent := LBase;
+  end
+  else
+  begin
+    LDim := clGrayText;
+    LAccent := LBase;
+    if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+      LAccent := LUI.ThemeAwareColors[itcBlue];
+  end;
+
+  LTop := Rect.Top + (Rect.Height - Canvas.TextHeight('Ag')) div 2;
+  LX := Rect.Left + cPad;
+
+  Canvas.Font.Color := LDim;
+  Canvas.TextOut(LX, LTop, LClass);
+  LX := Rect.Left + LColWidth;
+
+  Canvas.Font.Color := LBase;
+  Canvas.Font.Style := [TFontStyle.fsBold];
+  Canvas.TextOut(LX, LTop, LName);
+  Inc(LX, Canvas.TextWidth(LName));
+  Canvas.Font.Style := [];
+
+  if LDetail <> '' then
+  begin
+    // ': TFoo (+2)' -> ': ' and ' (+2)' in the dim color, the type name in
+    // the accent - the same three-way split the native window draws.
+    LTypeText := LDetail;
+    LTail := '';
+    LCut := Pos(' (+', LTypeText);
+    if LCut > 0 then
+    begin
+      LTail := Copy(LTypeText, LCut, MaxInt);
+      LTypeText := Copy(LTypeText, 1, LCut - 1);
+    end;
+    if LTypeText.StartsWith(': ') then
+    begin
+      Canvas.Font.Color := LDim;
+      Canvas.TextOut(LX, LTop, ': ');
+      Inc(LX, Canvas.TextWidth(': '));
+      Delete(LTypeText, 1, 2);
+    end;
+    Canvas.Font.Color := LAccent;
+    Canvas.TextOut(LX, LTop, LTypeText);
+    Inc(LX, Canvas.TextWidth(LTypeText));
+    if LTail <> '' then
+    begin
+      Canvas.Font.Color := LDim;
+      Canvas.TextOut(LX, LTop, LTail);
+    end;
+  end;
+  Canvas.Font.Color := LBase;   // leave the canvas the way the viewer set it
 end;
 
 procedure TPasCodeInsightManager.AsyncParameterCodeInsightParamIndex(

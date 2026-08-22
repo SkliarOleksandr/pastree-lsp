@@ -161,30 +161,21 @@ that carried it.
 
 ## Deferred polish (TODO)
 
-**Rich row coloring in the RAD viewer** (noted 2026-08-21, first big-project
-run: the list works but reads flat next to the native one, which colors the
-signature's type names). The chain, in dependency order:
+**Rich row coloring in the RAD viewer** — **delivered 2026-08-22**, one day
+after being noted, because step 1 turned out to already exist: the item
+carries no signature field, but the project answers a symbol's DECLARED TYPE
+on demand (`SymDeclTypeX`/`SubstX`/`XTypeText` — the recipe PasTree's own
+demo popup uses, ≤512-item guard included). The seam emits `': <type>'` in
+`detail` plus the routine's head word (`ItemHeadWord`, PasTree 0.5.0) in the
+item's `data`; the plugin feeds `detail` to `SymbolTypeText` (the glued slot
+IS the native layout) and `DrawLine` takes over COLORS only: class word and
+punctuation dimmed, type name in the theme-aware blue, the selected row left
+in the viewer's own highlight for contrast — which is what the native window
+does too.
 
-1. **PasTree**: completion items need signature data — parameter list and
-   result type for routines, the declared type for vars/fields/properties.
-   The model holds it; the engine just does not emit it yet. (PasTree-side
-   work, coordinate with that repo's plan.)
-2. **Server**: put the signature in the item verbatim — `detail` (and LSP
-   `labelDetails.detail`) for VS Code, and it rides the same field to the
-   plugin's `TLspCompletionItem.Detail`.
-3. **Plugin**: feed the signature to `SymbolTypeText` (the glued-after-name
-   slot IS where the native viewer shows it — layout comes free), then bring
-   back `INTACustomDrawCodeInsightViewer.DrawLine` — this time not for
-   layout but for COLOR: draw the name bold as stock does, then lex the
-   signature client-side (identifier/symbol/keyword char classes are enough)
-   and paint type names with the editor's own theme-aware palette
-   (`INTACodeEditorOptions.FontColor[]`, `INTAIDEUIServices.ThemeAwareColors`
-   — clients/rad-studio/SPEC.md lists both). The earlier custom-draw attempt
-   was backed out because it fought the stock LAYOUT; coloring on top of the
-   stock layout is the right use of that interface.
-
-Not before the signature data exists — coloring an empty string is step 3 of
-a 3-step chain.
+Still open from the original idea: FULL routine signatures — `(params):
+TResult` instead of the declared type — which is the same engine data
+parameter insight needs, so it lands with that feature, not here.
 
 **Parameter insight** (Ctrl+Shift+Space; requested 2026-08-21). LSP side is
 `textDocument/signatureHelp` — a tier-3 SPEC.md item whose blocker
