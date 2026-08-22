@@ -114,6 +114,23 @@ type
     const AHelp: TLspSignatureHelp; const AError: string);
 
   /// <summary>
+  /// One project-wide symbol for the IDE Insight (Ctrl+.) integration, in
+  /// IDE coordinates. KindWord is display vocabulary ('function', 'type',
+  /// ...), derived here so every consumer words it identically.
+  /// </summary>
+  TLspWorkspaceSymbol = record
+    Name: string;
+    KindWord: string;
+    Container: string;   // the declaring unit's file name
+    FilePath: string;
+    Row: Integer;
+    Col: Integer;
+  end;
+
+  TLspWorkspaceSymbolsProc = reference to procedure(ASuccess: Boolean;
+    const ASymbols: TArray<TLspWorkspaceSymbol>; const AError: string);
+
+  /// <summary>
   /// Hover delivery: AText is PLAIN text ready for a tooltip - the session
   /// strips the server's markdown dressing (code fence, italics) so no
   /// caller renders markup. '' with ASuccess=True means "nothing under the
@@ -174,6 +191,15 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// Asks for every project-level symbol matching AQuery ('' = all, capped and
+/// logged server-side) - the data behind the IDE Insight (Ctrl+.) category.
+/// The answer can be tens of thousands of records; callers cache it rather
+/// than re-asking per keystroke (the Insight dialog filters locally).
+/// </summary>
+procedure LspWorkspaceSymbols(const AQuery: string;
+  const AOnDone: TLspWorkspaceSymbolsProc);
 
 /// <summary>
 /// Asks which call encloses an IDE position and for its target's
@@ -291,6 +317,7 @@ type
     FPendingCompletion: Int64;
     FPendingHover: Int64;
     FPendingSignature: Int64;
+    FPendingWorkspace: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -316,6 +343,8 @@ type
       const AOnDone: TLspHoverProc);
     procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspSignatureHelpProc);
+    procedure WorkspaceSymbols(const AQuery: string;
+      const AOnDone: TLspWorkspaceSymbolsProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
@@ -1174,6 +1203,94 @@ begin
   FPendingSignature := LIssuedId;
 end;
 
+// LSP SymbolKind -> the display vocabulary the whole plugin words kinds in.
+function WorkspaceKindWord(AKind: Integer): string;
+begin
+  case AKind of
+    5:  Result := 'class';
+    7:  Result := 'property';
+    8:  Result := 'field';
+    10: Result := 'enum';
+    11: Result := 'interface';
+    12: Result := 'function';
+    13: Result := 'var';
+    14: Result := 'const';
+    22: Result := 'value';
+    23: Result := 'record';
+  else
+    Result := '';
+  end;
+end;
+
+function ParseWorkspaceSymbols(AResult: TJSONValue):
+  TArray<TLspWorkspaceSymbol>;
+var
+  LArr: TJSONArray;
+  LValue: TJSONValue;
+  LSym: TLspWorkspaceSymbol;
+  LUri: string;
+  LLine, LChar, LCount: Integer;
+begin
+  Result := nil;
+  if not (AResult is TJSONArray) then
+    Exit;
+  LArr := TJSONArray(AResult);
+  SetLength(Result, LArr.Count);
+  LCount := 0;
+  for LValue in LArr do
+  begin
+    LSym.Name := LValue.GetValue<string>('name', '');
+    if LSym.Name = '' then
+      Continue;
+    LSym.KindWord := WorkspaceKindWord(LValue.GetValue<Integer>('kind', 0));
+    LSym.Container := LValue.GetValue<string>('containerName', '');
+    if not LValue.TryGetValue<string>('location.uri', LUri) then
+      Continue;
+    LSym.FilePath := LspUriToPath(LUri);
+    LLine := LValue.GetValue<Integer>('location.range.start.line', -1);
+    LChar := LValue.GetValue<Integer>('location.range.start.character', -1);
+    if (LSym.FilePath = '') or (LLine < 0) or (LChar < 0) then
+      Continue;
+    LspToIde(LLine, LChar, LSym.Row, LSym.Col);
+    Result[LCount] := LSym;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
+procedure TLspSession.WorkspaceSymbols(const AQuery: string;
+  const AOnDone: TLspWorkspaceSymbolsProc);
+var
+  LParams: TJSONObject;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+
+  FDocs.Sync;
+  if FPendingWorkspace <> 0 then
+    FClient.Cancel(FPendingWorkspace);
+
+  LParams := TJSONObject.Create;
+  LParams.AddPair('query', AQuery);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('workspace/symbol', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if FPendingWorkspace = LIssuedId then
+        FPendingWorkspace := 0;
+      if ASuccess then
+        AOnDone(True, ParseWorkspaceSymbols(AResult), '')
+      else
+        AOnDone(False, nil, AError);
+    end);
+  FPendingWorkspace := LIssuedId;
+end;
+
 procedure TLspSession.Prewarm;
 var
   LProject: IOTAProject;
@@ -1326,6 +1443,17 @@ begin
     Exit;
   end;
   GSession.Hover(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspWorkspaceSymbols(const AQuery: string;
+  const AOnDone: TLspWorkspaceSymbolsProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.WorkspaceSymbols(AQuery, AOnDone);
 end;
 
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;

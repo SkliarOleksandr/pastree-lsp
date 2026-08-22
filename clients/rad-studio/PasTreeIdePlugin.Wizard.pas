@@ -32,7 +32,8 @@ uses
   System.SysUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
-  PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
+  PasTreeIdePlugin.LspSession;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -291,6 +292,8 @@ begin
   // "PasTree" as the Insight Provider in Options - and since phase C that
   // selection is what carries ALL declaration navigation.
   InitializeCodeInsight;
+  // Project-wide symbol search in the IDE Insight dialog (Ctrl+.).
+  InitializeIdeInsight;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -323,9 +326,11 @@ begin
     FKeyboardServices.RemoveKeyboardBinding(FKeyBindingIndex);
   FKeyboardServices := nil;
   FinalizeGotoDeclaration;
-  // Before FinalizeLspSession on purpose: the session's teardown fails every
-  // pending request synchronously, and those callbacks must find the manager
-  // already unregistered (and its closures gated off - see GAlive there).
+  // Before FinalizeLspSession, both of these: the session's teardown fails
+  // every pending request synchronously, and those callbacks must find the
+  // manager and the Insight notifier already unregistered (and their
+  // closures gated off - see the GAlive flags in each unit).
+  FinalizeIdeInsight;
   FinalizeCodeInsight;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server

@@ -685,6 +685,32 @@ begin
     'and honestly answered null there');
 end;
 
+{ 5e. workspace/symbol: the project-wide index behind Ctrl+. }
+procedure TestWorkspaceSymbol;
+var
+  LParams: TJSONObject;
+begin
+  Writeln;
+  Writeln('=== 5e. workspace/symbol finds the cross-unit declaration ===');
+  LParams := TJSONObject.Create;
+  LParams.AddPair('query', 'gree');
+  Check(Ask('workspace/symbol', LParams), 'workspace/symbol answered');
+  Check(GOk and GResultJson.Contains('"name":"Greet"'),
+    'the substring query finds Greet');
+  Check(GOk and GResultJson.Contains('"kind":12'),
+    'as a Function symbol');
+  Check(GOk and GResultJson.Contains('"containerName":"DemoUnit.pas"'),
+    'with its declaring unit as the container');
+
+  // The empty query is the RAD client's prefetch: everything, capped and
+  // logged server-side - here it must at least carry both fixture units.
+  LParams := TJSONObject.Create;
+  LParams.AddPair('query', '');
+  Check(Ask('workspace/symbol', LParams), 'the prefetch query answered');
+  Check(GOk and GResultJson.Contains('"name":"Shout"'),
+    'and carries symbols from other units');
+end;
+
 { 6. Cancellation hygiene.
 
   TLspSession cancels a superseded request on every new one, so the invariant
@@ -896,6 +922,7 @@ begin
       TestCompletion;
       TestHover;
       TestSignatureHelp;
+      TestWorkspaceSymbol;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

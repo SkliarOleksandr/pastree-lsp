@@ -143,6 +143,7 @@ type
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     function HandleCompletion(const AMsg: TLspIncoming): string;
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
+    function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -1011,7 +1012,8 @@ begin
       '"typeDefinitionProvider":true,' +
       '"documentHighlightProvider":true,' +
       '"completionProvider":{"triggerCharacters":["."]},' +
-      '"signatureHelpProvider":{"triggerCharacters":["(",","]}' +
+      '"signatureHelpProvider":{"triggerCharacters":["(",","]},' +
+      '"workspaceSymbolProvider":true' +
     // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
     // because a client's real question is never "which server build is this"
     // but "does it have the analysis fix I need", and that lives in PasTree.
@@ -1308,6 +1310,112 @@ begin
       + '"pastreeCall":{"line":%d,"character":%d}}',
       [LSB.ToString, LAnswer.ActiveSignature, LAnswer.ActiveParam,
        LCallLine, LCallChar]));
+  finally
+    LSB.Free;
+  end;
+end;
+
+// LSP SymbolKind (NOT CompletionItemKind - different table) for a PasTree
+// symbol, refined by the type category where the model knows one.
+function WorkspaceSymbolKind(AKind: TSemaSymbolKind;
+  ACat: TSemaTypeCat): Integer;
+begin
+  case AKind of
+    skType, skBuiltinType:
+      case ACat of
+        tcInterface: Result := 11;  // Interface
+        tcRecord:    Result := 23;  // Struct
+        tcEnum:      Result := 10;  // Enum
+      else
+        Result := 5;                // Class
+      end;
+    skVar:       Result := 13;      // Variable
+    skConst:     Result := 14;      // Constant
+    skField:     Result := 8;       // Field
+    skRoutine:   Result := 12;      // Function
+    skProperty:  Result := 7;       // Property
+    skEnumValue: Result := 22;      // EnumMember
+  else
+    Result := 13;
+  end;
+end;
+
+{ workspace/symbol — project-wide symbol search by name, the Ctrl+T /
+  Ctrl+. question. Unit-level names and struct members from every model in
+  the closure; locals, params, builtins and unit refs are noise at project
+  scope and stay out. Empty query legitimately means "everything" - the RAD
+  client prefetches on it and filters locally in the IDE Insight dialog -
+  so the cap is high and NEVER silent (the log carries the drop count). }
+function TLspServer.HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
+const
+  cMaxResults = 20000;
+var
+  LQuery, LFile: string;
+  LMid, LIdx, LCount, LDropped: Integer;
+  LModel: TPasSemaModel;
+  LHit: TPasRefHit;
+  LSB: TStringBuilder;
+  LStart: UInt64;
+begin
+  LQuery := '';
+  if AMsg.Params <> nil then
+    LQuery := LowerCase(AMsg.Params.GetValue<string>('query', ''));
+
+  if not WaitAnalyzed('', AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if (FNav = nil) or (FProject = nil) then
+    Exit(BuildResponse(AMsg.IdJson, '[]'));
+
+  LStart := GetTickCount64;
+  LCount := 0;
+  LDropped := 0;
+  LSB := TStringBuilder.Create;
+  try
+    for LMid := 0 to FProject.ModelCount - 1 do
+    begin
+      LModel := FProject.Model(LMid);
+      if LModel = nil then
+        Continue;
+      LFile := TPath.GetFileName(FProject.ModelFile(LMid));
+      for LIdx := 0 to LModel.SymCount - 1 do
+        with LModel.Symbols[LIdx] do
+        begin
+          if (Name = '') or (sfBuiltin in Flags) or
+             (Kind in [skParam, skLabel, skGenericParam, skUnitRef]) then
+            Continue;
+          // Project scope means unit-level declarations and struct members;
+          // everything scoped inside a routine is local noise here.
+          if (Scope < 0) or (Scope >= LModel.Scopes.Count) or
+             not (LModel.Scopes[Scope].Kind in
+               [sckUnit, sckImplementation, sckStruct, sckEnum]) then
+            Continue;
+          if (LQuery <> '') and (Pos(LQuery, NameLower) = 0) then
+            Continue;
+          if LCount >= cMaxResults then
+          begin
+            Inc(LDropped);
+            Continue;
+          end;
+          if not FNav.DeclHit(LMid, LIdx, LHit) then
+            Continue;
+          if LCount > 0 then
+            LSB.Append(',');
+          LSB.Append(Format(
+            '{"name":%s,"kind":%d,"containerName":%s,"location":%s}',
+            [JsonQuote(Name),
+             WorkspaceSymbolKind(Kind, TypeCat),
+             JsonQuote(LFile),
+             LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
+               Length(Name))]));
+          Inc(LCount);
+        end;
+    end;
+    Log(Format('workspace/symbol "%s" -> %d symbols in %d ms%s',
+      [LQuery, LCount, GetTickCount64 - LStart,
+       IfThen(LDropped > 0,
+         Format(' (%d MORE dropped by the %d cap)', [LDropped, cMaxResults]),
+         '')]));
+    Result := BuildResponse(AMsg.IdJson, '[' + LSB.ToString + ']');
   finally
     LSB.Free;
   end;
@@ -2201,6 +2309,8 @@ begin
         Exit(HandleCompletion(LMsg));
       if LMsg.Method = 'textDocument/signatureHelp' then
         Exit(HandleSignatureHelp(LMsg));
+      if LMsg.Method = 'workspace/symbol' then
+        Exit(HandleWorkspaceSymbol(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then

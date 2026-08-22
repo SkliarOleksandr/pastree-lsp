@@ -112,6 +112,7 @@
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CodeInsight.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.IdeInsight.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

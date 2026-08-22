@@ -69,6 +69,13 @@ procedure ExecuteTypeDefinition(const AView: IOTAEditView);
 /// </summary>
 procedure ExecuteToggle(const AView: IOTAEditView; AToImpl: Boolean);
 
+/// <summary>
+/// Jumps to a known position through the same history-aware path as every
+/// navigation here - the "from" side is the active editor's caret when there
+/// is one (an IDE Insight result activated from the dialog, for instance).
+/// </summary>
+procedure NavigateHistoryAware(const AFileName: string; ARow, ACol: Integer);
+
 implementation
 
 uses
@@ -384,6 +391,22 @@ begin
     Exit;
   ToggleAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
     AView.Buffer.EditPosition.Column, AToImpl, False);
+end;
+
+procedure NavigateHistoryAware(const AFileName: string; ARow, ACol: Integer);
+var
+  LEditorServices: IOTAEditorServices;
+  LView: IOTAEditView;
+begin
+  LView := nil;
+  if Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
+    LView := LEditorServices.TopView;
+  if Assigned(LView) then
+    PushHistoryAndNavigate(LView.Buffer.FileName,
+      LView.Buffer.EditPosition.Row, LView.Buffer.EditPosition.Column,
+      AFileName, ARow, ACol)
+  else
+    NavigateToPosition(AFileName, ARow, ACol);
 end;
 
 procedure FinalizeGotoDeclaration;
