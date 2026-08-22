@@ -346,7 +346,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Squiggles, native | Spike | `IOTAModuleErrors` (`3257`) | the experiment above; severity maps 1:1 |
+| Squiggles, native | **Spike RUNNING** (2026-08-22) | `IOTAModuleErrors` personality trait, fed by real publishDiagnostics | readout: a one-time `[pastree] file-trait spike POSITIVE` Build-tab line when the IDE first pulls GetErrors; its absence across a session answers the question the other way |
 | Squiggles, painted | Ready | `PaintText` post-text stage, per token run (`ToolsAPI.Editor.pas:761`) | exact range underlining; `PaintLine` at `plsEndPaint` is the coarser fallback |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
@@ -357,10 +357,10 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Outline | Ready | Structure pane via `IOTAStructureContext` (`StructureViewAPI.pas:108`) | fully pluggable; use a private `StructureType` string rather than contending with the IDE's Pascal provider |
+| Outline | **Have** (2026-08-22, first live run pending) | Structure pane, private `StructureType` 'PasTree.Outline' | refreshed on EditorViewActivated; two recorded unknowns: is `IOTAStructureView` a BorlandIDEServices service (logged once if not), and do the IDE's providers re-take the pane |
 | Outline follows the caret | Ready | `IOTAStructureView370.SelectNodeEx` (`105`) + `EditorSetCaretPos` (`ToolsAPI.Editor.pas:878`) | scroll-into-view select, driven by a real caret event instead of polling |
 | Outline survives a refresh | Ready | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
-| Project-wide symbol search | Server | IDE Insight omnibox — `INTAIDEInsightItem` (`9165`), `IOTAIDEInsightNotifier.RequestingItems` (`9213`) | Ctrl+. with zero UI work; populate lazily when the dialog opens |
+| Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
 | Document highlight (occurrences) | Ready | `PaintText` underlay, or `plsBackground` row wash | server answers it today |
 | Folding ranges | Spike / Server | `IOTAModuleRegions` (`3225`) natively, else `pgsElision` custom-draw | `IOTAElideActions` (`2530`) only exposes categories, not arbitrary ranges |
 
