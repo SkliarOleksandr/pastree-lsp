@@ -165,11 +165,6 @@ end;
 function TLspCompletionEngine.CompleteAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
   AProjectMid: Integer): TLspCompletionAnswer;
-const
-  // Declared-type detail is a cheap on-demand resolve PER ROW - worth it on
-  // a member list, noise-cost on a 1700-row scope dump (same guard, same
-  // number, as the PasTree demo's own completion popup).
-  cDetailLimit = 512;
 var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
@@ -215,7 +210,15 @@ begin
       Result.ReplaceColFrom := LInfo.PrefixColFrom;
       Result.ReplaceColTo := LInfo.PrefixColTo;
       Result.Provider := 'pastree/' + ContextName(LContext);
-      LWithTypes := (AProject <> nil) and (Length(LItems) <= cDetailLimit);
+      // Declared-type detail for EVERY row, no size guard: the first live
+      // run hit the demo popup's 512-item guard on an ordinary statement
+      // position (the whole RTL is in scope there - thousands of rows) and
+      // showed no types at all, which reads as the feature missing. The
+      // resolve is a per-row lookup, the request is per invocation (the RAD
+      // viewer filters locally afterwards), and the completion log line
+      // carries the milliseconds - if a real project proves this expensive,
+      // the fix is lazy resolve, not a cliff that silently strips the list.
+      LWithTypes := AProject <> nil;
       SetLength(Result.Items, Length(LItems));
       for LIdx := 0 to High(LItems) do
       begin
