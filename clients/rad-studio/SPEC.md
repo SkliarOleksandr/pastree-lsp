@@ -519,6 +519,51 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
 7. **Workspace symbol** into IDE Insight, once the server answers it.
 8. **Code Insight**, as its own project, once the server can answer completion.
 
+## The live queue (2026-08-22, user asks — supersedes "Suggested order" above,
+## whose items 1–8 are all delivered or running)
+
+1. **Error Insight productization.** The file-trait spike serves real
+   diagnostics already; the readout line has NOT been seen live yet
+   (2026-08-22) — first debug why (registration? the IDE never consulting
+   traits? Error Insight option off? queried only post-compile?), then
+   either strip the spike scaffolding or record NEGATIVE and take the
+   paint path.
+2. **Help Insight: XMLDoc documentation.** Hover and the completion viewer
+   show the declaration line only; the native ones render `/// <summary>`
+   docs. Blocked on PasTree's §8D (`DeclDocComment` — asked 2026-08-22 in
+   its plan doc); when it lands: hover appends the doc block,
+   `completionItem.documentation` carries it, the hint window renders it.
+   No interim raw-stream walk on our side — that is engine geometry.
+3. **Class completion (Ctrl+Shift+C), ours.** The native one is not gated
+   by the Insight Provider selection and "works very badly" (user,
+   2026-08-22) — so this is a REPLACEMENT by keyboard binding: take the
+   editor command, ask the server for the missing implementation stubs /
+   property accessors (a custom `pastree/classComplete` request over the
+   overlay AST — decl vs impl diff is exactly what the model knows), apply
+   through `CreateUndoableWriter` front-to-back, land the caret in the
+   first generated body.
+4. **Block completion, ours.** Same verdict on the native one. Editor-level:
+   an `IOTAKeyboardBinding` on Enter consults the overlay parse for an
+   unclosed block opener at the caret (`begin`/`try`/`case`/`repeat`...)
+   and inserts the matching closer with the opener's indentation. The
+   parser's error-tolerance already knows "unclosed at end" — the answer
+   is a per-keystroke overlay question, the same cost class as completion.
+5. **Rename refactoring, ours.** The built-in one existed and Embarcadero
+   DISABLED it for being buggy (user, 2026-08-22) — the demand is proven
+   and the field is empty. Server: `textDocument/rename` +
+   `prepareRename` over the references machinery (already correct
+   cross-unit, unit/builtin identities included) returning a
+   WorkspaceEdit. Plugin: context-menu "PasTree: Rename..." + a binding,
+   dialog prefilled with the identifier, edits applied per file
+   FRONT-TO-BACK via `CreateUndoableWriter` (the writer cannot move
+   backward — see the Editing table), open files through their buffers,
+   closed ones on disk with the BOM rules of `PasLsp.SourceText`.
+   `IOTASyncEditPoints` stays the cheap same-file variant later.
+6. **Find References results upgrade** (hierarchy + match highlight in the
+   snippet), **custom colored hint window**, **EditorIdle-driven
+   `didChange` + `IOTAEditLineTracker`** — carried over from the old order,
+   still queued.
+
 ## Non-goals
 
 - **A formatter.** Needs a printer; PasTree parses and analyzes but does not

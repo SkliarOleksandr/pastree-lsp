@@ -133,7 +133,11 @@ uses
   System.JSON,
   Winapi.ActiveX,
   IStreams,
-  PasLsp.SourceText;
+  PasLsp.SourceText,
+  // Mutual implementation-uses with the Diagnostics unit, legal and
+  // deliberate: didOpen is the earliest moment a real module exists, which
+  // is what its one-shot registration probe needs.
+  PasTreeIdePlugin.Diagnostics;
 
 procedure IdeToLsp(ARow, ACol: Integer; out ALine, ACharacter: Integer);
 begin
@@ -293,6 +297,7 @@ begin
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   FClient.Notify('textDocument/didOpen', LParams);
+  ProbeDiagnosticsTrait(APath);
 end;
 
 procedure TLspDocumentSync.SendDidChange(const APath, AText: string;
