@@ -334,6 +334,16 @@ begin
   // it must not outlive this call.
   FinalizeLspSession;
   FreeAndNil(FMenuManager);
+  // DRAIN THE MAIN-THREAD SYNC QUEUE before the BPL unloads. The teardown
+  // above fails every pending request, and those callbacks defer their IDE
+  // delivery via TThread.ForceQueue(nil, ...) - entries no thread owns, so
+  // nothing removes them. Left in the queue at IDE shutdown, they are freed
+  // by the RTL's own finalization AFTER this package is gone: releasing a
+  // closure whose code has been unloaded, which is the intermittent
+  // shutdown AV first seen 2026-08-22. Draining runs them NOW instead -
+  // each exits immediately on its GAlive/session gates - and leaves the
+  // queue with nothing of ours.
+  while CheckSynchronize do ;
   inherited;
 end;
 
