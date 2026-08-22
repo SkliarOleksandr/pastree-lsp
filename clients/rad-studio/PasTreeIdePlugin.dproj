@@ -113,7 +113,7 @@
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CodeInsight.pas"/>
         <DCCReference Include="PasTreeIdePlugin.IdeInsight.pas"/>
-        <DCCReference Include="PasTreeIdePlugin.Diagnostics.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.ErrorPaint.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>

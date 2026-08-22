@@ -55,7 +55,7 @@ contains
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
   PasTreeIdePlugin.CodeInsight in 'PasTreeIdePlugin.CodeInsight.pas',
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
-  PasTreeIdePlugin.Diagnostics in 'PasTreeIdePlugin.Diagnostics.pas',
+  PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas';
 
 end.

@@ -291,7 +291,28 @@ implementer does not re-derive it:
   manager-selection order for two `HandlesFile('.pas')` claimants is
   undocumented.
 
-## The open experiment, worth running first
+## The open experiment — CLOSED 2026-08-22, verdict NEGATIVE
+
+The spike ran a full session armed, with a live probe, and answered on two
+independent grounds (readout verbatim from the Build tab):
+
+- `probe: FindFileTrait(IOTAModuleErrors) answers NIL` — the personality-wide
+  `AddPersonalityTrait(sDelphiPersonality, ...)` registration is INVISIBLE to
+  the very lookup that would have to find it.
+- `probe: the module itself implements IOTAModuleErrors natively (GetErrors
+  answers 0 entries)` — the editor's query is answered by the IDE's own
+  module implementation before any fallback could run. The trait route is
+  dead no matter how the registration is spelled.
+
+`GetErrors` on our trait was never called. Consequences: diagnostics take
+the painted route (`PasTreeIdePlugin.ErrorPaint`, PaintText overlay —
+delivered the same day), and the same wall stands for `IOTAModuleRegions`
+(folding), `IOTAHelpInsight` and `IOTACodeBrowsePreview` — assume the
+module answers those natively too and plan the custom-draw route for each.
+The original reasoning follows, kept because the catch it names is now a
+measured fact.
+
+## What the experiment was (historical)
 
 Two interfaces would give us **native** diagnostics and **native** folding, with
 no painting code at all:
@@ -339,15 +360,15 @@ file-trait question above).
 | Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
 | Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |
-| Peek definition | Spike | `IOTACodeBrowsePreview` (`8851`) | three out-params; behind the trait wall |
+| Peek definition | Server | `IOTACodeBrowsePreview` (`8851`) | trait route ruled out by the closed experiment; needs a window of our own |
 | Back/Forward across jumps | Have | `IOTAHistoryServices` | we supply our own captioned `IOTAHistoryItem` |
 
 ### Diagnostics
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Squiggles, native | **Spike RUNNING** (2026-08-22) | `IOTAModuleErrors` personality trait, fed by real publishDiagnostics | readout: a one-time `[pastree] file-trait spike POSITIVE` Build-tab line when the IDE first pulls GetErrors; its absence across a session answers the question the other way |
-| Squiggles, painted | Ready | `PaintText` post-text stage, per token run (`ToolsAPI.Editor.pas:761`) | exact range underlining; `PaintLine` at `plsEndPaint` is the coarser fallback |
+| Squiggles, native | **DEAD** (spike NEGATIVE 2026-08-22) | — | the module answers `IOTAModuleErrors` natively and `FindFileTrait` never saw our registration; see the closed experiment above |
+| Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity; repaint via the session's diagnostics-changed listener |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
 | A diagnostics list pane | Ready | custom messages, or `IOTAToDoManager` (`8330`) | see "Result surfaces" |
@@ -362,7 +383,7 @@ file-trait question above).
 | Outline survives a refresh | Ready | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
 | Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
 | Document highlight (occurrences) | Ready | `PaintText` underlay, or `plsBackground` row wash | server answers it today |
-| Folding ranges | Spike / Server | `IOTAModuleRegions` (`3225`) natively, else `pgsElision` custom-draw | `IOTAElideActions` (`2530`) only exposes categories, not arbitrary ranges |
+| Folding ranges | Server | `pgsElision` custom-draw | `IOTAModuleRegions` ruled out by the closed experiment (module answers natively); `IOTAElideActions` (`2530`) only exposes categories, not arbitrary ranges |
 
 ### Editing
 
@@ -522,12 +543,12 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
 ## The live queue (2026-08-22, user asks — supersedes "Suggested order" above,
 ## whose items 1–8 are all delivered or running)
 
-1. **Error Insight productization.** The file-trait spike serves real
-   diagnostics already; the readout line has NOT been seen live yet
-   (2026-08-22) — first debug why (registration? the IDE never consulting
-   traits? Error Insight option off? queried only post-compile?), then
-   either strip the spike scaffolding or record NEGATIVE and take the
-   paint path.
+1. **Error Insight — DELIVERED via the paint path (2026-08-22, first live
+   run pending).** The spike answered NEGATIVE the same day (closed
+   experiment above); `PasTreeIdePlugin.ErrorPaint` draws the squiggles
+   from the session's publishDiagnostics cache. Still queued from the
+   diagnostics table: the gutter glyph and the scrollbar minimap, which
+   make a squiggle findable rather than merely visible.
 2. **Help Insight: XMLDoc documentation.** Hover and the completion viewer
    show the declaration line only; the native ones render `/// <summary>`
    docs. Blocked on PasTree's §8D (`DeclDocComment` — asked 2026-08-22 in

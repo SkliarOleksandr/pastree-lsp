@@ -232,10 +232,22 @@ procedure LspDocumentSymbols(const AFileName: string;
 /// The last diagnostics the server PUSHED for APath (publishDiagnostics
 /// arrives unsolicited after every analysis). False when the server never
 /// reported for that file - distinct from an empty array, which means "it
-/// reported: clean". Read by the IOTAModuleErrors file-trait spike.
+/// reported: clean". Read by the painted-squiggle layer (ErrorPaint).
 /// </summary>
 function LspTryGetDiagnostics(const APath: string;
   out ADiags: TArray<TLspDiagnostic>): Boolean;
+
+type
+  TLspDiagnosticsChangedProc = reference to procedure(const APath: string);
+
+/// <summary>
+/// Registers the ONE listener called (main thread) right after each
+/// publishDiagnostics lands in the cache - the painted-squiggle layer's
+/// repaint trigger. nil unregisters. Deliberately single: the day a second
+/// consumer exists, this becomes a list, not a second variable.
+/// </summary>
+procedure LspSetDiagnosticsChangedListener(
+  const AListener: TLspDiagnosticsChangedProc);
 
 /// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
@@ -404,6 +416,9 @@ type
 
 var
   GSession: TLspSession;
+  // The painted-squiggle layer's repaint trigger; see
+  // LspSetDiagnosticsChangedListener.
+  GDiagnosticsListener: TLspDiagnosticsChangedProc;
 
 { ---------------------------------------------------------------------------
   ToolsAPI harvesting
@@ -745,6 +760,8 @@ begin
   if FDiagnostics = nil then
     FDiagnostics := TDictionary<string, TArray<TLspDiagnostic>>.Create;
   FDiagnostics.AddOrSetValue(LowerCase(LPath), LDiags);
+  if Assigned(GDiagnosticsListener) then
+    GDiagnosticsListener(LPath);
 end;
 
 function TLspSession.TryGetDiagnostics(const APath: string;
@@ -843,15 +860,14 @@ begin
         FDocs.ResendAll;
       end;
 
-    { publishDiagnostics is CACHED here for the IOTAModuleErrors file-trait
-      spike (PasTreeIdePlugin.Diagnostics): the server pushes them after
-      every analysis, unsolicited by design, and the cache is the pull side
-      the trait answers the editor from. The painted-squiggle route
-      (PaintText/PaintLine on INTACodeEditorEvents) remains the fallback if
-      the spike answers "the IDE never consults the trait" - see
-      clients/rad-studio/SPEC.md's "open experiment". Anything else the
-      server starts notifying about surfaces in the Build tab instead of
-      vanishing silently. }
+    { publishDiagnostics is CACHED here for the painted-squiggle layer
+      (PasTreeIdePlugin.ErrorPaint): the server pushes them after every
+      analysis, unsolicited by design; the cache is the pull side PaintText
+      reads and the listener hook is its repaint trigger. (The native
+      IOTAModuleErrors route was spiked and ruled out 2026-08-22 - the
+      module answers it natively inside the IDE, see SPEC.md's closed
+      experiment.) Anything else the server starts notifying about surfaces
+      in the Build tab instead of vanishing silently. }
     FClient.OnNotification :=
       procedure(const AMethod: string; AParams: TJSONValue)
       begin
@@ -1628,6 +1644,12 @@ function LspTryGetDiagnostics(const APath: string;
 begin
   ADiags := nil;
   Result := Assigned(GSession) and GSession.TryGetDiagnostics(APath, ADiags);
+end;
+
+procedure LspSetDiagnosticsChangedListener(
+  const AListener: TLspDiagnosticsChangedProc);
+begin
+  GDiagnosticsListener := AListener;
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;

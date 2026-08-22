@@ -33,7 +33,7 @@ uses
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.Diagnostics, PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.LspSession;
 
 const
@@ -295,9 +295,11 @@ begin
   InitializeCodeInsight;
   // Project-wide symbol search in the IDE Insight dialog (Ctrl+.).
   InitializeIdeInsight;
-  // The IOTAModuleErrors file-trait spike - see that unit's header for the
-  // question it answers and how to read the result.
-  InitializeDiagnosticsTrait;
+  // Painted error squiggles over the server's pushed diagnostics. (The
+  // native IOTAModuleErrors trait was spiked and ruled out 2026-08-22 -
+  // the module answers that interface natively; SPEC.md, closed
+  // experiment.)
+  InitializeErrorPaint;
   // The Structure pane outline for the active source file.
   InitializeOutline;
 
@@ -339,7 +341,7 @@ begin
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;
-  FinalizeDiagnosticsTrait;
+  FinalizeErrorPaint;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
