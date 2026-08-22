@@ -543,7 +543,7 @@ var
   LCaretOfs, LVisIdx, LOpenVis, LIdentVis, LDepth, LArgs, LSteps: Integer;
   LIdentLine, LIdentCol, LTMid, LSym, LNext, LCount: Integer;
   LIdentText, LNavName, LParamsText, LSuffix: string;
-  LTargetProject: Boolean;
+  LTargetProject, LUsesFallback: Boolean;
   LSig: TLspSignatureItem;
 
   function VisKind(AVis: Integer): TPasTokenKind;
@@ -650,6 +650,7 @@ begin
       otherwise a shifted buffer would show a neighbor's signature. }
     LTargetModel := nil;
     LTargetProject := False;
+    LUsesFallback := False;
     LSym := NIL_SYM;
     LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
     try
@@ -676,6 +677,48 @@ begin
         end
         else
           LSym := NIL_SYM;
+      end;
+
+      { Third try, and the one that makes a FRESHLY TYPED cross-unit call
+        work on the first keystroke (live finding, 2026-08-22: completion
+        inserts `AccessCheck()` and the position-based navigator knows
+        nothing until the next full rebuild lands - a ~15 s window on the
+        big project): resolve the NAME through the interface scopes of the
+        units this file USES, taken from its last-good PROJECT model, whose
+        UsesList is already alias/namespace-resolved. Reverse order - a
+        later unit shadows an earlier one, the language's own rule. Plain
+        identifiers only; member calls stay with the engine's future
+        CallAt. }
+      if (LTargetModel = nil) and (AProject <> nil) and (AProjectMid >= 0)
+         and ((LOpenVis < 2) or
+              (LTree.Source.Visible[LOpenVis - 2].FileId <> 0) or
+              (VisKind(LOpenVis - 2) <> tkDot)) then
+      begin
+        LTargetModel := AProject.Model(AProjectMid);
+        LTMid := AProjectMid;
+        if LTargetModel <> nil then
+          for LCount := High(LTargetModel.UsesList) downto 0 do
+            if LTargetModel.UsesList[LCount].UnitId >= 0 then
+            begin
+              LTMid := LTargetModel.UsesList[LCount].UnitId;
+              with AProject.Model(LTMid) do
+                if InterfaceScope <> NIL_SCOPE then
+                  LSym := ResolveAt(InterfaceScope, LowerCase(LIdentText), -1)
+                else
+                  LSym := NIL_SYM;
+              if (LSym <> NIL_SYM) and
+                 (AProject.Model(LTMid).Symbols[LSym].Kind = skRoutine) then
+                Break;
+              LSym := NIL_SYM;
+            end;
+        if LSym <> NIL_SYM then
+        begin
+          LTargetModel := AProject.Model(LTMid);
+          LTargetProject := True;
+          LUsesFallback := True;
+        end
+        else
+          LTargetModel := nil;
       end;
 
       if LTargetModel = nil then
@@ -721,7 +764,9 @@ begin
         Result.ActiveSignature := LCount;
         Break;
       end;
-    if LTargetProject then
+    if LUsesFallback then
+      Result.Provider := 'pastree-interim/uses'
+    else if LTargetProject then
       Result.Provider := 'pastree-interim/project'
     else
       Result.Provider := 'pastree-interim/overlay';
