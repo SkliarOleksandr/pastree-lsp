@@ -142,6 +142,7 @@ type
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     function HandleCompletion(const AMsg: TLspIncoming): string;
+    function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -1009,7 +1010,8 @@ begin
       '"hoverProvider":true,' +
       '"typeDefinitionProvider":true,' +
       '"documentHighlightProvider":true,' +
-      '"completionProvider":{"triggerCharacters":["."]}' +
+      '"completionProvider":{"triggerCharacters":["."]},' +
+      '"signatureHelpProvider":{"triggerCharacters":["(",","]}' +
     // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
     // because a client's real question is never "which server build is this"
     // but "does it have the analysis fix I need", and that lives in PasTree.
@@ -1229,6 +1231,88 @@ end;
 // The item's data member (',"data":{...}') - our own side channel: the
 // routine head word for the RAD viewer's class column, hasParams for its
 // auto-parenthesis. '' when there is nothing to carry.
+{ textDocument/signatureHelp — same rules as completion: never WaitAnalyzed,
+  the live overlay text is the truth, answered by the seam's interim call
+  locator until PasTree's CallAt lands (COMPLETION.md / PasTree plan §8).
+  The call-open position rides the answer as "pastreeCall" for the RAD
+  client's hint anchor; standard clients ignore unknown members. }
+function TLspServer.HandleSignatureHelp(const AMsg: TLspIncoming): string;
+var
+  LPath, LText: string;
+  LLine, LChar, LPasLine, LPasCol, LIdx, LPrm, LMid: Integer;
+  LDoc: TLspDocument;
+  LAnswer: TLspSignatureHelpAnswer;
+  LStart: UInt64;
+  LSB: TStringBuilder;
+  LCallLine, LCallChar: Integer;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'signatureHelp: textDocument.uri and position required'));
+
+  LStart := GetTickCount64;
+  if FDocs.TryGet(LPath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(LPath, LText) then
+    LText := '';
+
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if LText = '' then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  if FCompletion = nil then
+    FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+      FDefines);
+  SyncCompletionOverlays;
+  LMid := -1;
+  if FNav <> nil then
+    LMid := FNav.ModelIdOf(LPath);
+  if (FProject <> nil) and (LMid >= 0) then
+    LAnswer := FCompletion.SignatureHelpAt(LPath, LText, LPasLine, LPasCol,
+      FProject, LMid, FNav)
+  else
+    LAnswer := FCompletion.SignatureHelpAt(LPath, LText, LPasLine, LPasCol,
+      nil, -1, nil);
+
+  Log(Format('signatureHelp: %s -> %d signatures, arg %d in %d ms (%s)',
+    [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Signatures),
+     LAnswer.ActiveParam, GetTickCount64 - LStart, LAnswer.Provider]));
+  if Length(LAnswer.Signatures) = 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LSB := TStringBuilder.Create;
+  try
+    for LIdx := 0 to High(LAnswer.Signatures) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append('{"label":')
+         .Append(JsonQuote(LAnswer.Signatures[LIdx].SigLabel))
+         .Append(',"parameters":[');
+      for LPrm := 0 to High(LAnswer.Signatures[LIdx].Params) do
+      begin
+        if LPrm > 0 then
+          LSB.Append(',');
+        LSB.Append('{"label":')
+           .Append(JsonQuote(LAnswer.Signatures[LIdx].Params[LPrm]))
+           .Append('}');
+      end;
+      LSB.Append(']}');
+    end;
+    PasTreeToLsp(LAnswer.CallLine, LAnswer.CallCol, LCallLine, LCallChar);
+    Result := BuildResponse(AMsg.IdJson, Format(
+      '{"signatures":[%s],"activeSignature":%d,"activeParameter":%d,'
+      + '"pastreeCall":{"line":%d,"character":%d}}',
+      [LSB.ToString, LAnswer.ActiveSignature, LAnswer.ActiveParam,
+       LCallLine, LCallChar]));
+  finally
+    LSB.Free;
+  end;
+end;
+
 procedure TLspServer.SyncCompletionOverlays;
 var
   LDocs: TArray<TLspDocument>;
@@ -2115,6 +2199,8 @@ begin
         Exit(HandleHover(LMsg));
       if LMsg.Method = 'textDocument/completion' then
         Exit(HandleCompletion(LMsg));
+      if LMsg.Method = 'textDocument/signatureHelp' then
+        Exit(HandleSignatureHelp(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then

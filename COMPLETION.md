@@ -195,16 +195,21 @@ is NOT honored (nothing in ToolsAPI exposes its value — searched), and
 parens apply only on keyboard accepts (Enter/Tab), so a future close-key
 `(` accept cannot double the paren.
 
-**Parameter insight** (Ctrl+Shift+Space; requested 2026-08-21). LSP side is
-`textDocument/signatureHelp` — a tier-3 SPEC.md item whose blocker
-(position-in-invalid-text) the overlay pipeline has since dissolved: the
-caret primitive already anchors the innermost node, what is missing is a
-PasTree query "which call encloses this position, which routine(s) does it
-target, which parameter index is the caret on" (coordinate with the PasTree
-plan). Server: a `signatureHelp` handler on the same no-WaitAnalyzed rule.
-Manager: implement `GetParameterList`/`AsyncInvokeParameterCodeInsight` over
-`IOTACodeInsightParameterList100` (it carries real parameter ranges) and
-stop declining key `#1` in `AllowCodeInsight`.
+**Parameter insight — plumbing delivered 2026-08-22, on an interim
+provider.** The full chain ships: `textDocument/signatureHelp` on the
+no-WaitAnalyzed rule (trigger chars `(` and `,`), the manager's
+`AsyncInvokeParameterCodeInsight` + both `IOTACodeInsightParameterList`
+views + key `#1` un-declined, and the active argument recounted server-side
+per request (`ParamIndex` answers -1 = reinvoke, so it cannot drift). The
+INTERIM seam provider locates the call by a backward walk over visible
+tokens and resolves the target through the overlay's RefMap or the
+navigator (accepted only when the analyzed text still holds that identifier
+at that position); overloads come from the `NextOverload` chain. The
+recorded gap: a freshly typed call to a cross-unit routine answers empty —
+that is the bridged-designator resolution only PasTree's `CallAt` can do,
+specced as §8B in its plan doc (written 2026-08-22 at the user's request).
+When `CallAt` lands, the seam's locator is deleted and nothing above it
+moves.
 
 (Tooltip Insight and auto-parenthesis were queued here and are delivered —
 see above.)

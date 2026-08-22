@@ -91,6 +91,28 @@ type
   TLspCompletionProc = reference to procedure(ASuccess: Boolean;
     const AItems: TArray<TLspCompletionItem>; const AError: string);
 
+  TLspSignatureItem = record
+    SigLabel: string;
+    Params: TArray<string>;   // one label per individual parameter
+  end;
+
+  /// <summary>
+  /// A signatureHelp answer in IDE coordinates. Valid=False means "the caret
+  /// is not inside a call the server could resolve" - the parameter hint
+  /// simply does not show, which is a legitimate answer, not an error.
+  /// </summary>
+  TLspSignatureHelp = record
+    Valid: Boolean;
+    Signatures: TArray<TLspSignatureItem>;
+    ActiveSignature: Integer;
+    ActiveParam: Integer;
+    CallRow: Integer;   // the call's '(' - the hint window's anchor
+    CallCol: Integer;
+  end;
+
+  TLspSignatureHelpProc = reference to procedure(ASuccess: Boolean;
+    const AHelp: TLspSignatureHelp; const AError: string);
+
   /// <summary>
   /// Hover delivery: AText is PLAIN text ready for a tooltip - the session
   /// strips the server's markdown dressing (code fence, italics) so no
@@ -152,6 +174,14 @@ procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
 /// </summary>
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// Asks which call encloses an IDE position and for its target's
+/// signature(s) - the parameter-insight question (Ctrl+Shift+Space). A new
+/// request supersedes an unanswered one, same as every other feature here.
+/// </summary>
+procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspSignatureHelpProc);
 
 /// <summary>
 /// Asks what is under an IDE position - the declaration's source line plus a
@@ -260,6 +290,7 @@ type
     FPendingTypeDefinition: Int64;
     FPendingCompletion: Int64;
     FPendingHover: Int64;
+    FPendingSignature: Int64;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -283,6 +314,8 @@ type
       const AOnDone: TLspCompletionProc);
     procedure Hover(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHoverProc);
+    procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspSignatureHelpProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
   end;
 
@@ -1054,6 +1087,93 @@ begin
   FPendingHover := LIssuedId;
 end;
 
+function ParseSignatureHelp(AResult: TJSONValue): TLspSignatureHelp;
+var
+  LSigs, LParams: TJSONArray;
+  LValue, LPrm: TJSONValue;
+  LSig: TLspSignatureItem;
+  LLine, LChar, LCount, LPCount: Integer;
+begin
+  Result := Default(TLspSignatureHelp);
+  if (AResult = nil) or AResult.Null then
+    Exit;
+  if not AResult.TryGetValue<TJSONArray>('signatures', LSigs) then
+    Exit;
+  SetLength(Result.Signatures, LSigs.Count);
+  LCount := 0;
+  for LValue in LSigs do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LSig.SigLabel := LValue.GetValue<string>('label', '');
+    LSig.Params := nil;
+    if LValue.TryGetValue<TJSONArray>('parameters', LParams) then
+    begin
+      SetLength(LSig.Params, LParams.Count);
+      LPCount := 0;
+      for LPrm in LParams do
+      begin
+        LSig.Params[LPCount] := LPrm.GetValue<string>('label', '');
+        Inc(LPCount);
+      end;
+      SetLength(LSig.Params, LPCount);
+    end;
+    Result.Signatures[LCount] := LSig;
+    Inc(LCount);
+  end;
+  SetLength(Result.Signatures, LCount);
+  if LCount = 0 then
+    Exit;
+  Result.ActiveSignature := AResult.GetValue<Integer>('activeSignature', 0);
+  Result.ActiveParam := AResult.GetValue<Integer>('activeParameter', 0);
+  LLine := AResult.GetValue<Integer>('pastreeCall.line', -1);
+  LChar := AResult.GetValue<Integer>('pastreeCall.character', -1);
+  if (LLine >= 0) and (LChar >= 0) then
+    LspToIde(LLine, LChar, Result.CallRow, Result.CallCol);
+  Result.Valid := True;
+end;
+
+procedure TLspSession.SignatureHelp(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspSignatureHelpProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspSignatureHelp), 'no LSP server available');
+    Exit;
+  end;
+
+  FDocs.Sync;
+  if FPendingSignature <> 0 then
+    FClient.Cancel(FPendingSignature);
+
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/signatureHelp', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if FPendingSignature = LIssuedId then
+        FPendingSignature := 0;
+      if ASuccess then
+        AOnDone(True, ParseSignatureHelp(AResult), '')
+      else
+        AOnDone(False, Default(TLspSignatureHelp), AError);
+    end);
+  FPendingSignature := LIssuedId;
+end;
+
 procedure TLspSession.Prewarm;
 var
   LProject: IOTAProject;
@@ -1206,6 +1326,17 @@ begin
     Exit;
   end;
   GSession.Hover(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspSignatureHelpProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, Default(TLspSignatureHelp), 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.SignatureHelp(AFileName, ARow, ACol, AOnDone);
 end;
 
 function LspSourceTextOf(const AFileName: string): string;

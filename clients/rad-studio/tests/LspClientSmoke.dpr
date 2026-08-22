@@ -643,6 +643,48 @@ begin
     'and is the declaration line itself');
 end;
 
+{ 5d. Signature help: the interim call locator over the overlay.
+
+  Pinned: a caret inside a call's arguments answers the target's real
+  signature with individual parameter labels and the active argument; the
+  call-open position rides as pastreeCall for the RAD hint anchor; a
+  position in no call answers null. The 'Greet' call resolves through the
+  NAVIGATOR (cross-unit, analyzed text unchanged) - the freshly-typed
+  cross-unit case is the recorded gap until PasTree's CallAt. }
+procedure TestSignatureHelp;
+var
+  LAppFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5d. signatureHelp inside a call''s arguments ===');
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+
+  FindPos(LAppFile, 'Writeln(Greet(''world', 'world', LLine, LChar);
+  Check(Ask('textDocument/signatureHelp',
+    PositionParams(LAppFile, LLine, LChar)),
+    'signatureHelp answered');
+  Check(GOk and GResultJson.Contains(
+    '"label":"Greet(const AName: string): string"'),
+    'the cross-unit target''s full signature');
+  Check(GOk and GResultJson.Contains('"label":"const AName: string"'),
+    'with the individual parameter label');
+  Check(GOk and GResultJson.Contains('"activeParameter":0'),
+    'and the first argument active');
+  Check(GOk and GResultJson.Contains('"pastreeCall"'),
+    'and the call anchor for the RAD hint window');
+
+  // A position inside no call is a null, not an invented signature.
+  FindPos(LAppFile, 'begin', 'begin', LLine, LChar);
+  Check(Ask('textDocument/signatureHelp',
+    PositionParams(LAppFile, LLine, LChar + 3)),
+    'signatureHelp answered outside any call');
+  // A JSON null result reaches the harness as an empty GResultJson (the
+  // client hands the callback nil for null results).
+  Check(GOk and ((GResultJson = '') or (GResultJson = 'null')),
+    'and honestly answered null there');
+end;
+
 { 6. Cancellation hygiene.
 
   TLspSession cancels a superseded request on every new one, so the invariant
@@ -853,6 +895,7 @@ begin
       TestOverlayBeatsDisk;
       TestCompletion;
       TestHover;
+      TestSignatureHelp;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

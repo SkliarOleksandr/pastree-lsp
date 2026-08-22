@@ -37,7 +37,8 @@ uses
   PasTree.Platforms,
   PasTree.SourceManager,
   PasTree.Preprocessor,
-  PasTree.Sema.Project;
+  PasTree.Sema.Project,
+  PasTree.Sema.Nav;
 
 type
   TLspCompletionEntry = record
@@ -53,6 +54,24 @@ type
     { True when the item is a routine declared WITH parameters - what the
       RAD client's auto-parenthesis reads to insert `()` and step inside. }
     HasParams: Boolean;
+  end;
+
+  TLspSignatureItem = record
+    SigLabel: string;         // 'Greet(const AName: string): string'
+    Params: TArray<string>;   // one label per INDIVIDUAL parameter
+  end;
+
+  { textDocument/signatureHelp's answer, plus the call-open position our RAD
+    client anchors its hint window to (1-based PasTree coords; Line 0 = the
+    caret is not inside any call's arguments - the whole answer is empty
+    then). }
+  TLspSignatureHelpAnswer = record
+    Signatures: TArray<TLspSignatureItem>;
+    ActiveSignature: Integer;
+    ActiveParam: Integer;
+    CallLine: Integer;
+    CallCol: Integer;
+    Provider: string;
   end;
 
   TLspCompletionAnswer = record
@@ -91,6 +110,16 @@ type
     function CompleteAt(const AFileName, AText: string;
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
       AProjectMid: Integer): TLspCompletionAnswer;
+    { Signature help at a position: the enclosing call located by a backward
+      walk over VISIBLE tokens (comments and strings are single tokens there,
+      nesting respected), the target resolved through the overlay's own
+      RefMap or - when the analyzed text still matches - the navigator.
+      INTERIM until PasTree's CallAt lands (its plan §8): a freshly typed
+      call to a cross-unit routine answers empty, honestly - bridged
+      designator resolution is the engine's to provide, not ours to copy. }
+    function SignatureHelpAt(const AFileName, AText: string;
+      APasLine, APasCol: Integer; AProject: TPasSemaProject;
+      AProjectMid: Integer; ANav: TPasNavigator): TLspSignatureHelpAnswer;
   end;
 
 implementation
@@ -223,6 +252,81 @@ begin
   SetLength(Result, LOut);
   if Length(Result) > cCap then
     Result := Copy(Result, 1, cCap - 3) + '...';
+end;
+
+{ '(const A, B: Integer; var S: string)' -> individual parameter labels
+  ('const A: Integer', 'const B: Integer', 'var S: string'): top-level ';'
+  splits groups, ',' splits names within one, the group's modifier and type
+  apply to each name. Depth-tracked over ()/[]/<> so a default value or a
+  generic type argument cannot break the split. }
+function SplitParamLabels(const AParamsText: string): TArray<string>;
+var
+  LInner, LGroup, LNames, LTail, LModifier, LName: string;
+  LGroups, LNameList: TArray<string>;
+  LDepth, LIdx, LFrom, LColon: Integer;
+
+  procedure CutGroup(ATo: Integer);
+  begin
+    LGroup := Trim(Copy(LInner, LFrom, ATo - LFrom));
+    if LGroup <> '' then
+      LGroups := LGroups + [LGroup];
+    LFrom := ATo + 1;
+  end;
+
+begin
+  Result := nil;
+  LInner := Trim(AParamsText);
+  if LInner.StartsWith('(') then
+    LInner := Copy(LInner, 2, Length(LInner) - 2);   // strip the parens
+  LGroups := nil;
+  LDepth := 0;
+  LFrom := 1;
+  for LIdx := 1 to Length(LInner) do
+    case LInner[LIdx] of
+      '(', '[', '<': Inc(LDepth);
+      ')', ']', '>': Dec(LDepth);
+      ';': if LDepth = 0 then CutGroup(LIdx);
+    end;
+  CutGroup(Length(LInner) + 1);
+
+  for LGroup in LGroups do
+  begin
+    // '[const|var|out] A, B: T [= default]' - the ':' at depth 0 ends names.
+    LColon := 0;
+    LDepth := 0;
+    for LIdx := 1 to Length(LGroup) do
+      case LGroup[LIdx] of
+        '(', '[', '<': Inc(LDepth);
+        ')', ']', '>': Dec(LDepth);
+        ':': if (LDepth = 0) and (LColon = 0) then LColon := LIdx;
+      end;
+    if LColon > 0 then
+    begin
+      LNames := Trim(Copy(LGroup, 1, LColon - 1));
+      LTail := ': ' + Trim(Copy(LGroup, LColon + 1, MaxInt));
+    end
+    else
+    begin
+      LNames := LGroup;   // untyped const parameter
+      LTail := '';
+    end;
+    LModifier := '';
+    LIdx := Pos(' ', LNames);
+    if LIdx > 0 then
+    begin
+      LName := Copy(LNames, 1, LIdx - 1);
+      if SameText(LName, 'const') or SameText(LName, 'var') or
+         SameText(LName, 'out') then
+      begin
+        LModifier := LowerCase(LName) + ' ';
+        LNames := Trim(Copy(LNames, LIdx + 1, MaxInt));
+      end;
+    end;
+    LNameList := LNames.Split([',']);
+    for LName in LNameList do
+      if Trim(LName) <> '' then
+        Result := Result + [LModifier + Trim(LName) + LTail];
+  end;
 end;
 
 function ContextName(AContext: TPasComplContext): string;
@@ -422,6 +526,206 @@ begin
   finally
     // The tree is a managed record the model references; freeing the model
     // is the only explicit teardown.
+    LModel.Free;
+  end;
+end;
+
+function TLspCompletionEngine.SignatureHelpAt(const AFileName, AText: string;
+  APasLine, APasCol: Integer; AProject: TPasSemaProject;
+  AProjectMid: Integer; ANav: TPasNavigator): TLspSignatureHelpAnswer;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+  LModel, LTargetModel: TPasSemaModel;
+  LCompletion: TPasCompletion;
+  LInfo: TPasCaretInfo;
+  LCaretOfs, LVisIdx, LOpenVis, LIdentVis, LDepth, LArgs, LSteps: Integer;
+  LIdentLine, LIdentCol, LTMid, LSym, LNext, LCount: Integer;
+  LIdentText, LNavName, LParamsText, LSuffix: string;
+  LTargetProject: Boolean;
+  LSig: TLspSignatureItem;
+
+  function VisKind(AVis: Integer): TPasTokenKind;
+  begin
+    with LTree.Source.Visible[AVis] do
+      Result := LTree.Source.Files[FileId].Tokens[TokenIndex].Kind;
+  end;
+
+  function VisStart(AVis: Integer): Integer;
+  begin
+    with LTree.Source.Visible[AVis] do
+      Result := LTree.Source.Files[FileId].Tokens[TokenIndex].Start;
+  end;
+
+begin
+  Result := Default(TLspSignatureHelpAnswer);
+  Result.Provider := 'pastree-interim/none';
+  if (APasLine < 1) or (APasCol < 1) then
+    Exit;
+
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+  try
+    // The caret as an offset into the main file, clamped like every host
+    // position (LineStarts is the lexer's own line map).
+    with LTree.Source.Files[0] do
+    begin
+      if APasLine > Length(LineStarts) then
+        Exit;
+      LCaretOfs := LineStarts[APasLine - 1] + (APasCol - 1);
+    end;
+
+    { The last main-file visible token that STARTS before the caret - the
+      anchor of the backward walk. Comments never appear here (visible
+      stream), strings/numbers are single tokens, so the walk cannot be
+      fooled by parens inside either. }
+    LVisIdx := -1;
+    for LIdentVis := 0 to High(LTree.Source.Visible) do
+      if LTree.Source.Visible[LIdentVis].FileId = 0 then
+      begin
+        // Include-file tokens carry offsets into THEIR file - they must be
+        // skipped, never compared against the main file's caret offset.
+        if VisStart(LIdentVis) >= LCaretOfs then
+          Break;
+        LVisIdx := LIdentVis;
+      end;
+    if LVisIdx < 0 then
+      Exit;
+
+    // Backward: nesting over ()/[], top-level commas count arguments, and a
+    // statement boundary at depth 0 means the caret is in no call at all.
+    LOpenVis := -1;
+    LDepth := 0;
+    LArgs := 0;
+    LSteps := 0;
+    while (LVisIdx >= 0) and (LSteps < 2000) do
+    begin
+      if LTree.Source.Visible[LVisIdx].FileId = 0 then
+        case VisKind(LVisIdx) of
+          tkRParen, tkRBracket:
+            Inc(LDepth);
+          tkLBracket:
+            begin
+              if LDepth = 0 then
+                Exit;   // inside an indexer, not a call - v1 declines
+              Dec(LDepth);
+            end;
+          tkLParen:
+            begin
+              if LDepth = 0 then
+              begin
+                LOpenVis := LVisIdx;
+                Break;
+              end;
+              Dec(LDepth);
+            end;
+          tkComma:
+            if LDepth = 0 then
+              Inc(LArgs);
+          tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse:
+            if LDepth = 0 then
+              Exit;   // left the statement without meeting an open paren
+        end;
+      Dec(LVisIdx);
+      Inc(LSteps);
+    end;
+    if (LOpenVis <= 0) or
+       (LTree.Source.Visible[LOpenVis - 1].FileId <> 0) or
+       (VisKind(LOpenVis - 1) <> tkIdentifier) then
+      Exit;   // no call, or a designator shape v1 does not resolve
+    LIdentVis := LOpenVis - 1;
+
+    with LTree.Source.Visible[LIdentVis] do
+      LIdentText := LTree.Source.Files[FileId].TokenText(TokenIndex);
+    LTree.Source.Files[0].OffsetToLineCol(VisStart(LIdentVis),
+      LIdentLine, LIdentCol);
+    LTree.Source.Files[0].OffsetToLineCol(VisStart(LOpenVis),
+      Result.CallLine, Result.CallCol);
+
+    { Resolve the name. Overlay RefMap first (locals and own-unit routines,
+      correct even mid-typing); then the last-good navigator, accepted only
+      when the analyzed text still holds THIS identifier at THIS position -
+      otherwise a shifted buffer would show a neighbor's signature. }
+    LTargetModel := nil;
+    LTargetProject := False;
+    LSym := NIL_SYM;
+    LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
+    try
+      if LCompletion.CaretAt(LIdentLine, LIdentCol + 1, LInfo) and
+         (LInfo.Kind = ckIdent) and (LInfo.Node <> NIL_NODE) and
+         (LInfo.Node <= High(LModel.RefMap)) then
+        LSym := LModel.RefMap[LInfo.Node];
+      if (LSym <> NIL_SYM) and (LModel.Symbols[LSym].Kind = skRoutine) then
+        LTargetModel := LModel
+      else
+      begin
+        LSym := NIL_SYM;
+        if (ANav <> nil) and (AProject <> nil) and (AProjectMid >= 0) and
+           ANav.SymbolAt(AProjectMid, LIdentLine, LIdentCol, LTMid, LSym,
+             LNavName) and SameText(LNavName, LIdentText) then
+        begin
+          LTargetModel := AProject.Model(LTMid);
+          LTargetProject := True;
+          if LTargetModel.Symbols[LSym].Kind <> skRoutine then
+          begin
+            LTargetModel := nil;
+            LSym := NIL_SYM;
+          end;
+        end
+        else
+          LSym := NIL_SYM;
+      end;
+
+      if LTargetModel = nil then
+        Exit;   // honest empty: the engine's CallAt owns this case one day
+
+      // The overload chain, each as its own signature.
+      LNext := LSym;
+      LCount := 0;
+      while (LNext <> NIL_SYM) and (LCount < 16) do
+      begin
+        LParamsText := '';
+        LIdentVis := ParamsNodeOf(LTargetModel, LNext);
+        if LIdentVis <> NIL_NODE then
+          LParamsText := NodeSpanText(LTargetModel.Tree, LIdentVis);
+        LSuffix := '';
+        if LTargetProject then
+        begin
+          if XValid(AProject.SymDeclTypeX(LTMid, LNext)) then
+            LSuffix := ': '
+              + AProject.XTypeText(AProject.SymDeclTypeX(LTMid, LNext));
+        end
+        else if LTargetModel.Symbols[LNext].TypeSym <> NIL_SYM then
+          LSuffix := ': '
+            + LTargetModel.Symbols[LTargetModel.Symbols[LNext].TypeSym].Name;
+        LSig.SigLabel := LTargetModel.Symbols[LNext].Name + LParamsText
+          + LSuffix;
+        LSig.Params := SplitParamLabels(LParamsText);
+        Result.Signatures := Result.Signatures + [LSig];
+        LNext := LTargetModel.Symbols[LNext].NextOverload;
+        Inc(LCount);
+      end;
+    finally
+      LCompletion.Free;
+    end;
+
+    Result.ActiveParam := LArgs;
+    // Prefer the first overload that still has a parameter for the argument
+    // being typed; the first one otherwise.
+    Result.ActiveSignature := 0;
+    for LCount := 0 to High(Result.Signatures) do
+      if Length(Result.Signatures[LCount].Params) > LArgs then
+      begin
+        Result.ActiveSignature := LCount;
+        Break;
+      end;
+    if LTargetProject then
+      Result.Provider := 'pastree-interim/project'
+    else
+      Result.Provider := 'pastree-interim/overlay';
+  finally
     LModel.Free;
   end;
 end;

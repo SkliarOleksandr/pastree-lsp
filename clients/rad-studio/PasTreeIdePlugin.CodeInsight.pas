@@ -26,9 +26,11 @@ unit PasTreeIdePlugin.CodeInsight;
       itself. That is the migration seam.
     - Hint text (Tooltip Insight) -> AsyncGetHintText over the server's
       hover, stripped to tooltip plain text by the session.
-    - Parameter insight -> declined (AllowCodeInsight says no), so the IDE
-      shows nothing rather than something wrong. It joins when the server
-      grows signatureHelp.
+    - Parameter insight (Ctrl+Shift+Space, '(' and ',') ->
+      AsyncInvokeParameterCodeInsight over textDocument/signatureHelp; the
+      answer feeds both IOTACodeInsightParameterList views, and the active
+      argument is recounted server-side per request (ParamIndex answers -1 =
+      reinvoke) so it can never drift from the text.
 
   The sync-interface methods (SetFilter/FindIdent on the symbol list, called
   per keystroke while the viewer is open) answer from the cached array the
@@ -361,6 +363,253 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
+  Parameter insight: one signatureHelp answer behind the IDE's two views
+  --------------------------------------------------------------------------- }
+
+{ 'const AName: string = Default' -> modifier/name/type/has-default. The
+  labels were built by the server from the declaration's own source span, so
+  the shape is real Pascal. }
+procedure ParseParamLabel(const ALabel: string; out AModifier, AName,
+  AType: string; out AHasDefault: Boolean);
+var
+  LText: string;
+  LIdx: Integer;
+begin
+  AModifier := '';
+  AType := '';
+  LText := Trim(ALabel);
+  LIdx := Pos(' ', LText);
+  if LIdx > 0 then
+  begin
+    AModifier := Copy(LText, 1, LIdx - 1);
+    if SameText(AModifier, 'const') or SameText(AModifier, 'var') or
+       SameText(AModifier, 'out') then
+      LText := Trim(Copy(LText, LIdx + 1, MaxInt))
+    else
+      AModifier := '';
+  end;
+  LIdx := Pos(':', LText);
+  if LIdx > 0 then
+  begin
+    AName := Trim(Copy(LText, 1, LIdx - 1));
+    AType := Trim(Copy(LText, LIdx + 1, MaxInt));
+  end
+  else
+    AName := LText;
+  AHasDefault := Pos('=', AType) > 0;
+  if AHasDefault then
+    AType := Trim(Copy(AType, 1, Pos('=', AType) - 1));
+end;
+
+type
+  TPasParamQuery = class(TInterfacedObject, IOTACodeInsightParamQuery)
+  private
+    FSig: TLspSignatureItem;
+    FRetVal: string;
+  public
+    constructor Create(const ASig: TLspSignatureItem);
+    { IOTACodeInsightParamQuery }
+    function GetQueryParamCount: Integer;
+    function GetQueryRetVal: string;
+    function GetQueryParamSymText(Index: Integer): string;
+    function GetQueryParamTypeText(Index: Integer): string;
+    function GetQueryParamHasDefaultVal(Index: Integer): Boolean;
+    function GetQueryParamInvokeTypeText(Index: Integer): string;
+  end;
+
+  TPasParameterList = class(TInterfacedObject, IOTACodeInsightParameterList,
+    IOTACodeInsightParameterList100)
+  private
+    FHelp: TLspSignatureHelp;
+    function ActiveParams: TArray<string>;
+  public
+    constructor Create(const AHelp: TLspSignatureHelp);
+    property Help: TLspSignatureHelp read FHelp;
+    { IOTACodeInsightParameterList }
+    procedure GetParameterQuery(ProcIndex: Integer;
+      out ParamQuery: IOTACodeInsightParamQuery);
+    function GetParamDelimiter: Char;
+    function GetProcedureCount: Integer;
+    function GetProcedureParamsText(I: Integer): string;
+    { IOTACodeInsightParameterList100 }
+    function GetParmPos(Index: Integer): TOTACharPos;
+    function GetParmCount: Integer;
+    function GetParmName(Index: Integer): string;
+    function GetParmHint(Index: Integer): string;
+    function GetCallStartPos: TOTACharPos;
+    function GetCallEndPos: TOTACharPos;
+  end;
+
+constructor TPasParamQuery.Create(const ASig: TLspSignatureItem);
+var
+  LIdx: Integer;
+begin
+  inherited Create;
+  FSig := ASig;
+  // The result type is the label's tail after the params' closing '): ' (or
+  // after 'Name: ' for a parameterless function).
+  LIdx := FSig.SigLabel.LastIndexOf('): ');
+  if LIdx >= 0 then
+    FRetVal := FSig.SigLabel.Substring(LIdx + 3)
+  else
+  begin
+    LIdx := FSig.SigLabel.IndexOf(': ');
+    if LIdx >= 0 then
+      FRetVal := FSig.SigLabel.Substring(LIdx + 2);
+  end;
+end;
+
+function TPasParamQuery.GetQueryParamCount: Integer;
+begin
+  Result := Length(FSig.Params);
+end;
+
+function TPasParamQuery.GetQueryRetVal: string;
+begin
+  Result := FRetVal;
+end;
+
+function TPasParamQuery.GetQueryParamSymText(Index: Integer): string;
+var
+  LModifier, LName, LType: string;
+  LHasDefault: Boolean;
+begin
+  Result := '';
+  if (Index >= 0) and (Index <= High(FSig.Params)) then
+  begin
+    ParseParamLabel(FSig.Params[Index], LModifier, LName, LType, LHasDefault);
+    Result := LName;
+  end;
+end;
+
+function TPasParamQuery.GetQueryParamTypeText(Index: Integer): string;
+var
+  LModifier, LName, LType: string;
+  LHasDefault: Boolean;
+begin
+  Result := '';
+  if (Index >= 0) and (Index <= High(FSig.Params)) then
+  begin
+    ParseParamLabel(FSig.Params[Index], LModifier, LName, LType, LHasDefault);
+    Result := LType;
+  end;
+end;
+
+function TPasParamQuery.GetQueryParamHasDefaultVal(Index: Integer): Boolean;
+var
+  LModifier, LName, LType: string;
+begin
+  Result := False;
+  if (Index >= 0) and (Index <= High(FSig.Params)) then
+    ParseParamLabel(FSig.Params[Index], LModifier, LName, LType, Result);
+end;
+
+function TPasParamQuery.GetQueryParamInvokeTypeText(Index: Integer): string;
+var
+  LModifier, LName, LType: string;
+  LHasDefault: Boolean;
+begin
+  Result := '';
+  if (Index >= 0) and (Index <= High(FSig.Params)) then
+  begin
+    ParseParamLabel(FSig.Params[Index], LModifier, LName, LType, LHasDefault);
+    Result := LModifier;
+  end;
+end;
+
+constructor TPasParameterList.Create(const AHelp: TLspSignatureHelp);
+begin
+  inherited Create;
+  FHelp := AHelp;
+end;
+
+function TPasParameterList.ActiveParams: TArray<string>;
+begin
+  Result := nil;
+  if (FHelp.ActiveSignature >= 0) and
+     (FHelp.ActiveSignature <= High(FHelp.Signatures)) then
+    Result := FHelp.Signatures[FHelp.ActiveSignature].Params;
+end;
+
+procedure TPasParameterList.GetParameterQuery(ProcIndex: Integer;
+  out ParamQuery: IOTACodeInsightParamQuery);
+begin
+  ParamQuery := nil;
+  if (ProcIndex >= 0) and (ProcIndex <= High(FHelp.Signatures)) then
+    ParamQuery := TPasParamQuery.Create(FHelp.Signatures[ProcIndex]);
+end;
+
+function TPasParameterList.GetParamDelimiter: Char;
+begin
+  Result := ';';
+end;
+
+function TPasParameterList.GetProcedureCount: Integer;
+begin
+  Result := Length(FHelp.Signatures);
+end;
+
+function TPasParameterList.GetProcedureParamsText(I: Integer): string;
+begin
+  // Per the interface doc: the parameters of procedure I, "delimited by a
+  // line ending".
+  Result := '';
+  if (I >= 0) and (I <= High(FHelp.Signatures)) then
+    Result := string.Join(sLineBreak, FHelp.Signatures[I].Params);
+end;
+
+function TPasParameterList.GetParmPos(Index: Integer): TOTACharPos;
+begin
+  // Per-parameter source positions are undocumented; the call's own open
+  // paren is the one position the interim provider knows. Bring-up decides
+  // whether the viewer needs more.
+  Result := GetCallStartPos;
+end;
+
+function TPasParameterList.GetParmCount: Integer;
+begin
+  Result := Length(ActiveParams);
+end;
+
+function TPasParameterList.GetParmName(Index: Integer): string;
+var
+  LParams: TArray<string>;
+  LModifier, LName, LType: string;
+  LHasDefault: Boolean;
+begin
+  Result := '';
+  LParams := ActiveParams;
+  if (Index >= 0) and (Index <= High(LParams)) then
+  begin
+    ParseParamLabel(LParams[Index], LModifier, LName, LType, LHasDefault);
+    Result := LName;
+  end;
+end;
+
+function TPasParameterList.GetParmHint(Index: Integer): string;
+var
+  LParams: TArray<string>;
+begin
+  Result := '';
+  LParams := ActiveParams;
+  if (Index >= 0) and (Index <= High(LParams)) then
+    Result := LParams[Index];
+end;
+
+function TPasParameterList.GetCallStartPos: TOTACharPos;
+begin
+  Result.Line := FHelp.CallRow;
+  Result.CharIndex := FHelp.CallCol - 1;   // TOTACharPos is zero-based
+end;
+
+function TPasParameterList.GetCallEndPos: TOTACharPos;
+begin
+  // The call is still being typed - there is no closing paren to report;
+  // the open paren is the only honest fixed point.
+  Result := GetCallStartPos;
+end;
+
+{ ---------------------------------------------------------------------------
   The manager
   --------------------------------------------------------------------------- }
 
@@ -383,6 +632,12 @@ type
     // keeps the shown object alive.
     FShownSymbols: IOTACodeInsightSymbolList;
     FShownObj: TPasSymbolList;
+    // The last signatureHelp answer, behind the two views the IDE pulls
+    // (GetParameterList / the 100 interface). Same pairing rule as
+    // FSymbols/FSymbolsObj.
+    FParamList: IOTACodeInsightParameterList;
+    FParamListObj: TPasParameterList;
+    FActiveParamId: Integer;
     // The one in-flight async completion; a later invocation supersedes it
     // (LspSession cancels the LSP request, this id gate drops the callback).
     FNextId: Integer;
@@ -500,11 +755,11 @@ end;
 procedure TPasCodeInsightManager.AllowCodeInsight(var Allow: Boolean;
   const Key: Char);
 begin
-  // #0 completion, #2 browse, #3 hints (Tooltip Insight, over the server's
-  // hover), '.' the trigger character. #1 (parameters) still declines
-  // honestly until the server answers signatureHelp - the IDE then shows
-  // nothing rather than something wrong.
-  Allow := (Key = #0) or (Key = #2) or (Key = #3) or (Key = '.');
+  // #0 completion, #1 parameters (signatureHelp), #2 browse, #3 hints
+  // (Tooltip Insight, over the server's hover), plus the trigger characters
+  // '.' (completion) and '('/',' (parameter insight re-anchoring).
+  Allow := (Key = #0) or (Key = #1) or (Key = #2) or (Key = #3) or
+    (Key = '.') or (Key = '(') or (Key = ',');
 end;
 
 function TPasCodeInsightManager.PreValidateCodeInsight(
@@ -570,7 +825,7 @@ end;
 procedure TPasCodeInsightManager.GetParameterList(
   out ParameterList: IOTACodeInsightParameterList);
 begin
-  ParameterList := nil;   // parameter insight is declined in AllowCodeInsight
+  ParameterList := FParamList;   // the last signatureHelp answer, or nil
 end;
 
 procedure TPasCodeInsightManager.GetCodeInsightType(AChar: Char;
@@ -585,11 +840,19 @@ begin
     // asks GetCodeInsightType(#3) BEFORE invoking a hint, and citNone here
     // vetoes the whole gesture - the first tooltip bring-up showed exactly
     // that (no popup, no request in the log).
+    #1: CodeInsightType := citParameterCodeInsight;
     #3: CodeInsightType := citHintCodeInsight;
     '.':
       begin
         // The same trigger character the server advertises to LSP clients.
         CodeInsightType := citCodeInsight;
+        InvokeType := itTimer;
+      end;
+    '(', ',':
+      begin
+        // Typing into an argument list re-anchors the parameter hint - the
+        // same trigger characters the server advertises for signatureHelp.
+        CodeInsightType := citParameterCodeInsight;
         InvokeType := itTimer;
       end;
   else
@@ -617,12 +880,20 @@ end;
 procedure TPasCodeInsightManager.ParameterCodeInsightAnchorPos(
   var EdPos: TOTAEditPos);
 begin
-  // Untouched: no parameter hints yet.
+  // Anchor the hint at the call's own open paren when we know it.
+  if Assigned(FParamListObj) and FParamListObj.Help.Valid then
+  begin
+    EdPos.Line := FParamListObj.Help.CallRow;
+    EdPos.Col := FParamListObj.Help.CallCol;
+  end;
 end;
 
 function TPasCodeInsightManager.ParameterCodeInsightParamIndex(
   EdPos: TOTAEditPos): Integer;
 begin
+  // -1 = "reinvoke me" (the interface's own protocol): the server recounts
+  // the active argument from the live text, which is always right, where a
+  // cached index would drift the moment the user edits mid-call.
   Result := -1;
 end;
 
@@ -710,8 +981,8 @@ end;
 function TPasCodeInsightManager.AsyncCanInvoke(
   AInsightType: TOTACodeInsightType): Boolean;
 begin
-  Result := AInsightType in [citCodeInsight, citBrowseCodeInsight,
-    citHintCodeInsight];
+  Result := AInsightType in [citCodeInsight, citParameterCodeInsight,
+    citBrowseCodeInsight, citHintCodeInsight];
 end;
 
 function TPasCodeInsightManager.AsyncEnabled: Boolean;
@@ -781,8 +1052,45 @@ end;
 function TPasCodeInsightManager.AsyncInvokeParameterCodeInsight(
   HowInvoked: TOTAInvokeType; const AFileName: string;
   ALine, ACharIndex: Integer; ACallback: TOTAParametersCallBack): Integer;
+var
+  LId: Integer;
+  LInInvoke: Boolean;
 begin
-  Result := -1;   // declined in AsyncCanInvoke; nothing to start
+  Inc(FNextId);
+  LId := FNextId;
+  FActiveParamId := LId;
+  LInInvoke := True;
+  // Position parameters trusted per the browse-confirmed convention
+  // (1-based line, 0-based char index).
+  LspSignatureHelp(AFileName, ALine, ACharIndex + 1,
+    procedure(ASuccess: Boolean; const AHelp: TLspSignatureHelp;
+      const AError: string)
+    begin
+      if not GAlive then
+        Exit;   // package unloading - Self may be gone (see GAlive)
+      if FActiveParamId <> LId then
+        Exit;   // superseded by a newer invocation
+      FActiveParamId := 0;
+      if ASuccess and AHelp.Valid then
+      begin
+        FParamListObj := TPasParameterList.Create(AHelp);
+        FParamList := FParamListObj;
+      end
+      else
+      begin
+        FParamList := nil;
+        FParamListObj := nil;
+      end;
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if GAlive and Assigned(ACallback) then
+            ACallback(Self, LId, AHelp.ActiveSignature,
+              not (ASuccess and AHelp.Valid), AError);
+        end);
+    end);
+  LInInvoke := False;
+  Result := LId;
 end;
 
 function TPasCodeInsightManager.AsyncGetHintText(HintLine, HintCol: Integer;
@@ -1096,8 +1404,30 @@ end;
 procedure TPasCodeInsightManager.AsyncParameterCodeInsightParamIndex(
   const AFileName: string; ALine, ACharIndex: Integer;
   ACallBack: TOTAParamIndexCallBack);
+var
+  LInInvoke: Boolean;
 begin
-  // No parameter insight - never invoked while AsyncCanInvoke declines it.
+  // The IDE asks this while the hint is up and the user types: recount the
+  // active argument from the live text - a fresh signatureHelp round trip,
+  // which the overlay pipeline answers in milliseconds.
+  LInInvoke := True;
+  LspSignatureHelp(AFileName, ALine, ACharIndex + 1,
+    procedure(ASuccess: Boolean; const AHelp: TLspSignatureHelp;
+      const AError: string)
+    begin
+      if not GAlive then
+        Exit;
+      DeliverToIde(LInInvoke,
+        procedure
+        begin
+          if GAlive and Assigned(ACallBack) then
+            if ASuccess and AHelp.Valid then
+              ACallBack(Self, AHelp.ActiveParam)
+            else
+              ACallBack(Self, -1);
+        end);
+    end);
+  LInInvoke := False;
 end;
 
 procedure TPasCodeInsightManager.AsyncOperationCanceled(AId: Integer);
@@ -1108,6 +1438,8 @@ begin
     FActiveId := 0;
   if FActiveHintId = AId then
     FActiveHintId := 0;
+  if FActiveParamId = AId then
+    FActiveParamId := 0;
 end;
 
 function TPasCodeInsightManager.ShowCalculating: Boolean;
