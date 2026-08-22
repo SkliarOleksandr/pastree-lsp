@@ -223,6 +223,15 @@ its bottom key-legend panel. The only route is a hint window of OUR OWN
 painted by `DrawColoredSignature`) - roughly a day, and it owns its
 positioning/dismissal/theming. Queued behind parameter insight if wanted.
 
+**Intrinsics show no signatures (found live 2026-08-22).** Compiler-seeded
+routines (SetLength, Length, Inc, ...) have no source declaration, so every
+declaration-span consumer here shows them bare — no parameter text in
+completion, empty signatureHelp, hasParams=False (which also suppresses
+auto-parenthesis precisely on `SetLength(`). Fix belongs in PasTree's
+builtin seed table: curated display signatures + a takes-arguments flag —
+asked as §8C in its plan doc. Nothing to change on this side when it lands:
+the same accessors/spans start answering.
+
 ## Handed to the PasTree plan (deep-review outcome, 2026-08-22)
 
 The seam currently carries its own copies of AST geometry the engine keeps
