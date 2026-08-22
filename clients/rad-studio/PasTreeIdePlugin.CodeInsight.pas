@@ -581,6 +581,11 @@ begin
   case AChar of
     #0: CodeInsightType := citCodeInsight;
     #2: CodeInsightType := citBrowseCodeInsight;
+    // Without this arm the IDE never reaches AsyncGetHintText at all: it
+    // asks GetCodeInsightType(#3) BEFORE invoking a hint, and citNone here
+    // vetoes the whole gesture - the first tooltip bring-up showed exactly
+    // that (no popup, no request in the log).
+    #3: CodeInsightType := citHintCodeInsight;
     '.':
       begin
         // The same trigger character the server advertises to LSP clients.
@@ -885,15 +890,83 @@ begin
   Result := LId;
 end;
 
+{ Draws a parameter list the way the native window colors one: parameter
+  NAMES in the base color, TYPE text (everything between ':' and the next
+  ';'/'='/end) in the accent, the const/var/out modifiers and all
+  punctuation dimmed, default values back in base. A flat tokenizer over
+  the signature text is enough - the server sends the declaration's own
+  source span, so the ':'/';'/'=' structure is real Pascal, not a guess. }
+procedure DrawColoredSignature(ACanvas: TCanvas; var AX: Integer;
+  ATop: Integer; const AText: string; ABase, ADim, AAccent: TColor);
+type
+  TMode = (mName, mType, mDefault);
+
+  procedure Put(const ARun: string; AColor: TColor);
+  begin
+    if ARun = '' then
+      Exit;
+    ACanvas.Font.Color := AColor;
+    ACanvas.TextOut(AX, ATop, ARun);
+    Inc(AX, ACanvas.TextWidth(ARun));
+  end;
+
+var
+  LIdx, LFrom: Integer;
+  LMode: TMode;
+  LRun: string;
+begin
+  LMode := mName;
+  LIdx := 1;
+  while LIdx <= Length(AText) do
+  begin
+    if CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+    begin
+      LFrom := LIdx;
+      while (LIdx <= Length(AText)) and
+            CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+        Inc(LIdx);
+      LRun := Copy(AText, LFrom, LIdx - LFrom);
+      case LMode of
+        mType:
+          Put(LRun, AAccent);
+        mName:
+          // The parameter-group modifiers are furniture, like punctuation.
+          if SameText(LRun, 'const') or SameText(LRun, 'var') or
+             SameText(LRun, 'out') then
+            Put(LRun, ADim)
+          else
+            Put(LRun, ABase);
+      else
+        Put(LRun, ABase);
+      end;
+    end
+    else
+    begin
+      case AText[LIdx] of
+        ':': LMode := mType;
+        ';': LMode := mName;
+        '=': LMode := mDefault;
+      end;
+      // 'array of', 'TArray<Integer>' - keep type-mode spaces/brackets in
+      // the accent so a compound type reads as one colored phrase.
+      if (LMode = mType) and (AText[LIdx] <> ':') then
+        Put(AText[LIdx], AAccent)
+      else
+        Put(AText[LIdx], ADim);
+      Inc(LIdx);
+    end;
+  end;
+end;
+
 { The rich-coloring pass (COMPLETION.md's deferred-polish item, delivered
   2026-08-22): the stock renderer draws every row in one color; the native
   DelphiLSP window dims the class word and colors the type text. This draw
   reproduces the STOCK LAYOUT exactly - fixed class column, bold name, the
   type text glued after it - and only takes over the COLORS: class word and
-  the ': ' / '(+N)' furniture dimmed (clGrayText), the type name itself in
-  the IDE's theme-aware blue. On the selected row everything stays the
-  viewer's own highlight color: contrast beats decoration there, which is
-  also what the native window does. }
+  the ': ' / '(+N)' furniture dimmed (clGrayText), parameter names base,
+  type text in the IDE's theme-aware blue (DrawColoredSignature). On the
+  selected row everything stays the viewer's own highlight color: contrast
+  beats decoration there, which is also what the native window does. }
 procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
   var Rect: TRect; DrawingHintText: Boolean; DoDraw: Boolean;
   var DefaultDraw: Boolean);
@@ -1005,11 +1078,8 @@ begin
       LParamsText := LDetail;   // unknown shape: draw plainly, never lose it
 
     if LParamsText <> '' then
-    begin
-      Canvas.Font.Color := LBase;
-      Canvas.TextOut(LX, LTop, LParamsText);
-      Inc(LX, Canvas.TextWidth(LParamsText));
-    end;
+      DrawColoredSignature(Canvas, LX, LTop, LParamsText, LBase, LDim,
+        LAccent);
     if LTypeText <> '' then
     begin
       Canvas.Font.Color := LDim;
