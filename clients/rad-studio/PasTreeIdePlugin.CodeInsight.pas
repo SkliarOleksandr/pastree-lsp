@@ -1011,7 +1011,25 @@ end;
 
 function TPasCodeInsightManager.GetOptionSetName: string;
 begin
-  Result := '';   // no Code Insight option set page of our own
+  { The Code Insight options are stored PER OPTION SET, and the set name is
+    the registry subkey: under <BaseRegistryKey>\Code Insight the IDE keeps
+    `Borland.EditOptions.Pascal` (the classic Pascal provider) and
+    `Borland.EditOptions.Borland.CodeInsight.LSP.Pascal` (DelphiLSP), each
+    holding `Help Insight`, `Auto Invoke`, `CodeCompleteAutoParens`,
+    `Declaration Information` and the rest. Returning '' - which this did
+    until 2026-08-23 - means our provider has NO set, so every one of those
+    settings reads as its bare default for us, whatever the user ticked.
+    That is the first suspect for a feature that "should work because the
+    method exists": the method is called, the option behind it is off.
+
+    We name the CLASSIC Pascal set deliberately, rather than inventing one:
+    the whole point of this provider is to behave like the native one
+    (user, 2026-08-21: "один в один"), and a set of our own would start with
+    every box unticked and would have to be configured twice. The cost is
+    that changes made on our page land in the shared set - acceptable while
+    the two providers mean the same thing by each option, and the line to
+    revisit if they ever do not. }
+  Result := 'Borland.EditOptions.Pascal';
 end;
 
 { ------------------------------ async half ------------------------------ }

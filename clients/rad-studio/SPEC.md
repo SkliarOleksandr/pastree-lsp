@@ -583,9 +583,27 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
      <line>,<col>">file (line)</a>`, then the summary and `h4`+`dl`
      sections. Same classes, same stylesheet, same link scheme.
 
+   **Measured the same day: the EDITOR hint is not one of those windows.**
+   Fed the HTML page, `AsyncGetHintText`'s hint showed the tags. So the hint
+   is plain text again — but with its blank lines kept, which is what the
+   first complaint was actually about. Two leads on the rich window remain,
+   and both are cheap:
+
+   - **the option set.** Code Insight settings live per option set under
+     `<BaseRegistryKey>\Code Insight` — `Borland.EditOptions.Pascal` and
+     `Borland.EditOptions.Borland.CodeInsight.LSP.Pascal`, each with a
+     `Help Insight` flag (True in both here). `GetOptionSetName` returned
+     `''` until 2026-08-23, so OUR provider had no set at all and every such
+     option read as a bare default. It now names the classic Pascal set, so
+     the user's own Code Insight settings apply to us — including whatever
+     `Help Insight` gates.
+   - **`IOTAHelpInsight`**, below.
+
    Hover therefore carries `pastreeHtml` beside the standard markdown
    contents (our field, ignored by other clients — the `pastreeCall`
-   precedent), and completion rows carry `data.docHtml`. A custom-drawn
+   precedent) and it is what the rich window would be fed the moment one is
+   reachable; completion rows carry `data.docHtml`, which the viewer's
+   documentation pane does want as HTML. A custom-drawn
    hint window (see 6) is no longer the plan for this; what remains open is
    the OTHER door into the editor's Help Insight window,
    **`IOTAHelpInsight`** (`6787`) — queried FROM the module, which the

@@ -260,6 +260,22 @@ All four shipped. Two notes worth keeping:
 
 ### Tier 2 — real features, bounded work
 
+- **Syntax colouring in VS Code — asked for 2026-08-23**, on seeing XMLDoc
+  render there in grey. Two mechanisms, and we ship neither:
+  1. **A TextMate grammar** (`contributes.grammars` + a `.tmLanguage.json`)
+     for `objectpascal`, with `pascal` as an alias. Nothing to do with LSP,
+     but it is the only thing that colours a fenced code block — including
+     the ```pascal declaration line inside our own hover card — and it is
+     what paints while the user types, before any server answer.
+  2. **`textDocument/semanticTokens`** (full + range + delta). This is the
+     LSP half, and it is where we should be better than any grammar: a
+     regex cannot tell a field from a local from a type, and we resolve
+     every one of them. Maps our symbol kinds onto the standard token types
+     (`type`, `class`, `property`, `parameter`, `variable`, `function`,
+     `enumMember`, `namespace`) with `declaration`/`readonly` modifiers.
+  Order: grammar first (small, immediate, fixes the hover fence), semantic
+  tokens second (the real answer for the editor).
+
 - **`workspace/symbol` (+ `workspaceSymbol/resolve`).** Project-wide symbol
   search: on a 3747-unit project this is the feature people reach for most
   (the IDE's own Ctrl+T). Every model's unit and implementation scopes already

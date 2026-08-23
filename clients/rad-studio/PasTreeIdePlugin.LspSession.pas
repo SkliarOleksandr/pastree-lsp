@@ -1194,6 +1194,7 @@ var
   LLines: TArray<string>;
   LIdx: Integer;
   LOut: string;
+  LBlank: Boolean;
 begin
   Result := '';
   if (AResult = nil) or AResult.Null then
@@ -1202,6 +1203,7 @@ begin
     Exit;
   LLines := LValue.Replace(#13#10, #10).Split([#10]);
   LOut := '';
+  LBlank := False;
   for LIdx := 0 to High(LLines) do
   begin
     if LLines[LIdx].StartsWith('```') then
@@ -1209,10 +1211,22 @@ begin
     if (LLines[LIdx].Length >= 2) and LLines[LIdx].StartsWith('_') and
        LLines[LIdx].EndsWith('_') then
       LLines[LIdx] := Copy(LLines[LIdx], 2, LLines[LIdx].Length - 2);
+    // Blank lines are the card's STRUCTURE, not filler: they separate the
+    // declaration from the documentation and the documentation from its
+    // sections. Dropping them (as this did until 2026-08-23) is what made a
+    // documented declaration read as one run-on block in the hint. Kept at
+    // most one in a row, so the markdown's fence-plus-blank does not open a
+    // gap, and never leading.
     if LLines[LIdx] = '' then
+    begin
+      LBlank := LOut <> '';
       Continue;
+    end;
     if LOut <> '' then
       LOut := LOut + sLineBreak;
+    if LBlank then
+      LOut := LOut + sLineBreak;
+    LBlank := False;
     LOut := LOut + LLines[LIdx];
   end;
   Result := LOut;
@@ -1232,11 +1246,17 @@ end;
 /// </summary>
 function HoverHintText(AResult: TJSONValue): string;
 begin
-  Result := '';
-  if (AResult = nil) or AResult.Null then
-    Exit;
-  if AResult.TryGetValue<string>('pastreeHtml', Result) and (Result <> '') then
-    Exit;
+  { MEASURED 2026-08-23, and the measurement decides this: the hint the IDE
+    shows for AsyncGetHintText is a PLAIN window - fed HTML, it displayed the
+    tags. So plain text it is, with the blocks kept apart by blank lines.
+
+    The HTML page still arrives as `pastreeHtml` and is NOT used here. It is
+    the payload for the rich Help Insight window, which is a different surface
+    with a different feed (see ProbeHelpInsight in
+    PasTreeIdePlugin.CodeInsight and the "Help Insight" option in the Code
+    Insight option set) - and the moment that surface is reachable, this is
+    the one line that changes. The viewer's documentation pane keeps using
+    HTML, because ToolsAPI documents THAT one as HTML. }
   Result := HoverPlainText(AResult);
 end;
 
