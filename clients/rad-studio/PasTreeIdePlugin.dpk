@@ -57,6 +57,7 @@ contains
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
   PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',
   PasTreeIdePlugin.IdleSync in 'PasTreeIdePlugin.IdleSync.pas',
-  PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas';
+  PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
+  PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas';
 
 end.

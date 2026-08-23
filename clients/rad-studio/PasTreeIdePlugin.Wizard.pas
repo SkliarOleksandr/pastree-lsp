@@ -35,6 +35,7 @@ uses
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.ClassComplete,
   PasTreeIdePlugin.LspSession;
 
 const
@@ -306,6 +307,10 @@ begin
   InitializeIdleSync;
   // The Structure pane outline for the active source file.
   InitializeOutline;
+  // Ctrl+Shift+C: our class completion, replacing the native one by keyboard
+  // binding (it is not gated by the Insight Provider selection, so this is
+  // the only way to take it over).
+  InitializeClassComplete;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -342,6 +347,7 @@ begin
   // every pending request synchronously, and those callbacks must find the
   // manager and the Insight notifier already unregistered (and their
   // closures gated off - see the GAlive flags in each unit).
+  FinalizeClassComplete;
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;

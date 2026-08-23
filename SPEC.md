@@ -173,8 +173,19 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/completion` | PasTree's engine through the seam; `documentation` per item; [COMPLETION.md](COMPLETION.md) owns the story |
 | `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
+| `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
+
+**Why one custom request rather than a code action.** `pastree/classComplete`
+answers "implement what I declared", which `textDocument/codeAction` could
+carry — at the price of advertising a capability, agreeing on a kind, and a
+resolve round-trip, all so that exactly one client can send it. The custom
+method is honest about who it is for, and the `pastree/` prefix marks it the
+same way the `pastreeCall` and `pastreeHtml` result fields do. It is also the
+one request that must NOT wait for the analysis: it is a parse of the live
+buffer, because the declaration the user wants a body for is the one they just
+typed.
 
 **Encoding disagreement — fixed 2026-08-20, in PasTree, and the diagnosis is
 worth keeping because the obvious explanation was wrong.** PasTree used to

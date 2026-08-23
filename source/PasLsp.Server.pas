@@ -46,6 +46,7 @@ uses
   PasLsp.Protocol,
   PasLsp.Documents,
   PasLsp.Completion,
+  PasLsp.ClassComplete,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
   PasLsp.ProductVersion,
@@ -145,6 +146,7 @@ type
     function HandleCompletion(const AMsg: TLspIncoming): string;
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
+    function HandleClassComplete(const AMsg: TLspIncoming): string;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -1811,6 +1813,76 @@ end;
   declaration's full extent yet. Navigation and the tree are correct; what
   suffers is breadcrumb tracking as the cursor moves inside a body, which
   needs a real span (a nav-side NodeSpan belongs in PasTree, not here). }
+{ pastree/classComplete — OUR request, the server half of Ctrl+Shift+C.
+
+  Not an LSP method and not pretending to be one: the protocol has no notion
+  of "implement what I declared", `textDocument/codeAction` is the nearest
+  thing and it would mean advertising a capability, negotiating kinds and
+  round-tripping a resolve for a command exactly one client will ever send.
+  A named custom request is the honest shape (the `pastree/` prefix is the
+  same convention `pastreeCall` and `pastreeHtml` follow).
+
+  Like completion, it must NOT call WaitAnalyzed: the whole point is the
+  declaration typed a second ago, which no rebuild has seen. It is a parse of
+  the live buffer, nothing more — the answer never depends on the closure. }
+function TLspServer.HandleClassComplete(const AMsg: TLspIncoming): string;
+var
+  LPath, LText, LEdits, LNames: string;
+  LDoc: TLspDocument;
+  LAnswer: TLspClassCompleteAnswer;
+  LIdx, LCaretLine, LCaretChar: Integer;
+  LStart: UInt64;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'classComplete: textDocument.uri required'));
+  LStart := GetTickCount64;
+  // Document truth, exactly as completion reads it: the open buffer if we
+  // hold one, the file on disk otherwise.
+  if FDocs.TryGet(LPath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(LPath, LText) then
+    LText := '';
+  if LText = '' then
+    Exit(BuildResponse(AMsg.IdJson,
+      '{"edits":[],"count":0,"provider":"no text"}'));
+  if FCompletion = nil then
+    FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+      FDefines);
+  SyncCompletionOverlays;
+  LAnswer := FCompletion.ClassCompleteAt(LPath, LText);
+
+  LEdits := '';
+  for LIdx := 0 to High(LAnswer.Edits) do
+  begin
+    if LEdits <> '' then
+      LEdits := LEdits + ',';
+    // A zero-length range at the insertion point: an ordinary TextEdit, so a
+    // client that already applies those needs no new code path.
+    LEdits := LEdits + Format('{"range":%s,"newText":%s,"kind":%s,"name":%s}',
+      [RangeJson(LAnswer.Edits[LIdx].Line, LAnswer.Edits[LIdx].Col, 0),
+       JsonQuote(LAnswer.Edits[LIdx].Text),
+       JsonQuote(LAnswer.Edits[LIdx].Kind),
+       JsonQuote(LAnswer.Edits[LIdx].Name)]);
+    if LNames <> '' then
+      LNames := LNames + ', ';
+    LNames := LNames + LAnswer.Edits[LIdx].Name;
+  end;
+  LCaretLine := 0;
+  LCaretChar := 0;
+  if LAnswer.CaretLine > 0 then
+    PasTreeToLsp(LAnswer.CaretLine, LAnswer.CaretCol, LCaretLine, LCaretChar);
+  Log(Format('classComplete: %s -> %d edit(s) in %d ms (%s)',
+    [TPath.GetFileName(LPath), Length(LAnswer.Edits),
+     GetTickCount64 - LStart, LAnswer.Provider]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"edits":[%s],"caret":{"line":%d,"character":%d},' +
+    '"names":%s,"count":%d,"provider":%s}',
+    [LEdits, LCaretLine, LCaretChar, JsonQuote(LNames),
+     Length(LAnswer.Edits), JsonQuote(LAnswer.Provider)]));
+end;
+
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
 var
   LPath, LItems, LParts: string;
@@ -2414,6 +2486,8 @@ begin
         Exit(HandleSignatureHelp(LMsg));
       if LMsg.Method = 'workspace/symbol' then
         Exit(HandleWorkspaceSymbol(LMsg));
+      if LMsg.Method = 'pastree/classComplete' then
+        Exit(HandleClassComplete(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then

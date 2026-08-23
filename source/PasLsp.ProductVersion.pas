@@ -52,7 +52,7 @@ const
   /// Bump the MINOR for a substantial change; that component keeps its ordinary
   /// semver meaning.
   /// </summary>
-  PasTreeLspVersion = '0.12.4';
+  PasTreeLspVersion = '0.13.0';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than

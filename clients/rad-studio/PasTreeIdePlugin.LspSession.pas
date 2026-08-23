@@ -124,6 +124,35 @@ type
     const AHelp: TLspSignatureHelp; const AError: string);
 
   /// <summary>
+  /// One insertion of a class-completion answer, in IDE coordinates. Nothing
+  /// is ever replaced - class completion only adds - so a row/col and the text
+  /// to put there is the whole edit.
+  /// </summary>
+  TLspClassEditIde = record
+    Row: Integer;
+    Col: Integer;
+    Text: string;
+    Name: string;   // 'TFoo.Bar' - what the IDE reports as done
+  end;
+
+  /// <summary>
+  /// The answer to pastree/classComplete. Edits arrive ASCENDING by position
+  /// and must be applied BACKWARD, or the second insertion lands at a position
+  /// the first one has already moved. Count = 0 with Success is the ordinary
+  /// "everything is implemented already", and Provider says which it was.
+  /// </summary>
+  TLspClassComplete = record
+    Edits: TArray<TLspClassEditIde>;
+    CaretRow: Integer;
+    CaretCol: Integer;
+    Names: string;
+    Provider: string;
+  end;
+
+  TLspClassCompleteProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspClassComplete; const AError: string);
+
+  /// <summary>
   /// One project-wide symbol for the IDE Insight (Ctrl+.) integration, in
   /// IDE coordinates. KindWord is display vocabulary ('function', 'type',
   /// ...), derived here so every consumer words it identically.
@@ -310,6 +339,16 @@ procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
 
 /// <summary>
+/// Asks the server which declarations of a file have no implementation, and
+/// for the text that would implement them (`pastree/classComplete` - our own
+/// request, not an LSP method). Whole-file and position-free: the question has
+/// one answer per buffer. The document is synced first, because the very
+/// declaration the user wants a body for is the one they just typed.
+/// </summary>
+procedure LspClassComplete(const AFileName: string;
+  const AOnDone: TLspClassCompleteProc);
+
+/// <summary>
 /// Starts the server for the active project and lets its first analysis begin,
 /// without any question to answer. Called when a project group finishes opening
 /// and when the active project changes.
@@ -428,6 +467,8 @@ type
       const AOnDone: TLspHoverProc);
     procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspSignatureHelpProc);
+    procedure ClassComplete(const AFileName: string;
+      const AOnDone: TLspClassCompleteProc);
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
     procedure DocumentSymbols(const AFileName: string;
@@ -1137,6 +1178,85 @@ begin
   SetLength(Result, LCount);
 end;
 
+/// <summary>
+/// A pastree/classComplete answer into IDE coordinates. An edit without a
+/// range is dropped for the same reason a completion item without a textEdit
+/// is: our server always sends one, so its absence means a server this plugin
+/// does not match.
+/// </summary>
+function ParseClassComplete(AResult: TJSONValue): TLspClassComplete;
+var
+  LEdits: TJSONArray;
+  LValue: TJSONValue;
+  LObj, LStart: TJSONObject;
+  LEdit: TLspClassEditIde;
+  LLine, LChar, LCount: Integer;
+begin
+  Result := Default(TLspClassComplete);
+  if not (AResult is TJSONObject) then
+    Exit;
+  Result.Names := AResult.GetValue<string>('names', '');
+  Result.Provider := AResult.GetValue<string>('provider', '');
+  LLine := AResult.GetValue<Integer>('caret.line', -1);
+  LChar := AResult.GetValue<Integer>('caret.character', -1);
+  if (LLine >= 0) and (LChar >= 0) then
+    LspToIde(LLine, LChar, Result.CaretRow, Result.CaretCol);
+  if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
+    Exit;
+  SetLength(Result.Edits, LEdits.Count);
+  LCount := 0;
+  for LValue in LEdits do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    if not LObj.TryGetValue<TJSONObject>('range.start', LStart) then
+      Continue;
+    LLine := LStart.GetValue<Integer>('line', -1);
+    LChar := LStart.GetValue<Integer>('character', -1);
+    if (LLine < 0) or (LChar < 0) then
+      Continue;
+    LspToIde(LLine, LChar, LEdit.Row, LEdit.Col);
+    LEdit.Text := LObj.GetValue<string>('newText', '');
+    LEdit.Name := LObj.GetValue<string>('name', '');
+    if LEdit.Text = '' then
+      Continue;
+    Result.Edits[LCount] := LEdit;
+    Inc(LCount);
+  end;
+  SetLength(Result.Edits, LCount);
+end;
+
+procedure TLspSession.ClassComplete(const AFileName: string;
+  const AOnDone: TLspClassCompleteProc);
+var
+  LParams, LDoc: TJSONObject;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspClassComplete), 'no LSP server available');
+    Exit;
+  end;
+  // Sync FIRST and unconditionally: unlike every other request here, this one
+  // exists BECAUSE the buffer just changed, and an answer computed from the
+  // previous text would implement the wrong set.
+  FDocs.Sync;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  // No supersede slot: this is a deliberate keystroke, not a stream of
+  // per-character questions, and two presses mean two answers.
+  FClient.Request('pastree/classComplete', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseClassComplete(AResult), '')
+      else
+        AOnDone(False, Default(TLspClassComplete), AError);
+    end);
+end;
+
 procedure TLspSession.Completion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
 var
@@ -1655,6 +1775,17 @@ begin
     Exit;
   end;
   GSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+end;
+
+procedure LspClassComplete(const AFileName: string;
+  const AOnDone: TLspClassCompleteProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, Default(TLspClassComplete), 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.ClassComplete(AFileName, AOnDone);
 end;
 
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;

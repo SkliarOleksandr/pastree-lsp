@@ -627,7 +627,30 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    which it is on the first hover of a session (`[pastree] IOTAHelpInsight:
    ...` on the Build tab), so the next decision is made on a measurement
    rather than on the assumption.
-3. **Class completion (Ctrl+Shift+C), ours.** The native one is not gated
+3. **Class completion (Ctrl+Shift+C), ours — MISSING BODIES DELIVERED
+   2026-08-23 (first live run pending).** `pastree/classComplete` (our
+   request, not an LSP method — see the handler's comment for why not
+   `codeAction`) parses the LIVE buffer and answers with the text that
+   implements every declaration lacking a body: methods, and — the ask that
+   started this — **free routines declared in the unit's interface
+   section**, which the native completion ignores. Skipped, by rule and by
+   harness: an implemented routine (matched on chain + name + parameter
+   TYPES, so overloads are told apart), an `abstract` or `external` one, an
+   interface type's methods, and nested `forward`s. `class` and `static`
+   come back on the header because they must (both were lost in the first
+   run: `class` is not in the routine node's span, it is `Aux=1`).
+   Bodies land at the end of the implementation section in declaration
+   order, caret on the first empty body line. `PasTreeIdePlugin.ClassComplete`
+   is the binding; `krHandled` unconditionally, so a decline can never fall
+   through to the native one behind the user's back.
+   **Still to come: property accessors** — `read GetFoo`/`write SetFoo` with
+   no such method, and `read FFoo` with no such field, are what the user
+   called the part that is really missing. That is a second edit KIND (into
+   the class declaration), which is why the answer already carries a list of
+   edits and the client already applies them bottom-up.
+
+   The original entry, for the reasoning that has not changed: the native one
+   is not gated
    by the Insight Provider selection and "works very badly" (user,
    2026-08-22) — so this is a REPLACEMENT by keyboard binding: take the
    editor command, ask the server for the missing implementation stubs /

@@ -785,6 +785,53 @@ begin
     'with its field as a child - types report their members');
 end;
 
+{ 5f. pastree/classComplete: the server half of Ctrl+Shift+C.
+
+  Asked about a fixture that is NOT in the project's closure, deliberately:
+  class completion is a parse of one buffer, and if this section needed the
+  analysis it would be testing the wrong thing. Every rule the fixture's own
+  header lists is checked here, including the two that must NOT produce a
+  body and the free routine the native completion ignores. }
+procedure TestClassComplete;
+var
+  LFile: string;
+  LParams, LDoc: TJSONObject;
+begin
+  Writeln;
+  Writeln('=== 5f. classComplete implements what is declared, once ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassComplete.pas');
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(LFile));
+  LParams.AddPair('textDocument', LDoc);
+  Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
+  Check(GOk and GResultJson.Contains('"count":1'),
+    'one edit - every body goes in one insertion at the end of the section');
+  Check(GOk and GResultJson.Contains(
+    'procedure TBase.Missing(const A: string; B: Integer);'),
+    'the missing method, with its parameter list verbatim');
+  Check(GOk and GResultJson.Contains(
+    'class function TBase.Make: TBase; static;'),
+    'a class static method repeats `static` - required on the implementation');
+  Check(GOk and GResultJson.Contains(
+    'function TBase.Overloaded(A: Integer): Integer;'),
+    'the overload that has no body');
+  Check(GOk and not GResultJson.Contains('function TBase.Overloaded: Integer'),
+    'and NOT the overload that has one');
+  Check(GOk and GResultJson.Contains('procedure TStack<T>.Push(const AItem: T);'),
+    'a generic type''s method is qualified with its parameters');
+  Check(GOk and GResultJson.Contains('procedure FreeRoutine(AValue: Integer);'),
+    'a FREE routine of the interface section counts - the whole point');
+  Check(GOk and not GResultJson.Contains('TBase.Done'),
+    'an implemented method is not implemented twice');
+  Check(GOk and not GResultJson.Contains('Abstracted'),
+    'an abstract method has no body by definition');
+  Check(GOk and not GResultJson.Contains('Work'),
+    'an interface''s methods are not the unit''s to implement');
+  Check(GOk and GResultJson.Contains('begin\r\n  \r\nend;'),
+    'each body is begin/blank/end, with the blank line indented for the caret');
+end;
+
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }
 procedure TestWorkspaceSymbol;
 var
@@ -1023,6 +1070,7 @@ begin
       TestHover;
       TestSignatureHelp;
       TestDocumentSymbol;
+      TestClassComplete;
       TestWorkspaceSymbol;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.

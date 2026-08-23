@@ -37,7 +37,8 @@ uses
   PasTree.Platforms,
   PasTree.SourceManager,
   PasTree.Preprocessor,
-  PasTree.Sema.Project;
+  PasTree.Sema.Project,
+  PasLsp.ClassComplete;
 
 type
   TLspCompletionEntry = record
@@ -124,6 +125,14 @@ type
     function SignatureHelpAt(const AFileName, AText: string;
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
       AProjectMid: Integer): TLspSignatureHelpAnswer;
+    { Class completion over the same live overlay text: the declarations of
+      AFileName that have no implementation, as text to insert (see
+      PasLsp.ClassComplete for what counts and what does not). No project
+      bridge and no position - the question is about ONE buffer as a whole,
+      and the answer must see declarations the last analysis never has:
+      the user pressed the key because they just typed one. }
+    function ClassCompleteAt(const AFileName, AText: string):
+      TLspClassCompleteAnswer;
   end;
 
 implementation
@@ -730,6 +739,22 @@ begin
   finally
     LModel.Free;
   end;
+end;
+
+function TLspCompletionEngine.ClassCompleteAt(const AFileName, AText: string):
+  TLspClassCompleteAnswer;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  // Parse only - no resolver, no bridge. Class completion is a question about
+  // DECLARATIONS AND BODIES, which the CST answers on its own; running the
+  // resolver for it would buy nothing and cost the analysis of every unit the
+  // file uses.
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  Result := ClassCompleteFor(LTree);
 end;
 
 end.
