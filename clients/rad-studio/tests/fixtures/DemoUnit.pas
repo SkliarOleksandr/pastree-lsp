@@ -12,6 +12,12 @@ type
 const
   CAnswer = 42;
 
+/// <summary>
+/// Greets a person
+/// by name.
+/// </summary>
+/// <param name="AName">the name to greet</param>
+/// <returns>the greeting line</returns>
 function Greet(const AName: string): string;
 
 implementation

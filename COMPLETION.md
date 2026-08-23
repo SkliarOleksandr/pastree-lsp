@@ -241,7 +241,14 @@ auto-parenthesis semantics ours pioneered), `TPasTree.NodeSpanText`, and
 
 - **`completionItem/resolve`** — until the provider defers documentation
   loading there is nothing to resolve; advertising it buys latency for
-  nothing.
+  nothing. **Settled for good on 2026-08-23**, when documentation arrived
+  (XMLDoc, PasTree 0.6.3's `ItemDocComment`): it ships with EVERY item
+  instead, because the RAD viewer asks a row for its documentation through
+  `IOTACodeInsightSymbolList80.GetSymbolDocumentation` — a synchronous
+  UI-thread call that may never round-trip — so a resolve pass would serve
+  the one client we do not have and leave ours blank. The per-row cost is
+  a backward raw-token step that stops immediately for every undocumented
+  declaration, i.e. nearly all of them.
 - **A word-scan-the-buffer provider** — identifiers harvested textually would
   LOOK scope-aware while ignoring scope, which teaches distrust. The keyword
   provider skirts this by being visibly, unmistakably just the reserved

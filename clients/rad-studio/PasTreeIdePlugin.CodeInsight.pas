@@ -350,7 +350,15 @@ end;
 
 function TPasSymbolList.GetSymbolDocumentation(I: Integer): string;
 begin
-  Result := '';   // nothing deferred server-side yet - see COMPLETION.md
+  // Help Insight for the selected row: the declaration's `///` block, already
+  // rendered to display text by the server. This call arrives on the UI
+  // thread while the viewer is open, so it may never round-trip (the
+  // sync-interface rule in clients/rad-studio/SPEC.md) - which is exactly why
+  // the server sends documentation with EVERY item instead of deferring it to
+  // a completionItem/resolve the IDE gives us no moment to make.
+  if (I < 0) or (I > High(FVisible)) then
+    Exit('');
+  Result := FAll[FVisible[I]].Doc;
 end;
 
 { ---------------------------------------------------------------------------

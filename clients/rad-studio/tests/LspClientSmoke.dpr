@@ -555,7 +555,7 @@ end;
 procedure TestCompletion;
 var
   LUnitFile, LUniFile, LPatched: string;
-  LLine, LChar: Integer;
+  LLine, LChar, LDocCount: Integer;
 begin
   Writeln;
   Writeln('=== 5b. completion: the PasTree engine over the overlay ===');
@@ -578,6 +578,21 @@ begin
     'Greet''s row carries its parameter list verbatim');
   Check(GOk and GResultJson.Contains('"hasParams":true'),
     'and the hasParams flag');
+  // Help Insight on a completion row (2026-08-23): documentation ships with
+  // EVERY item, because the RAD viewer asks for it synchronously on the UI
+  // thread and a completionItem/resolve round-trip is not available there.
+  Check(GOk and GResultJson.Contains('"documentation":{"kind":"markdown"'),
+    'the documented row carries completionItem.documentation');
+  Check(GOk and GResultJson.Contains('Greets a person by name.'),
+    'and it holds the rendered XMLDoc summary');
+  // Undocumented rows must not pay for the field: a keyword answers empty by
+  // engine contract, and the field is then omitted rather than sent empty -
+  // Greet is the only documented declaration in the fixture.
+  LDocCount := (Length(GResultJson) -
+    Length(GResultJson.Replace('"documentation"', ''))) div
+    Length('"documentation"');
+  Check(GOk and (LDocCount = 1),
+    'and it is the ONLY row carrying the field');
   // The bare-row fallbacks (2026-08-22): a type row names its definition's
   // head, a const row its value, a builtin routine its curated result.
   Check(GOk and GResultJson.Contains('"label":"TBox"'), 'TBox is offered');
@@ -651,6 +666,19 @@ begin
     'the declaration rides in a pascal code fence');
   Check(GOk and GResultJson.Contains('function Greet'),
     'and is the declaration line itself');
+  // Help Insight (2026-08-23): the fixture's `///` block, rendered by
+  // PasLsp.XmlDoc. The summary is collapsed across its two source lines - a
+  // doc section must read as a sentence, not as the author's margin - and the
+  // param/returns sections carry their labels. The note stays LAST, so the
+  // hint reads declaration, documentation, provenance.
+  Check(GOk and GResultJson.Contains('Greets a person by name.'),
+    'the XMLDoc summary rides along, collapsed to one paragraph');
+  Check(GOk and GResultJson.Contains('- AName - the name to greet'),
+    'and the parameter section');
+  Check(GOk and GResultJson.Contains('Returns: the greeting line'),
+    'and the returns section');
+  Check(GOk and not GResultJson.Contains('<summary>'),
+    'no XML tag survives into the display text');
 end;
 
 { 5d. Signature help: the engine's CallAt through the seam.

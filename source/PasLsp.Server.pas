@@ -47,6 +47,7 @@ uses
   PasLsp.Documents,
   PasLsp.Completion,
   PasLsp.SourceText,
+  PasLsp.XmlDoc,
   PasLsp.ProductVersion,
   PasLsp.Version,
   PasTree.Version;
@@ -1463,6 +1464,22 @@ begin
   FCompletion.SetOverlays(LPaths, LTexts);
 end;
 
+{ completionItem.documentation for a row that has a `///` block - markdown,
+  because that is what every LSP client renders and what our own RAD client's
+  plain-text strip is built for (PasLsp.XmlDoc's header explains why the
+  rendering carries no emphasis markers). Empty for the vast majority of rows,
+  and then the field is omitted rather than sent empty. }
+function CompletionDocJson(const AItem: TLspCompletionEntry): string;
+var
+  LText: string;
+begin
+  Result := '';
+  LText := XmlDocDisplayText(AItem.Doc);
+  if LText <> '' then
+    Result := ',"documentation":{"kind":"markdown","value":' +
+      JsonQuote(LText) + '}';
+end;
+
 function CompletionDataJson(const AItem: TLspCompletionEntry): string;
 begin
   Result := '';
@@ -1551,11 +1568,12 @@ begin
       // class column, every other client ignores data it did not create.
       LSB.Append(Format(
         '{"label":%s,"kind":%d,"detail":%s,"sortText":%s,'
-        + '"textEdit":{"range":%s,"newText":%s}%s}',
+        + '"textEdit":{"range":%s,"newText":%s}%s%s}',
         [LQuotedLabel, LAnswer.Items[LIdx].Kind,
          JsonQuote(LAnswer.Items[LIdx].Detail),
          JsonQuote(LAnswer.Items[LIdx].SortText),
          LRangeJson, LQuotedLabel,
+         CompletionDocJson(LAnswer.Items[LIdx]),
          CompletionDataJson(LAnswer.Items[LIdx])]));
     end;
     Log(Format('completion: %s -> %d items in %d ms (%s)',
@@ -1926,7 +1944,7 @@ end;
   symbol, builtin) for the same reason documented there. }
 function TLspServer.HandleHover(const AMsg: TLspIncoming): string;
 var
-  LPath, LName, LCode, LNote, LMd: string;
+  LPath, LName, LCode, LNote, LMd, LDoc: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx: Integer;
   LIdent: TPasNavIdent;
   LHit: TPasRefHit;
@@ -1954,6 +1972,7 @@ begin
 
   LCode := '';
   LNote := '';
+  LDoc := '';
   if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LCode := 'unit ' + LName + ';';
@@ -1964,6 +1983,11 @@ begin
   end
   else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
   begin
+    // Help Insight: the `///` block above the declaration, from the engine
+    // (SymDocComment) and rendered here. A symbol is the only identity that
+    // can have one - a unit reference names a file and a builtin has no
+    // source at all.
+    LDoc := XmlDocDisplayText(FProject.SymDocComment(LTMid, LSymIdx));
     if FNav.DeclHit(LTMid, LSymIdx, LHit) then
     begin
       LCode := Trim(LHit.Snippet);
@@ -1985,9 +2009,16 @@ begin
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
+  // Reading order: what it is (the declaration line), what it does (the doc),
+  // then where it lives. The provenance note goes LAST because it is the one
+  // part the reader already knows they can go look up; the doc is what they
+  // hovered for. The fence and the note's underscores are contract - the RAD
+  // client's HoverPlainText strips exactly this shape.
   LMd := '';
   if LCode <> '' then
     LMd := '```pascal'#10 + LCode + #10'```'#10#10;
+  if LDoc <> '' then
+    LMd := LMd + LDoc + #10#10;
   LMd := LMd + '_' + LNote + '_';
   // The range is the identifier's own span, so the editor underlines exactly
   // the name it is describing — including all segments of a qualified `uses`

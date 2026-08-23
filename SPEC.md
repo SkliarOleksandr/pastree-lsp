@@ -162,7 +162,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
 | `textDocument/references` | symbol / unit / builtin identities |
 | `textDocument/documentSymbol` | outline, types with members |
-| `textDocument/hover` | declaration card |
+| `textDocument/hover` | declaration card, plus the XMLDoc block (PasLsp.XmlDoc) |
 | `textDocument/publishDiagnostics` | push, open documents |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |
@@ -170,7 +170,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
 | `textDocument/typeDefinition` | via the declared type expression, so it crosses units |
 | `textDocument/documentHighlight` | occurrences in the current file |
-| `textDocument/completion` | PasTree's engine through the seam; [COMPLETION.md](COMPLETION.md) owns the story |
+| `textDocument/completion` | PasTree's engine through the seam; `documentation` per item; [COMPLETION.md](COMPLETION.md) owns the story |
 | `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
 

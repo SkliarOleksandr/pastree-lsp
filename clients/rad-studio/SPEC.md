@@ -549,12 +549,22 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    from the session's publishDiagnostics cache. Still queued from the
    diagnostics table: the gutter glyph and the scrollbar minimap, which
    make a squiggle findable rather than merely visible.
-2. **Help Insight: XMLDoc documentation.** Hover and the completion viewer
-   show the declaration line only; the native ones render `/// <summary>`
-   docs. Blocked on PasTree's §8D (`DeclDocComment` — asked 2026-08-22 in
-   its plan doc); when it lands: hover appends the doc block,
-   `completionItem.documentation` carries it, the hint window renders it.
-   No interim raw-stream walk on our side — that is engine geometry.
+2. **Help Insight: XMLDoc documentation — DELIVERED 2026-08-23 (first live
+   run pending).** PasTree 0.6.3 landed §8D, so the block arrives from the
+   engine (`SymDocComment` for hover, `ItemDocComment` per completion item)
+   and the RENDERING is ours: `source/PasLsp.XmlDoc.pas` turns the raw
+   `///` run into display text — summary, remarks, parameters, returns,
+   exceptions, blocks separated by blank lines, and deliberately NO
+   markdown emphasis anywhere, because a `**Returns:**` would reach a
+   Delphi hint window with the asterisks still in it. Hover appends it
+   between the code fence and the provenance note;
+   `completionItem.documentation` carries it per row, EAGERLY, because
+   `IOTACodeInsightSymbolList80.GetSymbolDocumentation` is a synchronous
+   UI-thread call and a `completionItem/resolve` round-trip is not
+   available there. `cMinPasTreeVersion` is pinned at 0.6.3.
+   Still queued from this item: a custom hint window (see 6) is what would
+   make the doc block *look* like the native one rather than merely be
+   there.
 3. **Class completion (Ctrl+Shift+C), ours.** The native one is not gated
    by the Insight Provider selection and "works very badly" (user,
    2026-08-22) — so this is a REPLACEMENT by keyboard binding: take the

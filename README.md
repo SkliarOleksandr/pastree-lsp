@@ -60,7 +60,7 @@ Phases 1 and 2 are complete and exercised live.
 | `textDocument/references` | the three-identity model: symbol / unit / compiler builtin |
 | `textDocument/implementation`, `textDocument/declaration` | the Pascal decl-impl toggle; the RAD Studio client binds it to Ctrl+Shift+Up/Down |
 | `textDocument/documentSymbol` | the unit outline, types with their members |
-| `textDocument/hover` | the declaration under the cursor |
+| `textDocument/hover` | the declaration under the cursor, with its XMLDoc |
 | `textDocument/publishDiagnostics` | for open documents, after each analysis |
 | `workspace/didChangeWatchedFiles` | the client watches, the server decides whether a rebuild is due |
 | `$/cancelRequest` | honored (−32800), noted by a dedicated stdin reader thread |

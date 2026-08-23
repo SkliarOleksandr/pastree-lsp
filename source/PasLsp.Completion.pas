@@ -53,6 +53,11 @@ type
     { True when the item is a routine declared WITH parameters - what the
       RAD client's auto-parenthesis reads to insert `()` and step inside. }
     HasParams: Boolean;
+    { The declaration's `///` doc block, RAW as the engine returns it (markers
+      stripped, lines joined with #10) - rendered by PasLsp.XmlDoc at the
+      point of display, so this record stays free of presentation. '' for
+      keywords, unit names, builtins and undocumented declarations. }
+    Doc: string;
   end;
 
   TLspSignatureItem = record
@@ -535,6 +540,15 @@ begin
         // HasParams drives the RAD client's auto-parenthesis; an empty `()`
         // and an all-optional intrinsic (Exit, Halt) both answer False.
         LEntry.HasParams := LCompletion.ItemHasParams(LItems[LIdx]);
+        // The `///` block for Help Insight, EAGERLY, per row - the same
+        // trade, and for the same reason, as the declared-type detail above:
+        // the RAD viewer asks for an item's documentation SYNCHRONOUSLY on
+        // the UI thread (IOTACodeInsightSymbolList80.GetSymbolDocumentation),
+        // where a round-trip is forbidden, so a completionItem/resolve pass
+        // could never serve it. The walk is a backward raw-token step that
+        // stops at the token before the declaration for every undocumented
+        // row, which is nearly all of them.
+        LEntry.Doc := LCompletion.ItemDocComment(LItems[LIdx]);
         LParamsText := LCompletion.ItemParamsText(LItems[LIdx]);
         if LParamsText <> '' then
           LEntry.Detail := CapDisplay(LParamsText);

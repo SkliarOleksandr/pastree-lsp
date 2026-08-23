@@ -55,7 +55,12 @@ const
   /// Raised to 0.6.0 later on 2026-08-22: signature help moved onto the
   /// engine's CallAt, and completion rows onto ItemParamsText/ItemHasParams
   /// (intrinsic signatures included) - all new in 0.6.0.
-  cMinPasTreeVersion = '0.6.0';
+  ///
+  /// Raised to 0.6.3 on 2026-08-23: Help Insight reads the doc-comment
+  /// accessors added there - TPasCompletion.ItemDocComment for completion
+  /// rows and TPasSemaProject.SymDocComment for hover. Without them the
+  /// XMLDoc surfaces would compile against nothing.
+  cMinPasTreeVersion = '0.6.3';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

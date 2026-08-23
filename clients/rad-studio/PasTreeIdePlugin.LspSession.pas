@@ -82,6 +82,11 @@ type
     // True for a routine declared WITH parameters - what auto-parenthesis
     // reads on accept.
     HasParams: Boolean;
+    // The declaration's XMLDoc as DISPLAY text, already rendered by the
+    // server (PasLsp.XmlDoc): what Help Insight shows for the selected row.
+    // '' whenever the declaration carries no `///` block, which is most of
+    // them - the viewer shows no documentation then.
+    Doc: string;
     Row: Integer;
     ColFrom: Integer;
     ColTo: Integer;
@@ -1095,6 +1100,12 @@ begin
     LItem.Detail := LObj.GetValue<string>('detail', '');
     LItem.Head := LObj.GetValue<string>('data.head', '');
     LItem.HasParams := LObj.GetValue<Boolean>('data.hasParams', False);
+    // documentation is markdown-shaped per LSP, but OUR server sends the
+    // already-rendered display text (no emphasis markers - see the server's
+    // PasLsp.XmlDoc), so it is taken verbatim. The plain-string form of the
+    // field is honored too; anything else means no documentation.
+    if not LObj.TryGetValue<string>('documentation.value', LItem.Doc) then
+      LItem.Doc := LObj.GetValue<string>('documentation', '');
     if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
        not LRange.TryGetValue<TJSONObject>('start', LStart) or
        not LRange.TryGetValue<TJSONObject>('end', LEnd) then
