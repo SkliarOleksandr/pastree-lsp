@@ -520,8 +520,6 @@ end;
 
 function TLspClient.Connect: Boolean;
 begin
-  RetireConnection;
-
   // Never overwrite a live connection. Teardown and FailAllPending both invoke
   // callbacks, and a callback that issues a request can reach EnsureStarted and
   // connect underneath us; assigning over FConn here would leak that

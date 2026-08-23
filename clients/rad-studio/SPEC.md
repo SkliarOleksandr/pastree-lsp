@@ -562,9 +562,37 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    `IOTACodeInsightSymbolList80.GetSymbolDocumentation` is a synchronous
    UI-thread call and a `completionItem/resolve` round-trip is not
    available there. `cMinPasTreeVersion` is pinned at 0.6.3.
-   Still queued from this item: a custom hint window (see 6) is what would
-   make the doc block *look* like the native one rather than merely be
-   there.
+   **The look, settled 2026-08-23 by reading the product.** The first live
+   run said the text was right and the presentation wrong — the doc ran
+   straight into the declaration line, blank lines and all. That symptom is
+   the answer: **the IDE's Help Insight surfaces are HTML windows**, and an
+   HTML renderer collapses newlines. It is documented, quietly, in two
+   places, and the product ships the proof:
+
+   - `IOTACodeInsightSymbolList80.GetSymbolDocumentation` — "Return
+     documentation for the symbol, in HTML" (`ToolsAPI.pas:8506`).
+   - `IOTACodeInsightManager90.GetHelpInsightHtml: WideString` (`8864`) —
+     the viewer's Help Insight pane for the selected row. A SIBLING of
+     `IOTACodeInsightManager`, so the IDE finds it with `Supports`; we now
+     implement it.
+   - `ObjRepos\HelpInsight.xsl` + `HelpInsight.css` — the IDE builds its own
+     page by XSL-transforming a `<member>` document. So the native look is
+     not a mystery to reverse-engineer: `PasLsp.XmlDoc.HelpInsightPage`
+     emits what that transform emits — `<div class="maincaption">` with the
+     declaration, `<a class="codelink" href="helpinsight:/filelink:<path>?
+     <line>,<col>">file (line)</a>`, then the summary and `h4`+`dl`
+     sections. Same classes, same stylesheet, same link scheme.
+
+   Hover therefore carries `pastreeHtml` beside the standard markdown
+   contents (our field, ignored by other clients — the `pastreeCall`
+   precedent), and completion rows carry `data.docHtml`. A custom-drawn
+   hint window (see 6) is no longer the plan for this; what remains open is
+   the OTHER door into the editor's Help Insight window,
+   **`IOTAHelpInsight`** (`6787`) — queried FROM the module, which the
+   file-trait spike suggests is the IDE's own. A one-time readout now says
+   which it is on the first hover of a session (`[pastree] IOTAHelpInsight:
+   ...` on the Build tab), so the next decision is made on a measurement
+   rather than on the assumption.
 3. **Class completion (Ctrl+Shift+C), ours.** The native one is not gated
    by the Insight Provider selection and "works very badly" (user,
    2026-08-22) — so this is a REPLACEMENT by keyboard binding: take the

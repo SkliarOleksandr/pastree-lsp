@@ -1,34 +1,47 @@
 unit PasLsp.XmlDoc;
 
 {
-  XMLDoc rendering: a declaration's `///` block as display text.
+  XMLDoc rendering: a declaration's `///` block as display text, and as the
+  HTML the RAD Studio IDE's Help Insight window actually wants.
 
   PasTree hands out the block RAW - `///` markers stripped, lines joined with
   #10, no XML touched (TPasTree.DeclDocComment; the engine's contract says
   rendering is the host's concern, exactly as with ItemParamsText's whitespace
-  collapse). This unit is that host side, once, for all three consumers:
-  hover's markdown card, completionItem.documentation, and - through the RAD
-  client, which only ever displays what arrives - the Help Insight window.
+  collapse). This unit is that host side, once, for every consumer: it parses
+  the block ONE way (ParseXmlDoc) and emits it two ways.
 
-  WHAT IT PRODUCES. Blocks in a fixed reading order (summary, remarks,
-  parameters, returns, exceptions), separated by BLANK LINES, each block one
-  collapsed paragraph or one `- name - text` list line. That shape is chosen
-  to survive both readers unchanged:
+  TWO EMITTERS, BECAUSE THERE ARE TWO KINDS OF WINDOW.
 
-  - as markdown (VS Code's hover) the blank lines keep the sections apart and
-    `- ` lines render as a list;
-  - as tooltip plain text the RAD client's HoverPlainText drops empty lines
-    and keeps the rest verbatim - so NO markdown emphasis markers are emitted
-    anywhere, because `**Returns:**` would reach a Delphi hint window with the
-    asterisks still in it.
+  1. `XmlDocDisplayText` - plain display text, blocks separated by blank
+     lines, NO markdown emphasis markers anywhere. This is what goes over the
+     wire as `completionItem.documentation` and inside hover's markdown card:
+     VS Code renders it as markdown, and the RAD client's HoverPlainText
+     hands the same string to a plain Delphi hint window, where a
+     `**Returns:**` would arrive with the asterisks still in it.
 
-  WHAT IT DOES NOT DO. No XML validity anything: a doc comment is prose a
-  developer typed, half of them have no tags at all, and a parse error must
-  never cost the user the text. Unknown tags are dropped and their content
-  kept; text outside any tag joins the summary; an unterminated `<` is text.
-  The only structure honored is the tag set Delphi's own Help Insight
-  documents (summary, remarks, param, typeparam, returns, value, exception,
-  plus the inline see/seealso/paramref/c/code and para/br).
+  2. `XmlDocHtml` / `HelpInsightPage` - HTML, because the IDE's Help Insight
+     surfaces are HTML surfaces and this is documented, if quietly:
+     `IOTACodeInsightSymbolList80.GetSymbolDocumentation` says "Return
+     documentation for the symbol, in HTML" (ToolsAPI.pas:8506) and
+     `IOTACodeInsightManager90.GetHelpInsightHtml` returns a WideString of
+     the same (8864). The shape to imitate is not guesswork either: the IDE
+     builds its own Help Insight page by XSL-transforming a `<member>`
+     document, and both the stylesheet and its CSS ship in the product -
+     `ObjRepos\HelpInsight.xsl` and `ObjRepos\HelpInsight.css`. So
+     HelpInsightPage emits what that transform emits: a `maincaption` div
+     with the declaration and an `a.codelink` to its source, then the
+     summary, then `h4` + `dl` sections for parameters, returns and
+     exceptions. Same classes, same order, same `helpinsight:/filelink:`
+     link scheme - which is why it can look like the native hint rather than
+     merely carry the same words.
+
+  WHAT THE PARSER DOES NOT DO. No XML validity anything: a doc comment is
+  prose a developer typed, half of them have no tags at all, and a parse
+  error must never cost the user the text. Unknown tags are dropped and their
+  content kept; text outside any tag joins the summary; an unterminated `<`
+  is text. The only structure honored is the tag set Delphi's own Help
+  Insight documents (summary, remarks, param, typeparam, returns, value,
+  exception, plus the inline see/seealso/paramref/c/code and para/br).
 
   Length is NOT capped here. A hint window is the display, and clipping text
   the user wrote is a display decision - the same reason the engine does not
@@ -37,10 +50,44 @@ unit PasLsp.XmlDoc;
 
 interface
 
-{ The `///` block as display text, or '' for an empty/whitespace-only block.
-  See the unit header for the shape and for why it carries no markdown
-  emphasis. Never raises. }
+type
+  { One named doc section: a parameter or an exception. }
+  TXmlDocEntry = record
+    Name: string;
+    Text: string;
+  end;
+
+  { A parsed `///` block. Every text field is RAW section text (line breaks
+    as the author wrote them) - collapsing to one paragraph is an emitter's
+    job, because HTML wants no collapse and a hint window does. }
+  TXmlDocParts = record
+    Summary: string;
+    Remarks: string;
+    Returns: string;
+    Params: TArray<TXmlDocEntry>;
+    Exceptions: TArray<TXmlDocEntry>;
+    function IsEmpty: Boolean;
+  end;
+
+{ The block, parsed. Never raises; an empty/whitespace-only block parses to
+  an empty record (IsEmpty). }
+function ParseXmlDoc(const ARaw: string): TXmlDocParts;
+
+{ The `///` block as display text, or '' for an empty block. See the unit
+  header for the shape and for why it carries no markdown emphasis. }
 function XmlDocDisplayText(const ARaw: string): string;
+
+{ The block as an HTML fragment - the sections only, no page around them.
+  '' for an empty block. }
+function XmlDocHtml(const ARaw: string): string;
+
+{ A whole Help Insight page for one declaration, in the shape the IDE's own
+  HelpInsight.xsl produces: the caption line (declaration text, then a
+  codelink reading `<file> (<line>)`) followed by XmlDocHtml's sections. The
+  link is only emitted when AFilePath is given; ALine/ACol are 1-based, as
+  everywhere on the PasTree side. }
+function HelpInsightPage(const ADeclaration, AFilePath, AFileShort: string;
+  ALine, ACol: Integer; const ARawDoc: string): string;
 
 implementation
 
@@ -55,10 +102,11 @@ type
   TDocTarget = (dtLead, dtSummary, dtRemarks, dtReturns, dtParam,
     dtException);
 
-  TDocEntry = record
-    Name: string;
-    Text: string;
-  end;
+function TXmlDocParts.IsEmpty: Boolean;
+begin
+  Result := (Summary = '') and (Remarks = '') and (Returns = '') and
+    (Length(Params) = 0) and (Length(Exceptions) = 0);
+end;
 
 { &lt; &gt; &amp; &quot; &apos; and numeric refs. An unknown or malformed
   entity is left exactly as written - it is likelier to be prose about a
@@ -109,6 +157,17 @@ begin
       Result := Result + '&' + LName + ';';
     LIdx := LEnd + 1;
   end;
+end;
+
+{ Back to HTML text: the four characters that would otherwise be markup. The
+  parser unescaped the source's entities so both emitters see real text; the
+  HTML one has to put them back. }
+function HtmlEscape(const AText: string): string;
+begin
+  Result := AText.Replace('&', '&amp;', [rfReplaceAll])
+                 .Replace('<', '&lt;', [rfReplaceAll])
+                 .Replace('>', '&gt;', [rfReplaceAll])
+                 .Replace('"', '&quot;', [rfReplaceAll]);
 end;
 
 { One paragraph out of a section's accumulated text: every whitespace run
@@ -166,53 +225,38 @@ begin
     Result := Copy(Result, 3, MaxInt);
 end;
 
-function XmlDocDisplayText(const ARaw: string): string;
+function ParseXmlDoc(const ARaw: string): TXmlDocParts;
 var
-  LSummary, LRemarks, LReturns: string;
-  LParams, LExceptions: TArray<TDocEntry>;
+  LParts: TXmlDocParts;
   LTarget: TDocTarget;
   LIdx, LClose: Integer;
-  LTagBody, LTagName, LName, LLine: string;
+  LTagBody, LTagName, LName: string;
   LClosing: Boolean;
-  LEntry: TDocEntry;
-  LOut: TStringBuilder;
+  LEntry: TXmlDocEntry;
 
   procedure AddText(const AText: string);
   begin
     if AText = '' then
       Exit;
     case LTarget of
-      dtLead, dtSummary: LSummary := LSummary + AText;
-      dtRemarks:         LRemarks := LRemarks + AText;
-      dtReturns:         LReturns := LReturns + AText;
+      dtLead, dtSummary: LParts.Summary := LParts.Summary + AText;
+      dtRemarks:         LParts.Remarks := LParts.Remarks + AText;
+      dtReturns:         LParts.Returns := LParts.Returns + AText;
       dtParam:
-        if Length(LParams) > 0 then
-          LParams[High(LParams)].Text := LParams[High(LParams)].Text + AText;
+        if Length(LParts.Params) > 0 then
+          LParts.Params[High(LParts.Params)].Text :=
+            LParts.Params[High(LParts.Params)].Text + AText;
       dtException:
-        if Length(LExceptions) > 0 then
-          LExceptions[High(LExceptions)].Text :=
-            LExceptions[High(LExceptions)].Text + AText;
+        if Length(LParts.Exceptions) > 0 then
+          LParts.Exceptions[High(LParts.Exceptions)].Text :=
+            LParts.Exceptions[High(LParts.Exceptions)].Text + AText;
     end;
   end;
 
-  procedure AddBlock(const AText: string);
-  begin
-    if AText = '' then
-      Exit;
-    if LOut.Length > 0 then
-      LOut.Append(#10#10);
-    LOut.Append(AText);
-  end;
-
 begin
-  Result := '';
+  LParts := Default(TXmlDocParts);
   if Trim(ARaw) = '' then
-    Exit;
-  LSummary := '';
-  LRemarks := '';
-  LReturns := '';
-  LParams := nil;
-  LExceptions := nil;
+    Exit(LParts);
   LTarget := dtLead;
   LIdx := 1;
   while LIdx <= Length(ARaw) do
@@ -292,59 +336,174 @@ begin
     begin
       LEntry.Name := AttrValue(LTagBody, 'name');
       LEntry.Text := '';
-      LParams := LParams + [LEntry];
+      LParts.Params := LParts.Params + [LEntry];
       LTarget := dtParam;
     end
     else if LTagName = 'exception' then
     begin
       LEntry.Name := AttrValue(LTagBody, 'cref');
       LEntry.Text := '';
-      LExceptions := LExceptions + [LEntry];
+      LParts.Exceptions := LParts.Exceptions + [LEntry];
       LTarget := dtException;
     end;
     // Everything else - <c>, <code>, <list>, <item>, an unknown tag - keeps
     // its CONTENT in the current section and contributes no structure.
   end;
+  Result := LParts;
+end;
 
+{ 'AName - the text', or just whichever of the two exists. Shared by both
+  emitters so a nameless <param> cannot read as ' - text' in one and
+  something else in the other. }
+function EntryLine(const AEntry: TXmlDocEntry): string;
+begin
+  Result := CollapseWs(AEntry.Text);
+  if AEntry.Name = '' then
+    Exit;
+  if Result <> '' then
+    Result := AEntry.Name + ' - ' + Result
+  else
+    Result := AEntry.Name;
+end;
+
+function XmlDocDisplayText(const ARaw: string): string;
+var
+  LParts: TXmlDocParts;
+  LOut: TStringBuilder;
+  LIdx: Integer;
+  LLine: string;
+
+  procedure AddBlock(const AText: string);
+  begin
+    if AText = '' then
+      Exit;
+    if LOut.Length > 0 then
+      LOut.Append(#10#10);
+    LOut.Append(AText);
+  end;
+
+begin
+  Result := '';
+  LParts := ParseXmlDoc(ARaw);
+  if LParts.IsEmpty then
+    Exit;
   LOut := TStringBuilder.Create;
   try
-    AddBlock(CollapseWs(LSummary));
-    AddBlock(CollapseWs(LRemarks));
-    if Length(LParams) > 0 then
+    AddBlock(CollapseWs(LParts.Summary));
+    AddBlock(CollapseWs(LParts.Remarks));
+    if Length(LParts.Params) > 0 then
     begin
       if LOut.Length > 0 then
         LOut.Append(#10#10);
       LOut.Append('Parameters:');
-      for LIdx := 0 to High(LParams) do
+      for LIdx := 0 to High(LParts.Params) do
       begin
-        LLine := CollapseWs(LParams[LIdx].Text);
-        if LParams[LIdx].Name <> '' then
-        begin
-          if LLine <> '' then
-            LLine := LParams[LIdx].Name + ' - ' + LLine
-          else
-            LLine := LParams[LIdx].Name;
-        end;
+        LLine := EntryLine(LParts.Params[LIdx]);
         if LLine <> '' then
           LOut.Append(#10'- ').Append(LLine);
       end;
     end;
-    LLine := CollapseWs(LReturns);
+    LLine := CollapseWs(LParts.Returns);
     if LLine <> '' then
       AddBlock('Returns: ' + LLine);
-    for LIdx := 0 to High(LExceptions) do
+    for LIdx := 0 to High(LParts.Exceptions) do
     begin
-      LLine := CollapseWs(LExceptions[LIdx].Text);
-      if LExceptions[LIdx].Name <> '' then
-      begin
-        if LLine <> '' then
-          LLine := LExceptions[LIdx].Name + ' - ' + LLine
-        else
-          LLine := LExceptions[LIdx].Name;
-      end;
+      LLine := EntryLine(LParts.Exceptions[LIdx]);
       if LLine <> '' then
         AddBlock('Raises: ' + LLine);
     end;
+    Result := LOut.ToString;
+  finally
+    LOut.Free;
+  end;
+end;
+
+{ The sections as HelpInsight.xsl emits them: a paragraph per prose section,
+  and `h4` + `dl` for the named ones, with the name in the `dt` and its text
+  in the `dd`. }
+function XmlDocHtml(const ARaw: string): string;
+var
+  LParts: TXmlDocParts;
+  LOut: TStringBuilder;
+
+  procedure AppendDefList(const ACaption: string;
+    const AEntries: TArray<TXmlDocEntry>);
+  var
+    LEntry: Integer;
+    LText: string;
+  begin
+    if Length(AEntries) = 0 then
+      Exit;
+    LOut.Append('<h4>').Append(ACaption).Append('</h4><p><dl>');
+    for LEntry := 0 to High(AEntries) do
+    begin
+      if AEntries[LEntry].Name <> '' then
+        LOut.Append('<dt><b>')
+            .Append(HtmlEscape(AEntries[LEntry].Name))
+            .Append('</b></dt>');
+      LText := CollapseWs(AEntries[LEntry].Text);
+      if LText <> '' then
+        LOut.Append('<dd>').Append(HtmlEscape(LText)).Append('</dd>');
+    end;
+    LOut.Append('</dl></p>');
+  end;
+
+begin
+  Result := '';
+  LParts := ParseXmlDoc(ARaw);
+  if LParts.IsEmpty then
+    Exit;
+  LOut := TStringBuilder.Create;
+  try
+    if CollapseWs(LParts.Summary) <> '' then
+      LOut.Append('<p>').Append(HtmlEscape(CollapseWs(LParts.Summary)))
+          .Append('</p>');
+    if CollapseWs(LParts.Remarks) <> '' then
+      LOut.Append('<p>').Append(HtmlEscape(CollapseWs(LParts.Remarks)))
+          .Append('</p>');
+    AppendDefList('Parameters', LParts.Params);
+    if CollapseWs(LParts.Returns) <> '' then
+      LOut.Append('<h4>Returns</h4><p>')
+          .Append(HtmlEscape(CollapseWs(LParts.Returns))).Append('</p>');
+    AppendDefList('Exceptions', LParts.Exceptions);
+    Result := LOut.ToString;
+  finally
+    LOut.Free;
+  end;
+end;
+
+function HelpInsightPage(const ADeclaration, AFilePath, AFileShort: string;
+  ALine, ACol: Integer; const ARawDoc: string): string;
+var
+  LOut: TStringBuilder;
+  LBody: string;
+begin
+  LOut := TStringBuilder.Create;
+  try
+    // The head is the IDE's own: a relative stylesheet link to
+    // ObjRepos\HelpInsight.css, exactly as HelpInsight.xsl writes it, so the
+    // page picks up the IDE's fonts, colours and link styling instead of a
+    // second theme of our invention.
+    LOut.Append('<html><head>')
+        .Append('<link type=''text/css'' rel=''Stylesheet'' ')
+        .Append('href=''HelpInsight.css'' />')
+        .Append('</head><body><div name="main">');
+    LOut.Append('<div class="maincaption">')
+        .Append(HtmlEscape(ADeclaration));
+    if AFilePath <> '' then
+      // The IDE's own link scheme: helpinsight:/filelink:<path>?<line>,<col>.
+      // Clicking it navigates the way the native hint's link does.
+      LOut.Append(' - <a class="codelink" href="helpinsight:/filelink:')
+          .Append(HtmlEscape(AFilePath))
+          .Append('?').Append(ALine).Append(',').Append(ACol)
+          .Append('">')
+          .Append(HtmlEscape(AFileShort))
+          .Append(' (').Append(ALine).Append(')</a>');
+    LOut.Append('</div>');
+    LBody := XmlDocHtml(ARawDoc);
+    if LBody <> '' then
+      LOut.Append(LBody);
+    LOut.Append('</div></body></html>');
     Result := LOut.ToString;
   finally
     LOut.Free;

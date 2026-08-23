@@ -162,7 +162,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
 | `textDocument/references` | symbol / unit / builtin identities |
 | `textDocument/documentSymbol` | outline, types with members |
-| `textDocument/hover` | declaration card, plus the XMLDoc block (PasLsp.XmlDoc) |
+| `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page |
 | `textDocument/publishDiagnostics` | push, open documents |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |

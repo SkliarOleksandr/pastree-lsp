@@ -1481,6 +1481,8 @@ begin
 end;
 
 function CompletionDataJson(const AItem: TLspCompletionEntry): string;
+var
+  LHtml: string;
 begin
   Result := '';
   if AItem.HeadWord <> '' then
@@ -1490,6 +1492,19 @@ begin
     if Result <> '' then
       Result := Result + ',';
     Result := Result + '"hasParams":true';
+  end;
+  // The same doc as an HTML fragment, for the RAD viewer's documentation
+  // surface: IOTACodeInsightSymbolList80.GetSymbolDocumentation is documented
+  // as returning HTML, and the plain rendering we send as
+  // completionItem.documentation arrives there with its line structure
+  // collapsed. It rides in `data` because it is ours - a client that did not
+  // ask for it never sees it.
+  LHtml := XmlDocHtml(AItem.Doc);
+  if LHtml <> '' then
+  begin
+    if Result <> '' then
+      Result := Result + ',';
+    Result := Result + '"docHtml":' + JsonQuote(LHtml);
   end;
   if Result <> '' then
     Result := ',"data":{' + Result + '}';
@@ -1944,8 +1959,9 @@ end;
   symbol, builtin) for the same reason documented there. }
 function TLspServer.HandleHover(const AMsg: TLspIncoming): string;
 var
-  LPath, LName, LCode, LNote, LMd, LDoc: string;
+  LPath, LName, LCode, LNote, LMd, LDoc, LRawDoc, LDeclFile: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx: Integer;
+  LDeclLine, LDeclCol: Integer;
   LIdent: TPasNavIdent;
   LHit: TPasRefHit;
   LStartLine, LStartChar, LEndLine, LEndChar: Integer;
@@ -1973,11 +1989,20 @@ begin
   LCode := '';
   LNote := '';
   LDoc := '';
+  LRawDoc := '';
+  LDeclFile := '';
+  LDeclLine := 0;
+  LDeclCol := 0;
   if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LCode := 'unit ' + LName + ';';
     if FNav.UnitDeclHit(LTMid, LHit) then
-      LNote := Format('unit - %s', [TPath.GetFileName(LHit.FilePath)])
+    begin
+      LNote := Format('unit - %s', [TPath.GetFileName(LHit.FilePath)]);
+      LDeclFile := LHit.FilePath;
+      LDeclLine := LHit.Line;
+      LDeclCol := LHit.Col;
+    end
     else
       LNote := 'unit';
   end
@@ -1987,13 +2012,17 @@ begin
     // (SymDocComment) and rendered here. A symbol is the only identity that
     // can have one - a unit reference names a file and a builtin has no
     // source at all.
-    LDoc := XmlDocDisplayText(FProject.SymDocComment(LTMid, LSymIdx));
+    LRawDoc := FProject.SymDocComment(LTMid, LSymIdx);
+    LDoc := XmlDocDisplayText(LRawDoc);
     if FNav.DeclHit(LTMid, LSymIdx, LHit) then
     begin
       LCode := Trim(LHit.Snippet);
       LNote := Format('%s - %s:%d',
         [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind),
          TPath.GetFileName(LHit.FilePath), LHit.Line]);
+      LDeclFile := LHit.FilePath;
+      LDeclLine := LHit.Line;
+      LDeclCol := LHit.Col;
     end
     else
       // A symbol with no declaration node of its own: the implicit Result,
@@ -2025,11 +2054,22 @@ begin
   // name, which IdentAt reports as one span.
   PasTreeToLsp(LIdent.Line, LIdent.ColFrom, LStartLine, LStartChar);
   PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
+  { `pastreeHtml` is OURS, alongside the standard contents: the same card as a
+    Help Insight page, in the shape the IDE's own HelpInsight.xsl emits (see
+    PasLsp.XmlDoc). The RAD client hands it to the IDE where an HTML surface
+    exists; every other client ignores a field it did not ask for, exactly as
+    with signatureHelp's `pastreeCall`. It is sent for every hover, not only
+    documented ones - the caption line and its source link are the half of
+    the native look that does not depend on a `///` block existing. }
   Result := BuildResponse(AMsg.IdJson, Format(
     '{"contents":{"kind":"markdown","value":%s},' +
+    '"pastreeHtml":%s,' +
     '"range":{"start":{"line":%d,"character":%d},' +
     '"end":{"line":%d,"character":%d}}}',
-    [JsonQuote(LMd), LStartLine, LStartChar, LEndLine, LEndChar]));
+    [JsonQuote(LMd),
+     JsonQuote(HelpInsightPage(LCode, LDeclFile,
+       TPath.GetFileName(LDeclFile), LDeclLine, LDeclCol, LRawDoc)),
+     LStartLine, LStartChar, LEndLine, LEndChar]));
 end;
 
 { workspace/didChangeWatchedFiles — a file changed on disk, outside any

@@ -87,6 +87,11 @@ type
     // '' whenever the declaration carries no `///` block, which is most of
     // them - the viewer shows no documentation then.
     Doc: string;
+    // The same documentation as an HTML fragment. This is what the viewer's
+    // documentation surface wants: GetSymbolDocumentation is documented as
+    // returning HTML (ToolsAPI.pas:8506), and so is the manager's
+    // GetHelpInsightHtml (8864).
+    DocHtml: string;
     Row: Integer;
     ColFrom: Integer;
     ColTo: Integer;
@@ -165,10 +170,14 @@ type
   end;
 
   /// <summary>
-  /// Hover delivery: AText is PLAIN text ready for a tooltip - the session
-  /// strips the server's markdown dressing (code fence, italics) so no
-  /// caller renders markup. '' with ASuccess=True means "nothing under the
-  /// cursor", the common case for any hover machinery.
+  /// Hover delivery: AText is what the IDE's hint surface should show, and it
+  /// is HTML whenever the server sent its own `pastreeHtml` page - which is
+  /// the normal case, because the IDE's tooltip Help Insight is an HTML
+  /// window (its stylesheet ships as ObjRepos\HelpInsight.css). Without that
+  /// field - an older or foreign server - it falls back to the markdown card
+  /// stripped to plain text, which renders as one collapsed paragraph there
+  /// but still says the right words. '' with ASuccess=True means "nothing
+  /// under the cursor", the common case for any hover machinery.
   /// </summary>
   TLspHoverProc = reference to procedure(ASuccess: Boolean;
     const AText: string; const AError: string);
@@ -1106,6 +1115,7 @@ begin
     // field is honored too; anything else means no documentation.
     if not LObj.TryGetValue<string>('documentation.value', LItem.Doc) then
       LItem.Doc := LObj.GetValue<string>('documentation', '');
+    LItem.DocHtml := LObj.GetValue<string>('data.docHtml', '');
     if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
        not LRange.TryGetValue<TJSONObject>('start', LStart) or
        not LRange.TryGetValue<TJSONObject>('end', LEnd) then
@@ -1208,6 +1218,28 @@ begin
   Result := LOut;
 end;
 
+/// <summary>
+/// What the hint surface gets: the server's own Help Insight page when it sent
+/// one (`pastreeHtml` - our field, alongside the standard contents), else the
+/// markdown card stripped to plain text.
+///
+/// HTML is preferred because the IDE's tooltip Help Insight IS an HTML window:
+/// the IDE builds its own page by XSL-transforming a `member` document, and
+/// both files ship in the product (ObjRepos\HelpInsight.xsl / .css). That also
+/// explains the first live run's symptom - plain text with blank lines between
+/// its blocks arrived as ONE paragraph, the declaration line running straight
+/// into the documentation, because an HTML renderer collapses newlines.
+/// </summary>
+function HoverHintText(AResult: TJSONValue): string;
+begin
+  Result := '';
+  if (AResult = nil) or AResult.Null then
+    Exit;
+  if AResult.TryGetValue<string>('pastreeHtml', Result) and (Result <> '') then
+    Exit;
+  Result := HoverPlainText(AResult);
+end;
+
 procedure TLspSession.Hover(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHoverProc);
 var
@@ -1242,7 +1274,7 @@ begin
       if FPendingHover = LIssuedId then
         FPendingHover := 0;
       if ASuccess then
-        AOnDone(True, HoverPlainText(AResult), '')
+        AOnDone(True, HoverHintText(AResult), '')
       else
         AOnDone(False, '', AError);
     end);

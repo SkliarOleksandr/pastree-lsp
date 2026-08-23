@@ -110,6 +110,8 @@ var
   // this project keeps a standing rule about. Checked FIRST in every closure
   // that touches manager state, before any Self dereference.
   GAlive: Boolean = False;
+  // The IOTAHelpInsight readout runs once per session - see ProbeHelpInsight.
+  GHelpInsightProbed: Boolean = False;
 
 procedure LogDiagnostic(const AMessage: string);
 var
@@ -350,15 +352,23 @@ end;
 
 function TPasSymbolList.GetSymbolDocumentation(I: Integer): string;
 begin
-  // Help Insight for the selected row: the declaration's `///` block, already
-  // rendered to display text by the server. This call arrives on the UI
-  // thread while the viewer is open, so it may never round-trip (the
-  // sync-interface rule in clients/rad-studio/SPEC.md) - which is exactly why
-  // the server sends documentation with EVERY item instead of deferring it to
-  // a completionItem/resolve the IDE gives us no moment to make.
+  // Help Insight for the selected row. HTML, not plain text: ToolsAPI's own
+  // comment on this method is "Return documentation for the symbol, in HTML"
+  // (ToolsAPI.pas:8506), and the IDE's Help Insight surfaces are HTML windows
+  // styled by ObjRepos\HelpInsight.css - the plain rendering arrives there as
+  // one collapsed paragraph. The plain text stays the fallback for a server
+  // that sent no HTML fragment.
+  //
+  // This call arrives on the UI thread while the viewer is open, so it may
+  // never round-trip (the sync-interface rule in clients/rad-studio/SPEC.md) -
+  // which is exactly why the server sends documentation with EVERY item
+  // instead of deferring it to a completionItem/resolve the IDE gives us no
+  // moment to make.
   if (I < 0) or (I > High(FVisible)) then
     Exit('');
-  Result := FAll[FVisible[I]].Doc;
+  Result := FAll[FVisible[I]].DocHtml;
+  if Result = '' then
+    Result := FAll[FVisible[I]].Doc;
 end;
 
 { ---------------------------------------------------------------------------
@@ -616,7 +626,7 @@ type
   TPasCodeInsightManager = class(TInterfacedObject, IOTACodeInsightManager100,
     IOTACodeInsightManager, IOTACodeInsightSelection,
     IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
-    INTACustomDrawCodeInsightViewer)
+    IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer)
   private
     FEnabled: Boolean;
     FSymbols: IOTACodeInsightSymbolList;
@@ -700,6 +710,8 @@ type
     function AsyncGotoDefinitionEx(const AFileName: string;
       ALine, ACharIndex: Integer;
       ACallBack: TOTAGotoDefinitionCallBackEx): Integer;
+    { IOTACodeInsightManager90 - the viewer's Help Insight pane, in HTML }
+    function GetHelpInsightHtml: WideString;
     { INTACustomDrawCodeInsightViewer }
     procedure DrawLine(Index: Integer; Canvas: TCanvas; var Rect: TRect;
       DrawingHintText: Boolean; DoDraw: Boolean; var DefaultDraw: Boolean);
@@ -964,6 +976,39 @@ begin
   end;
 end;
 
+function TPasCodeInsightManager.GetHelpInsightHtml: WideString;
+var
+  LServices: IOTACodeInsightServices;
+  LViewer: IOTACodeInsightViewer;
+  LSelected: string;
+  LItem: TLspCompletionItem;
+begin
+  // The viewer's own Help Insight pane for the SELECTED row - HTML by
+  // contract ("Retrieves help insight information for the current Viewer's
+  // selected item", ToolsAPI.pas:8864), and the same fragment
+  // GetSymbolDocumentation hands over, so the two surfaces cannot disagree.
+  //
+  // Read from the list the viewer is DISPLAYING (FShownObj), for the same
+  // reason Done does: a late async answer may have replaced FSymbolsObj under
+  // the open popup, and the pane must describe the row the user is looking at.
+  Result := '';
+  if not GAlive or not Assigned(FShownObj) then
+    Exit;
+  if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+    Exit;
+  LViewer := nil;
+  LServices.GetViewer(LViewer);
+  if not Assigned(LViewer) then
+    Exit;
+  LSelected := LViewer.GetSelectedString;
+  if (LSelected = '') or not FShownObj.TryGetByName(LSelected, LItem) then
+    Exit;
+  if LItem.DocHtml <> '' then
+    Result := LItem.DocHtml
+  else
+    Result := LItem.Doc;
+end;
+
 function TPasCodeInsightManager.GetOptionSetName: string;
 begin
   Result := '';   // no Code Insight option set page of our own
@@ -1092,6 +1137,42 @@ begin
   Result := LId;
 end;
 
+{ ONE-TIME READOUT, first hover of a session: does the active module offer
+  IOTAHelpInsight? That interface ("Allows Help Insight to show documentation
+  information from the current symbol in the code editor. Query for it from the
+  IOTAModule. If it isn't present, then this feature is not present",
+  ToolsAPI.pas:6787) is the OTHER way into the editor's Help Insight window -
+  the one that takes a `member` document rather than a hint string. It is
+  queried FROM the module, so if the IDE's own module already implements it the
+  path is occupied and not ours to take, exactly as the 2026-08-22 file-trait
+  spike found for IOTAModuleErrors. Answering that question costs one Supports
+  call, and guessing it has already cost this project one spike. }
+procedure ProbeHelpInsight;
+var
+  LModuleServices: IOTAModuleServices;
+  LModule: IOTAModule;
+  LHelpInsight: IOTAHelpInsight;
+begin
+  if GHelpInsightProbed then
+    Exit;
+  GHelpInsightProbed := True;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+    Exit;
+  LModule := LModuleServices.CurrentModule;
+  if not Assigned(LModule) then
+  begin
+    GHelpInsightProbed := False;   // no module yet - ask again next hover
+    Exit;
+  end;
+  if Supports(LModule, IOTAHelpInsight, LHelpInsight) then
+    LogDiagnostic(Format('IOTAHelpInsight: PRESENT on the module ' +
+      '(IsEnabled=%s) - the editor Help Insight window has a native feed',
+      [BoolToStr(LHelpInsight.IsEnabled, True)]))
+  else
+    LogDiagnostic('IOTAHelpInsight: absent on the module - the hint string ' +
+      'is the only editor Help Insight feed available to us');
+end;
+
 function TPasCodeInsightManager.AsyncGetHintText(HintLine, HintCol: Integer;
   ACallBack: TOTAHintTextCallBack): Integer;
 var
@@ -1100,6 +1181,7 @@ var
   LFileName: string;
   LInInvoke: Boolean;
 begin
+  ProbeHelpInsight;
   // Tooltip Insight: the server's hover, as plain text. The position is the
   // HOVERED token's, not the caret's, so the parameters must be trusted -
   // assumed to follow the browse convention confirmed live (1-based line,

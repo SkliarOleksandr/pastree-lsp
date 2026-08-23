@@ -593,6 +593,10 @@ begin
     Length('"documentation"');
   Check(GOk and (LDocCount = 1),
     'and it is the ONLY row carrying the field');
+  // The viewer's documentation surface is HTML too (GetSymbolDocumentation is
+  // documented as returning HTML), so the fragment rides in our data field.
+  Check(GOk and GResultJson.Contains('"docHtml":"<p>Greets a person'),
+    'the row also carries the doc as an HTML fragment');
   // The bare-row fallbacks (2026-08-22): a type row names its definition's
   // head, a const row its value, a builtin routine its curated result.
   Check(GOk and GResultJson.Contains('"label":"TBox"'), 'TBox is offered');
@@ -679,6 +683,19 @@ begin
     'and the returns section');
   Check(GOk and not GResultJson.Contains('<summary>'),
     'no XML tag survives into the display text');
+  // The IDE's hint surface is an HTML window (ObjRepos\HelpInsight.xsl/.css),
+  // so the same card rides as `pastreeHtml` in the shape that transform
+  // emits: the maincaption div, a codelink to the declaration, then the
+  // sections. Our field, alongside the standard contents - a foreign client
+  // ignores it, exactly like signatureHelp's pastreeCall.
+  Check(GOk and GResultJson.Contains('"pastreeHtml"'),
+    'hover carries the Help Insight page as well');
+  Check(GOk and GResultJson.Contains('class=\"maincaption\"'),
+    'with the IDE stylesheet''s own caption class');
+  Check(GOk and GResultJson.Contains('helpinsight:/filelink:'),
+    'and the IDE''s own source-link scheme');
+  Check(GOk and GResultJson.Contains('<dt><b>AName</b></dt>'),
+    'and the parameters as a definition list, not as text');
 end;
 
 { 5d. Signature help: the engine's CallAt through the seam.
