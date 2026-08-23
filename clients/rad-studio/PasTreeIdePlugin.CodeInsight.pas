@@ -1174,21 +1174,50 @@ begin
   if GHelpInsightProbed then
     Exit;
   GHelpInsightProbed := True;
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-    Exit;
-  LModule := LModuleServices.CurrentModule;
-  if not Assigned(LModule) then
-  begin
-    GHelpInsightProbed := False;   // no module yet - ask again next hover
-    Exit;
+  // Wrapped whole: the first version of this probe produced NO line at all on
+  // a live run (user, 2026-08-23). Everything here talks to IDE objects we do
+  // not own - Supports on the module, and IsEnabled is `safecall` on an
+  // IDispatch, so a raise on the other side arrives as an exception here -
+  // and an exception thrown out of a hover would be swallowed by the IDE with
+  // the probe silently never reporting. A readout that can fail silently is
+  // not a readout.
+  try
+    if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices)
+    then
+    begin
+      LogDiagnostic('IOTAHelpInsight: no IOTAModuleServices');
+      Exit;
+    end;
+    LModule := LModuleServices.CurrentModule;
+    if not Assigned(LModule) then
+    begin
+      GHelpInsightProbed := False;   // no module yet - ask again next hover
+      Exit;
+    end;
+    if not Supports(LModule, IOTAHelpInsight, LHelpInsight) then
+    begin
+      LogDiagnostic('IOTAHelpInsight: absent on module ' + LModule.FileName +
+        ' - the hint string is the only editor Help Insight feed for us');
+      Exit;
+    end;
+    // Two lines, not one: presence is the finding, and IsEnabled is a second
+    // call that may fail on its own. Reported separately so a failure in the
+    // second cannot hide the first.
+    LogDiagnostic('IOTAHelpInsight: PRESENT on module ' + LModule.FileName +
+      ' - the editor Help Insight window has a native feed');
+    try
+      LogDiagnostic('IOTAHelpInsight.IsEnabled = ' +
+        BoolToStr(LHelpInsight.IsEnabled, True));
+    except
+      on E: Exception do
+        LogDiagnostic('IOTAHelpInsight.IsEnabled raised ' + E.ClassName +
+          ': ' + E.Message);
+    end;
+  except
+    on E: Exception do
+      LogDiagnostic('IOTAHelpInsight probe raised ' + E.ClassName + ': ' +
+        E.Message);
   end;
-  if Supports(LModule, IOTAHelpInsight, LHelpInsight) then
-    LogDiagnostic(Format('IOTAHelpInsight: PRESENT on the module ' +
-      '(IsEnabled=%s) - the editor Help Insight window has a native feed',
-      [BoolToStr(LHelpInsight.IsEnabled, True)]))
-  else
-    LogDiagnostic('IOTAHelpInsight: absent on the module - the hint string ' +
-      'is the only editor Help Insight feed available to us');
 end;
 
 function TPasCodeInsightManager.AsyncGetHintText(HintLine, HintCol: Integer;
