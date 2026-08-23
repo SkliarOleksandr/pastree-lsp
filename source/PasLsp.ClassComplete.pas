@@ -18,9 +18,9 @@ unit PasLsp.ClassComplete;
      `forward`-declared ones are all the same question, "is there a body for
      this key".
 
-     (An `interface` TYPE - IFoo - is the one place with nothing to generate:
-     its methods are implemented by whatever class implements the interface,
-     not by the unit. Those are skipped.)
+     (An `interface` TYPE - IFoo - has nothing to IMPLEMENT here: its methods
+     are implemented by whatever class implements it. Its PROPERTIES still get
+     their accessor methods declared, though - see the property pass.)
 
   2. **The whole unit at once**, not just the type at the caret. The question
      "what did I declare and not implement" has one answer per file, and
@@ -60,7 +60,9 @@ type
     Line: Integer;
     Col: Integer;
     Text: string;
-    Kind: string;   // 'body' (implementation) or 'member' (into the type)
+    // 'body' (into the implementation section), 'member' (into the type's
+    // declaration) or 'spec' (the read/write written into a property line).
+    Kind: string;
     Name: string;   // 'TFoo.Bar' / 'Foo' - for the log and the IDE's message
   end;
 
@@ -669,12 +671,14 @@ end;
   it), and it needs no type analysis to decide. `read FFoo` therefore declares
   the field, `read GetFoo` the function. }
 function AccessorDecl(const ATree: TPasTree; AProp: Integer;
-  const AName, AWord, ATypeText, AIndexParams: string;
+  const AName, AWord, ATypeText, AIndexParams: string; AForceMethod: Boolean;
   out AIsMethod: Boolean): string;
 var
   LClassPrefix, LParams: string;
 begin
-  AIsMethod := AName.ToLower.StartsWith('get') or
+  // AForceMethod is the interface case: an interface has no fields, so a
+  // specifier there can only ever name a method whatever it is called.
+  AIsMethod := AForceMethod or AName.ToLower.StartsWith('get') or
     AName.ToLower.StartsWith('set');
   if not AIsMethod then
   begin
@@ -702,6 +706,68 @@ begin
     if AIndexParams <> '' then
       LParams := AIndexParams + '; ' + LParams;
     Result := LClassPrefix + 'procedure ' + AName + '(' + LParams + ');';
+  end;
+end;
+
+{ Does the property already say how to read or write it? A property with
+  NEITHER is the one class completion has to finish; one with either is the
+  author's decision (a read-only property is a design, not an omission) and is
+  left exactly as written. }
+function PropertyHasAccessor(const ATree: TPasTree; AProp: Integer): Boolean;
+var
+  LChild: Integer;
+  LWord: string;
+begin
+  Result := False;
+  LChild := ATree.Nodes[AProp].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if ATree.Nodes[LChild].Kind = nkPropSpec then
+    begin
+      LWord := ATree.NodeText(LChild);
+      if SameText(LWord, 'read') or SameText(LWord, 'write') or
+         SameText(LWord, 'readonly') or SameText(LWord, 'writeonly') then
+        Exit(True);
+    end;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ Where ` read GetX write SetX` goes when a property has neither: after the
+  type, EXCEPT that `index` must stay in front of `read` (13.1.x fixes the
+  specifier order), so an indexed-by-constant property gets them after that.
+  0 = the property has no type to hang them off, which is a redeclaration
+  (`property X;`) and none of our business. }
+function PropertySpecInsertVis(const ATree: TPasTree; AProp: Integer): Integer;
+var
+  LChild: Integer;
+  LSeenName: Boolean;
+begin
+  Result := 0;
+  LSeenName := False;
+  LChild := ATree.Nodes[AProp].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case ATree.Nodes[LChild].Kind of
+      nkAttrGroup:
+        ;
+      nkParams:
+        ;   // the index PARAMETER list - `[Index: Integer]`, not the `index`
+            // specifier; the type still follows it
+      nkIdent:
+        if not LSeenName then
+          LSeenName := True
+        else
+          Result := ATree.Nodes[LChild].LastToken;   // the type
+      nkPropSpec:
+        if SameText(ATree.NodeText(LChild), 'index') then
+          Result := ATree.Nodes[LChild].LastToken
+        else
+          Break;   // read/write/stored/... - we are past where these go
+    else
+      Result := ATree.Nodes[LChild].LastToken;       // a non-ident type
+    end;
+    LChild := ATree.Nodes[LChild].NextSibling;
   end;
 end;
 
@@ -734,15 +800,41 @@ end;
   not. ANeedsSection says which of the two happened, because the text differs
   (the second has to write the section header and re-indent the `end`). }
 function MemberInsertPos(const ATree: TPasTree; ATypeNode: Integer;
-  out ALine, ACol: Integer; out AIndent: string;
+  AAllowSection: Boolean; out ALine, ACol: Integer; out AIndent: string;
   out ANeedsSection: Boolean): Boolean;
 var
   LChild, LLevel, LAnchor, LVisIdx: Integer;
   LVis: TPasVisibleToken;
 begin
   Result := False;
-  ANeedsSection := True;
+  // An INTERFACE has no visibility sections at all - its members are simply
+  // listed - so there is no `private` to write and nothing to look for.
+  ANeedsSection := AAllowSection;
   LAnchor := NIL_NODE;
+  if not AAllowSection then
+  begin
+    // After the LAST member, exactly as the private branch does - not in front
+    // of the type's `end`, which would leave `end` sitting on the same line as
+    // the last thing we wrote.
+    LChild := ATree.Nodes[ATypeNode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if not (ATree.Nodes[LChild].Kind in [nkVisibility, nkGuid]) then
+        LAnchor := LChild;
+      LChild := ATree.Nodes[LChild].NextSibling;
+    end;
+    if LAnchor = NIL_NODE then
+      Exit;   // an empty interface has no property to need an accessor
+    ANeedsSection := False;
+    LVisIdx := ATree.Nodes[LAnchor].LastToken;
+    AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LAnchor));
+    if (LVisIdx < 0) or (LVisIdx > High(ATree.Source.Visible)) then
+      Exit;
+    LVis := ATree.Source.Visible[LVisIdx];
+    with ATree.Source.Files[LVis.FileId] do
+      OffsetToLineCol(Tokens[LVis.TokenIndex].EndPos, ALine, ACol);
+    Exit(True);
+  end;
   LLevel := 0;
   LChild := ATree.Nodes[ATypeNode].FirstChild;
   while LChild <> NIL_NODE do
@@ -878,9 +970,11 @@ var
   // ---- the property-accessor pass
   LTypeName, LMemberText, LPropType, LIndexParams, LWord, LAccessor,
     LIndent: string;
-  LProp, LSpec, LTarget: Integer;
+  LProp, LSpec, LTarget, LPropName, LSpecVis, LWhich: Integer;
+  LSpecText, LAccessorName: string;
+  LVis: TPasVisibleToken;
   LMembers: TDictionary<string, Boolean>;
-  LIsMethod, LNeedsSection: Boolean;
+  LIsMethod, LNeedsSection, LIsInterface: Boolean;
   LMemberEdits: TArray<TLspClassEdit>;
 begin
   Result := Default(TLspClassCompleteAnswer);
@@ -940,13 +1034,18 @@ begin
     for LIdx := 0 to High(ATree.Nodes) do
     begin
       if not (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
-        nkObjectType, nkHelperType]) then
+        nkObjectType, nkHelperType, nkInterfaceType]) then
         Continue;
+      // An INTERFACE takes part here even though it takes no part in the body
+      // pass: its properties still need accessor METHODS declared - it has no
+      // fields to point at and no bodies of its own, so a specifier there can
+      // only be a method, and only its implementors write it.
+      LIsInterface := ATree.Nodes[LIdx].Kind = nkInterfaceType;
       LTypeName := TypeNameOf(ATree, LIdx);
       if LTypeName = '' then
         Continue;   // an anonymous/inline type has no implementation to write
       LChain := TypeChain(ATree, LIdx, LSkip);
-      if LSkip then
+      if LSkip and not LIsInterface then
         Continue;
       if LChain <> '' then
         LChain := LChain + '.' + LTypeName
@@ -966,6 +1065,78 @@ begin
           end;
           LPropType := PropertyTypeText(ATree, LProp);
           LIndexParams := PropertyIndexParams(ATree, LProp);
+          { A property with NEITHER read NOR write is the shape the user
+            actually types first - `property X: Integer;` - and it does not
+            compile until something backs it. Both accessors are synthesized
+            from the property's own name (`GetX`/`SetX`), declared, given
+            bodies where the container has bodies, and `read`/`write` are
+            written into the property line itself: an accessor the property
+            does not point at would be dead code, so the two edits go
+            together or not at all.
+
+            METHODS rather than a field, by the user's call (2026-08-23), and
+            it is the only answer an interface could take anyway - so one rule
+            covers both containers. }
+          if (LPropType <> '') and not PropertyHasAccessor(ATree, LProp) then
+          begin
+            LPropName := ChildOfKind(ATree, LProp, nkIdent);
+            LSpecVis := PropertySpecInsertVis(ATree, LProp);
+            if (LPropName <> NIL_NODE) and (LSpecVis > 0) then
+            begin
+              LName := Flatten(ATree.NodeSpanText(LPropName));
+              LSpecText := '';
+              for LWhich := 0 to 1 do
+              begin
+                if LWhich = 0 then
+                  LWord := 'read'
+                else
+                  LWord := 'write';
+                // Get/Set, not Read/Write: the convention the whole language
+                // writes accessors in, and the one our own Get/Set rule
+                // recognises when the user writes the specifier by hand.
+                if LWhich = 0 then
+                  LAccessorName := 'Get' + LName
+                else
+                  LAccessorName := 'Set' + LName;
+                if LMembers.ContainsKey(LowerCase(LAccessorName)) then
+                begin
+                  // The name is taken by something else in this type - point
+                  // the property at it rather than declaring a second one.
+                  LSpecText := LSpecText + ' ' + LWord + ' ' + LAccessorName;
+                  Continue;
+                end;
+                LMembers.AddOrSetValue(LowerCase(LAccessorName), True);
+                LAccessor := AccessorDecl(ATree, LProp, LAccessorName, LWord,
+                  LPropType, LIndexParams, True, LIsMethod);
+                if LMemberText <> '' then
+                  LMemberText := LMemberText + sLineBreak;
+                LMemberText := LMemberText + LAccessor;
+                LSpecText := LSpecText + ' ' + LWord + ' ' + LAccessorName;
+                if not LIsInterface then
+                begin
+                  LCand := Default(TDeclCandidate);
+                  LCand.Key := MakeKey(LChain, LAccessorName, '');
+                  LCand.Name := LChain + '.' + LAccessorName;
+                  LCand.OrderTok := ATree.NodeLeftmostVis(LProp);
+                  LCand.Seq := LDecls.Count;
+                  LCand.Header := AccessorImplHeader(LAccessor, LChain);
+                  LDecls.Add(LCand);
+                end;
+              end;
+              if LSpecText <> '' then
+              begin
+                LEdit := Default(TLspClassEdit);
+                LVis := ATree.Source.Visible[LSpecVis];
+                with ATree.Source.Files[LVis.FileId] do
+                  OffsetToLineCol(Tokens[LVis.TokenIndex].EndPos,
+                    LEdit.Line, LEdit.Col);
+                LEdit.Text := LSpecText;
+                LEdit.Kind := 'spec';
+                LEdit.Name := LChain + '.' + LName;
+                LMemberEdits := LMemberEdits + [LEdit];
+              end;
+            end;
+          end;
           LSpec := ATree.Nodes[LProp].FirstChild;
           while LSpec <> NIL_NODE do
           begin
@@ -986,11 +1157,13 @@ begin
                   // accessor, and it is declared once.
                   LMembers.AddOrSetValue(LowerCase(LName), True);
                   LAccessor := AccessorDecl(ATree, LProp, LName, LWord,
-                    LPropType, LIndexParams, LIsMethod);
+                    LPropType, LIndexParams, LIsInterface, LIsMethod);
                   if LMemberText <> '' then
                     LMemberText := LMemberText + sLineBreak;
                   LMemberText := LMemberText + LAccessor;
-                  if LIsMethod then
+                  // An interface's accessors get NO body here: whoever
+                  // implements the interface writes them.
+                  if LIsMethod and not LIsInterface then
                   begin
                     // The generated method needs a body like any other
                     // declaration - ordered where the property sits.
@@ -1014,8 +1187,8 @@ begin
         end;
         if LMemberText = '' then
           Continue;
-        if not MemberInsertPos(ATree, LIdx, LLine, LCol, LIndent,
-          LNeedsSection) then
+        if not MemberInsertPos(ATree, LIdx, not LIsInterface, LLine, LCol,
+          LIndent, LNeedsSection) then
           Continue;
         LEdit := Default(TLspClassEdit);
         LEdit.Line := LLine;

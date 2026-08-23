@@ -805,11 +805,12 @@ begin
   LDoc.AddPair('uri', PathToLspUri(LFile));
   LParams.AddPair('textDocument', LDoc);
   Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
-  // Two edits for this fixture: every body in ONE insertion at the end of the
-  // implementation section, plus one member insertion into TProps' private
-  // section. One edit per PLACE, never one per routine.
-  Check(GOk and GResultJson.Contains('"count":2'),
-    'one edit per place: the bodies together, the members together');
+  // Five edits for this fixture, one per PLACE and never one per routine:
+  // every body in ONE insertion at the end of the implementation section, the
+  // members of TProps and of IWorker, and the `read`/`write` written into the
+  // two bare property lines.
+  Check(GOk and GResultJson.Contains('"count":5'),
+    'one edit per place: bodies together, each type''s members together');
   Check(GOk and GResultJson.Contains(
     'procedure TBase.Missing(const A: string; B: Integer);'),
     'the missing method, with its parameter list verbatim');
@@ -829,7 +830,7 @@ begin
     'an implemented method is not implemented twice');
   Check(GOk and not GResultJson.Contains('Abstracted'),
     'an abstract method has no body by definition');
-  Check(GOk and not GResultJson.Contains('Work'),
+  Check(GOk and not GResultJson.Contains('procedure IWorker.Work'),
     'an interface''s methods are not the unit''s to implement');
   Check(GOk and GResultJson.Contains('begin\r\n  \r\nend;'),
     'each body is begin/blank/end, with the blank line indented for the caret');
@@ -868,6 +869,26 @@ begin
   Check(GOk and (Pos('function TProps.GetMissing: string;', GResultJson) <
     Pos('procedure TProps.SetMissing', GResultJson)),
     'the accessors'' bodies are generated, getter before setter');
+
+  // --- a property with NEITHER read nor write, and interface properties ---
+  Check(GOk and GResultJson.Contains('"kind":"spec"'),
+    'completing a bare property is an edit into the property line itself');
+  Check(GOk and GResultJson.Contains(' read GetPlain write SetPlain'),
+    'and it points the property at the accessors it just declared');
+  Check(GOk and GResultJson.Contains('function GetPlain: Integer;')
+    and GResultJson.Contains('function TProps.GetPlain: Integer;'),
+    'a bare property in a CLASS gets methods, declared and implemented');
+  Check(GOk and not GResultJson.Contains('ReadOnlyOne'),
+    'a read-only property is a decision, not an omission - untouched');
+  // An interface: accessors are METHODS whatever they are called (no fields
+  // exist there), declared in the interface and implemented by nobody here.
+  Check(GOk and GResultJson.Contains('function GetNamed: Integer;')
+    and GResultJson.Contains('procedure SetNamed(const Value: Integer);'),
+    'an interface property''s accessors are declared in the interface');
+  Check(GOk and GResultJson.Contains(' read GetBare write SetBare'),
+    'and a bare interface property is completed the same way');
+  Check(GOk and not GResultJson.Contains('IWorker.GetNamed'),
+    'but an interface gets no bodies - its implementors write those');
 end;
 
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }

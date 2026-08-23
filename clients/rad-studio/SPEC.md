@@ -655,11 +655,26 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    last; a `class property` gets `class` accessors; a dotted specifier
    (`read FInner.Value`) is nobody's to declare and is left alone.
 
+   **A property with NEITHER `read` nor `write`** — `property X: Integer;`,
+   the shape people type first — is completed too (asked 2026-08-23): both
+   accessors are synthesized as `GetX`/`SetX`, declared, given bodies, and
+   `read GetX write SetX` is written into the property line itself (after any
+   `index` specifier, which the grammar keeps in front of `read`). Methods
+   rather than a field, by the user's call — and the only answer an interface
+   could take, so one rule covers both. A property with EITHER specifier is
+   left alone: a read-only property is a design, not an omission.
+
+   **Interface properties** take part as well, with two differences that
+   follow from what an interface is: an accessor there can only be a METHOD
+   (no fields exist to point at), and it gets NO body — its implementors
+   write those. Members land before the interface's `end`, after its last
+   member, with no `private` to write.
+
    One edit per PLACE, never per routine: all bodies in one insertion, each
-   type's members in one more. Which is why the answer is a list, sorted
-   ascending — the writer applies them in that order (see the client's
-   ApplyClassComplete), and the caret's line is corrected for the lines the
-   member edits add above it.
+   type's members in one more, each completed property line one more. Which is
+   why the answer is a list, sorted ascending — the writer applies them in
+   that order (see the client's ApplyClassComplete), and the caret's line is
+   corrected for the lines the earlier edits add above it.
 
    The original entry, for the reasoning that has not changed: the native one
    is not gated

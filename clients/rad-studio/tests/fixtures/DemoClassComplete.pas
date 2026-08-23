@@ -22,6 +22,13 @@ interface
 type
   IWorker = interface
     procedure Work;
+    { An interface's property accessors ARE declarable - and can only be
+      methods, since an interface has no fields. Declared here, implemented by
+      whoever implements the interface, so NO bodies for these. }
+    property Named: Integer read GetNamed write SetNamed;
+    { And a bare one, which gets both accessors and the specifiers written
+      into the property line. }
+    property Bare: string;
   end;
 
   TBase = class
@@ -63,6 +70,12 @@ type
     { Indexed: the index parameters ride into both accessors, the setter's
       value last. }
     property Items[Index: Integer]: string read GetItem write SetItem;
+    { NEITHER read nor write - the shape typed first. Both accessors are
+      synthesized from the name, and `read GetPlain write SetPlain` is written
+      into this line. }
+    property Plain: Integer;
+    { A read-only property is a DECISION, not an omission: nothing is added. }
+    property ReadOnlyOne: Integer read FKnown;
   end;
 
 procedure FreeRoutine(AValue: Integer);
