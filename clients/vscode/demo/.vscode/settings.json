@@ -1,0 +1,18 @@
+{
+  "//": "Absolute paths on purpose: our extension reads these settings verbatim (no ${workspaceFolder} substitution), and when it is installed as a VSIX its own directory is under ~/.vscode/extensions, so no relative default can find this repo. Edit the three C:\\Repos\\pastree-lsp prefixes if the checkout lives elsewhere.",
+  "pastree.serverPath": "c:\\Repos\\pastree-lsp\\out\\pastree-server.exe",
+  "pastree.projectFile": "c:\\Repos\\pastree-lsp\\clients\\vscode\\demo\\XmlDocDemo.dpr",
+  "pastree.platform": "Win64",
+  "pastree.logFile": "c:\\Repos\\pastree-lsp\\clients\\vscode\\demo\\pastree-lsp.log",
+  "pastree.searchPaths": [
+    "C:\\Program Files (x86)\\Embarcadero\\Studio\\37.0\\lib\\Win64\\release",
+    "C:\\Program Files (x86)\\Embarcadero\\Studio\\37.0\\source\\rtl\\sys",
+    "C:\\Program Files (x86)\\Embarcadero\\Studio\\37.0\\source\\rtl\\common",
+    "C:\\Program Files (x86)\\Embarcadero\\Studio\\37.0\\source\\rtl\\win"
+  ],
+  "files.associations": {
+    "*.pas": "objectpascal",
+    "*.dpr": "objectpascal",
+    "*.inc": "objectpascal"
+  }
+}
