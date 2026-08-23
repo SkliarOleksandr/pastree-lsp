@@ -891,6 +891,49 @@ begin
     'but an interface gets no bodies - its implementors write those');
 end;
 
+{ 5g. classComplete on a buffer that does not parse: repair the ONE break it
+  knows (a missing `;`), refuse everything else.
+
+  Both halves matter. The repair is the commonest press of the key -
+  `property XX: Integer` and no semicolon yet - and the refusal is what stops
+  a generator from writing code out of a tree the parser had to guess at: that
+  is how a live run produced 1339 lines of bodies for methods that all had
+  them (2026-08-23). }
+procedure TestClassCompleteBrokenBuffer;
+var
+  LParams, LDoc: TJSONObject;
+
+  function AskAbout(const AFixture: string): Boolean;
+  begin
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(TPath.Combine(GFixtureDir, AFixture)));
+    LParams.AddPair('textDocument', LDoc);
+    Result := Ask('pastree/classComplete', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5g. classComplete repairs a missing ";", refuses the rest ===');
+  Check(AskAbout('DemoClassCompleteSemi.pas'), 'answered for the semi case');
+  Check(GOk and GResultJson.Contains('"newText":";"'),
+    'the missing semicolon comes back as an edit of its own');
+  Check(GOk and GResultJson.Contains('"kind":"semi"'),
+    'named as the repair it is');
+  Check(GOk and GResultJson.Contains(' read GetXX write SetXX'),
+    'and the property is completed off the REPAIRED parse');
+  Check(GOk and GResultJson.Contains('function TSemi.GetXX: Integer;'),
+    'with bodies for the accessors it declared');
+  Check(GOk and not GResultJson.Contains('TSemi.Done'),
+    'and the one implemented method is still recognised as implemented');
+
+  Check(AskAbout('DemoClassCompleteBroken.pas'), 'answered for the broken one');
+  Check(GOk and GResultJson.Contains('"count":0'),
+    'a file no semicolon can rescue generates NOTHING');
+  Check(GOk and GResultJson.Contains('refused'),
+    'and says it refused, with the parser''s own first complaint');
+end;
+
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }
 procedure TestWorkspaceSymbol;
 var
@@ -1130,6 +1173,7 @@ begin
       TestSignatureHelp;
       TestDocumentSymbol;
       TestClassComplete;
+      TestClassCompleteBrokenBuffer;
       TestWorkspaceSymbol;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.

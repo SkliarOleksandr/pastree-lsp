@@ -747,6 +747,10 @@ var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
   LDiags: TArray<TPasParseDiag>;
+  LRepairs: TArray<TLspClassEdit>;
+  LEdit: TLspClassEdit;
+  LFixed, LNext: string;
+  LIdx, LLine, LCol: Integer;
 begin
   // Parse only - no resolver, no bridge. Class completion is a question about
   // DECLARATIONS AND BODIES, which the CST answers on its own; running the
@@ -754,7 +758,60 @@ begin
   // file uses.
   LPre := FPreprocessor.ProcessText(AFileName, AText);
   LTree := TPasParser.ParseFile(LPre, LDiags);
+  { A BROKEN PARSE GENERATES NOTHING - except for the one break this feature
+    repairs itself, a missing semicolon.
+
+    Class completion WRITES code, and it decides what to write from the shape
+    of the tree, so a tree the parser had to guess at produces guesses.
+    Measured on a buffer where `property XX: Integer` had been typed and the
+    `;` had not (2026-08-23): the unterminated property swallowed the rest of
+    the class, every implementation in the unit stopped being one, and the
+    answer was 1339 lines of bodies for methods that all already had them,
+    two insertions landing inside an unrelated routine. Error tolerance is
+    exactly right for the READING features - a half-typed line must still
+    complete and still navigate - and exactly wrong for a generator.
+
+    But "type the semicolon yourself first" is a bad answer to the commonest
+    press of the key, so the semicolons go in AS EDITS and the file is parsed
+    again. Anything still wrong after that, and the answer is a refusal that
+    says where to look. }
+  LFixed := AText;
+  LIdx := 0;
+  // Three attempts: enough for the "I typed two declarations and no
+  // semicolons" case, few enough that a file which simply does not parse is
+  // refused promptly rather than rewritten by guesswork.
+  while (Length(LDiags) > 0) and (LIdx < 3) do
+  begin
+    Inc(LIdx);
+    // A separate variable for the result, NOT LFixed twice: `out` clears its
+    // argument before the call, so passing one variable as both the text and
+    // the repaired text hands the function an empty string (cost: one
+    // debugging round, 2026-08-23).
+    if not TrySemicolonRepair(LTree, LDiags[0].VisIndex, LFixed, LNext,
+      LLine, LCol) then
+      Break;
+    LFixed := LNext;
+    LEdit := Default(TLspClassEdit);
+    LEdit.Line := LLine;
+    // Back into the ORIGINAL buffer's columns, past the repairs already made.
+    LEdit.Col := MapColToOriginal(LLine, LCol, LRepairs);
+    LEdit.Text := ';';
+    LEdit.Kind := 'semi';
+    LRepairs := LRepairs + [LEdit];
+    LPre := FPreprocessor.ProcessText(AFileName, LFixed);
+    LTree := TPasParser.ParseFile(LPre, LDiags);
+  end;
+  if Length(LDiags) > 0 then
+  begin
+    Result := Default(TLspClassCompleteAnswer);
+    Result.Provider := Format('pastree/classComplete: refused - %d parse ' +
+      'error(s) in this file, first: %s', [Length(LDiags), LDiags[0].Msg]);
+    Exit;
+  end;
   Result := ClassCompleteFor(LTree);
+  // The answer's positions are in the REPAIRED text; the client edits the
+  // original. MergeSemicolonRepairs maps them back and adds the semicolons.
+  MergeSemicolonRepairs(Result, LRepairs);
 end;
 
 end.

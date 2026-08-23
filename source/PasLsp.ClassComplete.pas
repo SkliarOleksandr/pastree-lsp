@@ -83,6 +83,46 @@ type
   file with nothing to do answers with no edits and a Provider that says so. }
 function ClassCompleteFor(const ATree: TPasTree): TLspClassCompleteAnswer;
 
+{ THE ONE REPAIR THIS FEATURE MAKES to a buffer it cannot parse: a missing
+  semicolon. `property XX: Integer` with the `;` not yet typed is the shape
+  the key gets pressed on, and refusing it would be refusing the common case -
+  but generating from the broken tree is worse than refusing, because an
+  unterminated declaration swallows the rest of the class and every
+  implementation in the unit stops being one (measured 2026-08-23: 1339 lines
+  of bodies for methods that all had them, two insertions landing inside an
+  unrelated routine).
+
+  ONE `;` per call, at AVisIndex - the position of the parser's FIRST
+  diagnostic - inserted after the token BEFORE it, which is where it was
+  missing from. The caller then PARSES AGAIN and only proceeds on a clean
+  tree, which is what makes this safe: the repair is a guess, and a guess that
+  did not work does not produce a clean parse. Not keyed on the diagnostic's
+  message, because the parser does not blame the semicolon for its absence -
+  `property XX: Integer` followed by `end` reads to it as a missing property
+  specifier.
+
+  ALine/ACol are in ATEXT's coordinates (which, after the first repair, is no
+  longer the buffer's - see MapColToOriginal). False when the token before is
+  in an $I include: the text we hold is the main file's, and rewriting a
+  different file from here is not this feature's business. }
+function TrySemicolonRepair(const ATree: TPasTree; AVisIndex: Integer;
+  const AText: string; out ARepaired: string;
+  out ALine, ACol: Integer): Boolean;
+
+{ A column in the repaired text, back in the original buffer's coordinates:
+  every `;` inserted earlier on that line shifted it right by one. }
+function MapColToOriginal(ALine, ACol: Integer;
+  const ARepairs: TArray<TLspClassEdit>): Integer;
+
+{ Folds the repairs into an answer computed from the REPAIRED text: every
+  position the answer carries is in repaired coordinates, and the client
+  applies everything to the ORIGINAL buffer, so each column has to lose the
+  semicolons inserted before it on its own line. The repairs then join the
+  list, sorted last at an equal position - a property's `read X write Y` must
+  land in FRONT of the `;` that terminates it. }
+procedure MergeSemicolonRepairs(var AAnswer: TLspClassCompleteAnswer;
+  const ARepairs: TArray<TLspClassEdit>);
+
 implementation
 
 uses
@@ -1303,6 +1343,76 @@ begin
     LDecls.Free;
     LImpls.Free;
   end;
+end;
+
+function TrySemicolonRepair(const ATree: TPasTree; AVisIndex: Integer;
+  const AText: string; out ARepaired: string;
+  out ALine, ACol: Integer): Boolean;
+var
+  LVisIdx, LOffset: Integer;
+  LVis: TPasVisibleToken;
+begin
+  Result := False;
+  ARepaired := AText;
+  ALine := 0;
+  ACol := 0;
+  // The `;` belongs after the token BEFORE the one that tripped the parser:
+  // the diagnostic points at what it found instead.
+  LVisIdx := AVisIndex - 1;
+  if (LVisIdx < 0) or (LVisIdx > High(ATree.Source.Visible)) then
+    Exit;
+  LVis := ATree.Source.Visible[LVisIdx];
+  if LVis.FileId <> 0 then
+    Exit;   // an $I include - not the text we were handed
+  LOffset := ATree.Source.Files[0].Tokens[LVis.TokenIndex].EndPos;
+  if (LOffset < 0) or (LOffset > Length(AText)) then
+    Exit;
+  ATree.Source.Files[0].OffsetToLineCol(LOffset, ALine, ACol);
+  ARepaired := Copy(AText, 1, LOffset) + ';' +
+    Copy(AText, LOffset + 1, MaxInt);
+  Result := True;
+end;
+
+function MapColToOriginal(ALine, ACol: Integer;
+  const ARepairs: TArray<TLspClassEdit>): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := ACol;
+  for LIdx := 0 to High(ARepairs) do
+    if (ARepairs[LIdx].Line = ALine) and (ARepairs[LIdx].Col < ACol) then
+      Dec(Result);
+end;
+
+procedure MergeSemicolonRepairs(var AAnswer: TLspClassCompleteAnswer;
+  const ARepairs: TArray<TLspClassEdit>);
+var
+  LIdx, LJdx, LShift: Integer;
+begin
+  if Length(ARepairs) = 0 then
+    Exit;
+  for LIdx := 0 to High(AAnswer.Edits) do
+  begin
+    LShift := 0;
+    for LJdx := 0 to High(ARepairs) do
+      if (ARepairs[LJdx].Line = AAnswer.Edits[LIdx].Line) and
+         (ARepairs[LJdx].Col < AAnswer.Edits[LIdx].Col) then
+        Inc(LShift);
+    Dec(AAnswer.Edits[LIdx].Col, LShift);
+  end;
+  AAnswer.Edits := AAnswer.Edits + ARepairs;
+  TArray.Sort<TLspClassEdit>(AAnswer.Edits,
+    TComparer<TLspClassEdit>.Construct(
+      function(const A, B: TLspClassEdit): Integer
+      begin
+        Result := A.Line - B.Line;
+        if Result = 0 then
+          Result := A.Col - B.Col;
+        // At the SAME position the semicolon goes last: the specifiers it
+        // terminates have to be inside the statement, not after its end.
+        if Result = 0 then
+          Result := Ord(A.Kind = 'semi') - Ord(B.Kind = 'semi');
+      end));
 end;
 
 end.
