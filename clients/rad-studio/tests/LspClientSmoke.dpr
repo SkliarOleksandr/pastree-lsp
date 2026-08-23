@@ -595,8 +595,12 @@ begin
     'and it is the ONLY row carrying the field');
   // The viewer's documentation surface is HTML too (GetSymbolDocumentation is
   // documented as returning HTML), so the fragment rides in our data field.
-  Check(GOk and GResultJson.Contains('"docHtml":"<p>Greets a person'),
+  Check(GOk and GResultJson.Contains('"docHtml":"<table width='),
     'the row also carries the doc as an HTML fragment');
+  // The pane sizes itself to the min-content width of what it is given, so
+  // the fragment must impose its own - measured live 2026-08-23.
+  Check(GOk and GResultJson.Contains('<p>Greets a person by name.</p>'),
+    'with the summary as a paragraph inside the fixed-width wrapper');
   // The bare-row fallbacks (2026-08-22): a type row names its definition's
   // head, a const row its value, a builtin routine its curated result.
   Check(GOk and GResultJson.Contains('"label":"TBox"'), 'TBox is offered');

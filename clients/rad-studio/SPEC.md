@@ -597,7 +597,23 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
      option read as a bare default. It now names the classic Pascal set, so
      the user's own Code Insight settings apply to us — including whatever
      `Help Insight` gates.
-   - **`IOTAHelpInsight`**, below.
+   - **`IOTAHelpInsight` — ANSWERED, negative (2026-08-23).** The readout
+     says `absent on module <the open .pas>`, so the interface the editor's
+     Help Insight window is fed from is not on the module at all and there is
+     nothing for us to implement. Combined with the hint being a plain
+     window, that closes the question: **the editor tooltip is plain text,
+     and the only way to make it look like the native one is to draw it
+     ourselves** (`INTACustomDrawCodeInsightViewer.DrawLine` with
+     `DrawingHintText=True`, item 6's custom hint window). Do not re-derive
+     this; the option set below was the other candidate and changed nothing.
+
+   The VIEWER's documentation pane, by contrast, does render HTML - and it
+   sizes itself to the **min-content** width of the document it is handed
+   (measured: the pane came out as wide as the longest word, one or two words
+   per line, and resizing the popup changed nothing). So `XmlDocHtml` wraps
+   its sections in a fixed-width table; `cDocPaneWidthPx` in
+   `source/PasLsp.XmlDoc.pas` is that width and the comment there carries the
+   measurement.
 
    Hover therefore carries `pastreeHtml` beside the standard markdown
    contents (our field, ignored by other clients — the `pastreeCall`

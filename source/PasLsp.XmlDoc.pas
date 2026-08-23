@@ -418,9 +418,23 @@ begin
   end;
 end;
 
+const
+  { The documentation pane of the RAD Studio completion viewer sizes itself to
+    the MIN-CONTENT width of the HTML it is given - measured live on
+    2026-08-23: the pane came out exactly as wide as the longest word in the
+    text ('coordinates'), one or two words per line, and resizing the popup
+    changed nothing. So the width has to come from the document, and this is
+    it: a wrapper with an explicit width, which the layout cannot collapse.
+
+    420 CSS pixels is about 60 characters at the pane's 9pt font - the width
+    prose is comfortable to read at, and close to what the native Help
+    Insight window uses. A fixed number is right here rather than a
+    percentage: there is no containing box to be a percentage OF. }
+  cDocPaneWidthPx = 420;
+
 { The sections as HelpInsight.xsl emits them: a paragraph per prose section,
   and `h4` + `dl` for the named ones, with the name in the `dt` and its text
-  in the `dd`. }
+  in the `dd`, inside the fixed-width wrapper the pane needs. }
 function XmlDocHtml(const ARaw: string): string;
 var
   LParts: TXmlDocParts;
@@ -455,6 +469,13 @@ begin
     Exit;
   LOut := TStringBuilder.Create;
   try
+    // Both a table width and a CSS width, deliberately: the pane's renderer
+    // is the IDE's own and unidentified, and these are the two ways an HTML
+    // layout has ever been told "this wide" - a table attribute for the
+    // mshtml-era engine, a style for anything modern. Neither harms the
+    // other, and one of them is the one that lands.
+    LOut.Append(Format('<table width="%0:d" style="width:%0:dpx">' +
+      '<tr><td>', [cDocPaneWidthPx]));
     if CollapseWs(LParts.Summary) <> '' then
       LOut.Append('<p>').Append(HtmlEscape(CollapseWs(LParts.Summary)))
           .Append('</p>');
@@ -466,6 +487,7 @@ begin
       LOut.Append('<h4>Returns</h4><p>')
           .Append(HtmlEscape(CollapseWs(LParts.Returns))).Append('</p>');
     AppendDefList('Exceptions', LParts.Exceptions);
+    LOut.Append('</td></tr></table>');
     Result := LOut.ToString;
   finally
     LOut.Free;
