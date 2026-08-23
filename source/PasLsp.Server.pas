@@ -1833,6 +1833,13 @@ var
     then
       Exit;
     LScope := LModel.Scopes[AScopeIdx];
+    // A scope's containers are created LAZILY by the model (Names/Symbols are
+    // nil until something is declared into it), so an EMPTY scope has no list
+    // at all — reading Count there is an access violation, not an empty loop.
+    // Cost of learning this: every documentSymbol answered with an
+    // EAccessViolation once a closure contained such a scope (2026-08-23).
+    if (LScope = nil) or (LScope.Symbols = nil) then
+      Exit;
     LSB := TStringBuilder.Create;
     try
       for LI := 0 to LScope.Symbols.Count - 1 do

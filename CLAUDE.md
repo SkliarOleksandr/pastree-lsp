@@ -134,6 +134,19 @@ program over both shared units, so it stops compiling if either one ever gains
 a dependency. Adding a third shared unit is a real decision, not a convenience:
 each one is a way for PasTree to get in.
 
+## Reading the analysis model: an empty scope has no lists
+
+**`TSemaScope.Symbols` and `.Names` are created lazily and are legally `nil`**
+— the model builds them when the first symbol is declared into the scope, so a
+scope that never got one has neither. `LScope.Symbols.Count` on such a scope is
+an access violation, not an empty loop, and the symptom is remote from the
+cause: on 2026-08-23 every `textDocument/documentSymbol` in a session came back
+as `EAccessViolation` (the editor showed "Request failed", the outline was
+simply gone). Check for `nil` before iterating any scope container, and cover a
+new model-walking handler with at least one harness request — that crash
+reached a user because `documentSymbol` had no coverage at all
+(`LspClientSmoke` section 5d-bis now exists for exactly this).
+
 ## Reading source text: assume a BOM
 
 **Any `.pas`/`.dpr` may start with a BOM, and a BOM is never content.** Delphi

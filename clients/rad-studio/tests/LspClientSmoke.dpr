@@ -751,6 +751,36 @@ begin
     'and honestly answered null there');
 end;
 
+{ 5d-bis. documentSymbol: the outline behind the Structure pane.
+
+  It had NO coverage here until 2026-08-23, and that is exactly how a crash
+  reached a user: a scope's symbol list is created lazily by the model and is
+  legally nil for an empty scope, the handler read its Count anyway, and every
+  documentSymbol in the session came back as an EAccessViolation. One request
+  per unit is all it takes to notice - the reason this section exists. }
+procedure TestDocumentSymbol;
+var
+  LUnitFile: string;
+  LParams, LDoc: TJSONObject;
+begin
+  Writeln;
+  Writeln('=== 5d-bis. documentSymbol answers an outline, not an error ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(LUnitFile));
+  LParams.AddPair('textDocument', LDoc);
+  Check(Ask('textDocument/documentSymbol', LParams),
+    'documentSymbol answered');
+  Check(GOk, 'and did not fail the request');
+  Check(GOk and GResultJson.Contains('"name":"Greet"'),
+    'the routine is in the outline');
+  Check(GOk and GResultJson.Contains('"name":"TBox"'),
+    'and the record type');
+  Check(GOk and GResultJson.Contains('"name":"Value"'),
+    'with its field as a child - types report their members');
+end;
+
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }
 procedure TestWorkspaceSymbol;
 var
@@ -988,6 +1018,7 @@ begin
       TestCompletion;
       TestHover;
       TestSignatureHelp;
+      TestDocumentSymbol;
       TestWorkspaceSymbol;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
