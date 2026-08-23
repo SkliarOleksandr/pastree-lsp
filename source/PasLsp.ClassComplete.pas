@@ -1075,6 +1075,12 @@ begin
         LName := LName + ', ' + LDecls[LIdx].Name;
     end;
 
+    // No trailing break: the insertion point sits just after a token, so the
+    // text that follows it already begins with the line's own ending. Keeping
+    // ours would leave a second blank line in front of whatever came next -
+    // usually the unit's `end.` (first live run, 2026-08-23).
+    if LText.EndsWith(sLineBreak) then
+      LText := Copy(LText, 1, Length(LText) - Length(sLineBreak));
     if (LText = '') and (Length(LMemberEdits) = 0) then
     begin
       Result.Provider := 'pastree/classComplete: nothing to implement';

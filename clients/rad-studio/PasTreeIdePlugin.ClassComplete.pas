@@ -80,6 +80,7 @@ var
   LIdx: Integer;
   LWriter: IOTAEditWriter;
   LCharPos: TOTACharPos;
+  LOffsets: TArray<Integer>;
   LPos: IOTAEditPosition;
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) then
@@ -96,17 +97,28 @@ begin
     order - which is the order the server sends them in, for exactly this
     reason - with one CopyTo per edit walking the buffer forward. One writer
     means one undo step for the whole completion, like the native one. }
+  { EVERY OFFSET FIRST, THEN THE WRITER. Row/col has to become a buffer
+    offset, and only the view knows that mapping - but the view answers about
+    the buffer AS IT IS. Converting inside the write loop therefore reads a
+    buffer the earlier insertions have already grown: on the first live run
+    over a 22 000-line unit the two accessor declarations pushed the body
+    insertion two lines down, past the unit's own `end.`, and the bodies landed
+    outside the unit entirely (2026-08-23). The server's positions all describe
+    ONE snapshot, so they must all be resolved against that snapshot. }
+  SetLength(LOffsets, Length(AAnswer.Edits));
+  for LIdx := 0 to High(AAnswer.Edits) do
+  begin
+    LCharPos.Line := AAnswer.Edits[LIdx].Row;
+    LCharPos.CharIndex := AAnswer.Edits[LIdx].Col - 1;
+    LOffsets[LIdx] := AView.CharPosToPos(LCharPos);
+  end;
   LWriter := AView.Buffer.CreateUndoableWriter;
   if not Assigned(LWriter) then
     Exit;
   try
     for LIdx := 0 to High(AAnswer.Edits) do
     begin
-      // Row/col to a buffer offset: the writer measures in characters from the
-      // start of the buffer, and the view is what knows the mapping.
-      LCharPos.Line := AAnswer.Edits[LIdx].Row;
-      LCharPos.CharIndex := AAnswer.Edits[LIdx].Col - 1;
-      LWriter.CopyTo(AView.CharPosToPos(LCharPos));
+      LWriter.CopyTo(LOffsets[LIdx]);
       LWriter.Insert(UTF8String(AAnswer.Edits[LIdx].Text));
     end;
   finally
