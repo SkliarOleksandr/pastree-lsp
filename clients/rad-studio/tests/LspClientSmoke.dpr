@@ -805,8 +805,11 @@ begin
   LDoc.AddPair('uri', PathToLspUri(LFile));
   LParams.AddPair('textDocument', LDoc);
   Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
-  Check(GOk and GResultJson.Contains('"count":1'),
-    'one edit - every body goes in one insertion at the end of the section');
+  // Two edits for this fixture: every body in ONE insertion at the end of the
+  // implementation section, plus one member insertion into TProps' private
+  // section. One edit per PLACE, never one per routine.
+  Check(GOk and GResultJson.Contains('"count":2'),
+    'one edit per place: the bodies together, the members together');
   Check(GOk and GResultJson.Contains(
     'procedure TBase.Missing(const A: string; B: Integer);'),
     'the missing method, with its parameter list verbatim');
@@ -841,6 +844,30 @@ begin
   // line breaks: the insertion point sits at the end of an existing line.
   Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nprocedure'),
     'the first body opens with a blank line, not against the previous end');
+
+  // --- property accessors: a SECOND edit, into the type's private section ---
+  Check(GOk and GResultJson.Contains('"kind":"member"'),
+    'accessors arrive as their own edit kind');
+  Check(GOk and GResultJson.Contains('function GetMissing: string;')
+    and GResultJson.Contains('procedure SetMissing(const Value: string);'),
+    'a Get/Set-shaped specifier with no method declares one, both ways');
+  Check(GOk and GResultJson.Contains('FBacked: Integer;'),
+    'and a specifier that is not Get/Set-shaped declares a FIELD');
+  Check(GOk and GResultJson.Contains(
+    'function GetItem(Index: Integer): string;'),
+    'an indexed property''s getter takes the index parameters');
+  Check(GOk and GResultJson.Contains(
+    'procedure SetItem(Index: Integer; const Value: string);'),
+    'and its setter takes them BEFORE the value');
+  Check(GOk and not GResultJson.Contains('GetKnown'),
+    'an accessor the type already declares is left alone');
+  Check(GOk and not GResultJson.Contains('FKnown: Integer;'),
+    'and so is a field it already has');
+  // The generated methods need bodies too, getter first - one property's two
+  // accessors share a source position, so the order is the sort's to keep.
+  Check(GOk and (Pos('function TProps.GetMissing: string;', GResultJson) <
+    Pos('procedure TProps.SetMissing', GResultJson)),
+    'the accessors'' bodies are generated, getter before setter');
 end;
 
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }

@@ -60,7 +60,7 @@ type
     Line: Integer;
     Col: Integer;
     Text: string;
-    Kind: string;   // 'body' - the only kind so far; 'member' is phase 2
+    Kind: string;   // 'body' (implementation) or 'member' (into the type)
     Name: string;   // 'TFoo.Bar' / 'Foo' - for the log and the IDE's message
   end;
 
@@ -96,6 +96,11 @@ type
     Name: string;       // display name, qualified for a method
     Header: string;     // 'procedure TFoo.Bar(const A: string): string;'
     OrderTok: Integer;  // the declaration's first visible token
+    // Tie-break for the sort below. Two generated accessors of ONE property
+    // share its token, and the sort is not stable - without this the setter
+    // could be emitted before the getter, which is not the order anyone
+    // writes them in.
+    Seq: Integer;
   end;
 
 { ---- small tree helpers (all read-only over the arena) -------------------- }
@@ -545,6 +550,290 @@ begin
     LTail + ';' + LDirs;
 end;
 
+{ ---- property accessors (the second half of class completion) ------------- }
+
+{ The type's own name as an implementation must qualify it - `TFoo`,
+  `TStack<T>` - and '' when ATypeNode is not the definition of a named type. }
+function TypeNameOf(const ATree: TPasTree; ATypeNode: Integer): string;
+var
+  LDecl, LName, LGeneric: Integer;
+begin
+  Result := '';
+  LDecl := ATree.Nodes[ATypeNode].Parent;
+  if (LDecl = NIL_NODE) or (ATree.Nodes[LDecl].Kind <> nkTypeDecl) then
+    Exit;
+  LName := ChildOfKind(ATree, LDecl, nkIdent);
+  if LName = NIL_NODE then
+    Exit;
+  Result := ATree.NodeSpanText(LName);
+  LGeneric := ChildOfKind(ATree, LDecl, nkGenericParams);
+  if LGeneric <> NIL_NODE then
+    Result := Result + Flatten(ATree.NodeSpanText(LGeneric));
+end;
+
+{ Every name the type declares itself: fields, methods, properties, nested
+  types and constants. What an accessor specifier is checked against - if the
+  name is already here, there is nothing to generate, whatever it names. }
+procedure CollectMemberNames(const ATree: TPasTree; ATypeNode: Integer;
+  ANames: TDictionary<string, Boolean>);
+var
+  LChild, LSub, LFirstVis, LLastVis: Integer;
+  LSegments: TArray<string>;
+begin
+  LChild := ATree.Nodes[ATypeNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case ATree.Nodes[LChild].Kind of
+      nkRoutine:
+        if RoutineName(ATree, LChild, LFirstVis, LLastVis, LSegments) and
+           (Length(LSegments) > 0) then
+          ANames.AddOrSetValue(LowerCase(LSegments[High(LSegments)]), True);
+      nkPropertyDecl, nkTypeDecl, nkConstDecl:
+        begin
+          LSub := ChildOfKind(ATree, LChild, nkIdent);
+          if LSub <> NIL_NODE then
+            ANames.AddOrSetValue(LowerCase(ATree.NodeSpanText(LSub)), True);
+        end;
+      nkVarDecl:
+        begin
+          // A field declaration names one or more fields before its type;
+          // the type is an nkIdent too, so the same colon rule as parameters
+          // applies - but for a NAME SET, over-collecting the type's name is
+          // harmless (it can only make us skip generating something that
+          // would have collided anyway).
+          LSub := ATree.Nodes[LChild].FirstChild;
+          while LSub <> NIL_NODE do
+          begin
+            if ATree.Nodes[LSub].Kind = nkIdent then
+              ANames.AddOrSetValue(LowerCase(ATree.NodeSpanText(LSub)), True);
+            LSub := ATree.Nodes[LSub].NextSibling;
+          end;
+        end;
+    end;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ The property's declared type, as text. Children are name, [index params],
+  [type], specifiers - so the type is the first child that is none of those. }
+function PropertyTypeText(const ATree: TPasTree; AProp: Integer): string;
+var
+  LChild: Integer;
+  LSeenName: Boolean;
+begin
+  Result := '';
+  LSeenName := False;
+  LChild := ATree.Nodes[AProp].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case ATree.Nodes[LChild].Kind of
+      nkPropSpec:
+        Exit;   // specifiers start; there was no type
+      nkParams, nkAttrGroup:
+        ;
+      nkIdent:
+        if not LSeenName then
+          LSeenName := True
+        else
+          Exit(Flatten(ATree.NodeSpanText(LChild)));
+    else
+      Exit(Flatten(ATree.NodeSpanText(LChild)));
+    end;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ The property's index parameters as a routine's would be written: `[Index:
+  Integer]` -> `Index: Integer`, defaults stripped. '' for a plain property. }
+function PropertyIndexParams(const ATree: TPasTree; AProp: Integer): string;
+var
+  LParams: Integer;
+begin
+  Result := '';
+  LParams := ChildOfKind(ATree, AProp, nkParams);
+  if LParams = NIL_NODE then
+    Exit;
+  Result := Flatten(ATree.NodeSpanText(LParams));
+  if Result.StartsWith('[') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+  Result := Trim(StripDefaults('(' + Result + ')'));
+  Result := Copy(Result, 2, Length(Result) - 2);
+end;
+
+{ The accessor a specifier names, when the type does not declare it yet.
+
+  WHICH KIND, and the rule is ours rather than the IDE's: a name that starts
+  with `Get` or `Set` is a METHOD, anything else is a FIELD. That is what the
+  convention every Delphi codebase already follows means, it is predictable
+  from the name alone (so the user knows what the key will do before pressing
+  it), and it needs no type analysis to decide. `read FFoo` therefore declares
+  the field, `read GetFoo` the function. }
+function AccessorDecl(const ATree: TPasTree; AProp: Integer;
+  const AName, AWord, ATypeText, AIndexParams: string;
+  out AIsMethod: Boolean): string;
+var
+  LClassPrefix, LParams: string;
+begin
+  AIsMethod := AName.ToLower.StartsWith('get') or
+    AName.ToLower.StartsWith('set');
+  if not AIsMethod then
+  begin
+    Result := AName + ': ' + ATypeText + ';';
+    Exit;
+  end;
+  // A class property's accessors are class methods - anything else will not
+  // compile against it.
+  LClassPrefix := '';
+  if ATree.Nodes[AProp].Aux = 1 then
+    LClassPrefix := 'class ';
+  if SameText(AWord, 'read') then
+  begin
+    LParams := '';
+    if AIndexParams <> '' then
+      LParams := '(' + AIndexParams + ')';
+    Result := LClassPrefix + 'function ' + AName + LParams + ': ' +
+      ATypeText + ';';
+  end
+  else
+  begin
+    // The setter takes the index parameters FIRST and the new value last,
+    // which is the order the compiler passes them in.
+    LParams := 'const Value: ' + ATypeText;
+    if AIndexParams <> '' then
+      LParams := AIndexParams + '; ' + LParams;
+    Result := LClassPrefix + 'procedure ' + AName + '(' + LParams + ');';
+  end;
+end;
+
+{ The leading whitespace of the line a token sits on - so generated members
+  line up with the ones already there instead of with a guess. }
+function IndentOfToken(const ATree: TPasTree; AVisIdx: Integer): string;
+var
+  LVis: TPasVisibleToken;
+  LLine, LCol, LIdx: Integer;
+  LText: string;
+begin
+  Result := '';
+  if (AVisIdx < 0) or (AVisIdx > High(ATree.Source.Visible)) then
+    Exit;
+  LVis := ATree.Source.Visible[AVisIdx];
+  with ATree.Source.Files[LVis.FileId] do
+  begin
+    OffsetToLineCol(Tokens[LVis.TokenIndex].Start, LLine, LCol);
+    LText := LineText(LLine);
+  end;
+  for LIdx := 1 to Length(LText) do
+    if CharInSet(LText[LIdx], [' ', #9]) then
+      Result := Result + LText[LIdx]
+    else
+      Break;
+end;
+
+{ Where new members go: the END of the type's `private` section when it has
+  one, and a new `private` section right before the type's `end` when it does
+  not. ANeedsSection says which of the two happened, because the text differs
+  (the second has to write the section header and re-indent the `end`). }
+function MemberInsertPos(const ATree: TPasTree; ATypeNode: Integer;
+  out ALine, ACol: Integer; out AIndent: string;
+  out ANeedsSection: Boolean): Boolean;
+var
+  LChild, LLevel, LAnchor, LVisIdx: Integer;
+  LVis: TPasVisibleToken;
+begin
+  Result := False;
+  ANeedsSection := True;
+  LAnchor := NIL_NODE;
+  LLevel := 0;
+  LChild := ATree.Nodes[ATypeNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if ATree.Nodes[LChild].Kind = nkVisibility then
+      LLevel := ATree.Nodes[LChild].Aux      // 1 = private (the parser's map)
+    else if LLevel = 1 then
+      LAnchor := LChild;                     // last member of a private run
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+  if LAnchor <> NIL_NODE then
+  begin
+    ANeedsSection := False;
+    LVisIdx := ATree.Nodes[LAnchor].LastToken;
+    AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LAnchor));
+  end
+  else
+  begin
+    // No private section: land right before the type's `end`, whose own
+    // indentation is what the new section header should use.
+    LVisIdx := ATree.Nodes[ATypeNode].LastToken;
+    AIndent := IndentOfToken(ATree, LVisIdx);
+  end;
+  if (LVisIdx < 0) or (LVisIdx > High(ATree.Source.Visible)) then
+    Exit;
+  LVis := ATree.Source.Visible[LVisIdx];
+  with ATree.Source.Files[LVis.FileId] do
+    if ANeedsSection then
+      // At the `end` token itself: the text goes in front of it.
+      OffsetToLineCol(Tokens[LVis.TokenIndex].Start, ALine, ACol)
+    else
+      OffsetToLineCol(Tokens[LVis.TokenIndex].EndPos, ALine, ACol);
+  Result := True;
+end;
+
+{ Every line of AText prefixed with AIndent - generated members have to line
+  up with the ones already in the type. }
+function IndentLines(const AText, AIndent: string): string;
+var
+  LLines: TArray<string>;
+  LIdx: Integer;
+begin
+  Result := '';
+  LLines := AText.Split([sLineBreak]);
+  for LIdx := 0 to High(LLines) do
+  begin
+    if LIdx > 0 then
+      Result := Result + sLineBreak;
+    Result := Result + AIndent + LLines[LIdx];
+  end;
+end;
+
+{ A generated member declaration as its IMPLEMENTATION header: the same text
+  with the type name spliced in front of the routine name. One source for
+  both, so a generated declaration and its generated body cannot disagree. }
+function AccessorImplHeader(const ADecl, AChain: string): string;
+var
+  LHead, LRest: string;
+  LSpace: Integer;
+begin
+  LRest := ADecl;
+  LHead := '';
+  // `class ` is a word of its own in front of the routine keyword.
+  if LRest.ToLower.StartsWith('class ') then
+  begin
+    LHead := Copy(LRest, 1, 6);
+    LRest := Copy(LRest, 7, MaxInt);
+  end;
+  LSpace := Pos(' ', LRest);
+  if LSpace = 0 then
+    Exit(ADecl);
+  LHead := LHead + Copy(LRest, 1, LSpace);        // 'function ' / 'procedure '
+  LRest := Copy(LRest, LSpace + 1, MaxInt);       // 'GetFoo: TBar;'
+  Result := LHead + AChain + '.' + LRest;
+end;
+
+{ How many lines the edits positioned strictly BEFORE ALine insert. The caret
+  is a position in the finished text, and every one of those pushes it down. }
+function InsertedLinesBefore(const AEdits: TArray<TLspClassEdit>;
+  ALine: Integer): Integer;
+var
+  LIdx, LChar: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to High(AEdits) do
+    if AEdits[LIdx].Line < ALine then
+      for LChar := 1 to Length(AEdits[LIdx].Text) do
+        if AEdits[LIdx].Text[LChar] = #10 then
+          Inc(Result);
+end;
+
 { The point to insert bodies at: just past the last token of the
   implementation section, so new routines land after the existing ones and
   before `initialization`/`finalization`/`end.`. }
@@ -586,6 +875,13 @@ var
   LText: string;
   LDots, LCount: Integer;
   LSegments: TArray<string>;
+  // ---- the property-accessor pass
+  LTypeName, LMemberText, LPropType, LIndexParams, LWord, LAccessor,
+    LIndent: string;
+  LProp, LSpec, LTarget: Integer;
+  LMembers: TDictionary<string, Boolean>;
+  LIsMethod, LNeedsSection: Boolean;
+  LMemberEdits: TArray<TLspClassEdit>;
 begin
   Result := Default(TLspClassCompleteAnswer);
   Result.Provider := 'pastree/classComplete';
@@ -625,6 +921,7 @@ begin
       if LChain <> '' then
         LCand.Name := LChain + '.' + LName;
       LCand.OrderTok := ATree.NodeLeftmostVis(LIdx);
+      LCand.Seq := LDecls.Count;
       if LChain = '' then
         LCand.Header := BuildHeader(ATree, LIdx, LNameFirst, LNameLast, '')
       else
@@ -635,12 +932,120 @@ begin
       LDecls.Add(LCand);
     end;
 
+    { PROPERTY ACCESSORS. A second kind of edit, and the half the user called
+      the one that is really missing: `read GetFoo` with no GetFoo declares
+      the method (and gets a body like any other), `read FFoo` with no FFoo
+      declares the field. Each type gets ONE member edit carrying everything
+      planned for it, so its private section is touched once. }
+    for LIdx := 0 to High(ATree.Nodes) do
+    begin
+      if not (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
+        nkObjectType, nkHelperType]) then
+        Continue;
+      LTypeName := TypeNameOf(ATree, LIdx);
+      if LTypeName = '' then
+        Continue;   // an anonymous/inline type has no implementation to write
+      LChain := TypeChain(ATree, LIdx, LSkip);
+      if LSkip then
+        Continue;
+      if LChain <> '' then
+        LChain := LChain + '.' + LTypeName
+      else
+        LChain := LTypeName;
+      LMembers := TDictionary<string, Boolean>.Create;
+      try
+        CollectMemberNames(ATree, LIdx, LMembers);
+        LMemberText := '';
+        LProp := ATree.Nodes[LIdx].FirstChild;
+        while LProp <> NIL_NODE do
+        begin
+          if ATree.Nodes[LProp].Kind <> nkPropertyDecl then
+          begin
+            LProp := ATree.Nodes[LProp].NextSibling;
+            Continue;
+          end;
+          LPropType := PropertyTypeText(ATree, LProp);
+          LIndexParams := PropertyIndexParams(ATree, LProp);
+          LSpec := ATree.Nodes[LProp].FirstChild;
+          while LSpec <> NIL_NODE do
+          begin
+            if (ATree.Nodes[LSpec].Kind = nkPropSpec) and (LPropType <> '') then
+            begin
+              LWord := ATree.NodeText(LSpec);
+              LTarget := ChildOfKind(ATree, LSpec, nkIdent);
+              if (SameText(LWord, 'read') or SameText(LWord, 'write')) and
+                 (LTarget <> NIL_NODE) then
+              begin
+                LName := Flatten(ATree.NodeSpanText(LTarget));
+                // A dotted specifier (`read FInner.Value`) names something
+                // that is not this type's to declare.
+                if (Pos('.', LName) = 0) and
+                   not LMembers.ContainsKey(LowerCase(LName)) then
+                begin
+                  // Claimed immediately: two properties may share an
+                  // accessor, and it is declared once.
+                  LMembers.AddOrSetValue(LowerCase(LName), True);
+                  LAccessor := AccessorDecl(ATree, LProp, LName, LWord,
+                    LPropType, LIndexParams, LIsMethod);
+                  if LMemberText <> '' then
+                    LMemberText := LMemberText + sLineBreak;
+                  LMemberText := LMemberText + LAccessor;
+                  if LIsMethod then
+                  begin
+                    // The generated method needs a body like any other
+                    // declaration - ordered where the property sits.
+                    LCand := Default(TDeclCandidate);
+                    LCand.Key := MakeKey(LChain, LName, '');
+                    LCand.Name := LChain + '.' + LName;
+                    LCand.OrderTok := ATree.NodeLeftmostVis(LProp);
+                    LCand.Seq := LDecls.Count;
+                    // The member text minus its trailing ';' is the header,
+                    // with the type spliced in - one source for both, so the
+                    // declaration and its body can never disagree.
+                    LCand.Header := AccessorImplHeader(LAccessor, LChain);
+                    LDecls.Add(LCand);
+                  end;
+                end;
+              end;
+            end;
+            LSpec := ATree.Nodes[LSpec].NextSibling;
+          end;
+          LProp := ATree.Nodes[LProp].NextSibling;
+        end;
+        if LMemberText = '' then
+          Continue;
+        if not MemberInsertPos(ATree, LIdx, LLine, LCol, LIndent,
+          LNeedsSection) then
+          Continue;
+        LEdit := Default(TLspClassEdit);
+        LEdit.Line := LLine;
+        LEdit.Col := LCol;
+        LEdit.Kind := 'member';
+        LEdit.Name := LChain;
+        if LNeedsSection then
+          // Before the type's `end`: write the section, the members, then the
+          // indentation the `end` had, since we are standing on its column.
+          LEdit.Text := 'private' + sLineBreak +
+            IndentLines(LMemberText, LIndent + '  ') + sLineBreak + LIndent
+        else
+          // After the last private member: a line break puts us on a fresh
+          // line, and that line needs the same indent as its neighbours.
+          LEdit.Text := sLineBreak +
+            IndentLines(LMemberText, LIndent);
+        LMemberEdits := LMemberEdits + [LEdit];
+      finally
+        LMembers.Free;
+      end;
+    end;
+
     // Declaration order is source order, and the arena is not in source
     // order (leaves are allocated first) - so sort by the first token.
     LDecls.Sort(TComparer<TDeclCandidate>.Construct(
       function(const A, B: TDeclCandidate): Integer
       begin
         Result := A.OrderTok - B.OrderTok;
+        if Result = 0 then
+          Result := A.Seq - B.Seq;
       end));
 
     LText := '';
@@ -670,30 +1075,51 @@ begin
         LName := LName + ', ' + LDecls[LIdx].Name;
     end;
 
-    if LText = '' then
+    if (LText = '') and (Length(LMemberEdits) = 0) then
     begin
       Result.Provider := 'pastree/classComplete: nothing to implement';
       Exit;
     end;
-    if not ImplInsertPos(ATree, LLine, LCol) then
+    Result.Edits := LMemberEdits;
+    if LText <> '' then
     begin
-      Result.Provider :=
-        'pastree/classComplete: no implementation section to insert into';
-      Exit;
-    end;
-    LEdit.Line := LLine;
-    LEdit.Col := LCol;
-    LEdit.Text := LText;
-    LEdit.Kind := 'body';
-    LEdit.Name := LName;
-    Result.Edits := [LEdit];
-    // The caret goes on the indented empty line of the FIRST body. Counting
-    // from the insertion point's own line L: the first break ends L, so L+1 is
-    // the blank separator, L+2 the header, L+3 `begin`, L+4 the body line.
-    Result.CaretLine := LLine + 4;
-    Result.CaretCol := 3;
-    Result.Provider := Format('pastree/classComplete: %d to implement',
-      [LCount]);
+      if not ImplInsertPos(ATree, LLine, LCol) then
+      begin
+        Result.Provider :=
+          'pastree/classComplete: no implementation section to insert into';
+        Exit;
+      end;
+      LEdit := Default(TLspClassEdit);
+      LEdit.Line := LLine;
+      LEdit.Col := LCol;
+      LEdit.Text := LText;
+      LEdit.Kind := 'body';
+      LEdit.Name := LName;
+      Result.Edits := Result.Edits + [LEdit];
+      // The caret goes on the indented empty line of the FIRST body. From the
+      // insertion point's own line L: the first break ends L, L+1 is the blank
+      // separator, L+2 the header, L+3 `begin`, L+4 the body line. Plus every
+      // line the MEMBER edits insert above it - they are applied too, and the
+      // caret is a position in the finished text.
+      Result.CaretLine := LLine + 4 + InsertedLinesBefore(Result.Edits, LLine);
+      Result.CaretCol := 3;
+    end
+    else
+      // Members only (a property whose accessors are all fields): the caret
+      // has nowhere better to be than where the user left it.
+      Result.CaretLine := 0;
+    // Ascending by position, which is the order an edit writer can apply.
+    TArray.Sort<TLspClassEdit>(Result.Edits,
+      TComparer<TLspClassEdit>.Construct(
+        function(const A, B: TLspClassEdit): Integer
+        begin
+          Result := A.Line - B.Line;
+          if Result = 0 then
+            Result := A.Col - B.Col;
+        end));
+    Result.Provider := Format(
+      'pastree/classComplete: %d to implement, %d member edit(s)',
+      [LCount, Length(LMemberEdits)]);
   finally
     LDecls.Free;
     LImpls.Free;

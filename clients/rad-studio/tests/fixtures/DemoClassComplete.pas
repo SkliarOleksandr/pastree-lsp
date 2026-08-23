@@ -46,6 +46,25 @@ type
     procedure Push(const AItem: T);
   end;
 
+  { Property accessors - the second half of class completion. Rule: a
+    specifier name starting with Get/Set is a METHOD, anything else is a
+    FIELD. }
+  TProps = class
+  private
+    FKnown: Integer;
+    function GetKnown: Integer;
+  public
+    { Both accessors exist: nothing to generate for this one. }
+    property Known: Integer read GetKnown write FKnown;
+    { Neither exists: a getter and a setter, declared and implemented. }
+    property Missing: string read GetMissing write SetMissing;
+    { Not Get/Set-shaped, so a FIELD - no body for this one. }
+    property Backed: Integer read FBacked;
+    { Indexed: the index parameters ride into both accessors, the setter's
+      value last. }
+    property Items[Index: Integer]: string read GetItem write SetItem;
+  end;
+
 procedure FreeRoutine(AValue: Integer);
 
 implementation
@@ -62,6 +81,11 @@ end;
 function TBase.Defaulted(A: Integer; const S: string): Integer;
 begin
   Result := A;
+end;
+
+function TProps.GetKnown: Integer;
+begin
+  Result := FKnown;
 end;
 
 end.

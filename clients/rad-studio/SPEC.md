@@ -643,11 +643,23 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    order, caret on the first empty body line. `PasTreeIdePlugin.ClassComplete`
    is the binding; `krHandled` unconditionally, so a decline can never fall
    through to the native one behind the user's back.
-   **Still to come: property accessors** — `read GetFoo`/`write SetFoo` with
-   no such method, and `read FFoo` with no such field, are what the user
-   called the part that is really missing. That is a second edit KIND (into
-   the class declaration), which is why the answer already carries a list of
-   edits and the client already applies them bottom-up.
+   **Property accessors — DELIVERED 2026-08-23**, the part the user called
+   the one that is really missing. A `read`/`write` specifier naming
+   something the type does not declare becomes a member edit into the type's
+   `private` section (a new one right before its `end` when there is none),
+   and the RULE for which kind is ours, stated so it is predictable from the
+   name alone: **`Get`/`Set` prefix means a method, anything else means a
+   field.** So `read GetFoo` declares `function GetFoo: T;` plus a body,
+   `read FFoo` declares the field and nothing else. Indexed properties pass
+   their index parameters into both accessors, the setter's `const Value`
+   last; a `class property` gets `class` accessors; a dotted specifier
+   (`read FInner.Value`) is nobody's to declare and is left alone.
+
+   One edit per PLACE, never per routine: all bodies in one insertion, each
+   type's members in one more. Which is why the answer is a list, sorted
+   ascending — the writer applies them in that order (see the client's
+   ApplyClassComplete), and the caret's line is corrected for the lines the
+   member edits add above it.
 
    The original entry, for the reasoning that has not changed: the native one
    is not gated
