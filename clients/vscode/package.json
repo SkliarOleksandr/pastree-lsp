@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -43,6 +43,11 @@
           "type": "string",
           "default": "",
           "description": "Server log file path (empty = no file logging)"
+        },
+        "pastree.logUnits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log one line per unit in the analysis closure (which file won for each unit name). Verbose - hundreds of lines per rebuild - so it is off unless you are chasing a search-path problem."
         },
         "pastree.searchPaths": {
           "type": "array",

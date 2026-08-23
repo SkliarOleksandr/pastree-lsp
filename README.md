@@ -144,13 +144,20 @@ both halves at once.
 ## What the log contains
 
 `PASTREE_LSP_LOG`, or the `logFile` initializationOption (which wins). Per
-completed analysis it writes the **parse record**: every unit in the closure
-with the full path of the file that was picked for it, and every diagnostic -
-not only the open documents' (those are what `publishDiagnostics` sends, which
-is the right scope for squiggles and the wrong one for debugging: an `F1027` on
-a unit nobody has open is exactly what breaks navigation in the file they do
-have open). The configuration block lists the search paths themselves, not just
-how many.
+completed analysis it writes the **parse record**: the closure's unit count and
+every diagnostic with the full path of the unit it belongs to - not only the
+open documents' (those are what `publishDiagnostics` sends, which is the right
+scope for squiggles and the wrong one for debugging: an `F1027` on a unit
+nobody has open is exactly what breaks navigation in the file they do have
+open). The configuration block lists the search paths themselves, not just how
+many.
+
+The full **unit inventory** - one `unit x <- path` line per unit, which answers
+"which of several copies on the search path won for this name?" - is off by
+default: it is a few hundred lines per rebuild (3757 on the reference project)
+and it buries everything else. Turn it on with `logUnits` in the
+initializationOptions (`pastree.logUnits` in the VS Code client) or
+`PASTREE_LSP_LOG_UNITS=1` in the environment, for the one question it answers.
 
 Every navigation line names **both ends**, prefixed by the LSP method exactly as
 it arrived on the wire:

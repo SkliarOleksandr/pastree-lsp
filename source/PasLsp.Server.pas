@@ -61,6 +61,9 @@ type
     FExitRequested: Boolean;
     FExitCode: Integer;
     FTrace: Boolean;
+    // Log one line per unit in the closure? Off by default - see
+    // LogParseRecord's header for what stays on regardless.
+    FLogUnits: Boolean;
     FLogPath: string;
     FLogStarted: Boolean;
     FDocs: TLspDocumentStore;
@@ -184,6 +187,7 @@ begin
   FOutgoing := TList<string>.Create;
   FPlatform := pfWin64;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
+  FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
   FLogPath := GetEnvironmentVariable('PASTREE_LSP_LOG');
 end;
 
@@ -322,6 +326,11 @@ begin
     LItem := AOptions.GetValue<string>('logFile', '');
     if LItem <> '' then
       FLogPath := LItem;   // beats PASTREE_LSP_LOG: per-workspace over global
+    // The closure inventory: verbose enough to bury the rest of the log, so a
+    // client asks for it explicitly (the environment variable stays as the
+    // no-client escape hatch).
+    if AOptions.GetValue<Boolean>('logUnits', False) then
+      FLogUnits := True;
   end;
 
   // FIRST line of the run, before anything that could go wrong: a log whose
@@ -543,10 +552,16 @@ end;
       and the wrong one for debugging, because an F1027 on a unit nobody has
       open is precisely what breaks navigation in the file they do have open.
 
-  Volume is the point rather than a cost: a healthy fully-pathed project logs
-  ~200 unit lines and no diagnostics, and the run that made this feature
-  necessary logged 304 F1027s. Written with LogBlock, so it is one file
-  write. }
+  THE PER-UNIT LINES ARE OFF BY DEFAULT since 2026-08-23, at the user's call:
+  on a real project they are ~200 (3757 on the reference one) lines of "unit x
+  <- path" per rebuild, and a log nobody can skim is a log nobody reads. What
+  stays unconditional is everything that reports a PROBLEM - the unit count,
+  every diagnostic with its position, and the units that could not be loaded -
+  so the log still answers "is the analysis healthy" on its own. Turn the
+  inventory back on for the one question it exists for ("which file won for
+  this unit name?") with the `logUnits` initialization option, or
+  PASTREE_LSP_LOG_UNITS=1 in the environment for a session where no client
+  passes options. Both are read once, at initialize. }
 procedure TLspServer.LogParseRecord;
 var
   LLines: TArray<string>;
@@ -563,11 +578,15 @@ begin
     LModel := FProject.Model(LMi);
     Inc(LTotal, Length(LModel.Diags));
     // The FULL path, not the file name: which of several copies on the search
-    // path won is exactly the thing this line exists to answer.
-    LLines := LLines + [Format('  unit %s <- %s%s',
-      [LModel.UnitNameLower, FProject.ModelFile(LMi),
-       IfThen(Length(LModel.Diags) = 0, '',
-         Format(' (%d diagnostics)', [Length(LModel.Diags)]))])];
+    // path won is exactly the thing this line exists to answer. Logged for
+    // EVERY unit only when asked (see the header); a unit that has
+    // diagnostics is logged either way, because the position lines under it
+    // are meaningless without knowing which file they are in.
+    if FLogUnits or (Length(LModel.Diags) > 0) then
+      LLines := LLines + [Format('  unit %s <- %s%s',
+        [LModel.UnitNameLower, FProject.ModelFile(LMi),
+         IfThen(Length(LModel.Diags) = 0, '',
+           Format(' (%d diagnostics)', [Length(LModel.Diags)]))])];
     for LDi := 0 to High(LModel.Diags) do
     begin
       // FileId indexes the model's own file table, so a diagnostic raised

@@ -49,6 +49,7 @@ function activate(context) {
       platform: cfg.get('platform') || 'Win64',
       config: cfg.get('config') || '',
       logFile: cfg.get('logFile') || '',
+      logUnits: cfg.get('logUnits') || false,
       searchPaths: cfg.get('searchPaths') || [],
       defines: cfg.get('defines') || [],
     },

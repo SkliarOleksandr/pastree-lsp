@@ -117,11 +117,17 @@ carries no debug-only directives).
 
 The editor only ever says `no identifier/declaration resolved at cursor`. The
 real reason is in **`pastree-lsp.log`, in the same folder as the `.dproj` being
-analyzed** (stderr beside it). It carries the search paths, every unit in the
-closure with the full path of the file chosen for it, every diagnostic, and both
-ends of every navigation. Read it before suspecting the resolver — the last two
-failures of this kind were a search-path problem and a stale binary, neither of
-which was visible from the editor.
+analyzed** (stderr beside it). It carries the search paths, every diagnostic
+with the unit it belongs to, and both ends of every navigation. Read it before
+suspecting the resolver — the last two failures of this kind were a
+search-path problem and a stale binary, neither of which was visible from the
+editor.
+
+**For a search-path problem specifically, turn the unit inventory on** —
+`logUnits` in the initializationOptions (`pastree.logUnits` in VS Code) or
+`PASTREE_LSP_LOG_UNITS=1`. It logs one `unit x <- path` line per unit, which is
+the only thing that answers "which of several copies on the search path won?",
+and it is off by default because it is hundreds of lines per rebuild.
 
 ## The package's one hard invariant
 
