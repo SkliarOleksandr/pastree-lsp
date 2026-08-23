@@ -21,12 +21,11 @@ unit PasTreeIdePlugin.ClassComplete;
   tell which one just ran. The answer always comes back through the Build tab
   instead, including "nothing to implement".
 
-  APPLYING THE EDITS. Backward, bottom edit first: an insertion moves every
-  position after it, and the server sends positions in the pre-edit
-  coordinates of one snapshot. EditPosition.InsertText is what does the
-  writing (it is undoable and it is what the auto-parenthesis path already
-  uses); the caret then goes where the server said, which is the empty body
-  line of the first generated routine.
+  APPLYING THE EDITS goes through an UNDOABLE EDIT WRITER, in ascending
+  position order - see ApplyClassComplete for why the editor's own InsertText
+  is the wrong tool here (auto-indent) and why ascending is the only order a
+  writer allows. The caret then goes where the server said, which is the empty
+  body line of the first generated routine.
 }
 
 interface
@@ -79,24 +78,46 @@ procedure ApplyClassComplete(const AView: IOTAEditView;
   const AAnswer: TLspClassComplete);
 var
   LIdx: Integer;
+  LWriter: IOTAEditWriter;
+  LCharPos: TOTACharPos;
   LPos: IOTAEditPosition;
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) then
     Exit;
-  LPos := AView.Buffer.EditPosition;
-  if not Assigned(LPos) then
+  { AN EDIT WRITER, NOT EditPosition.InsertText - and the first live run is why
+    (2026-08-23). InsertText goes through the EDITOR, which applies auto-indent
+    to every line it receives: the generated bodies came out with `end;`
+    indented two spaces under `begin`, and each further stub two more, because
+    each inserted line inherited the previous one's indent. A writer writes the
+    text as given, which is the only way generated code can look like what the
+    generator decided.
+
+    A writer also cannot move BACKWARD, so the edits are applied in ASCENDING
+    order - which is the order the server sends them in, for exactly this
+    reason - with one CopyTo per edit walking the buffer forward. One writer
+    means one undo step for the whole completion, like the native one. }
+  LWriter := AView.Buffer.CreateUndoableWriter;
+  if not Assigned(LWriter) then
     Exit;
-  // BACKWARD: the positions are all from one pre-edit snapshot, so applying
-  // the last one first leaves the earlier ones still valid. (Forward would
-  // need every later position shifted by the text inserted before it - the
-  // same arithmetic, done by hand, with one place to get it wrong.)
-  for LIdx := High(AAnswer.Edits) downto 0 do
-  begin
-    LPos.Move(AAnswer.Edits[LIdx].Row, AAnswer.Edits[LIdx].Col);
-    LPos.InsertText(AAnswer.Edits[LIdx].Text);
+  try
+    for LIdx := 0 to High(AAnswer.Edits) do
+    begin
+      // Row/col to a buffer offset: the writer measures in characters from the
+      // start of the buffer, and the view is what knows the mapping.
+      LCharPos.Line := AAnswer.Edits[LIdx].Row;
+      LCharPos.CharIndex := AAnswer.Edits[LIdx].Col - 1;
+      LWriter.CopyTo(AView.CharPosToPos(LCharPos));
+      LWriter.Insert(UTF8String(AAnswer.Edits[LIdx].Text));
+    end;
+  finally
+    LWriter := nil;   // the writer commits on release
   end;
   if AAnswer.CaretRow > 0 then
-    LPos.Move(AAnswer.CaretRow, AAnswer.CaretCol);
+  begin
+    LPos := AView.Buffer.EditPosition;
+    if Assigned(LPos) then
+      LPos.Move(AAnswer.CaretRow, AAnswer.CaretCol);
+  end;
   // The insertion came from a keystroke with no visible cause; repaint now
   // rather than at the next natural refresh.
   AView.Paint;

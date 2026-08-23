@@ -51,10 +51,11 @@ type
     to insert AT (nothing is ever replaced or deleted - class completion only
     ever adds), and the caller inserts `Text` there verbatim, CRLF and all.
 
-    Edits come back ASCENDING by position. A client that inserts them must
-    therefore go BACKWARD - bottom edit first - or every position after the
-    first insertion is stale (and the IDE's undoable writer cannot move
-    backward anyway, see the Editing table in clients/rad-studio/SPEC.md). }
+    Edits come back ASCENDING by position, because that is the only order an
+    IDE edit writer can apply them in - it cannot move backward. A client
+    walking them forward with one writer gets one undo step and no
+    auto-indent; a client that inserts them one at a time through the editor
+    instead has to go BACKWARD, or every position after the first is stale. }
   TLspClassEdit = record
     Line: Integer;
     Col: Integer;
@@ -249,10 +250,68 @@ end;
   space-free. Names are deliberately NOT in the key - a user mid-edit may have
   renamed a parameter in one of the two places, and the honest reading of that
   is still "this routine is implemented". }
+{ One parameter's contribution to the key, from its SOURCE TEXT: the type,
+  once per name it declares. `const A, B: string = ''` -> `string;string;`.
+
+  Text, not node kinds, and that is the whole point. A parameter's children are
+  [attrs] name+ [type] [default], and the TYPE of `A: Integer` is an nkIdent
+  exactly like the name is - so "the first child that is not a name" reads
+  `Integer` as a second name and the DEFAULT VALUE as the type. That is not a
+  hypothetical: it made `function Bar(A: Integer; const S: string = '')` key
+  differently from its own implementation (which may not repeat the default),
+  and the first live run generated a duplicate body for a routine that had one
+  (2026-08-23). The colon is what separates names from type, and the `=` is
+  where the default starts; both are in the text and neither is in the kinds. }
+function ParamEntry(const AText: string): string;
+var
+  LIdx, LDepth, LColon, LEq, LNames: Integer;
+  LNamesText, LTypeText: string;
+begin
+  Result := '';
+  // Cut the default off first: it belongs to the declaration alone.
+  LDepth := 0;
+  LEq := 0;
+  LColon := 0;
+  for LIdx := 1 to Length(AText) do
+  begin
+    case AText[LIdx] of
+      '(', '[', '<': Inc(LDepth);
+      ')', ']', '>': Dec(LDepth);
+      ':':
+        if (LDepth = 0) and (LEq = 0) then
+          LColon := LIdx;   // the LAST top-level colon is the type separator
+      '=':
+        if (LDepth = 0) and (LEq = 0) then
+          LEq := LIdx;
+    end;
+  end;
+  if LEq > 0 then
+    LNamesText := Copy(AText, 1, LEq - 1)
+  else
+    LNamesText := AText;
+  if (LColon > 0) and (LColon <= Length(LNamesText)) then
+  begin
+    LTypeText := Copy(LNamesText, LColon + 1, MaxInt);
+    LNamesText := Copy(LNamesText, 1, LColon - 1);
+  end
+  else
+    LTypeText := '';   // an untyped `var X` - legal, and its own type
+  LTypeText := LowerCase(Flatten(LTypeText).Replace(' ', '', [rfReplaceAll]));
+  // One entry per NAME: `const A, B: string` is two arguments.
+  LNames := 1;
+  for LIdx := 1 to Length(LNamesText) do
+    if LNamesText[LIdx] = ',' then
+      Inc(LNames);
+  while LNames > 0 do
+  begin
+    Result := Result + LTypeText + ';';
+    Dec(LNames);
+  end;
+end;
+
 function ParamsKey(const ATree: TPasTree; ARoutine: Integer): string;
 var
-  LParams, LParam, LChild, LType, LNames: Integer;
-  LTypeText: string;
+  LParams, LParam: Integer;
 begin
   Result := '';
   LParams := ChildOfKind(ATree, ARoutine, nkParams);
@@ -262,36 +321,71 @@ begin
   while LParam <> NIL_NODE do
   begin
     if ATree.Nodes[LParam].Kind = nkParam then
-    begin
-      // Children: [attrs] name+ [type] [default]. The type is the first child
-      // that is neither a name nor an attribute group.
-      LNames := 0;
-      LType := NIL_NODE;
-      LChild := ATree.Nodes[LParam].FirstChild;
-      while LChild <> NIL_NODE do
-      begin
-        case ATree.Nodes[LChild].Kind of
-          nkIdent: Inc(LNames);
-          nkAttrGroup: ;
-        else
-          if LType = NIL_NODE then
-            LType := LChild;
-        end;
-        LChild := ATree.Nodes[LChild].NextSibling;
-      end;
-      LTypeText := '';
-      if LType <> NIL_NODE then
-        LTypeText := LowerCase(Flatten(ATree.NodeSpanText(LType)).Replace(' ',
-          '', [rfReplaceAll]));
-      if LNames = 0 then
-        LNames := 1;   // a nameless (erroneous) parameter still takes a slot
-      while LNames > 0 do
-      begin
-        Result := Result + LTypeText + ';';
-        Dec(LNames);
-      end;
-    end;
+      Result := Result + ParamEntry(ATree.NodeSpanText(LParam));
     LParam := ATree.Nodes[LParam].NextSibling;
+  end;
+end;
+
+{ The parameter list as the IMPLEMENTATION must write it: the declaration's
+  own text with every default value removed. Delphi requires the defaults to
+  appear in the interface ONLY (E2226), so copying the declaration verbatim -
+  as the first version did - produces a header that does not compile. }
+function StripDefaults(const AText: string): string;
+var
+  LIdx, LDepth: Integer;
+  LSkipping: Boolean;
+  LQuote: Boolean;
+begin
+  Result := '';
+  LDepth := 0;
+  LSkipping := False;
+  LQuote := False;
+  for LIdx := 1 to Length(AText) do
+  begin
+    if LQuote then
+    begin
+      // Inside a string literal nothing is punctuation - a default of ');'
+      // must not be read as the end of the parameter list.
+      if not LSkipping then
+        Result := Result + AText[LIdx];
+      if AText[LIdx] = '''' then
+        LQuote := False;
+      Continue;
+    end;
+    case AText[LIdx] of
+      '''':
+        begin
+          LQuote := True;
+          if not LSkipping then
+            Result := Result + AText[LIdx];
+          Continue;
+        end;
+      '(', '[':
+        Inc(LDepth);
+      ')', ']':
+        begin
+          Dec(LDepth);
+          LSkipping := False;   // the parameter ended with its list
+        end;
+      ';', ',':
+        LSkipping := False;     // the next parameter starts
+      '=':
+        if LDepth > 0 then
+        begin
+          LSkipping := True;
+          Continue;
+        end;
+    end;
+    if not LSkipping then
+    begin
+      // `A: Integer = 7` loses its default and would keep the space in front
+      // of it: `(A: Integer )`. Nothing in a signature ever wants a space
+      // before a separator, so drop it as the separator goes in.
+      if CharInSet(AText[LIdx], [')', ']', ';', ',']) and
+         Result.EndsWith(' ') then
+        Result := Result.TrimRight;
+      Result := Result + AText[LIdx];
+    end;
   end;
 end;
 
@@ -446,7 +540,7 @@ begin
   end;
   LTail := '';
   if LTailEnd > ANameLast then
-    LTail := Flatten(RawSpan(ATree, ANameLast + 1, LTailEnd));
+    LTail := StripDefaults(Flatten(RawSpan(ATree, ANameLast + 1, LTailEnd)));
   Result := LHead + AChain + Flatten(RawSpan(ATree, ANameFirst, ANameLast)) +
     LTail + ';' + LDirs;
 end;
@@ -561,6 +655,12 @@ begin
       // produce two bodies.
       LImpls.AddOrSetValue(LKey, True);
       // Blank line, header, begin, an indented empty line for the caret, end.
+      // The FIRST stub needs two line breaks, not one: the insertion point is
+      // at the END of the last existing line (just past its final token), so
+      // one break only terminates that line and the body would sit directly
+      // against the previous `end;` (first live run, 2026-08-23).
+      if LText = '' then
+        LText := sLineBreak;
       LText := LText + sLineBreak + LDecls[LIdx].Header + sLineBreak +
         'begin' + sLineBreak + '  ' + sLineBreak + 'end;' + sLineBreak;
       Inc(LCount);
@@ -587,10 +687,10 @@ begin
     LEdit.Kind := 'body';
     LEdit.Name := LName;
     Result.Edits := [LEdit];
-    // The caret goes on the indented empty line of the FIRST body: the insert
-    // point's line carries the blank separator, then the header, then `begin`,
-    // then that line.
-    Result.CaretLine := LLine + 3;
+    // The caret goes on the indented empty line of the FIRST body. Counting
+    // from the insertion point's own line L: the first break ends L, so L+1 is
+    // the blank separator, L+2 the header, L+3 `begin`, L+4 the body line.
+    Result.CaretLine := LLine + 4;
     Result.CaretCol := 3;
     Result.Provider := Format('pastree/classComplete: %d to implement',
       [LCount]);

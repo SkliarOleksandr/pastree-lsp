@@ -32,6 +32,14 @@ type
     class function Make: TBase; static;
     function Overloaded: Integer; overload;
     function Overloaded(A: Integer): Integer; overload;
+    { A DEFAULT VALUE, twice over. Implemented below WITHOUT the default (as
+      Delphi requires - E2226 says defaults live in the interface only), so
+      matching must ignore it: the first live run keyed the two differently
+      and generated a duplicate body. }
+    function Defaulted(A: Integer; const S: string = ''): Integer;
+    { And one that IS missing, so the generated header can be checked for the
+      default having been stripped out of it. }
+    procedure NeedsBody(A: Integer = 7);
   end;
 
   TStack<T> = class
@@ -49,6 +57,11 @@ end;
 function TBase.Overloaded: Integer;
 begin
   Result := 0;
+end;
+
+function TBase.Defaulted(A: Integer; const S: string): Integer;
+begin
+  Result := A;
 end;
 
 end.

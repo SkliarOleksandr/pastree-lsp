@@ -830,6 +830,17 @@ begin
     'an interface''s methods are not the unit''s to implement');
   Check(GOk and GResultJson.Contains('begin\r\n  \r\nend;'),
     'each body is begin/blank/end, with the blank line indented for the caret');
+  // Default values: the two rules that cost the first live run a duplicate
+  // body and an uncompilable header (2026-08-23).
+  Check(GOk and not GResultJson.Contains('Defaulted'),
+    'a defaulted parameter does not make an implemented routine look missing');
+  Check(GOk and GResultJson.Contains('procedure TBase.NeedsBody(A: Integer);'),
+    'and a generated header drops the default - E2226 keeps those in the '
+    + 'interface');
+  // The first body must be separated from the code above it, which needs TWO
+  // line breaks: the insertion point sits at the end of an existing line.
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nprocedure'),
+    'the first body opens with a blank line, not against the previous end');
 end;
 
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }

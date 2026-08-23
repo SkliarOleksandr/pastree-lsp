@@ -136,10 +136,11 @@ type
   end;
 
   /// <summary>
-  /// The answer to pastree/classComplete. Edits arrive ASCENDING by position
-  /// and must be applied BACKWARD, or the second insertion lands at a position
-  /// the first one has already moved. Count = 0 with Success is the ordinary
-  /// "everything is implemented already", and Provider says which it was.
+  /// The answer to pastree/classComplete. Edits arrive ASCENDING by position,
+  /// which is the order an IOTAEditWriter can apply them in - it cannot move
+  /// backward, and it is the tool to use here (see ApplyClassComplete). No
+  /// edits with Success is the ordinary "everything is implemented already",
+  /// and Provider says which it was.
   /// </summary>
   TLspClassComplete = record
     Edits: TArray<TLspClassEditIde>;
