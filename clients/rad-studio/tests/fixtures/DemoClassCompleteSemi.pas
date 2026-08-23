@@ -20,6 +20,17 @@ type
     property XX: Integer
   end;
 
+  { The same shape, but the bare property is the LAST member of its section -
+    so the member insertion, the specifiers and the semicolon all land at ONE
+    position, and the order between them is the whole test (an unstable sort
+    wrote `procedure SetYY(const Value: Integer); read GetYY write SetYY;` on
+    a live run, 2026-08-23). }
+  TLast = class
+  private
+    FB: Integer;
+    property YY: Integer
+  end;
+
 implementation
 
 procedure TSemi.Done;

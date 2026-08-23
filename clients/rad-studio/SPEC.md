@@ -627,8 +627,17 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    which it is on the first hover of a session (`[pastree] IOTAHelpInsight:
    ...` on the Build tab), so the next decision is made on a measurement
    rather than on the assumption.
-3. **Class completion (Ctrl+Shift+C), ours — MISSING BODIES DELIVERED
-   2026-08-23 (first live run pending).** `pastree/classComplete` (our
+3. **Class completion (Ctrl+Shift+C), ours — DELIVERED and VERIFIED LIVE
+   2026-08-23 (v0.13.0 → v0.15.2), on a 4000-line demo unit and a
+   22 000-line one in the user's own project.** Bodies, property accessors,
+   bare-property completion and interface properties all work; the user
+   confirmed each stage. What the live runs cost, and what they taught, is
+   the list at the end of this item — every one of the seven was a real
+   defect that no harness had a chance of catching, because each needed a
+   REAL buffer (a parameter with a default, a class method, a 22 000-line
+   file, a property as the last member of its section, an unfinished line).
+
+   `pastree/classComplete` (our
    request, not an LSP method — see the handler's comment for why not
    `codeAction`) parses the LIVE buffer and answers with the text that
    implements every declaration lacking a body: methods, and — the ask that
@@ -675,6 +684,50 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    why the answer is a list, sorted ascending — the writer applies them in
    that order (see the client's ApplyClassComplete), and the caret's line is
    corrected for the lines the earlier edits add above it.
+
+   **A BROKEN BUFFER GENERATES NOTHING, with one repair.** A generator that
+   works from a tree the parser had to guess at writes guesses: on a buffer
+   with `property XX: Integer` and no `;` yet, the unterminated property
+   swallowed the rest of the class, every implementation in the unit stopped
+   being one, and the answer was 1339 lines of bodies for methods that all
+   had them — two of them landing inside an unrelated routine. So any parse
+   diagnostic refuses the whole request and says which one it was. The single
+   exception is the missing semicolon itself, because it is the commonest
+   press of the key: up to three of them are WRITTEN (as `semi` edits), each
+   guessed at the parser's first complaint and each validated by a reparse —
+   a guess that did not work cannot produce a clean tree, which is what makes
+   guessing safe. Error tolerance is right for the reading features and wrong
+   for a generator; this is where that line sits.
+
+   **What the live runs taught, in order — do not re-derive these:**
+   1. A parameter's TYPE is an `nkIdent` exactly like its NAME, so a
+      decl-vs-impl key must come from the parameter's TEXT (the colon
+      separates names from type, `=` starts the default), never from node
+      kinds. Otherwise a defaulted parameter keys differently from its own
+      implementation and you get a duplicate body.
+   2. A generated implementation must NOT repeat a default value (E2226).
+   3. `class` is not inside the routine node's span — the parser consumes it
+      before opening the node and records `Aux = 1`.
+   4. A qualified name is a CHAIN of `nkIdent` segments, not one node; the
+      dot between them is the only thing that distinguishes another segment
+      from `function Foo: Integer`'s result type.
+   5. `EditPosition.InsertText` goes through the editor, which auto-indents
+      every line it is handed — generated code came out with creeping
+      indentation. Use an edit writer.
+   6. `CharPosToPos` answers about the buffer AS IT IS, so every edit offset
+      must be resolved BEFORE the first insertion; converting inside the
+      write loop pushed the bodies past the unit's own `end.`.
+   7. Several edits can share ONE position (a property that is the last
+      member of its section anchors all three there), and an unstable sort
+      then wrote `procedure SetXX(const Value: Integer); read GetXX write
+      SetXX;`. `CompareClassEdits` fixes the order: spec, semi, member, body.
+
+   **Still open on this feature:** implementing an INTERFACE a class declares
+   (`TFoo = class(TObject, IBar)` → stubs for every `IBar` method — the one
+   thing the native completion does that this does not, and it needs the
+   project model rather than the buffer); `class var` for a class property
+   whose accessor is a field; and harness coverage for a type with no
+   `private` section at all, a `record`, and `strict private`.
 
    The original entry, for the reasoning that has not changed: the native one
    is not gated

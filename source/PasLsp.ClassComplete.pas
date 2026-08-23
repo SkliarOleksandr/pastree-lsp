@@ -118,8 +118,8 @@ function MapColToOriginal(ALine, ACol: Integer;
   position the answer carries is in repaired coordinates, and the client
   applies everything to the ORIGINAL buffer, so each column has to lose the
   semicolons inserted before it on its own line. The repairs then join the
-  list, sorted last at an equal position - a property's `read X write Y` must
-  land in FRONT of the `;` that terminates it. }
+  list, and CompareClassEdits fixes the order where several land at ONE
+  position - which a bare property's three edits all do. }
 procedure MergeSemicolonRepairs(var AAnswer: TLspClassCompleteAnswer;
   const ARepairs: TArray<TLspClassEdit>);
 
@@ -910,6 +910,37 @@ begin
   Result := True;
 end;
 
+{ The order two edits go in when they are at the SAME position - and they can
+  be: a property that is the last member of its section anchors the member
+  insertion at its own end, which is exactly where its `read`/`write` and its
+  `;` go too. Left undefined (an unstable sort), that produced
+  `procedure SetXX(const Value: Integer); read GetXX write SetXX;` on a live
+  run (2026-08-23).
+
+  The order is the order the text has to read in: the specifiers belong inside
+  the declaration, the semicolon closes it, and only then can new members
+  follow. }
+function EditKindRank(const AKind: string): Integer;
+begin
+  if AKind = 'spec' then
+    Result := 0
+  else if AKind = 'semi' then
+    Result := 1
+  else if AKind = 'member' then
+    Result := 2
+  else
+    Result := 3;   // 'body' - a different place entirely
+end;
+
+function CompareClassEdits(const A, B: TLspClassEdit): Integer;
+begin
+  Result := A.Line - B.Line;
+  if Result = 0 then
+    Result := A.Col - B.Col;
+  if Result = 0 then
+    Result := EditKindRank(A.Kind) - EditKindRank(B.Kind);
+end;
+
 { Every line of AText prefixed with AIndent - generated members have to line
   up with the ones already in the type. }
 function IndentLines(const AText, AIndent: string): string;
@@ -1329,13 +1360,7 @@ begin
       Result.CaretLine := 0;
     // Ascending by position, which is the order an edit writer can apply.
     TArray.Sort<TLspClassEdit>(Result.Edits,
-      TComparer<TLspClassEdit>.Construct(
-        function(const A, B: TLspClassEdit): Integer
-        begin
-          Result := A.Line - B.Line;
-          if Result = 0 then
-            Result := A.Col - B.Col;
-        end));
+      TComparer<TLspClassEdit>.Construct(CompareClassEdits));
     Result.Provider := Format(
       'pastree/classComplete: %d to implement, %d member edit(s)',
       [LCount, Length(LMemberEdits)]);
@@ -1401,18 +1426,10 @@ begin
     Dec(AAnswer.Edits[LIdx].Col, LShift);
   end;
   AAnswer.Edits := AAnswer.Edits + ARepairs;
+  // CompareClassEdits fixes the order at an identical position - which the
+  // three edits of one bare property all share.
   TArray.Sort<TLspClassEdit>(AAnswer.Edits,
-    TComparer<TLspClassEdit>.Construct(
-      function(const A, B: TLspClassEdit): Integer
-      begin
-        Result := A.Line - B.Line;
-        if Result = 0 then
-          Result := A.Col - B.Col;
-        // At the SAME position the semicolon goes last: the specifiers it
-        // terminates have to be inside the statement, not after its end.
-        if Result = 0 then
-          Result := Ord(A.Kind = 'semi') - Ord(B.Kind = 'semi');
-      end));
+    TComparer<TLspClassEdit>.Construct(CompareClassEdits));
 end;
 
 end.

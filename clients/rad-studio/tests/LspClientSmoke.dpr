@@ -902,6 +902,7 @@ end;
 procedure TestClassCompleteBrokenBuffer;
 var
   LParams, LDoc: TJSONObject;
+  LAt: Integer;
 
   function AskAbout(const AFixture: string): Boolean;
   begin
@@ -926,6 +927,20 @@ begin
     'with bodies for the accessors it declared');
   Check(GOk and not GResultJson.Contains('TSemi.Done'),
     'and the one implemented method is still recognised as implemented');
+  // TLast's bare property is the LAST member of its section, so its three
+  // edits share one position and only their ORDER decides what the line reads
+  // as. Specifiers, then the semicolon that closes the declaration, then the
+  // new members - the array order IS the apply order.
+  // Positions RELATIVE to TLast's own specifier edit: the fixture has two
+  // semicolon repairs, and the first one belongs to the other class.
+  LAt := Pos(' read GetYY write SetYY', GResultJson);
+  Check(GOk and (LAt > 0) and (LAt < Pos('function GetYY: Integer;',
+    GResultJson)),
+    'at one position the specifiers go before the new members');
+  Check(GOk and (LAt > 0) and
+    (Pos('"newText":";"', GResultJson, LAt) <
+     Pos('function GetYY: Integer;', GResultJson)),
+    'and the semicolon closes the declaration before those members');
 
   Check(AskAbout('DemoClassCompleteBroken.pas'), 'answered for the broken one');
   Check(GOk and GResultJson.Contains('"count":0'),
