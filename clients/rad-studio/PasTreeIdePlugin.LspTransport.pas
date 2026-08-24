@@ -35,11 +35,14 @@ unit PasTreeIdePlugin.LspTransport;
   itself - no orphan after an IDE crash, no watchdog), and we can add a
   listening mode later if losing warm caches actually turns out to hurt.
 
-  STDERR goes to a FILE, not a pipe. The server logs diagnostics there, and
-  an undrained pipe would wedge the server the moment its 64 KB buffer
-  filled. A file needs no reader thread and survives a crash for reading
-  afterwards. Routing it into the Messages panel means switching this one
-  handle to a pipe plus a drain thread - a later step, not a redesign.
+  STDERR goes to a FILE, not a pipe - and since 2026-08-24 that file is THE
+  SERVER LOG itself, appended to alongside the server's own lines, or NUL when
+  no log is configured. A pipe is what it is not: an undrained one wedges the
+  server the moment its 64 KB buffer fills, so it would need a drain thread to
+  buy nothing. What the merge buys is that a server which writes to stderr and
+  dies before it can log anything now says so in the file people already read,
+  instead of in a pastree-lsp-stderr-<pid>.log nobody finds - one of which
+  used to be created per server start.
 
   THREADING. Send is for the main thread only. Frames arrive on the reader
   thread and are marshalled to the main thread via TThread.Queue, so the
@@ -137,11 +140,14 @@ type
     /// missing or the process cannot be started - nothing is left running.
     /// AOnFrame/AOnGone are invoked on the main thread.
     ///
-    /// AStdErrPath is where the child's stderr is appended. Pass '' for the
-    /// legacy per-process file under %TEMP% - callers that know a better home
-    /// (the plugin puts it next to the project, beside the server log) should
-    /// name one, because a %TEMP% file with a pid in its name is exactly the
-    /// diagnostic nobody finds when they need it.
+    /// AStdErrPath is the file the child's stderr is APPENDED to - the plugin
+    /// passes the server log itself, so the two halves of a failed start read
+    /// as one story in one place. Pass '' to DISCARD stderr (the handle goes
+    /// to NUL): no file is created, which is the right answer when there is
+    /// no log configured to merge it into. It used to be a per-process file
+    /// under %TEMP% instead, and that was wrong twice over - a pid in the
+    /// name is the diagnostic nobody finds, and the files accumulated one per
+    /// server start forever.
     /// </summary>
     constructor Create(const AExePath, AWorkDir: string;
       const AOnFrame: TLspFrameProc; const AOnGone: TLspGoneProc;
@@ -168,7 +174,8 @@ type
     function WaitForExit(ATimeoutMs: Cardinal): Boolean;
 
     /// <summary>
-    /// Where the child's stderr went, for diagnostics.
+    /// Where the child's stderr went, for diagnostics - the server log, or ''
+    /// when it was discarded to NUL.
     /// </summary>
     property StdErrPath: string read FStdErrPath;
     property ProcessId: DWORD read FProcessId;
@@ -455,6 +462,8 @@ constructor TLspConnection.Create(const AExePath, AWorkDir: string;
 var
   LChildIn, LChildOut: THandle;
   LSA: TSecurityAttributes;
+  LDisposition: DWORD;
+  LStdErrTarget: string;
 begin
   inherited Create;
   FOnFrame := AOnFrame;
@@ -476,27 +485,45 @@ begin
     CreatePipePair(FWriteEnd, LChildIn, False);   // child reads its stdin
     CreatePipePair(FReadEnd, LChildOut, True);    // child writes its stdout
 
-    // Child stderr: an append-mode file, shared for reading so it can be
-    // tailed live. FILE_APPEND_DATA rather than GENERIC_WRITE so concurrent
-    // servers cannot overwrite each other's lines.
-    // Append mode is what makes a single fixed name safe: two servers writing
-    // the same file interleave lines instead of truncating each other, so the
-    // caller-supplied path needs no pid in it.
+    // Child stderr: an append-mode handle on the caller's file - the server
+    // log, in the plugin - shared for reading AND writing, because the server
+    // process appends its own lines to that same file through its own handle.
+    // FILE_APPEND_DATA is what makes three writers safe rather than merely
+    // possible: the OS positions every write at the current end, so lines
+    // interleave whole instead of overwriting each other.
+    //
+    // NO PATH, NO FILE. With '' the handle goes to NUL and stderr is dropped:
+    // a server started with no log configured (the harnesses, an unsaved
+    // project) has nowhere to merge stderr into, and the alternative this
+    // replaces - one pastree-lsp-stderr-<pid>.log per start under %TEMP% -
+    // just littered.
+    // FStdErrPath stays '' in the discard case: it is what diagnostics show
+    // the user, and "nul" would read as a path they should go and look at.
     FStdErrPath := AStdErrPath;
     if FStdErrPath = '' then
-      FStdErrPath := TPath.Combine(TPath.GetTempPath,
-        Format('pastree-lsp-stderr-%d.log', [GetCurrentProcessId]));
-    if ExtractFilePath(FStdErrPath) <> '' then
-      ForceDirectories(ExtractFilePath(FStdErrPath));
+      LStdErrTarget := 'nul'
+    else
+    begin
+      LStdErrTarget := FStdErrPath;
+      if ExtractFilePath(FStdErrPath) <> '' then
+        ForceDirectories(ExtractFilePath(FStdErrPath));
+    end;
     LSA.nLength := SizeOf(LSA);
     LSA.lpSecurityDescriptor := nil;
     LSA.bInheritHandle := True;
-    FStdErrFile := CreateFile(PChar(FStdErrPath), FILE_APPEND_DATA,
-      FILE_SHARE_READ or FILE_SHARE_WRITE, @LSA, OPEN_ALWAYS,
+    // NUL is a device: it exists already, and OPEN_ALWAYS is not how one is
+    // opened. A real log gets OPEN_ALWAYS so the first server of a fresh
+    // project creates it.
+    if FStdErrPath = '' then
+      LDisposition := OPEN_EXISTING
+    else
+      LDisposition := OPEN_ALWAYS;
+    FStdErrFile := CreateFile(PChar(LStdErrTarget), FILE_APPEND_DATA,
+      FILE_SHARE_READ or FILE_SHARE_WRITE, @LSA, LDisposition,
       FILE_ATTRIBUTE_NORMAL, 0);
     if FStdErrFile = INVALID_HANDLE_VALUE then
-      raise ELspTransport.CreateFmt('cannot open stderr log %s (%d)',
-        [FStdErrPath, GetLastError]);
+      raise ELspTransport.CreateFmt('cannot open stderr target %s (%d)',
+        [LStdErrTarget, GetLastError]);
 
     Spawn(AExePath, AWorkDir, LChildIn, LChildOut);
   finally

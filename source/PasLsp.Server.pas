@@ -129,6 +129,7 @@ type
     FNextServerId: Integer;       // our own id space for server->client calls
     FProgressSeq: Integer;        // makes each token unique within a session
     FLastReportTick: UInt64;
+    procedure AppendLog(const AText: string);
     procedure Log(const AMsg: string);
     procedure LogBlock(const ALines: TArray<string>);
     procedure LogParseRecord;
@@ -231,6 +232,66 @@ end;
   swallowing stderr, which is exactly the situation a transport bug puts you
   in. Append per line, open/close each time: crash-safe, and the volume is
   a handful of lines per request. }
+{ ONE APPEND, SHARED WITH THE OTHER WRITERS OF THIS FILE.
+
+  Not TFile.AppendAllText any more, and the reason is not performance: that
+  opens the file denying write to everyone else, and this log now has two more
+  writers. The IDE package hands the CHILD's stderr an append handle on this
+  very file (so a server that dies before it can log anything still says why,
+  in the place people read), and the same package's crash recorder writes here
+  when the IDE itself faults. A deny-write open turns each of those into a
+  sharing violation.
+
+  FILE_APPEND_DATA with FILE_SHARE_READ or FILE_SHARE_WRITE is what makes that
+  safe rather than merely possible: a write through an append handle is atomic
+  against other appenders - the OS positions it at the current end - so lines
+  from three writers interleave whole, never halfway.
+
+  A collision still loses the race for the OPEN, which is what the retries are
+  for. Losing all of them drops ONE line and keeps the log; only a path that
+  cannot be opened at all (a bad directory, a denied share) turns logging off,
+  and only on the first attempt - a log that switches itself off mid-session
+  because a tail happened to hold the file is worse than no log at all, since
+  it looks exactly like a server that stopped working. }
+procedure TLspServer.AppendLog(const AText: string);
+const
+  cRetries = 20;
+  cRetryMs = 5;
+var
+  LFile: THandle;
+  LBytes: TBytes;
+  LWritten: DWORD;
+  LTry: Integer;
+begin
+  LFile := INVALID_HANDLE_VALUE;
+  for LTry := 1 to cRetries do
+  begin
+    LFile := CreateFile(PChar(FLogPath), FILE_APPEND_DATA,
+      FILE_SHARE_READ or FILE_SHARE_WRITE, nil, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL, 0);
+    if LFile <> INVALID_HANDLE_VALUE then
+      Break;
+    if GetLastError <> ERROR_SHARING_VIOLATION then
+    begin
+      // Unwritable, not busy. Only give up on the log if we never wrote to
+      // it - a path that worked and then broke is worth retrying next line.
+      if not FLogStarted then
+        FLogPath := '';
+      Exit;
+    end;
+    Sleep(cRetryMs);
+  end;
+  if LFile = INVALID_HANDLE_VALUE then
+    Exit;   // busy for 100 ms; drop the line, keep the log
+  try
+    LBytes := TEncoding.UTF8.GetBytes(AText);
+    if Length(LBytes) > 0 then
+      WriteFile(LFile, LBytes[0], Length(LBytes), LWritten, nil);
+  finally
+    CloseHandle(LFile);
+  end;
+end;
+
 procedure TLspServer.Log(const AMsg: string);
 var
   LLine: string;
@@ -241,20 +302,17 @@ begin
     Exit;
   LLine := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now) + ' ' + AMsg +
     sLineBreak;
-  try
-    if not FLogStarted then
-    begin
-      // Separator instead of truncation: successive runs stay in one file,
-      // and "which run is this" stays answerable.
-      TFile.AppendAllText(FLogPath,
-        StringOfChar('-', 64) + sLineBreak + LLine, TEncoding.UTF8);
-      FLogStarted := True;
-    end
-    else
-      TFile.AppendAllText(FLogPath, LLine, TEncoding.UTF8);
-  except
-    FLogPath := '';   // an unwritable log must not take the server down
+  if not FLogStarted then
+  begin
+    // Separator instead of truncation: successive runs stay in one file,
+    // and "which run is this" stays answerable.
+    LLine := StringOfChar('-', 64) + sLineBreak + LLine;
   end;
+  AppendLog(LLine);
+  // After the write, not before: AppendLog decides "unwritable path" by
+  // whether anything has ever been logged, and clears FLogPath if not.
+  if FLogPath <> '' then
+    FLogStarted := True;
 end;
 
 { Many lines, ONE file write.
@@ -284,18 +342,12 @@ begin
     end;
     if FLogPath = '' then
       Exit;
-    try
-      if not FLogStarted then
-      begin
-        TFile.AppendAllText(FLogPath,
-          StringOfChar('-', 64) + sLineBreak + LSB.ToString, TEncoding.UTF8);
-        FLogStarted := True;
-      end
-      else
-        TFile.AppendAllText(FLogPath, LSB.ToString, TEncoding.UTF8);
-    except
-      FLogPath := '';
-    end;
+    if not FLogStarted then
+      AppendLog(StringOfChar('-', 64) + sLineBreak + LSB.ToString)
+    else
+      AppendLog(LSB.ToString);
+    if FLogPath <> '' then
+      FLogStarted := True;
   finally
     LSB.Free;
   end;

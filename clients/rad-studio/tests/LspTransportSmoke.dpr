@@ -158,10 +158,20 @@ begin
   end;
 end;
 
+{ The harness names its own stderr file, and that is the only reason one
+  exists: the transport discards stderr when no path is given (no per-start
+  temp file, see its header), but a harness that cannot show what a dying
+  server said would be diagnosing blind. One fixed name, truncated per run. }
+function StdErrFile: string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath, 'pastree-lsp-smoke-stderr.log');
+end;
+
 function Connect(const AExe: string): TLspConnection;
 begin
   ResetState;
-  Result := TLspConnection.Create(AExe, ExtractFilePath(AExe), OnFrame, OnGone);
+  Result := TLspConnection.Create(AExe, ExtractFilePath(AExe), OnFrame, OnGone,
+    StdErrFile);
   Writeln(Format('  spawned pid %d, stderr -> %s',
     [Result.ProcessId, Result.StdErrPath]));
 end;
@@ -256,8 +266,7 @@ procedure DumpStdErr;
 var
   LPath, LLine: string;
 begin
-  LPath := TPath.Combine(TPath.GetTempPath,
-    Format('pastree-lsp-stderr-%d.log', [GetCurrentProcessId]));
+  LPath := StdErrFile;
   if not TFile.Exists(LPath) then
     Exit;
   Writeln;
@@ -275,6 +284,11 @@ begin
       GExe := TPath.GetFullPath(TPath.Combine(
         ExtractFilePath(ParamStr(0)), cDefaultExeRel));
     Writeln('server: ' + GExe);
+
+    // Truncated per run, not appended: the transport opens it in append mode,
+    // so without this the dump would show every previous run's output too.
+    if TFile.Exists(StdErrFile) then
+      TFile.Delete(StdErrFile);
 
     GFailures := 0;
     TestGraceful(GExe);

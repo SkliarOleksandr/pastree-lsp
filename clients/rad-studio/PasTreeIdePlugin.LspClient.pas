@@ -202,8 +202,11 @@ type
     /// <summary>True when a request can actually reach the server now.</summary>
     function IsReady: Boolean;
 
-    /// <summary>Where the server's stderr goes; '' if not running.</summary>
+    /// <summary>Where the server's stderr goes - the server log; '' if not
+    /// running, or if it is being discarded (no log configured).</summary>
     function StdErrPath: string;
+    /// <summary>The same, phrased for a diagnostic message.</summary>
+    function StdErrWhere: string;
 
     /// <summary>The server's process id, or 0 if none. For diagnostics.</summary>
     function ProcessId: Cardinal;
@@ -273,8 +276,6 @@ const
   cMaxRestartAttempts = 5;
   cBackoffBaseMs = 1000;
   cBackoffCapMs = 30000;
-  // Fixed name, next to the server log - see StdErrPathFor.
-  cStdErrLogName = 'pastree-lsp-stderr.log';
 
 function ServerExeOverride: string;
 begin
@@ -477,6 +478,16 @@ begin
     Result := '';
 end;
 
+{ StdErrPath as a diagnostic message says it: a path when there is one to go
+  and read, and words when there is not - '(stderr: )' in a message reads as a
+  bug in the message. }
+function TLspClient.StdErrWhere: string;
+begin
+  Result := StdErrPath;
+  if Result = '' then
+    Result := 'discarded - no log file configured';
+end;
+
 function TLspClient.ProcessId: Cardinal;
 begin
   if Assigned(FConn) then
@@ -507,15 +518,19 @@ begin
 end;
 
 /// <summary>
-/// Where to append the server's stderr, given the server log path we asked it
-/// to write: the same directory, fixed name. '' in, '' out - the transport then
-/// picks its own %TEMP% fallback.
+/// Where the server's stderr goes: INTO THE SERVER LOG ITSELF, not a file of
+/// its own. Both describe one server's life, and split across two files the
+/// interesting case - the server writing something to stderr and dying before
+/// it could log a line - reads as a log that stops for no reason.
+///
+/// It used to be a sibling file (pastree-lsp-stderr.log), and before that a
+/// per-process one under %TEMP%; the second of those accumulated a file per
+/// server start, which is what prompted this. '' in, '' out - the transport
+/// then discards stderr rather than inventing a path.
 /// </summary>
 function StdErrPathFor(const ALogFile: string): string;
 begin
-  if ALogFile = '' then
-    Exit('');
-  Result := TPath.Combine(ExtractFilePath(ALogFile), cStdErrLogName);
+  Result := ALogFile;
 end;
 
 function TLspClient.Connect: Boolean;
@@ -638,7 +653,7 @@ begin
     begin
       FGaveUpLogged := True;
       Log(Format('giving up on the server after %d attempts - fix the cause '
-        + 'and reload the package (stderr: %s)', [FAttempts, StdErrPath]));
+        + 'and reload the package (stderr: %s)', [FAttempts, StdErrWhere]));
     end;
     Exit(False);
   end;
@@ -1046,7 +1061,7 @@ begin
 
   FState := lcsFailed;
   Log(Format('server connection lost: %s (stderr: %s)',
-    [AReason, StdErrPath]));
+    [AReason, StdErrWhere]));
   FOutbox.Clear;
   FailAllPending('server connection lost: ' + AReason);
   // FConn is deliberately NOT freed here - see EnsureStarted for why.
