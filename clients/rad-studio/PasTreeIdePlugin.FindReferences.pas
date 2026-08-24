@@ -61,7 +61,8 @@ procedure FinalizeFindReferencesMessageGroup;
 implementation
 
 uses
-  System.SysUtils, System.Character, System.Generics.Collections, Vcl.Dialogs,
+  System.SysUtils, System.Character, System.Generics.Collections,
+  Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession;
 
 const
@@ -85,12 +86,40 @@ begin
   Result := GMessageGroup;
 end;
 
+{ NOT AT IDE SHUTDOWN - this is the AV of 2026-08-22 and 2026-08-24, finally
+  located by the crash recorder (PasTreeIdePlugin.CrashLog) on the second one:
+
+    IDE ACCESS VIOLATION at coreide370.bpl + 3202A8, read of address 00000010
+      PasTreeIdePlugin.bpl -> PasTreeIdePlugin.FindReferences.pas:94
+      PasTreeIdePlugin.bpl -> PasTreeIdePlugin.Wizard.pas:369
+
+  i.e. RemoveMessageGroup, called from TIDEWizard.Destroy, faulting inside the
+  IDE. By the time a designtime package is unloaded as part of the IDE closing,
+  the Messages panel that owns the group is already torn down, and the removal
+  reads a field off something that is gone. Nothing about the group is wrong -
+  the same call during an ordinary package Uninstall works.
+
+  So the call is now conditional on the IDE NOT terminating, which is exactly
+  the distinction that matters: at shutdown the group dies with the panel and
+  removing it buys nothing, while during an uninstall-with-the-IDE-running it
+  is the difference between a clean reinstall and a stale tab. Application is
+  the IDE's own, and Terminated is set once its main form is closing.
+
+  The try/except is the belt to that braces, and deliberately silent: this runs
+  while the package is being unloaded, so there is no panel left to report to,
+  and an exception escaping a destructor here would take the IDE down over a
+  cosmetic cleanup. }
 procedure FinalizeFindReferencesMessageGroup;
 var
   LMessageServices: IOTAMessageServices;
 begin
-  if Assigned(GMessageGroup) and Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
-    LMessageServices.RemoveMessageGroup(GMessageGroup);
+  if Assigned(GMessageGroup) and not Application.Terminated and
+     Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    try
+      LMessageServices.RemoveMessageGroup(GMessageGroup);
+    except
+      // See above. The group is released either way by the line below.
+    end;
   GMessageGroup := nil;
 end;
 
