@@ -99,6 +99,24 @@ type
     // came back to what is already analyzed (an edit typed and undone).
     FBuiltSignature: string;
     FStartedSignature: string;
+    // The same two signatures split into their per-document parts: what tells
+    // a ONE-FILE edit (the incremental fast path) from any other change to
+    // the inputs - a document opened, closed, saved, or two edited at once.
+    FBuiltParts: TArray<string>;
+    FStartedParts: TArray<string>;
+    // INCREMENTAL REANALYSIS (PasTree's stage B). When the only thing that
+    // changed is the text of one already-analyzed unit, the in-flight session
+    // is a TPasAsyncSession.CreateForModule one over FModuleFile instead of a
+    // closure rebuild: tens of milliseconds against seconds. It may REFUSE
+    // (an interface change, and the rest of AnalyzeModuleOnly's guard list),
+    // and then the project comes back UNTOUCHED and we start the real
+    // rebuild with it as the parse donor.
+    FModuleMode: Boolean;
+    FModuleFile: string;
+    // Set for exactly the rebuild that follows a refusal: the inputs still
+    // look like a one-file edit, so without it the next StartAnalysis would
+    // hand the same edit to the same guards forever.
+    FNoModuleOnce: Boolean;
     // The client process, watched so a dead client cannot leave this one
     // running (see StartClientWatchdog); 0 = not watching.
     FClientHandle: THandle;
@@ -118,6 +136,9 @@ type
     procedure StartClientWatchdog(APid: Integer);
     function FileMatches(const APath, AText, ADiskText: string): Boolean;
     function OverlaySignature: string;
+    function OverlayParts: TArray<string>;
+    function SingleChangedDoc(out APath: string): Boolean;
+    function TryStartModuleAnalysis: Boolean;
     procedure StartProgress(const ATitle: string);
     procedure ReportProgress;
     procedure EndProgress(const AMessage: string);
@@ -459,6 +480,14 @@ begin
     FSession.Cancel;
     FreeAndNil(FSession);
   end;
+  FModuleMode := False;
+  FModuleFile := '';
+  // The keystroke case first: one already-analyzed unit's text changed and
+  // nothing else did. If PasTree's guards accept it this costs tens of
+  // milliseconds; if they refuse, the rebuild below runs instead, one
+  // finalize later, with the untouched project as its parse donor.
+  if TryStartModuleAnalysis then
+    Exit;
 
   // The tripwire for the 4.5x described in SPEC.md, deliberately placed FAR
   // from the assignment it guards (the first statement of pastree-server.dpr):
@@ -488,6 +517,16 @@ begin
   FSession.SetNamespaces(FNamespaces);
   for LAlias in FAliases do
     FSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
+  // PARSE REUSE (PasTree's stage A): the last-good project donates the parse
+  // of every unit whose text - main file and every $I include - is byte-for-
+  // byte what this run would read. It must outlive the build, and it does:
+  // FProject is only freed in FinalizeAnalysisIfDone, after the worker is
+  // done. AFTER the namespace/alias calls above, which the donor gate
+  // compares. False means the configuration moved and the donor was refused;
+  // the run then parses everything, which is only the old cost.
+  if FProject <> nil then
+    if not FSession.SetParseDonor(FProject) then
+      Log('parse donor refused: the analysis configuration changed');
   // Document truth, stamped with the client's version — compared on
   // completion to catch a snapshot that went stale mid-build.
   for LDoc in FDocs.All do
@@ -495,7 +534,8 @@ begin
   FDirty := False;   // this session covers everything up to now
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
-  FStartedSignature := OverlaySignature;
+  FStartedParts := OverlayParts;
+  FStartedSignature := string.Join(',', FStartedParts);
   FBuildStart := GetTickCount64;
   StartProgress('PasTree: analyzing');
   // "full rebuild" spelled out on purpose: when incremental reanalysis
@@ -623,6 +663,25 @@ begin
   LError := FSession.LastError;
   if LError <> '' then
     Tell(1, 'PasTree: the analysis failed - ' + LError, True);
+  // A REFUSED module session (see TryStartModuleAnalysis): the project comes
+  // back exactly as it went in, so nothing about the analyzed state changed -
+  // no diagnostics to republish, no parse record to re-log, and the built
+  // signature still describes what this project holds. Take it back, then
+  // start the real rebuild, which picks it up as the parse donor.
+  if FModuleMode and not FSession.ModuleAccepted then
+  begin
+    FProject := FSession.TakeProject;
+    FreeAndNil(FSession);
+    FModuleMode := False;
+    if FProject <> nil then
+      FNav := TPasNavigator.Create(FProject);
+    Log(Format('incremental refused for %s (%s) - full rebuild',
+      [FModuleFile, IfThen(FProject = nil, 'no project returned',
+        FProject.StageTimings)]));
+    FNoModuleOnce := True;
+    StartAnalysis(FModuleFile);
+    Exit;
+  end;
   FreeAndNil(FNav);
   FreeAndNil(FProject);
   FProject := FSession.TakeProject;
@@ -631,6 +690,8 @@ begin
     Exit;
   FNav := TPasNavigator.Create(FProject);
   FBuiltSignature := FStartedSignature;
+  FBuiltParts := FStartedParts;
+  FModuleMode := False;
   // The whole-closure diagnostic count (open docs get theirs listed by
   // PublishDiagnostics below): a healthy run on a fully-pathed project is
   // near zero, so a big number here means missing search paths (F1027
@@ -742,7 +803,7 @@ end;
   churn this exists to stop. The overlay is still handed to the analysis for
   them; what it buys there is the editor's own decoding of the bytes, which is
   not worth a rebuild on its own. }
-function TLspServer.OverlaySignature: string;
+function TLspServer.OverlayParts: TArray<string>;
 var
   LDoc: TLspDocument;
   LParts: TStringList;
@@ -754,10 +815,96 @@ begin
       if LDoc.Differs then
         LParts.Add(Format('%s|%d|%.8x', [LowerCase(LDoc.Path),
           Length(LDoc.Text), THashFNV1a32.GetHashValue(LDoc.Text)]));
-    Result := LParts.CommaText;
+    Result := LParts.ToStringArray;
   finally
     LParts.Free;
   end;
+end;
+
+function TLspServer.OverlaySignature: string;
+begin
+  Result := string.Join(',', OverlayParts);
+end;
+
+{ Did EXACTLY ONE document's text change since the last completed analysis?
+
+  The parts are sorted and one per differing document, `path|len|hash`, so the
+  two lists line up position by position and the answer is a single walk: same
+  length, and exactly one position where the parts differ while their PATHS
+  match. Anything else - a document opened, closed, saved back to its file, or
+  two edited between builds - is not a one-file edit and gets the full
+  rebuild. Deliberately strict: the fast path is only sound for a change the
+  guards in AnalyzeModuleOnly actually inspected, and they inspect one unit. }
+function TLspServer.SingleChangedDoc(out APath: string): Boolean;
+var
+  LIdx, LFound: Integer;
+  LNow: TArray<string>;
+begin
+  APath := '';
+  LNow := OverlayParts;
+  if (FProject = nil) or (Length(LNow) <> Length(FBuiltParts)) then
+    Exit(False);
+  LFound := -1;
+  for LIdx := 0 to High(LNow) do
+    if LNow[LIdx] <> FBuiltParts[LIdx] then
+    begin
+      // Same document, different content - or a different document
+      // altogether, which is a set change and disqualifies the edit.
+      if (LFound >= 0) or
+         (Copy(LNow[LIdx], 1, Pos('|', LNow[LIdx])) <>
+          Copy(FBuiltParts[LIdx], 1, Pos('|', FBuiltParts[LIdx]))) then
+        Exit(False);
+      LFound := LIdx;
+    end;
+  Result := LFound >= 0;
+  if Result then
+    APath := Copy(LNow[LFound], 1, Pos('|', LNow[LFound]) - 1);
+end;
+
+{ The keystroke path: re-analyze ONE unit in place instead of rebuilding the
+  closure. True = a module session is now running and StartAnalysis is done.
+
+  Ownership: CreateForModule TAKES the project, so FProject/FNav go to nil for
+  the (tens of milliseconds) the session runs - requests reach it through
+  WaitAnalyzed like any other in-flight build. The project comes back through
+  TakeProject either updated or untouched; FinalizeAnalysisIfDone reads
+  ModuleAccepted to tell which, and rebuilds for real on a refusal. }
+function TLspServer.TryStartModuleAnalysis: Boolean;
+var
+  LPath: string;
+  LDoc: TLspDocument;
+begin
+  Result := False;
+  if FNoModuleOnce then
+  begin
+    FNoModuleOnce := False;
+    Exit;
+  end;
+  if (FProject = nil) or not SingleChangedDoc(LPath) then
+    Exit;
+  // It has to be a unit this project already analyzed - a file the closure
+  // never reached has no model to swap.
+  if FProject.ModelIdOf(LPath) < 0 then
+    Exit;
+  FStartedParts := OverlayParts;
+  FStartedSignature := string.Join(',', FStartedParts);
+  FModuleFile := LPath;
+  FModuleMode := True;
+  FSession := TPasAsyncSession.CreateForModule(FProject, LPath);
+  FProject := nil;          // the session owns it now
+  FreeAndNil(FNav);         // and the navigator pointed into it
+  // Every overlay, not just the edited one: the project's buffer table has to
+  // stay the truth about what the editor holds, exactly as a full session
+  // leaves it.
+  for LDoc in FDocs.All do
+    FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
+  FDirty := False;
+  FPendingDue := 0;
+  FPendingPriority := '';
+  FBuildStart := GetTickCount64;
+  Log(Format('analysis started: incremental, one module (%s)', [LPath]));
+  FSession.Start;
+  Result := True;
 end;
 
 procedure TLspServer.StartProgress(const ATitle: string);

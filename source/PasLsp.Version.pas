@@ -60,7 +60,16 @@ const
   /// accessors added there - TPasCompletion.ItemDocComment for completion
   /// rows and TPasSemaProject.SymDocComment for hover. Without them the
   /// XMLDoc surfaces would compile against nothing.
-  cMinPasTreeVersion = '0.6.3';
+  ///
+  /// Raised to 0.9.0 on 2026-08-24: the analysis host now drives PasTree's
+  /// incremental reanalysis - TPasAsyncSession.CreateForModule/ModuleAccepted
+  /// for a one-unit edit and SetParseDonor for the rebuild that follows a
+  /// refusal. Both are new in 0.9.0, and the guards that make the fast path
+  /// sound (interface prefix, instance table) live in that version's
+  /// AnalyzeModuleOnly - which is exactly why this is a version gate and not
+  /// a compile-time one: an older sibling must fail loudly rather than have
+  /// the server infer anything about what its guards checked.
+  cMinPasTreeVersion = '0.9.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
