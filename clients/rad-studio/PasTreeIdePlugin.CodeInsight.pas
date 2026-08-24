@@ -1450,15 +1450,15 @@ begin
   // bar, and the first pass here that flattened them read as the coloring
   // "disappearing" on selection.
   LBase := Canvas.Font.Color;
-  LDim := clGrayText;
+  LDim := clNavy;
   LTypeColor := LBase;
   LValueColor := LBase;
   if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
   begin
     // The native palette: types in the warm accent, values in blue - both
     // theme-aware so the dark theme gets its own variants.
-    LTypeColor := LUI.ThemeAwareColors[itcOrange];
-    LValueColor := LUI.ThemeAwareColors[itcBlue];
+    LTypeColor := LUI.ThemeAwareColors[itcViolet];
+    LValueColor := clBlue;
   end;
 
   LTop := Rect.Top + (Rect.Height - Canvas.TextHeight('Ag')) div 2;
