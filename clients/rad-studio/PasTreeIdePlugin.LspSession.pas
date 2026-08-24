@@ -395,6 +395,7 @@ uses
   PasTreeIdePlugin.LspClient,
   PasLsp.ProductVersion,
   PasLsp.SourceText,
+  PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspDocuments;
 
 const
@@ -750,6 +751,7 @@ begin
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
+
   // NOTHING IS ANNOUNCED HERE. This used to log "package <version>, built
   // <stamp>" on every package load, to distinguish "the fix is in" from "the
   // IDE is still running the BPL from before the rebuild" - a real distinction,
@@ -864,6 +866,10 @@ begin
   // survives too. Falls back to %TEMP% only for a project with no directory,
   // which in practice means an unsaved one.
   Result.LogFile := LogPathFor(Result.ProjectFile);
+  // The IDE-side crash log goes to the same folder (its own file - see
+  // PasTreeIdePlugin.CrashLog): the two are read together, and this is the
+  // one place that already knows where "beside this project" is.
+  SetCrashLogPath(Result.LogFile);
 end;
 
 function TLspSession.EnsureSession: Boolean;

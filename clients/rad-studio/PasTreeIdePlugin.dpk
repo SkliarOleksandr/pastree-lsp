@@ -58,6 +58,8 @@ contains
   PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',
   PasTreeIdePlugin.IdleSync in 'PasTreeIdePlugin.IdleSync.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
-  PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas';
+  PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',
+  { Every AV in the IDE, with a stack, beside the server log - see the unit. }
+  PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas';
 
 end.

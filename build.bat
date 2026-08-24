@@ -58,7 +58,7 @@ if errorlevel 1 goto :fail
 
 rem -- 2. the RAD Studio designtime package (Win32, and it links no PasTree) --
 echo === RAD Studio package (Win32) ===
-msbuild "%PLUGIN%\PasTreeIdePlugin.dproj" /t:Build /p:Config=Debug /p:Platform=Win32 /nologo /v:m
+msbuild "%PLUGIN%\PasTreeIdePlugin.dproj" /t:Build /p:Config=Debug /p:Platform=Win32 /p:DCC_MapFile=3 /nologo /v:m
 if errorlevel 1 goto :failbpl
 
 rem -- 3. the harnesses (Win32, like the package they exercise, driving the

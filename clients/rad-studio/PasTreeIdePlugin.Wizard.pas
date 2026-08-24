@@ -36,6 +36,7 @@ uses
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.ClassComplete,
+  PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
 
 const
@@ -286,6 +287,11 @@ end;
 
 constructor TIDEWizard.Create;
 begin
+  // FIRST, before anything that could fault: the vectored AV recorder. It
+  // observes only - every access violation in the process is written to
+  // pastree-ide-crash.log with a stack, and nothing about the IDE's own
+  // handling changes. See the unit header.
+  InitializeCrashLog;
   FMenuManager := TMenuManager.Create;
   // Creates the session object only - the server is spawned by the first
   // prewarm or the first navigation request, so loading this package costs
@@ -372,6 +378,11 @@ begin
   // each exits immediately on its GAlive/session gates - and leaves the
   // queue with nothing of ours.
   while CheckSynchronize do ;
+  // LAST, mirroring Create: the handler is a pointer into this BPL, so it
+  // must be unregistered before the BPL can go - and keeping it live through
+  // the teardown above is the point, since the shutdown AV is one of the two
+  // it was written for.
+  FinalizeCrashLog;
   inherited;
 end;
 

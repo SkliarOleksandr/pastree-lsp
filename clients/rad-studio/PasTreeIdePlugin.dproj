@@ -116,6 +116,7 @@
         <DCCReference Include="PasTreeIdePlugin.ErrorPaint.pas"/>
         <DCCReference Include="PasTreeIdePlugin.IdleSync.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
