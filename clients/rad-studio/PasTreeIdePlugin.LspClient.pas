@@ -202,6 +202,24 @@ type
     /// <summary>True when a request can actually reach the server now.</summary>
     function IsReady: Boolean;
 
+    /// <summary>
+    /// The "server ready: <version> for <project>" line, or '' before the
+    /// handshake has answered. Logged once by the handshake itself; exposed
+    /// because reopening the same project does not restart the server and the
+    /// host wants to mark that boundary with the same line.
+    /// </summary>
+    function ReadyLine: string;
+
+    /// <summary>
+    /// Writes AText into the SERVER's log, where it is interleaved with the
+    /// requests the server was answering at the time. For host-side lifecycle
+    /// events - a project opening or closing - which are invisible from the
+    /// server side and are exactly the boundaries a reader looks for. A no-op
+    /// unless the handshake is done: there is no log yet before it, and an
+    /// event queued behind one would be logged out of order.
+    /// </summary>
+    procedure LogToServer(const AText: string);
+
     /// <summary>Where the server's stderr goes - the server log; '' if not
     /// running, or if it is being discarded (no log configured).</summary>
     function StdErrPath: string;
@@ -708,11 +726,45 @@ begin
   Request('initialize', LParams, OnInitializeAnswered);
 end;
 
+{ The line that marks a project coming up, built here rather than at the one
+  place it used to be logged: reopening the same project does not restart the
+  server, and the host wants to print the same line for that too (see
+  LspProjectOpened). Empty until the handshake has answered. }
+function TLspClient.ReadyLine: string;
+begin
+  if FState <> lcsReady then
+    Exit('');
+  Result := 'server ready';
+  if FServerInfo <> '' then
+    Result := Result + ': ' + FServerInfo;
+  // Which project this server is FOR, by name only - one server per project
+  // configuration, so a line that does not say which one leaves the reader
+  // guessing after a project switch (the restart is silent by design). The
+  // path is deliberately dropped: it is already in the configuration block at
+  // the top of the server's own log, and this panel is narrow.
+  if FOptions.ProjectFile <> '' then
+    Result := Result + ' for ' + ExtractFileName(FOptions.ProjectFile);
+end;
+
+procedure TLspClient.LogToServer(const AText: string);
+var
+  LParams: TJSONObject;
+begin
+  if (FState <> lcsReady) or (AText = '') then
+    Exit;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('message', AText);
+  // $/-prefixed, which is LSP's own namespace for implementation-defined
+  // messages a peer may ignore: any other server drops it silently instead of
+  // treating it as a protocol violation.
+  Notify('$/pastree.hostEvent', LParams);
+end;
+
 procedure TLspClient.OnInitializeAnswered(ASuccess: Boolean;
   AResult: TJSONValue; const AError: string);
 var
   LInfo: TJSONObject;
-  LReady, LBuilt: string;
+  LBuilt: string;
 begin
   if not ASuccess then
   begin
@@ -753,17 +805,7 @@ begin
   ResetRestartPolicy;
   Notify('initialized', TJSONObject.Create);
 
-  LReady := 'server ready';
-  if FServerInfo <> '' then
-    LReady := LReady + ': ' + FServerInfo;
-  // Which project this server is FOR, by name only - one server per project
-  // configuration, so a line that does not say which one leaves the reader
-  // guessing after a project switch (the restart is silent by design). The path
-  // is deliberately dropped: it is already in the configuration block at the
-  // top of the server's own log, and this panel is narrow.
-  if FOptions.ProjectFile <> '' then
-    LReady := LReady + ' for ' + ExtractFileName(FOptions.ProjectFile);
-  Log(LReady);
+  Log(ReadyLine);
 
   { THE STALE-DEPLOYMENT CHECK, at the only moment it can run.
 

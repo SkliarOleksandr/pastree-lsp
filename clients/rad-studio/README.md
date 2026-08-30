@@ -42,7 +42,7 @@ The analysis itself lives in `pastree-server.exe`; **both features run through
 it**. See "Architecture" below.
 
 A RAD Studio IDE package that surfaces PasTree's analysis inside the Delphi
-editor itself. Three features so far:
+editor itself. Four features so far:
 
 - **Find References** (the feature already available in
   `object-pascal-tree`'s `demo/`);
@@ -50,7 +50,9 @@ editor itself. Three features so far:
   (reported to work poorly on large projects) - both the native menu item and
   Ctrl+Click;
 - **the decl↔impl jump** on Ctrl+Shift+Up/Down, the IDE's own keys for it,
-  taken over the same way.
+  taken over the same way;
+- **Rename** on Ctrl+Shift+E and in the editor's menu - every use across the
+  project, then a results tab showing each changed line as it now reads.
 
 The analysis starts when a project finishes opening rather than on the first
 navigation, so the closure is usually already built by the time anyone asks it
@@ -88,6 +90,30 @@ through our Code Insight manager whenever "PasTree" is the selected
 Insight Provider). A miss is reported in the Messages panel tagged
 `[pastree]`, which is where the origin shows. See "Go to
 Declaration" below for how the native item got replaced.
+
+### Rename
+
+Ctrl+Shift+E, or "Rename..." in the editor's right-click menu. A dialog
+prefilled with the identifier under the caret, then the server plans every
+site and the plugin applies it - one undo step per file.
+
+- **Nothing is written unless everything can be.** Every touched file is
+  opened and every site checked against the live buffer first; if one has
+  moved since the analysis the whole rename is refused, naming the file and
+  line, with nothing changed.
+- **Results go to a "PasTree Rename" tab** shaped like Find References -
+  grouped by file, navigable, the declaration labelled - where every line is
+  the source AS IT NOW READS. A rename you cannot see is a rename you cannot
+  trust.
+- **A unit name is refused** (renaming a unit is a file rename plus every
+  `uses` clause - planned, not done), and so is a compiler builtin, which has
+  no declaration to rename. Both refusals are the server's own sentence.
+- **Switchable off** in Tools > PasTree > Settings. Off hides the menu item
+  and hands Ctrl+Shift+E back to the IDE - the same off-switch shape the
+  decl/impl toggle has, and a feature that edits your code should have one.
+- **The name check is the analysis's**, not ours: this package cannot link
+  PasTree, so a reserved word is refused by the server. The plugin only
+  rejects obvious non-identifiers, to save a round trip on a typo.
 
 ### Find References
 
@@ -478,6 +504,10 @@ what lets `tests/` drive them against a real server outside the IDE:
   buffer's text" over a temp file it writes itself), and by being a Win32
   program over both shared units it fails to build if either ever gains a
   PasTree dependency - the tripwire on this package's one hard invariant.
+- `PasTreeIdePlugin.Rename.pas` - rename: the prompt, the two-pass apply
+  (verify everything, then write), and the results tab. Its unit header has
+  the reasoning, including why the writer walks ASCENDING here while the
+  demo walks backwards.
 - `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,

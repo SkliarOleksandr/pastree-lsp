@@ -88,6 +88,22 @@ is which PasTree the server was built against, not the resolver.
 
 ## Diagnosing "the analysis got slow"
 
+**If it got slow WHILE TYPING, the question is not how fast a rebuild is — it
+is why there was a rebuild at all.** Since 0.17.0 an ordinary edit re-analyzes
+one module (tens of ms to ~1.5 s); a closure rebuild per keystroke is the fast
+path not firing, and it is silent — every answer stays correct. Grep
+`pastree-lsp.log` for `analysis started:`:
+
+- `incremental, one module (...)` — fired. If it is then followed by
+  `incremental refused ... (module=refused:<reason>)`, PasTree declined and the
+  reason names itself; `too-many-consumers(N>L)` is tunable with the
+  `moduleRedoLimit` initializationOption, the rest are library decisions.
+- `full rebuild` on a single-file edit — the server never offered it the fast
+  path. That decision is `SingleChangedDoc`, and the cause is always the same
+  shape: something made the inputs look like more than one changed document.
+
+Everything below is about a slow REBUILD, which is a different question.
+
 **First suspect: `System.NeverSleepOnMMThreadContention := True` is missing.** It
 is the first statement in `pastree-server.dpr` and it must stay there — PasTree
 parses across cores, and without it Delphi's memory manager sleeps on allocation

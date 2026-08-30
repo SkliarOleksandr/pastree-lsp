@@ -35,7 +35,9 @@ uses
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ClassComplete,
+  PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
 
@@ -51,6 +53,8 @@ type
     procedure AddActions;
     procedure OnFindReferencesExecute(Sender: TObject);
     procedure OnFindReferencesUpdate(Sender: TObject);
+    procedure OnRenameExecute(Sender: TObject);
+    procedure OnRenameUpdate(Sender: TObject);
     procedure OnFindTypeDeclarationExecute(Sender: TObject);
     procedure OnFindTypeDeclarationUpdate(Sender: TObject);
   public
@@ -154,6 +158,26 @@ begin
   LAction.OnExecute := OnFindReferencesExecute;
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
+
+  // Also on Ctrl+Shift+E (PasTreeIdePlugin.Rename registers the binding).
+  // The menu item is what makes the feature discoverable at all - a rename
+  // nobody knows is there is a rename nobody uses.
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeRename';
+  LAction.Caption := 'Rename...';
+  LAction.Category := 'PasTreeRename';
+  { A LABEL, NOT A BINDING - and the distinction matters if this ever stops
+    working. The IDE draws TAction.ShortCut in the menu's own right-hand
+    column, which is the only reason it is set: this action list has no form
+    and no owner, so VCL's shortcut dispatch never sees it and the key is
+    still delivered by TPasRenameBinding (PasTreeIdePlugin.Rename). Keep the
+    two spellings in step - a menu promising a key that does nothing is
+    worse than a menu that promises nothing. }
+  LAction.ShortCut := ShortCut(Ord('E'), [ssCtrl, ssShift]);
+  LAction.OnUpdate := OnRenameUpdate;
+  LAction.OnExecute := OnRenameExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
 end;
 
 constructor TMenuManager.Create;
@@ -213,6 +237,20 @@ begin
   ExecuteFindReferences(FEditorServices.TopView);
 end;
 
+procedure TMenuManager.OnRenameUpdate(Sender: TObject);
+begin
+  // HIDDEN rather than greyed when the feature is off: a disabled item
+  // reads as "not right now", and this one would never come back without a
+  // trip to the settings dialog. Off means gone.
+  TAction(Sender).Visible := RenameEnabled;
+  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+end;
+
+procedure TMenuManager.OnRenameExecute(Sender: TObject);
+begin
+  ExecuteRename(FEditorServices.TopView);
+end;
+
 { TToggleKeyBinding }
 
 function TToggleKeyBinding.GetBindingType: TBindingType;
@@ -252,6 +290,16 @@ begin
   // which would then run ITS decl<->impl jump - so a position our analysis
   // cannot answer would silently fall back to the implementation this replaces,
   // and the two disagreeing would be indistinguishable from ours misbehaving.
+  // THE OFF SWITCH, and it is the ONE place in this procedure that may answer
+  // krUnhandled: that is precisely what makes "override off" mean "the IDE's
+  // own jump", with no keymap to unbind and nothing to restore. It has to
+  // come before ABindingResult is set below, where krHandled is deliberately
+  // unconditional.
+  if not OverrideDeclImplToggle then
+  begin
+    ABindingResult := krUnhandled;
+    Exit;
+  end;
   ABindingResult := krHandled;
   if not Assigned(AContext) or not Assigned(AContext.EditBuffer) then
     Exit;
@@ -271,7 +319,22 @@ procedure TProjectOpenNotifier.FileNotification(
   var ACancel: Boolean);
 begin
   if ANotifyCode in [ofnEndProjectGroupOpen, ofnActiveProjectChanged] then
-    LspPrewarm;
+  begin
+    LspProjectOpened;
+    CheckInsightProviderSelected;
+    { A RETRY, and idempotent - see InitializeSettings. At package load the
+      IDE's menu (and the Build tab any complaint would go to) may not be
+      built yet, so a first attempt there can fail invisibly. This is the
+      first moment the IDE is demonstrably up, so it is where the attempt
+      actually has to succeed - and where its diagnostics land somewhere the
+      user can read them. A no-op once the menu item exists. }
+    InitializeSettings;
+  end
+  // BEGIN, not END: at ofnEndProjectGroupClose the project is already gone, so
+  // the line could not name it - and naming which project went away is the
+  // entire value of logging a close.
+  else if ANotifyCode = ofnBeginProjectGroupClose then
+    LspProjectClosed;
 end;
 
 procedure TProjectOpenNotifier.BeforeCompile(const AProject: IOTAProject;
@@ -317,6 +380,15 @@ begin
   // binding (it is not gated by the Insight Provider selection, so this is
   // the only way to take it over).
   InitializeClassComplete;
+  // Ctrl+Shift+E (and an editor menu item): rename a symbol across the
+  // project, then show every changed line in its own Messages tab. The
+  // ToolsAPI has no refactoring surface, so this is a plain command -
+  // see PasTreeIdePlugin.Rename.
+  InitializeRename;
+  // Tools > PasTree > Settings. Last of the registrations because it is the
+  // only one that is pure UI - nothing above it reads the settings at
+  // startup, they are read at the point of use.
+  InitializeSettings;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -348,6 +420,10 @@ begin
   if (FKeyBindingIndex >= 0) and Assigned(FKeyboardServices) then
     FKeyboardServices.RemoveKeyboardBinding(FKeyBindingIndex);
   FKeyboardServices := nil;
+  // Early, with the other things the IDE can dispatch into: a Tools menu
+  // item whose OnClick points into an unloaded BPL is the same crash as a
+  // keystroke or a notification arriving late.
+  FinalizeSettings;
   FinalizeGotoDeclaration;
   // Before FinalizeLspSession, both of these: the session's teardown fails
   // every pending request synchronously, and those callbacks must find the
@@ -361,6 +437,7 @@ begin
   // would sync against a dead client.
   FinalizeIdleSync;
   FinalizeErrorPaint;
+  FinalizeRename;
   FinalizeFindReferencesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running

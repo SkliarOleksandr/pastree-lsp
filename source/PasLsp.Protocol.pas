@@ -28,6 +28,10 @@ const
   LSP_INTERNAL_ERROR = -32603;
   LSP_SERVER_NOT_INITIALIZED = -32002;
   LSP_REQUEST_CANCELLED = -32800;
+  // A request that resolved fine but whose ANSWER is a refusal the user
+  // must read - a rename the analysis declines. Distinct from
+  // INVALID_PARAMS: the client sent nothing wrong.
+  LSP_REQUEST_FAILED = -32803;
 
 type
   // One incoming message. Root owns everything; callers free Root only.

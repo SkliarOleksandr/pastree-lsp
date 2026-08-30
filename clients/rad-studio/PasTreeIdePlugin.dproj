@@ -1,4 +1,4 @@
-﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
     <PropertyGroup>
         <ProjectGuid>{8EE41D90-3534-4ABA-8C99-548E10C091B2}</ProjectGuid>
         <MainSource>PasTreeIdePlugin.dpk</MainSource>
@@ -118,6 +118,11 @@
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.Settings.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">
+            <Form>PasTreeSettingsForm</Form>
+        </DCCReference>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

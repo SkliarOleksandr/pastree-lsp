@@ -49,6 +49,11 @@
           "default": false,
           "description": "Log one line per unit in the analysis closure (which file won for each unit name). Verbose - hundreds of lines per rebuild - so it is off unless you are chasing a search-path problem."
         },
+        "pastree.moduleRedoLimit": {
+          "type": "integer",
+          "default": 0,
+          "description": "Incremental analysis: how many units an interface edit may pull in before the server rebuilds the closure instead. 0 = PasTree's measured default (128); a negative value lifts the ceiling entirely."
+        },
         "pastree.searchPaths": {
           "type": "array",
           "items": { "type": "string" },

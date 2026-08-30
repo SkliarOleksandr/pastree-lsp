@@ -154,6 +154,47 @@ type
     const AAnswer: TLspClassComplete; const AError: string);
 
   /// <summary>
+  /// One replacement from a rename plan (pastree/renamePlan), already in IDE
+  /// coordinates - and note that these arrive that way: unlike every other
+  /// answer here, our own rename method reports PasTree's own 1-based
+  /// line/column rather than LSP positions, precisely because a host that
+  /// applies the edits itself works in editor coordinates.
+  ///
+  /// Row/Col/Len address the OLD identifier in the text the server was given.
+  /// OldText is that exact text, for the "has the buffer moved since?" check
+  /// every applier must make. Snippet is the line as it reads AFTER every
+  /// edit on that same line, with HiFrom/HiTo (0-based, into Snippet)
+  /// spanning the NEW name - the preview that lets a results panel show the
+  /// outcome rather than a promise.
+  /// </summary>
+  TLspRenameEdit = record
+    FilePath: string;
+    Row, Col: Integer;
+    Len: Integer;
+    OldText: string;
+    IsDecl: Boolean;
+    Snippet: string;
+    HiFrom, HiTo: Integer;
+  end;
+
+  /// <summary>
+  /// A whole rename, as planned by the analysis: what is being renamed, to
+  /// what, and every site. Edits arrive sorted by (file, line, column), which
+  /// is what lets an applier walk each file BACKWARDS - two edits on one line
+  /// move each other whenever the name changes length.
+  /// </summary>
+  TLspRenamePlan = record
+    OldName: string;
+    NewName: string;
+    Edits: TArray<TLspRenameEdit>;
+  end;
+
+  /// <summary>Same delivery contract as TLspHitsProc.</summary>
+  TLspRenamePlanProc = reference to procedure(ASuccess: Boolean;
+    const APlan: TLspRenamePlan; const AError: string);
+
+
+  /// <summary>
   /// One project-wide symbol for the IDE Insight (Ctrl+.) integration, in
   /// IDE coordinates. KindWord is display vocabulary ('function', 'type',
   /// ...), derived here so every consumer words it identically.
@@ -350,6 +391,20 @@ procedure LspClassComplete(const AFileName: string;
   const AOnDone: TLspClassCompleteProc);
 
 /// <summary>
+/// Plans a rename of the identifier at an IDE position: every site that
+/// would change, plus a preview of each line as it would read afterwards.
+/// Plans only - nothing is written; the caller applies the edits (see
+/// PasTreeIdePlugin.Rename) and shows the result.
+///
+/// Failure here is normal and its message is for the USER: an invalid or
+/// reserved new name, a unit name (a unit rename is a file rename plus
+/// every uses clause - not this), or a compiler builtin with no declaration
+/// to rename all come back as an error with a sentence saying so.
+/// </summary>
+procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
+  const ANewName: string; const AOnDone: TLspRenamePlanProc);
+
+/// <summary>
 /// Starts the server for the active project and lets its first analysis begin,
 /// without any question to answer. Called when a project group finishes opening
 /// and when the active project changes.
@@ -372,6 +427,41 @@ procedure LspClassComplete(const AFileName: string;
 /// (see Prewarm). A missing server exe is still reported.
 /// </summary>
 procedure LspPrewarm;
+
+/// <summary>
+/// A project (group) finished opening, or the active project changed. Prewarms
+/// exactly as LspPrewarm does, and SAYS SO - in the Build tab and in the
+/// server's own log.
+///
+/// Reopening the SAME project does not restart the server (its configuration
+/// is unchanged, which is the whole point), so the "server ready" line that
+/// otherwise marks a project coming up never appeared for it: the log ran
+/// straight from the previous session's requests into the new one's with
+/// nothing between them. That is where a reader needs a marker most, and it
+/// was asked for on 2026-08-29 after exactly that confusion.
+/// </summary>
+procedure LspProjectOpened;
+
+/// <summary>
+/// The project group is closing. Logs which project went away, on both sides,
+/// and leaves the server running: the same project reopening then costs
+/// nothing, where stopping it would buy back memory at the price of the full
+/// closure analysis on every open.
+/// </summary>
+procedure LspProjectClosed;
+
+/// <summary>
+/// Writes one line into the SERVER's log (pastree-lsp.log), not the Build tab.
+/// For findings worth keeping but not worth interrupting anybody with - a
+/// capability readout, a probe result: the kind of thing that answers a
+/// question weeks later and is pure noise in a panel the user watches while
+/// working.
+///
+/// False = there was no ready server to write through, so nothing was
+/// recorded. A caller that reports once per session should treat that as "not
+/// yet" and ask again rather than marking itself done.
+/// </summary>
+function LspLogToServer(const AText: string): Boolean;
 
 /// <summary>
 /// The text of AFileName as the server currently sees it: the live buffer we
@@ -455,6 +545,9 @@ type
     constructor Create;
     destructor Destroy; override;
     procedure Prewarm;
+    procedure ProjectOpened;
+    procedure ProjectClosed;
+    function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
@@ -471,6 +564,8 @@ type
       const AOnDone: TLspSignatureHelpProc);
     procedure ClassComplete(const AFileName: string;
       const AOnDone: TLspClassCompleteProc);
+    procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
+      const ANewName: string; const AOnDone: TLspRenamePlanProc);
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
     procedure DocumentSymbols(const AFileName: string;
@@ -908,11 +1003,16 @@ begin
   end;
 
   LProject := GetActiveProject;
+  // SILENTLY. EnsureSession is the gate in front of EVERY request, and most
+  // requests are not user actions: the outline asks on each tab activation,
+  // the idle sync on each pause. During IDE startup those fire while the
+  // project group is still loading, so "no active project." landed in the
+  // Build tab before the user had done anything - reported as noise on
+  // 2026-08-29, and rightly. Nothing is lost: a click that resolved nothing
+  // still says so where the user is looking (the editor), and the failures
+  // worth a panel line - a missing server exe - are reported above.
   if not Assigned(LProject) then
-  begin
-    LogDiagnostic('no active project.');
     Exit;
-  end;
 
   LOptions := BuildOptions(LProject, LPlatform, LConfig);
 
@@ -1261,6 +1361,91 @@ begin
         AOnDone(True, ParseClassComplete(AResult), '')
       else
         AOnDone(False, Default(TLspClassComplete), AError);
+    end);
+end;
+
+/// <summary>
+/// A pastree/renamePlan answer. The positions are PasTree's own 1-based
+/// line/column - IDE coordinates already - so unlike every other parser here
+/// this one does NOT convert (see TLspRenameEdit). An edit missing its
+/// position or its old text is dropped rather than applied blind.
+/// </summary>
+function ParseRenamePlan(AResult: TJSONValue): TLspRenamePlan;
+var
+  LEdits: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LEdit: TLspRenameEdit;
+  LCount: Integer;
+begin
+  Result := Default(TLspRenamePlan);
+  if not (AResult is TJSONObject) then
+    Exit;
+  Result.OldName := AResult.GetValue<string>('oldName', '');
+  Result.NewName := AResult.GetValue<string>('newName', '');
+  if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
+    Exit;
+  SetLength(Result.Edits, LEdits.Count);
+  LCount := 0;
+  for LValue in LEdits do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LEdit.FilePath := LObj.GetValue<string>('filePath', '');
+    LEdit.Row := LObj.GetValue<Integer>('line', 0);
+    LEdit.Col := LObj.GetValue<Integer>('col', 0);
+    LEdit.Len := LObj.GetValue<Integer>('len', 0);
+    LEdit.OldText := LObj.GetValue<string>('oldText', '');
+    LEdit.IsDecl := LObj.GetValue<Boolean>('isDecl', False);
+    LEdit.Snippet := LObj.GetValue<string>('snippet', '');
+    LEdit.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
+    LEdit.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    if (LEdit.FilePath = '') or (LEdit.Row < 1) or (LEdit.Col < 1) or
+       (LEdit.Len < 1) or (LEdit.OldText = '') then
+      Continue;
+    Result.Edits[LCount] := LEdit;
+    Inc(LCount);
+  end;
+  SetLength(Result.Edits, LCount);
+end;
+
+procedure TLspSession.RenamePlan(const AFileName: string; ARow, ACol: Integer;
+  const ANewName: string; const AOnDone: TLspRenamePlanProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspRenamePlan), 'no LSP server available');
+    Exit;
+  end;
+  // Sync FIRST and unconditionally, for classComplete's reason turned up one
+  // notch: this plan becomes EDITS to those same buffers, and coordinates
+  // computed from text the server no longer holds would be applied to the
+  // wrong columns. (The applier re-checks every site against the buffer
+  // anyway - this is what keeps that check from failing routinely.)
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  LParams.AddPair('newName', ANewName);
+  // No supersede slot, as for classComplete: a rename is a deliberate act,
+  // not a stream of per-keystroke questions.
+  FClient.Request('pastree/renamePlan', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseRenamePlan(AResult), '')
+      else
+        AOnDone(False, Default(TLspRenamePlan), AError);
     end);
 end;
 
@@ -1699,6 +1884,68 @@ begin
   EnsureSession;
 end;
 
+{ Prewarm, plus the line that says a project came up.
+
+  Where the line comes from matters: after EnsureSession, either the server was
+  just started for this project - and its own handshake already logged
+  "server ready" - or it was already running for it, which is the case that
+  used to pass in silence. ReadyLine is empty until the handshake answers, so
+  the first case prints nothing here and the second prints exactly what the
+  first printed, which is the point: one line per project open, always the
+  same one, whether or not a server had to be spawned for it. }
+procedure TLspSession.ProjectOpened;
+var
+  LProject: IOTAProject;
+  LWasReady: Boolean;
+  LReadyLine: string;
+begin
+  LProject := GetActiveProject;
+  if not Assigned(LProject) then
+    Exit;   // see Prewarm: normal during startup, and not ours to report
+  LWasReady := Assigned(FClient) and (FClient.State = lcsReady);
+  if not EnsureSession then
+    Exit;
+  if not LWasReady then
+    Exit;   // the handshake logged it, and logging it twice is worse than not
+  // LWasReady was sampled BEFORE EnsureSession: if it just restarted the
+  // server for a changed project/configuration, the client is mid-handshake
+  // again and ReadyLine is '' - that restart already announced itself, and
+  // the new handshake will log its own "server ready" when it answers.
+  // Logging an empty line here was exactly that race.
+  LReadyLine := FClient.ReadyLine;
+  if LReadyLine = '' then
+    Exit;
+  LogDiagnostic(LReadyLine);
+  // Into the server's log too, where it separates one project's requests from
+  // the next's. The server cannot see this event: from its side a reopened
+  // project is just more requests arriving.
+  FClient.LogToServer(Format('IDE opened %s',
+    [ExtractFileName(FStartedProject)]));
+end;
+
+{ The server is deliberately LEFT RUNNING - see LspProjectClosed. This only
+  records the boundary, on both sides, while there is still a project to
+  name. }
+procedure TLspSession.ProjectClosed;
+begin
+  if not Assigned(FClient) or (FClient.State <> lcsReady) or
+     (FStartedProject = '') then
+    Exit;
+  LogDiagnostic(Format('project closed: %s - the server stays up for it',
+    [ExtractFileName(FStartedProject)]));
+  FClient.LogToServer(Format('IDE closed %s',
+    [ExtractFileName(FStartedProject)]));
+end;
+
+{ Deliberately does NOT start a server: this carries readouts, and spawning a
+  process to record one would be the tail wagging the dog. }
+function TLspSession.LogToServer(const AText: string): Boolean;
+begin
+  Result := Assigned(FClient) and (FClient.State = lcsReady);
+  if Result then
+    FClient.LogToServer(AText);
+end;
+
 procedure TLspSession.Definition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
@@ -1754,6 +2001,23 @@ begin
   FreeAndNil(GSession);
 end;
 
+procedure LspProjectOpened;
+begin
+  if Assigned(GSession) then
+    GSession.ProjectOpened;
+end;
+
+procedure LspProjectClosed;
+begin
+  if Assigned(GSession) then
+    GSession.ProjectClosed;
+end;
+
+function LspLogToServer(const AText: string): Boolean;
+begin
+  Result := Assigned(GSession) and GSession.LogToServer(AText);
+end;
+
 procedure LspPrewarm;
 begin
   // Silent when there is no session: this is fired by an IDE event, not by a
@@ -1793,6 +2057,17 @@ begin
     Exit;
   end;
   GSession.ClassComplete(AFileName, AOnDone);
+end;
+
+procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
+  const ANewName: string; const AOnDone: TLspRenamePlanProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, Default(TLspRenamePlan), 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.RenamePlan(AFileName, ARow, ACol, ANewName, AOnDone);
 end;
 
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;

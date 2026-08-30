@@ -744,17 +744,55 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    and inserts the matching closer with the opener's indentation. The
    parser's error-tolerance already knows "unclosed at end" — the answer
    is a per-keystroke overlay question, the same cost class as completion.
-5. **Rename refactoring, ours.** The built-in one existed and Embarcadero
-   DISABLED it for being buggy (user, 2026-08-22) — the demand is proven
-   and the field is empty. Server: `textDocument/rename` +
-   `prepareRename` over the references machinery (already correct
-   cross-unit, unit/builtin identities included) returning a
-   WorkspaceEdit. Plugin: context-menu "PasTree: Rename..." + a binding,
-   dialog prefilled with the identifier, edits applied per file
-   FRONT-TO-BACK via `CreateUndoableWriter` (the writer cannot move
-   backward — see the Editing table), open files through their buffers,
-   closed ones on disk with the BOM rules of `PasLsp.SourceText`.
-   `IOTASyncEditPoints` stays the cheap same-file variant later.
+5. **Rename refactoring, ours — DELIVERED 2026-08-30 (first live run
+   pending).** The built-in one existed and Embarcadero DISABLED it for being
+   buggy (user, 2026-08-22) — the demand was proven and the field was empty.
+   PasTree 0.12.0 landed `PlanRename`/`IsValidRenameName`, which is what made
+   this a client-side job at all.
+
+   Server: `textDocument/rename` + `prepareRename` (a WorkspaceEdit over the
+   references machinery — already correct cross-unit) and, for us,
+   `pastree/renamePlan`, which keeps the two things a WorkspaceEdit throws
+   away: each site's `oldText`, and the line as it READS after the rename.
+   See the server `SPEC.md`.
+
+   Plugin (`PasTreeIdePlugin.Rename`): the editor's local menu plus
+   Ctrl+Shift+E — not Ctrl+E, which is incremental search — a dialog
+   prefilled with the identifier, then **two passes over the whole plan**:
+   open every touched file and check each site still reads the old name, and
+   only then write. A single mismatch aborts everything with the file and
+   line named, because a half-applied rename across five files is far worse
+   than one that did not happen. Within a file the edits go through ONE
+   `CreateUndoableWriter` in ASCENDING order — a writer cannot move backward
+   (see the Editing table), and its offsets all address the original text, so
+   ascending needs no shifting arithmetic; offsets are resolved before the
+   first write, for `ApplyClassComplete`'s hard-won reason.
+
+   **And then it shows what it did**, in a "PasTree Rename" Messages tab
+   shaped exactly like Find References — grouped by file, one navigable line
+   per site, the declaration labelled — where each line is the source AS IT
+   NOW READS. That is the demo's shape (`PasTreeDemo.Main.ShowRenameTab`) and
+   it is the half that makes the feature trustworthy: a rename that silently
+   touched fourteen places is indistinguishable from one that touched the
+   wrong fourteen.
+
+   **Two validators, deliberately.** The keyword verdict is the analysis's
+   (`IsValidRenameName`, in PasTree — which this Win32 package must never
+   link), so every real refusal comes from the server and is shown verbatim.
+   The plugin only rejects obvious non-identifiers, to save a round trip on a
+   typo. A copy of the keyword list here would be a second answer able to
+   disagree with the first.
+
+   **Switchable off** in Tools > PasTree > Settings, third switch in the
+   Overrides group. Off hides the menu item (hidden, not greyed - a disabled
+   item reads as "not right now", and this one would not come back on its
+   own) and answers `krUnhandled` for Ctrl+Shift+E, which hands the key back
+   to the IDE. A feature that EDITS the user's code is the one that most
+   needs a way to be refused outright.
+
+   Still queued: renaming a UNIT (a file rename plus every `uses` clause —
+   the server declines it today with a sentence saying so), and
+   `IOTASyncEditPoints` as the cheap same-file variant.
 6. **Find References results upgrade** (hierarchy + match highlight in the
    snippet), **custom colored hint window** — carried over from the old
    order, still queued. **Idle-debounced `didChange` DELIVERED 2026-08-22**
@@ -765,6 +803,23 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    and the next publishDiagnostics the painted ranges are stale by
    whatever lines were inserted above them; the tracker is what would
    shift them live.
+7. **Toggle decl/impl on a cursor that was never on a routine — DELIVERED
+   2026-08-29, silent now.** Ctrl+Shift+Up/Down on a constant, a type, a
+   comment, blank space — anywhere except a routine with a separate
+   declaration and body — used to write `[pastree] Toggle decl/impl: no
+   routine with a separate declaration and body at cursor.` to the Build tab.
+   That is the ordinary outcome of a key that does not apply, not a failure.
+
+   No server or PasTree change was needed: the protocol already tells the two
+   cases apart, and the plugin simply was not using the distinction. The
+   server answers this case as **success with `null`** (`HandleToggle`, after
+   both directions are tried), while a REAL refusal — no server, cancelled
+   request, dead connection — arrives as `ASuccess=False` with a reason and
+   still logs. So only the empty-answer branch went silent.
+
+   The reason a diagnosis would want is not lost, it just moved out of the
+   user's face: the server logs `nothing to toggle to at that position` into
+   `pastree-lsp.log` for exactly this answer.
 
 ## Non-goals
 

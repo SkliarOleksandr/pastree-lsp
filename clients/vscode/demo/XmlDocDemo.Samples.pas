@@ -38,7 +38,7 @@ type
   /// <summary>What a greeting should sound like.</summary>
   TGreetingStyle = (
     /// <summary>Hello, First Last.</summary>
-    gsFormal,
+    gsFormal2,
     /// <summary>Hi First!</summary>
     gsCasual);
 
@@ -145,7 +145,7 @@ begin
   if (AName.First = '') and (AName.Last = '') then
     raise EArgumentException.Create('a name with no parts');
   case FStyle of
-    gsFormal:
+    gsFormal2:
       Result := Format('Hello, %s %s%s',
         [AName.First, AName.Last, Tail]);
   else

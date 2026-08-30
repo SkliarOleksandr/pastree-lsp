@@ -65,6 +65,17 @@ procedure InitializeCodeInsight;
   after the session died would ask questions nothing can answer. }
 procedure FinalizeCodeInsight;
 
+/// <summary>
+/// Logs to the Build tab, once per session, if the Tools > Options > Editor >
+/// Source "Insight Provider" combobox does not name PasTree - completion,
+/// browse and parameter insight all silently come from whichever other
+/// provider is selected otherwise, and nothing else says so. Called after
+/// every project open (TProjectOpenNotifier), which is a real point in time
+/// to ask, unlike registration (InitializeCodeInsight runs before the user
+/// could have chosen anything).
+/// </summary>
+procedure CheckInsightProviderSelected;
+
 implementation
 
 uses
@@ -112,6 +123,8 @@ var
   GAlive: Boolean = False;
   // The IOTAHelpInsight readout runs once per session - see ProbeHelpInsight.
   GHelpInsightProbed: Boolean = False;
+  // Edge-trigger for the "PasTree is not selected" line - see SetEnabled.
+  GInsightWarned: Boolean = False;
 
 procedure LogDiagnostic(const AMessage: string);
 var
@@ -752,6 +765,10 @@ begin
   Result := FEnabled;
 end;
 
+{ NOT where "is PasTree selected" is answered - tried that first, and the IDE
+  does not call this with False for a manager the user never selected at all
+  (only ever observed True, on selection). CheckInsightProviderSelected below
+  asks IOTACodeInsightServices60 directly instead. }
 procedure TPasCodeInsightManager.SetEnabled(Value: Boolean);
 begin
   FEnabled := Value;
@@ -1170,6 +1187,20 @@ var
   LModuleServices: IOTAModuleServices;
   LModule: IOTAModule;
   LHelpInsight: IOTAHelpInsight;
+
+  // INTO THE SERVER LOG, not the Build tab. This is a readout: it answers a
+  // question about the IDE that mattered while the feature was being designed
+  // and may matter again in a year, and it says nothing the user can act on
+  // today. The panel is for things worth interrupting somebody with (user,
+  // 2026-08-29 - and the same call retired two other lines that day).
+  procedure Readout(const AText: string);
+  begin
+    if not LspLogToServer('IOTAHelpInsight probe: ' + AText) then
+      // No server yet, so this went nowhere: unmark, and the next hover asks
+      // again. A readout that reports into the void is not a readout.
+      GHelpInsightProbed := False;
+  end;
+
 begin
   if GHelpInsightProbed then
     Exit;
@@ -1185,7 +1216,7 @@ begin
     if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices)
     then
     begin
-      LogDiagnostic('IOTAHelpInsight: no IOTAModuleServices');
+      Readout('no IOTAModuleServices');
       Exit;
     end;
     LModule := LModuleServices.CurrentModule;
@@ -1196,27 +1227,24 @@ begin
     end;
     if not Supports(LModule, IOTAHelpInsight, LHelpInsight) then
     begin
-      LogDiagnostic('IOTAHelpInsight: absent on module ' + LModule.FileName +
-        ' - the hint string is the only editor Help Insight feed for us');
+      Readout('absent on module ' + LModule.FileName
+        + ' - the hint string is the only editor Help Insight feed for us');
       Exit;
     end;
     // Two lines, not one: presence is the finding, and IsEnabled is a second
     // call that may fail on its own. Reported separately so a failure in the
     // second cannot hide the first.
-    LogDiagnostic('IOTAHelpInsight: PRESENT on module ' + LModule.FileName +
-      ' - the editor Help Insight window has a native feed');
+    Readout('PRESENT on module ' + LModule.FileName
+      + ' - the editor Help Insight window has a native feed');
     try
-      LogDiagnostic('IOTAHelpInsight.IsEnabled = ' +
-        BoolToStr(LHelpInsight.IsEnabled, True));
+      Readout('IsEnabled = ' + BoolToStr(LHelpInsight.IsEnabled, True));
     except
       on E: Exception do
-        LogDiagnostic('IOTAHelpInsight.IsEnabled raised ' + E.ClassName +
-          ': ' + E.Message);
+        Readout('IsEnabled raised ' + E.ClassName + ': ' + E.Message);
     end;
   except
     on E: Exception do
-      LogDiagnostic('IOTAHelpInsight probe raised ' + E.ClassName + ': ' +
-        E.Message);
+      Readout('raised ' + E.ClassName + ': ' + E.Message);
   end;
 end;
 
@@ -1594,10 +1622,12 @@ begin
   GManager := TPasCodeInsightManager.Create;
   GManagerIndex := LServices.AddCodeInsightManager(GManager);
   GAlive := True;
-  // Loud on purpose: registering changes nothing by itself, and picking the
-  // provider in Options is exactly the step people miss.
-  LogDiagnostic('Code Insight manager registered. Select "PasTree" under '
-    + 'Tools > Options > Editor > Source > Insight Provider to use it.');
+  // NOT ANNOUNCED. This used to say "registered - now select PasTree under
+  // Tools > Options ...", loud on purpose because picking the provider is the
+  // step people miss. It is the wrong trade at every IDE start after the
+  // first: the provider is already selected, so the line is a step report
+  // nobody needs, and this panel earns its keep only if what appears in it is
+  // worth reading. Log failures, not steps.
 end;
 
 procedure FinalizeCodeInsight;
@@ -1612,6 +1642,39 @@ begin
     GManagerIndex := -1;
   end;
   GManager := nil;
+end;
+
+procedure CheckInsightProviderSelected;
+var
+  LServices: IOTACodeInsightServices60;
+  LCurrent: IOTACodeInsightManager;
+  LSelection: IOTACodeInsightSelection;
+  LCurrentName: string;
+begin
+  if not GAlive or not Assigned(GManager) then
+    Exit;
+  if not Supports(BorlandIDEServices, IOTACodeInsightServices60, LServices) then
+    Exit;
+  LServices.GetCurrentCodeInsightManager(LCurrent);
+  if LCurrent = GManager then
+  begin
+    // Selected again after a warning earlier this session - the next time it
+    // is switched away should say so again, not stay silent because of an
+    // old flag.
+    GInsightWarned := False;
+    Exit;
+  end;
+  if GInsightWarned then
+    Exit;
+  LCurrentName := 'no provider';
+  if Assigned(LCurrent) and Supports(LCurrent, IOTACodeInsightSelection,
+    LSelection) then
+    LCurrentName := '"' + LSelection.GetDisplayName + '"';
+  LogDiagnostic(Format('PasTree is not selected as the Insight Provider - '
+    + 'completion, browse and parameter insight will come from %s instead '
+    + 'until it is selected under Tools > Options > Editor > Source.',
+    [LCurrentName]));
+  GInsightWarned := True;
 end;
 
 end.

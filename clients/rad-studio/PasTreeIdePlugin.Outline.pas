@@ -47,6 +47,7 @@ uses
   StructureViewAPI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.GotoDeclaration;
 
 const
@@ -603,7 +604,6 @@ procedure InstallOutline(const AFilePath: string;
 var
   LView: IOTAStructureView;
   LContext: TPasOutlineContext;
-  LIdx: Integer;
   LMessages: IOTAMessageServices;
 begin
   if not Supports(BorlandIDEServices, IOTAStructureView, LView) then
@@ -662,6 +662,15 @@ procedure TOutlineEditNotifier.EditorViewActivated(
   const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
 begin
   if not Assigned(EditView) then
+    Exit;
+  // THE OFF SWITCH FOR THIS FEATURE, and it is a single guard because
+  // SetStructureContext is the only thing that ever takes the pane: not
+  // pushing IS leaving it to the IDE's own provider. Checked here rather
+  // than at registration so the setting takes effect on the next tab
+  // activation instead of at the next IDE start - and so turning it back on
+  // needs no re-registration of a notifier the IDE would have to be told
+  // about again.
+  if not OverrideStructureView then
     Exit;
   if not IsPascalSourceFile(EditView.Buffer.FileName) then
     Exit;

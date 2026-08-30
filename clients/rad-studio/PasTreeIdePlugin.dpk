@@ -59,6 +59,12 @@ contains
   PasTreeIdePlugin.IdleSync in 'PasTreeIdePlugin.IdleSync.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
   PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',
+  PasTreeIdePlugin.Rename in 'PasTreeIdePlugin.Rename.pas',
+  { The settings store, and the ONE form in this package - the only unit here
+    with a .dfm, so that the dialog can be laid out in the Form Designer
+    rather than in code. See PasTreeIdePlugin.SettingsForm's header. }
+  PasTreeIdePlugin.Settings in 'PasTreeIdePlugin.Settings.pas',
+  PasTreeIdePlugin.SettingsForm in 'PasTreeIdePlugin.SettingsForm.pas' {PasTreeSettingsForm},
   { Every AV in the IDE, with a stack, beside the server log - see the unit. }
   PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas';
 

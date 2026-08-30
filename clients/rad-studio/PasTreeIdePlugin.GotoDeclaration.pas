@@ -367,12 +367,21 @@ begin
         begin
           if not ARetried then
             ToggleAndNavigate(AFileName, ARow, ACol, not AToImpl, True)
-          else
-            // Both directions came back empty: the cursor is not inside a
-            // routine that has two halves. Logged, because "the key did
-            // nothing" needs a reason somewhere.
-            LogDiagnostic('Toggle decl/impl: no routine with a separate '
-              + 'declaration and body at cursor.');
+          // ELSE: SILENCE, DELIBERATELY. Both directions came back empty,
+          // which the server answers as success-with-null and means only
+          // that the cursor is not inside a routine with two halves - a
+          // constant, a type, a comment, blank space. That is the ORDINARY
+          // outcome of pressing a key that does not apply here, not a
+          // failure, and it used to put a line in the Build tab every time.
+          //
+          // Nothing is lost, and this is why the empty case may be silent
+          // while the branch above may not: a real refusal - no server, a
+          // cancelled request, a dead connection - arrives as ASuccess=False
+          // with a reason, and still logs. The protocol already tells the
+          // two apart, so no server or PasTree change was needed. And "the
+          // key did nothing" keeps its recorded reason where a diagnosis
+          // would look for it: the server logs `nothing to toggle to at
+          // that position` into pastree-lsp.log for exactly this answer.
         end
         else
           PushHistoryAndNavigate(AFileName, ARow, ACol, AHits[0].FilePath,

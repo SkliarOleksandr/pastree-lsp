@@ -19,6 +19,10 @@ unit PasLsp.Server;
     "platform"    — e.g. "Win64", overrides the project's own
     "config"      — build configuration name, .dproj only
     "searchPaths", "defines" — string arrays, appended after the project's
+    "logFile", "logUnits" — where the log goes, and whether it inventories
+                  every unit of the closure
+    "moduleRedoLimit" — the incremental fast path's blast-radius ceiling;
+                  0 keeps PasTree's measured default
   A .dproj brings its own MainSource/search paths/defines/namespaces/aliases
   (TPasDProj — the same MSBuild evaluation the CLI tools use). Without a
   projectFile the open documents themselves become the analysis roots.
@@ -107,12 +111,20 @@ type
     // INCREMENTAL REANALYSIS (PasTree's stage B). When the only thing that
     // changed is the text of one already-analyzed unit, the in-flight session
     // is a TPasAsyncSession.CreateForModule one over FModuleFile instead of a
-    // closure rebuild: tens of milliseconds against seconds. It may REFUSE
-    // (an interface change, and the rest of AnalyzeModuleOnly's guard list),
-    // and then the project comes back UNTOUCHED and we start the real
-    // rebuild with it as the parse donor.
+    // closure rebuild: tens of milliseconds against seconds. Since PasTree
+    // 0.10.0 that covers INTERFACE edits too - the library redoes the units
+    // the change can reach instead of refusing - so the fast path is the
+    // ordinary case rather than the body-edit special case. It may still
+    // REFUSE (a blast radius over ModuleRedoLimit, a new import, an $IF
+    // oracle unit, and the rest of AnalyzeModuleOnly's guard list), and then
+    // the project comes back UNTOUCHED and we start the real rebuild with it
+    // as the parse donor.
     FModuleMode: Boolean;
     FModuleFile: string;
+    // The blast-radius ceiling handed to the project before a module run;
+    // 0 = leave PasTree's own default (128, a measured value). See the
+    // "moduleRedoLimit" initialization option.
+    FModuleRedoLimit: Integer;
     // Set for exactly the rebuild that follows a refusal: the inputs still
     // look like a one-file edit, so without it the next StartAnalysis would
     // hand the same edit to the same guards forever.
@@ -172,6 +184,12 @@ type
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
     function HandleClassComplete(const AMsg: TLspIncoming): string;
+    function HandlePrepareRename(const AMsg: TLspIncoming): string;
+    function HandleRename(const AMsg: TLspIncoming): string;
+    function HandleRenamePlan(const AMsg: TLspIncoming): string;
+    function PlanRenameAt(const APath: string; APasLine, APasCol: Integer;
+      const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+      out AOldName, AError: string): Boolean;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -404,6 +422,15 @@ begin
     // no-client escape hatch).
     if AOptions.GetValue<Boolean>('logUnits', False) then
       FLogUnits := True;
+    // The incremental fast path's blast-radius ceiling: over this many
+    // affected units an interface edit rebuilds instead. PasTree's default
+    // (128) is measured rather than guessed - about 300 ms fixed plus ~57 ms
+    // per unit against a 29 s rebuild on a 3676-unit closure, so break-even
+    // is near 500 - and the reason to name it here is that the right value
+    // depends on the closure: a project whose core types unit reaches a
+    // third of the closure wants a lower one, a small project can lift it
+    // entirely with a negative value. 0 = say nothing, keep the library's.
+    FModuleRedoLimit := AOptions.GetValue<Integer>('moduleRedoLimit', 0);
   end;
 
   // FIRST line of the run, before anything that could go wrong: a log whose
@@ -707,7 +734,7 @@ end;
 procedure TLspServer.FinalizeAnalysisIfDone;
 var
   LDoc: TLspDocument;
-  LStale: Boolean;
+  LStale, LWasModule: Boolean;
   LError: string;
 begin
   if (FSession = nil) or not FSession.IsDone then
@@ -743,6 +770,7 @@ begin
   FNav := TPasNavigator.Create(FProject);
   FBuiltSignature := FStartedSignature;
   FBuiltParts := FStartedParts;
+  LWasModule := FModuleMode;
   FModuleMode := False;
   // The whole-closure diagnostic count (open docs get theirs listed by
   // PublishDiagnostics below): a healthy run on a fully-pathed project is
@@ -753,13 +781,22 @@ begin
     Inc(LDiagTotal, Length(FProject.Model(LMi).Diags));
   EndProgress(Format('%d units in %d ms',
     [FProject.ModelCount, GetTickCount64 - FBuildStart]));
-  Log(Format('analysis done: %d units in %d ms, %d diagnostics in closure;'
+  Log(Format('analysis %s: %d units in %d ms, %d diagnostics in closure;'
     + ' stages %s',
-    [FProject.ModelCount, GetTickCount64 - FBuildStart, LDiagTotal,
-     FProject.StageTimings]));
+    [IfThen(LWasModule, 'done (incremental)', 'done'), FProject.ModelCount,
+     GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings]));
   // Every unit and every diagnostic, not just the open documents' - see
   // LogParseRecord for why that difference is the whole point.
-  LogParseRecord;
+  //
+  // NOT after an accepted incremental run: the closure is the one this
+  // already recorded, unit for unit and file for file, and the questions the
+  // record answers ("which copy of this unit won?", "what did the analysis
+  // fail to load?") are rebuild questions. Writing it per keystroke would
+  // walk every model of a 3676-unit project and bury the rebuild that
+  // matters under a hundred repetitions of itself. The stages field above
+  // carries what IS new - module=<radius>, or module=refused:<reason>.
+  if not LWasModule then
+    LogParseRecord;
 
   LStale := FDirty;
   if not LStale then
@@ -887,30 +924,93 @@ end;
   two edited between builds - is not a one-file edit and gets the full
   rebuild. Deliberately strict: the fast path is only sound for a change the
   guards in AnalyzeModuleOnly actually inspected, and they inspect one unit. }
+function PartPath(const APart: string): string;
+begin
+  Result := Copy(APart, 1, Pos('|', APart) - 1);
+end;
+
+{ Did EXACTLY ONE document's text change since the last completed analysis?
+
+  A MERGE OF TWO SORTED SETS, not a position-by-position compare, and the
+  difference is the whole point. Each list holds one entry per document whose
+  text OVERRIDES its file (`path|len|hash`, see OverlayParts), so a single
+  file's text can change in three ways, and the first version of this
+  recognised only one of them:
+
+    hash differs   - an edit on top of an edit
+    path APPEARS   - the FIRST edit to a file: it stops matching its disk
+                     text and joins the set
+    path DISAPPEARS - the file was saved, or closed unsaved: it stops
+                     overriding, and the text that counts is the file's again
+
+  Comparing by position made an appearance or a disappearance look like a set
+  change and rebuilt the closure - so the first keystroke in each file, and
+  every save, paid a full rebuild. On a 3676-unit project that is 29 seconds
+  for the one keystroke that begins a session in a file.
+
+  All three are ONE FILE's text changing, which is exactly what the fast path
+  handles: AnalyzeModuleOnly re-reads that path's current effective text
+  (buffer overlay if there is one, the file if not), so a disappearance is as
+  correct a fast-path input as an edit. Two or more differing paths, in any
+  combination, disqualify it - PasTree's entry point takes one path, and its
+  guards inspected one unit.
+
+  A save where the buffer already held the file's text produces a
+  disappearance with nothing behind it: no rebuild is needed at all, and this
+  still spends one module run on it. Cheap, and simpler than proving it. }
 function TLspServer.SingleChangedDoc(out APath: string): Boolean;
 var
-  LIdx, LFound: Integer;
   LNow: TArray<string>;
+  LI, LJ, LFound: Integer;
+  LLeft, LRight: string;
 begin
   APath := '';
   LNow := OverlayParts;
-  if (FProject = nil) or (Length(LNow) <> Length(FBuiltParts)) then
+  if FProject = nil then
     Exit(False);
-  LFound := -1;
-  for LIdx := 0 to High(LNow) do
-    if LNow[LIdx] <> FBuiltParts[LIdx] then
+  LI := 0;
+  LJ := 0;
+  LFound := 0;
+  // Both lists are sorted by their whole `path|len|hash` string, so they are
+  // sorted by path, so this walks them in step.
+  while (LI <= High(LNow)) or (LJ <= High(FBuiltParts)) do
+  begin
+    if LI > High(LNow) then
+      LLeft := ''
+    else
+      LLeft := PartPath(LNow[LI]);
+    if LJ > High(FBuiltParts) then
+      LRight := ''
+    else
+      LRight := PartPath(FBuiltParts[LJ]);
+    if (LRight = '') or ((LLeft <> '') and (LLeft < LRight)) then
     begin
-      // Same document, different content - or a different document
-      // altogether, which is a set change and disqualifies the edit.
-      if (LFound >= 0) or
-         (Copy(LNow[LIdx], 1, Pos('|', LNow[LIdx])) <>
-          Copy(FBuiltParts[LIdx], 1, Pos('|', FBuiltParts[LIdx]))) then
-        Exit(False);
-      LFound := LIdx;
+      APath := LLeft;          // appeared: the first edit to this file
+      Inc(LFound);
+      Inc(LI);
+    end
+    else if (LLeft = '') or (LRight < LLeft) then
+    begin
+      APath := LRight;         // disappeared: saved, or closed unsaved
+      Inc(LFound);
+      Inc(LJ);
+    end
+    else
+    begin
+      if LNow[LI] <> FBuiltParts[LJ] then
+      begin
+        APath := LLeft;        // same file, different text
+        Inc(LFound);
+      end;
+      Inc(LI);
+      Inc(LJ);
     end;
-  Result := LFound >= 0;
-  if Result then
-    APath := Copy(LNow[LFound], 1, Pos('|', LNow[LFound]) - 1);
+    if LFound > 1 then
+      Exit(False);
+  end;
+  Result := LFound = 1;
+  if not Result then
+    APath := '';
 end;
 
 { The keystroke path: re-analyze ONE unit in place instead of rebuilding the
@@ -924,6 +1024,7 @@ end;
 function TLspServer.TryStartModuleAnalysis: Boolean;
 var
   LPath: string;
+  LId: Integer;
   LDoc: TLspDocument;
 begin
   Result := False;
@@ -936,12 +1037,28 @@ begin
     Exit;
   // It has to be a unit this project already analyzed - a file the closure
   // never reached has no model to swap.
-  if FProject.ModelIdOf(LPath) < 0 then
+  LId := FProject.ModelIdOf(LPath);
+  if LId < 0 then
     Exit;
+  // THE PROJECT'S SPELLING OF THE PATH, not the signature's. OverlayParts
+  // lowercases so two spellings of one file compare equal; handing that key
+  // to the analysis makes the re-analyzed model carry it, and every position
+  // answered out of that model then comes back as file:///c%3A/repos/.../
+  // demounit.pas - a different document as far as an editor is concerned,
+  // which is how this was caught (LspClientSmoke 5c, the URI changed case
+  // after the first incremental run). ModelFile is the path the closure
+  // loaded, so the swap keeps the model's identity exactly as it was.
+  LPath := FProject.ModelFile(LId);
   FStartedParts := OverlayParts;
   FStartedSignature := string.Join(',', FStartedParts);
   FModuleFile := LPath;
   FModuleMode := True;
+  // Set on the project rather than kept by the session, and set here rather
+  // than once at startup: every full rebuild produces a NEW project carrying
+  // PasTree's default, so the configured ceiling has to be re-applied to
+  // whichever project is about to take the module run.
+  if FModuleRedoLimit <> 0 then
+    FProject.ModuleRedoLimit := FModuleRedoLimit;
   FSession := TPasAsyncSession.CreateForModule(FProject, LPath);
   FProject := nil;          // the session owns it now
   FreeAndNil(FNav);         // and the navigator pointed into it
@@ -1258,7 +1375,8 @@ begin
       '"documentHighlightProvider":true,' +
       '"completionProvider":{"triggerCharacters":["."]},' +
       '"signatureHelpProvider":{"triggerCharacters":["(",","]},' +
-      '"workspaceSymbolProvider":true' +
+      '"workspaceSymbolProvider":true,' +
+      '"renameProvider":{"prepareProvider":true}' +
     // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
     // because a client's real question is never "which server build is this"
     // but "does it have the analysis fix I need", and that lives in PasTree.
@@ -1910,6 +2028,236 @@ begin
       LSB.Append(HitLocationJson(LHits[LIdx]));
     end;
     LSB.Append(']');
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ Rename, the one place this server produces EDITS rather than answers.
+
+  Identity is the symbol one and nothing else: PlanRename is DeclHit +
+  FindReferences turned into replacements, so a rename can never reach
+  further than the references panel already showed. A `uses` item or a
+  module header is declined here on purpose - renaming a unit is a file
+  rename plus every referring `uses` clause, a workspace edit of a different
+  shape (planned, not this). A compiler builtin has no declaration at all.
+
+  ANewName = '' means "identity check only": resolve the target and say
+  whether it COULD be renamed, without judging a name. prepareRename asks
+  exactly that, and asking it through this one function is what keeps
+  prepareRename from green-lighting a position that rename then refuses. }
+function TLspServer.PlanRenameAt(const APath: string;
+  APasLine, APasCol: Integer; const ANewName: string;
+  out AEdits: TArray<TPasRenameEdit>; out AOldName, AError: string): Boolean;
+var
+  LMid, LTMid, LSym: Integer;
+  LOther: string;
+begin
+  Result := False;
+  AEdits := nil;
+  AOldName := '';
+  AError := '';
+  if FNav = nil then
+  begin
+    AError := 'The project has not been analyzed yet.';
+    Exit;
+  end;
+  LMid := FNav.ModelIdOf(APath);
+  if LMid < 0 then
+  begin
+    AError := 'This file is not part of the analyzed project.';
+    Exit;
+  end;
+  // UnitAt before SymbolAt, for the reason HandleReferences states: on a
+  // .dpr, SymbolAt claims an `X in '...'` uses item as an ordinary symbol.
+  if FNav.UnitAt(LMid, APasLine, APasCol, LTMid, LOther) then
+  begin
+    AError := Format('''%s'' is a unit name. Renaming a unit is a file ' +
+      'rename plus every uses clause, which this server does not do yet.',
+      [LOther]);
+    Exit;
+  end;
+  if not FNav.SymbolAt(LMid, APasLine, APasCol, LTMid, LSym, AOldName) then
+  begin
+    if FNav.BuiltinNameAt(LMid, APasLine, APasCol, LOther) then
+      AError := Format('''%s'' is a compiler builtin - it has no ' +
+        'declaration to rename.', [LOther])
+    else
+      AError := 'There is nothing renameable at that position.';
+    Exit;
+  end;
+  if ANewName = '' then
+    Exit(True);
+  Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} AEdits,
+    {out} AError);
+  if not Result then
+    AEdits := nil;
+end;
+
+{ textDocument/prepareRename - the range F2 pre-fills from, and the earliest
+  point a refusal can be shown. Answered as an ERROR rather than null when
+  the position resolves to something unrenameable, because "unit names are
+  not renamed here" is the whole content of the answer: a client puts an
+  error's message in front of the user, a null only greys the command out. }
+function TLspServer.HandlePrepareRename(const AMsg: TLspIncoming): string;
+var
+  LPath, LOldName, LError: string;
+  LLine, LChar, LPasLine, LPasCol, LMid: Integer;
+  LIdent: TPasNavIdent;
+  LEdits: TArray<TPasRenameEdit>;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'prepareRename: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, '', {out} LEdits,
+    {out} LOldName, {out} LError) then
+  begin
+    Log(Format('prepareRename: %s refused - %s',
+      [PosTag(LPath, LPasLine, LPasCol), LError]));
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
+  end;
+  // The span comes from IdentAt, not from the symbol's declaration: it must
+  // be the identifier UNDER THE CURSOR, in this file.
+  if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
+      'There is nothing renameable at that position.'));
+  Log(Format('prepareRename: %s ''%s'' ok',
+    [PosTag(LPath, LPasLine, LPasCol), LOldName]));
+  Result := BuildResponse(AMsg.IdJson, Format('{"range":%s,"placeholder":%s}',
+    [RangeJson(LIdent.Line, LIdent.ColFrom, LIdent.ColTo - LIdent.ColFrom),
+     JsonQuote(LOldName)]));
+end;
+
+{ textDocument/rename -> WorkspaceEdit. The plan arrives sorted by (file,
+  line, col), so `changes` is built by walking it and starting a new array
+  whenever the file changes - one key per file, which the shape requires (a
+  repeated key would be a different edit set silently winning).
+
+  Every range addresses the OLD identifier as ANALYZED. A client applying a
+  WorkspaceEdit is expected to reject it if its buffer moved since (VS Code
+  checks document versions); the IDE client, which applies by hand, makes
+  the same check itself with the OldText each pastree/renamePlan edit
+  carries. }
+function TLspServer.HandleRename(const AMsg: TLspIncoming): string;
+var
+  LPath, LNewName, LOldName, LError: string;
+  LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
+  LEdits: TArray<TPasRenameEdit>;
+  LSB: TStringBuilder;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) or
+     not AMsg.Params.TryGetValue<string>('newName', LNewName) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'rename: textDocument.uri, position and newName required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LEdits,
+    {out} LOldName, {out} LError) then
+  begin
+    Log(Format('rename: %s -> ''%s'' refused - %s',
+      [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
+  end;
+  Log(Format('rename: %s ''%s'' -> ''%s'': %d edits',
+    [PosTag(LPath, LPasLine, LPasCol), LOldName, LNewName, Length(LEdits)]));
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('{"changes":{');
+    for LIdx := 0 to High(LEdits) do
+    begin
+      if LIdx = 0 then
+        LSB.Append(JsonQuote(PathToUri(LEdits[LIdx].FilePath))).Append(':[')
+      else if not SameText(LEdits[LIdx].FilePath, LEdits[LIdx - 1].FilePath)
+      then
+        LSB.Append('],').Append(JsonQuote(PathToUri(LEdits[LIdx].FilePath)))
+          .Append(':[')
+      else
+        LSB.Append(',');
+      LSB.AppendFormat('{"range":%s,"newText":%s}',
+        [RangeJson(LEdits[LIdx].Line, LEdits[LIdx].Col, LEdits[LIdx].Len),
+         JsonQuote(LNewName)]);
+    end;
+    if Length(LEdits) > 0 then
+      LSB.Append(']');
+    LSB.Append('}}');
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ pastree/renamePlan - OURS, for a host that applies the rename itself and
+  wants to SHOW what it did. The same plan as textDocument/rename, but every
+  edit keeps the two things a WorkspaceEdit throws away: `oldText`, so the
+  host can verify each site against its own buffer before touching it, and
+  `snippet`/`hiFrom`/`hiTo` - the line as it reads AFTER the rename, with
+  the new name highlighted. That is what lets the RAD client fill a Find
+  References-shaped results tab with the OUTCOME rather than a promise.
+
+  A client that does not know this method loses nothing: textDocument/rename
+  is the same plan. }
+function TLspServer.HandleRenamePlan(const AMsg: TLspIncoming): string;
+var
+  LPath, LNewName, LOldName, LError: string;
+  LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
+  LEdits: TArray<TPasRenameEdit>;
+  LSB: TStringBuilder;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) or
+     not AMsg.Params.TryGetValue<string>('newName', LNewName) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'renamePlan: textDocument.uri, position and newName required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LEdits,
+    {out} LOldName, {out} LError) then
+  begin
+    Log(Format('renamePlan: %s -> ''%s'' refused - %s',
+      [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
+  end;
+  Log(Format('renamePlan: %s ''%s'' -> ''%s'': %d edits',
+    [PosTag(LPath, LPasLine, LPasCol), LOldName, LNewName, Length(LEdits)]));
+  LSB := TStringBuilder.Create;
+  try
+    LSB.AppendFormat('{"oldName":%s,"newName":%s,"edits":[',
+      [JsonQuote(LOldName), JsonQuote(LNewName)]);
+    for LIdx := 0 to High(LEdits) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.AppendFormat('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
+        '"len":%d,"oldText":%s,"isDecl":%s,"snippet":%s,' +
+        '"hiFrom":%d,"hiTo":%d}',
+        [JsonQuote(PathToUri(LEdits[LIdx].FilePath)),
+         JsonQuote(LEdits[LIdx].FilePath),
+         LEdits[LIdx].Line, LEdits[LIdx].Col, LEdits[LIdx].Len,
+         JsonQuote(LEdits[LIdx].OldText),
+         LowerCase(BoolToStr(LEdits[LIdx].IsDecl, True)),
+         JsonQuote(LEdits[LIdx].Snippet),
+         LEdits[LIdx].HiFrom, LEdits[LIdx].HiTo]);
+    end;
+    LSB.Append(']}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
     LSB.Free;
@@ -2710,6 +3058,28 @@ begin
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then
         Exit(HandleDocumentHighlight(LMsg));
+      if LMsg.Method = 'textDocument/prepareRename' then
+        Exit(HandlePrepareRename(LMsg));
+      if LMsg.Method = 'textDocument/rename' then
+        Exit(HandleRename(LMsg));
+      if LMsg.Method = 'pastree/renamePlan' then
+        Exit(HandleRenamePlan(LMsg));
+      { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when
+        something happens that the server cannot see but a reader of this log
+        needs as a boundary: the IDE opening or closing a project. Reopening
+        the SAME project restarts nothing here - the configuration is
+        identical - so without this the log runs straight from one session's
+        requests into the next's with nothing between them, which is exactly
+        the confusion it was added for (2026-08-29).
+
+        Prefixed on the way in rather than trusted as-is: a line in this file
+        that did not come from the server must say so. }
+      if LMsg.Method = '$/pastree.hostEvent' then
+      begin
+        if LMsg.Params is TJSONObject then
+          Log('host: ' + LMsg.Params.GetValue<string>('message', ''));
+        Exit;
+      end;
       if LMsg.Method.StartsWith('$/') then
         Exit;   // optional protocol extensions ($/cancelRequest et al):
                 // droppable by spec until phase 2 makes cancel meaningful

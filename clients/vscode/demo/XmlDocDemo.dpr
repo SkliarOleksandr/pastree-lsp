@@ -22,8 +22,9 @@ begin
   // rides with every completion row, not just with the hover.
   GName.First := 'Ada';
   GName.Last := 'Lovelace';
-  GGreeter := TGreeter.Create(gsFormal);
+  GGreeter := TGreeter.Create(gsFormal2);
   try
+    TObject.  
     Writeln(GGreeter.Greet(GName, True));
     Writeln(CAnswer, ' ', EscapesAndOddities);
     UntaggedDoc;

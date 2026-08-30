@@ -186,7 +186,8 @@ var
   LWritten: DWORD;
   LTry: Integer;
 begin
-  LFile := INVALID_HANDLE_VALUE;
+  // No pre-initialisation: the loop assigns on its first iteration and every
+  // exit below is either a Break with a real handle or an Exit.
   for LTry := 1 to cRetries do
   begin
     LFile := CreateFile(PChar(GPath), FILE_APPEND_DATA,

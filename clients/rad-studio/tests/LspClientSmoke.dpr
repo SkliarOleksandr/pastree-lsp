@@ -308,11 +308,43 @@ begin
   end;
 end;
 
+{ The server log this run writes, and reads back in section 5c: the only place
+  the incremental fast path is observable from outside. Nothing in a response
+  says whether an answer came from a module reanalysis or a closure rebuild -
+  by design, they are the same answer - so the log line is the evidence. }
+function ServerLogFile: string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath, 'pastree-lsp-smoke.log');
+end;
+
+{ Read while the server holds the file open for appending - hence the explicit
+  share mode; TFile.ReadAllText denies write and would collide with a line
+  arriving mid-read. }
+function ReadServerLog: string;
+var
+  LStream: TFileStream;
+  LBytes: TBytes;
+begin
+  Result := '';
+  if not TFile.Exists(ServerLogFile) then
+    Exit;
+  LStream := TFileStream.Create(ServerLogFile, fmOpenRead or fmShareDenyNone);
+  try
+    SetLength(LBytes, LStream.Size);
+    if Length(LBytes) > 0 then
+      LStream.ReadBuffer(LBytes[0], Length(LBytes));
+    Result := TEncoding.UTF8.GetString(LBytes);
+  finally
+    LStream.Free;
+  end;
+end;
+
 function StartClient(const AExe: string): Boolean;
 var
   LOptions: TLspInitOptions;
 begin
   LOptions := Default(TLspInitOptions);
+  LOptions.LogFile := ServerLogFile;
   // A bare .dpr root: the server takes it as MainSource directly, no MSBuild
   // evaluation, which keeps this test independent of any .dproj.
   LOptions.ProjectFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
@@ -541,6 +573,102 @@ begin
   // reruns) see the fixtures as written.
   SendDidChange(LUnitFile, TFile.ReadAllText(LUnitFile));
   SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
+end;
+
+{ 5c. THE INCREMENTAL FAST PATH ACTUALLY FIRES.
+
+  A fast path that quietly stops firing is indistinguishable from a slow
+  analyzer: every answer stays correct, the editor just gets sluggish, and
+  nobody can point at a broken test. Nothing in a response distinguishes a
+  module reanalysis from a closure rebuild - by design - so this reads the
+  server's own log lines, which is also what a human debugging "the analysis
+  got slow" would do.
+
+  Two edits, because they exercise DIFFERENT halves of SingleChangedDoc and
+  only the second one used to work:
+
+    edit 1  the file's text starts overriding its disk copy - the overlay
+            APPEARS in the signature. This is the first keystroke in a file,
+            it happens once per file per session, and it rebuilt the whole
+            closure until 0.17.0.
+    edit 2  an edit on top of an edit: same path, different hash.
+
+  Both must log `analysis started: incremental, one module`. What is NOT
+  asserted is acceptance by PasTree's guards - `analysis done (incremental)`
+  is checked, but a refusal here would be a library decision about a fixture,
+  not a server bug, and pinning it would make this test fail for the wrong
+  reason. What the server owns is CHOOSING the module path, and that is what
+  is pinned. }
+procedure TestIncrementalPath;
+var
+  LUnitFile, LDiskText, LEdited, LBefore, LAfter: string;
+  LLine, LChar: Integer;
+
+  // The log only grows, so "did this edit log it" means "in what was appended
+  // since". Comparing whole snapshots would pass on a line from an earlier
+  // section forever after.
+  function AppendedSince(const ABefore: string): string;
+  begin
+    Result := ReadServerLog;
+    Result := Copy(Result, Length(ABefore) + 1, MaxInt);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5c. an edit takes the incremental path, not a rebuild ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LDiskText := TFile.ReadAllText(LUnitFile);
+
+  // Make sure an analysis exists to be incremental ABOUT, and that this
+  // document's overlay matches its file right now (earlier sections restore
+  // what they change).
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'a baseline analysis is in place');
+
+  // Inside a routine BODY: a comment appended to Greet's body changes nothing
+  // any other unit can see, which is the cheapest case the library has.
+  LEdited := StringReplace(LDiskText, 'Result := ''Hello, ''',
+    '// incremental smoke'#13#10'  Result := ''Hello, ''', []);
+  Check(LEdited <> LDiskText, 'fixture patch applied (a comment in a body)');
+
+  LBefore := ReadServerLog;
+  SendDidChange(LUnitFile, LEdited);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'the first edit was analyzed');
+  LAfter := AppendedSince(LBefore);
+  Check(LAfter.Contains('analysis started: incremental, one module'),
+    'the FIRST edit to a file takes the module path (the overlay appearing '
+    + 'is a one-file change)');
+  Check(not LAfter.Contains('analysis started: full rebuild'),
+    'and no closure rebuild was started for it');
+
+  LBefore := ReadServerLog;
+  SendDidChange(LUnitFile, LEdited + #13#10);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'the second edit was analyzed');
+  LAfter := AppendedSince(LBefore);
+  Check(LAfter.Contains('analysis started: incremental, one module'),
+    'an edit on top of an edit takes it too');
+  Check(LAfter.Contains('analysis done (incremental)'),
+    'and PasTree accepted it - the module was reanalyzed in place');
+  // The identity of the re-analyzed module must survive the swap. The first
+  // version of this handed PasTree the signature's LOWERCASED path, and the
+  // model came back carrying it: every answer out of that unit then had a
+  // uri of .../demounit.pas, which an editor treats as a different document
+  // from the one it opened. Nothing else in the suite would have noticed.
+  Check(GResultJson.Contains('DemoUnit.pas'),
+    'and the answer still names the file the way the closure loaded it');
+
+  // Back to the file's text, which is itself a one-file change (the overlay
+  // DISAPPEARS) and must not rebuild either.
+  LBefore := ReadServerLog;
+  SendDidChange(LUnitFile, LDiskText);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'the document went back to its on-disk text');
+  Check(AppendedSince(LBefore).Contains(
+    'analysis started: incremental, one module'),
+    'reverting to the file takes the module path as well');
 end;
 
 { 5b. Completion: PasTree's engine over the live overlay, bridged.
@@ -783,6 +911,88 @@ begin
     'and the record type');
   Check(GOk and GResultJson.Contains('"name":"Value"'),
     'with its field as a child - types report their members');
+end;
+
+{ 5d-ter. rename: prepareRename, textDocument/rename and pastree/renamePlan.
+
+  Nothing here APPLIES anything - the server plans, a host edits - so the
+  fixtures come out of this section byte-identical, and every check is about
+  the plan's shape.
+
+  The refusals are half the section on purpose. A rename is the one request
+  that changes a project, so "it declined and said why" is a feature with the
+  same weight as "it planned correctly": an invalid name, a reserved word, a
+  unit name (a file rename plus every uses clause - not this) and a compiler
+  builtin must each come back as an error a client can put in front of the
+  user, never as a silent empty edit set. }
+procedure TestRename;
+var
+  LUnitFile, LAppFile: string;
+  LLine, LChar: Integer;
+
+  // PositionParams plus the one member rename adds.
+  function RenameParams(const AFile: string; ALine, AChar: Integer;
+    const ANewName: string): TJSONObject;
+  begin
+    Result := PositionParams(AFile, ALine, AChar);
+    Result.AddPair('newName', ANewName);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5d-ter. rename plans edits, or refuses with a reason ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/prepareRename',
+    PositionParams(LUnitFile, LLine, LChar)), 'prepareRename answered');
+  Check(GOk and GResultJson.Contains('"placeholder":"Greet"'),
+    'it offers the current name as the placeholder');
+  Check(GOk and GResultJson.Contains(Format('"character":%d', [LChar])),
+    'and a range that starts at the identifier, not at the line');
+
+  Check(Ask('textDocument/rename',
+    RenameParams(LUnitFile, LLine, LChar, 'Salute')), 'rename answered');
+  Check(GOk and GResultJson.Contains('"changes"'), 'it is a WorkspaceEdit');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas'),
+    'the declaring unit is edited');
+  Check(GOk and GResultJson.Contains('DemoApp.dpr'),
+    'and so is the caller - a rename reaches as far as the references did');
+  Check(GOk and GResultJson.Contains('"newText":"Salute"'),
+    'every edit writes the new name');
+
+  // A reserved word and a non-identifier: both are PlanRename's own name
+  // test (IsValidRenameName), and both must reach the user as an error.
+  Check(Ask('textDocument/rename',
+    RenameParams(LUnitFile, LLine, LChar, 'begin')), 'rename to a keyword answered');
+  Check(not GOk, 'and refused it');
+  Check(Ask('textDocument/rename',
+    RenameParams(LUnitFile, LLine, LChar, '2bad')), 'rename to a non-identifier answered');
+  Check(not GOk, 'and refused that too');
+
+  // The unit identity, declined by design (see PlanRenameAt).
+  FindPos(LAppFile, 'DemoUnit in ', 'DemoUnit', LLine, LChar);
+  Check(Ask('textDocument/rename',
+    RenameParams(LAppFile, LLine, LChar, 'RenamedUnit')),
+    'rename on a uses item answered');
+  Check(not GOk, 'and refused - a unit rename is a file rename');
+  Check(not GOk and GError.Contains('unit'), 'saying so');
+
+  // pastree/renamePlan: the same plan, plus what a host that applies it
+  // itself needs - the old text to verify against its buffer, and the line
+  // as it will READ afterwards.
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LUnitFile, LLine, LChar, 'Salute')), 'renamePlan answered');
+  Check(GOk and GResultJson.Contains('"oldName":"Greet"'),
+    'it names what is being renamed');
+  Check(GOk and GResultJson.Contains('"oldText":"Greet"'),
+    'each edit carries the old text for a buffer check');
+  Check(GOk and GResultJson.Contains('"isDecl":true'),
+    'the declaration site is flagged - a host pins it first');
+  Check(GOk and GResultJson.Contains('Salute'),
+    'and the preview snippets already read as the new name');
 end;
 
 { 5f. pastree/classComplete: the server half of Ctrl+Shift+C.
@@ -1158,6 +1368,11 @@ begin
 
     Writeln('server:   ' + GExe);
     Writeln('fixtures: ' + GFixtureDir);
+    Writeln('log:      ' + ServerLogFile);
+    // Fresh per run: section 5c reads this file back, and a run's evidence
+    // must not be the previous run's.
+    if TFile.Exists(ServerLogFile) then
+      TFile.Delete(ServerLogFile);
     if not TFile.Exists(TPath.Combine(GFixtureDir, 'DemoApp.dpr')) then
       raise Exception.Create('fixtures not found next to the test exe');
 
@@ -1183,10 +1398,12 @@ begin
       TestNonAsciiPositions;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
+      TestIncrementalPath;
       TestCompletion;
       TestHover;
       TestSignatureHelp;
       TestDocumentSymbol;
+      TestRename;
       TestClassComplete;
       TestClassCompleteBrokenBuffer;
       TestWorkspaceSymbol;

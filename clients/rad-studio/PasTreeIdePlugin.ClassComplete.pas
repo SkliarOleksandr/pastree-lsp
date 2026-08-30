@@ -208,7 +208,8 @@ begin
     Exit;
   GBindingIndex := GKeyboardServices.AddKeyboardBinding(
     TPasClassCompleteBinding.Create);
-  LogDiagnostic('class completion bound to Ctrl+Shift+C');
+  // Not announced - a binding that worked is not news; see the same reasoning
+  // in InitializeCodeInsight.
 end;
 
 procedure FinalizeClassComplete;

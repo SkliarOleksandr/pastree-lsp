@@ -173,7 +173,10 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/completion` | PasTree's engine through the seam; `documentation` per item; [COMPLETION.md](COMPLETION.md) owns the story |
 | `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
+| `textDocument/prepareRename` | the identifier's own span, and the earliest refusal |
+| `textDocument/rename` | a `WorkspaceEdit` over the resolved references, symbol identity only |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
+| `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText` and a post-rename preview per line |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
@@ -186,6 +189,30 @@ same way the `pastreeCall` and `pastreeHtml` result fields do. It is also the
 one request that must NOT wait for the analysis: it is a parse of the live
 buffer, because the declaration the user wants a body for is the one they just
 typed.
+
+**Rename is the reference search, turned into edits — and its refusals are
+half the feature.** `PlanRename` is `DeclHit` + `FindReferences`, so a rename
+can never reach further than the references panel already showed, and never
+onto a same-spelled unrelated symbol. Only the SYMBOL identity is renamed: a
+`uses` item or a module header is declined (renaming a unit is a file rename
+plus every referring `uses` clause — a different shape of workspace edit, and
+a planned feature rather than a gap), and a compiler builtin has no
+declaration site at all. An invalid name or a reserved word is refused by the
+analysis itself (`IsValidRenameName`), never by a client's own copy of the
+keyword list — a second answer able to disagree with the first is exactly
+what that would be. Every refusal comes back as an error whose message is
+written to be shown to a user, not logged.
+
+**Why `pastree/renamePlan` exists next to `textDocument/rename`.** They plan
+the same edits; the custom one keeps what a `WorkspaceEdit` throws away —
+`oldText` for each site, so a host that applies the rename ITSELF can verify
+the buffer has not moved since the analysis, and a `snippet` with
+`hiFrom`/`hiTo`: the line as it reads AFTER the rename, with the new name
+highlighted. That is what lets the RAD Studio client fill a Find
+References-shaped results tab with the OUTCOME rather than a promise — the
+ToolsAPI has no refactoring surface to plug into, so the plugin edits buffers
+and then shows what it did. A client that does not know the method loses
+nothing: `textDocument/rename` is the same plan.
 
 **Encoding disagreement — fixed 2026-08-20, in PasTree, and the diagnosis is
 worth keeping because the obvious explanation was wrong.** PasTree used to
@@ -291,13 +318,11 @@ All four shipped. Two notes worth keeping:
   search: on a 3747-unit project this is the feature people reach for most
   (the IDE's own Ctrl+T). Every model's unit and implementation scopes already
   hold what it needs, keyed by `NameLower`.
-- **`textDocument/rename` (+ `prepareRename`).** Precise *because* the
-  references are resolved rather than textual, and the three-identity model
-  already decides what a rename even means. Work is in the edges: a
-  `WorkspaceEdit` touching files nobody has open, and a refusal for a builtin
-  or a symbol declared in a library unit the user cannot edit. (Listed as a
-  non-goal in the original phase plan; the reason it was — no precise
-  references — has since gone away.)
+- **A UNIT rename.** The half `textDocument/rename` declines: a file rename
+  plus every referring `uses` clause (and the `.dproj`/`.dpr` entry). The
+  identity is already there — `FindUnitReferences` — but the edits leave the
+  shape the symbol rename lives in: renaming a file is not replacing an
+  identifier, and a host has to be told to do both.
 - **`workspace/didChangeConfiguration` (+ `workspace/configuration`).**
   Reconfigure without a restart. Today a changed `.dproj` only prints a note
   from the watched-files handler, because search paths, defines and namespaces
@@ -410,8 +435,69 @@ Next, and NOT in protocol order:
    whole exercise, and the only step that retires in-process analysis.
 9. Tier 1 of the coverage list above, `$/progress` first: a 5-second rebuild
    the client cannot see is the most visible remaining gap.
-10. (PasTree repo) incremental reanalysis — see that repo's To do; the host
-    side here is already doing everything it can without library support.
+10. (PasTree repo) incremental reanalysis — **DONE, both sides.** PasTree
+    0.9.0 shipped the parse donor and single-module reanalysis, 0.10.0 put
+    INTERFACE edits on the fast path (the units a change can reach are
+    recomputed instead of the call being refused), 0.11.0 made the
+    blast-radius ceiling the `ModuleRedoLimit` property. The server drives
+    all three — see "The incremental fast path" below.
+
+## The incremental fast path
+
+An edit no longer rebuilds the closure. The mechanisms are PasTree's and
+documented in that repo (`docs/incremental-analysis.md`, with the measured
+numbers); what belongs here is the part the server owns — **deciding** which
+path an edit takes, and being honest in the log about which one it took.
+
+The decision is one question: *did exactly one document's text change since
+the last completed analysis?* The overlay signature is kept as its sorted
+per-document parts, and the two lists are merged by path. One differing path
+— in any of the three ways a file's text can change — takes the module path:
+
+| | |
+|---|---|
+| hash differs | an edit on top of an edit |
+| path appears | the FIRST edit to a file, when it stops matching its disk text |
+| path disappears | a save, or a close without saving |
+
+Two or more differing paths rebuild. PasTree's entry point takes one path and
+its guards inspected one unit, so this is not a place to be clever.
+
+Then: `TPasAsyncSession.CreateForModule` takes ownership of the project, the
+document buffers go in exactly as for a full session, and the project comes
+back through `TakeProject` accepted or refused. A refusal costs one finalize —
+the project is untouched, so nothing is republished — and the rebuild that
+follows adopts it as the parse donor. Every full rebuild does that too,
+whether or not a module run preceded it.
+
+Two details that are easy to get wrong and were:
+
+- **The path handed to the analysis must be the project's spelling**, not the
+  signature's. The signature lowercases so that two spellings of one file
+  compare equal; a lowercased path reaching the analysis makes the swapped
+  model carry it, and every position answered out of that unit afterwards
+  names a document the editor never opened. `ModelFile(id)` is the spelling
+  the closure loaded. Pinned by `LspClientSmoke` 5c.
+- **The parse record is not written after an accepted module run.** The
+  closure is the one it already recorded, and the questions it answers
+  ("which copy of this unit won?") are rebuild questions; writing it per
+  keystroke buries the rebuild that matters.
+
+`moduleRedoLimit` in the initializationOptions writes PasTree's
+`ModuleRedoLimit` — how many affected units an interface edit may pull in
+before rebuilding instead. 0 keeps the library's measured default of 128.
+It is per-project by nature: on a 3676-unit closure a COM type-library unit
+reaches 28 consumers (redone in ~2 s against a 29 s rebuild) while a core
+types unit reaches 1181, which is past break-even and correctly rebuilds.
+
+The log distinguishes all of it, because a fast path that quietly stops
+firing is indistinguishable from a slow analyzer: `analysis started:
+incremental, one module (<file>)` against `analysis started: full rebuild`,
+then `analysis done (incremental)`, and on a refusal `incremental refused for
+<file> (module=refused:<reason>) - full rebuild` with PasTree's own reason.
+`LspClientSmoke` section 5c is the gate: it reads the server's log back and
+requires the module path for the first edit to a file, an edit on top of an
+edit, and a revert.
 
 ## Open questions
 
@@ -419,11 +505,12 @@ Next, and NOT in protocol order:
   to own the child process's pipes; ToolsAPI imposes no obstacle, but verify)
 - how much of `TPasAsyncSession` (the demo's async layer) is reusable as the
   server's scheduling core vs. server-owned from scratch
-- incremental reanalysis granularity: MEASURED and written up as a feature in
-  the PasTree repo To-do (parse-artifact cache, then single-module reanalysis
-  with a fallback guard). On the demo closure a rebuild splits 21% interface
-  parse / 27% full parse / 52% cross passes, so caching the parse is at best
-  half the answer
+- ~~incremental reanalysis granularity~~ — **ANSWERED, shipped 2026-08-28.**
+  The question was where to cut, given that a rebuild splits 21% interface
+  parse / 27% full parse / 52% cross passes, so caching the parse could never
+  be more than half the answer. The cut is per MODULE, with the units an
+  interface change can reach recomputed alongside it, and the parse donor
+  underneath as the fallback. See "The incremental fast path" above
 - **a git hash in the build stamp — deliberately deferred, 2026-08-20.** The
   version identifies a commit only if nobody forgets to bump it, and the
   binary's timestamp identifies a compile rather than a commit; embedding

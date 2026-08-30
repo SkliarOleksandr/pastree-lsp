@@ -69,7 +69,21 @@ const
   /// AnalyzeModuleOnly - which is exactly why this is a version gate and not
   /// a compile-time one: an older sibling must fail loudly rather than have
   /// the server infer anything about what its guards checked.
-  cMinPasTreeVersion = '0.9.0';
+  ///
+  /// Raised to 0.11.0 on 2026-08-28: the incremental path grew the two things
+  /// the server now depends on. 0.10.0 made an INTERFACE edit redo the units
+  /// it can reach instead of refusing outright - which is what turns the fast
+  /// path from a body-edit special case into the ordinary one - and 0.11.0
+  /// turned the blast-radius ceiling into TPasSemaProject.ModuleRedoLimit,
+  /// which the "moduleRedoLimit" initialization option writes. The property
+  /// is the compile-time half; the behaviour is not, and that is the half
+  /// this gate is for: against 0.9.0 every interface edit silently falls back
+  /// to a closure rebuild and the only symptom is that editing feels slow.
+  /// Raised to 0.12.0 on 2026-08-30: rename. TPasNavigator.PlanRename and
+  /// IsValidRenameName are what textDocument/rename and pastree/renamePlan
+  /// ARE - there is no fallback to degrade to, so an older sibling must
+  /// fail at compile time rather than at the first F2.
+  cMinPasTreeVersion = '0.12.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

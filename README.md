@@ -68,12 +68,25 @@ Phases 1 and 2 are complete and exercised live.
 | `window/logMessage`, `window/showMessage` | server trouble the user can act on |
 | `textDocument/typeDefinition` | the type of the thing under the cursor, across units |
 | `textDocument/documentHighlight` | occurrences within the current file |
+| `textDocument/rename`, `textDocument/prepareRename` | rename a symbol across the project, as a `WorkspaceEdit`; a unit name or a builtin is refused with a reason |
+| `pastree/renamePlan` | the same plan with each site's old text and a preview of the line after the rename — what the RAD Studio client shows in its results tab |
 
 **Behaviour** — analysis runs on a background session, debounced so a typing
 burst costs one build; a document event only schedules a rebuild when the text
 really differs from what was analyzed; a result whose buffer versions went
 stale mid-build is swapped in and immediately rebuilt; and a client that dies
 without closing stdin is noticed by the liveness watchdog.
+
+**An edit does not rebuild the closure** (since 0.17.0, on PasTree 0.11.0).
+When exactly one document's text changed, the server re-analyzes that one
+module in place instead — including an INTERFACE edit, where PasTree recomputes
+the units the change can reach. Measured on a 3676-unit client project: a body
+edit 310 ms and an interface edit 1.5 s, against a 29 s rebuild. Everything
+that does not qualify — several files at once, a new `uses` entry, a blast
+radius past `moduleRedoLimit` — falls back to an ordinary rebuild, and that
+rebuild reuses the previous analysis's parse of every unchanged file (29 s →
+23 s). Which path an edit took is in the log; `SPEC.md` has the decision rule
+and PasTree's `docs/incremental-analysis.md` the mechanisms.
 
 Verified against VS Code (`clients/vscode`, also installable as a VSIX):
 go-to-definition, find-all-references, outline, hover and diagnostics all work
