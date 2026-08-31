@@ -35,11 +35,15 @@ unit PasTreeIdePlugin.ResultRows;
     editor itself paints with, read at draw time so a Tools > Options >
     Editor color or theme change shows on the next repaint. Nothing cached.
 
-  The match is bold + underline IN THE RUN'S OWN SYNTAX COLOR - the Find
-  in Files marker, not a filled one. Two background variants lost to live
-  runs first: the editor's "Search match" element is white-on-black by
-  default (a black box punched into every row), and any filled rectangle
-  repeated down a result list reads as noise.
+  The match is bold + underline in MAROON - the exact Find in Files marker
+  (fourth live run: the run's own syntax color was tried there first and
+  the user asked for the native maroon instead). clMaroon is only readable
+  on a light panel, so on a dark theme - detected from the luminance of the
+  panel's prepared font color, light text meaning a dark panel - it falls
+  back to the IDE's theme-aware red accent. Two background variants lost to
+  live runs before any of this: the editor's "Search match" element is
+  white-on-black by default (a black box punched into every row), and any
+  filled rectangle repeated down a result list reads as noise.
 
   The tokenizer below is a DISPLAY tokenizer, one detached line at a time,
   best effort by design: reserved words, identifiers, strings, numbers
@@ -90,8 +94,8 @@ function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
 implementation
 
 uses
-  System.SysUtils, System.Types, System.StrUtils, System.UITypes,
-  Vcl.Graphics, ToolsAPI.UI, ToolsAPI.Editor;
+  Winapi.Windows, System.SysUtils, System.Types, System.StrUtils,
+  System.UITypes, Vcl.Graphics, ToolsAPI.UI, ToolsAPI.Editor;
 
 { ------------------------------------------------------------------------- }
 { The display tokenizer                                                      }
@@ -459,7 +463,7 @@ var
   LHavePalette: Boolean;
   LBaseColor: TColor;
   LBaseStyle: TFontStyles;
-  LBlue, LOrange, LGreen: TColor;
+  LBlue, LOrange, LGreen, LMatchColor: TColor;
   LTop, LX: Integer;
 
   procedure Put(const ARun: string; AColor: TColor; AStyle: TFontStyles);
@@ -511,10 +515,10 @@ var
         if LCut < LTake then
           LTake := LCut;
         if LInMatch then
-          // The Find in Files marker - bold + underline - in the run's own
-          // syntax color. See the unit header for the two rejected
-          // background variants.
-          Put(Copy(FText, LFrom, LTake), LColor,
+          // The Find in Files marker - bold + underline, maroon. See the
+          // unit header for the rejected variants (backgrounds, syntax
+          // color) and for the dark-theme fallback in LMatchColor.
+          Put(Copy(FText, LFrom, LTake), LMatchColor,
             LStyle + [TFontStyle.fsBold, TFontStyle.fsUnderline])
         else
           Put(Copy(FText, LFrom, LTake), LColor, LStyle);
@@ -525,6 +529,8 @@ var
 
 var
   LUI: INTAIDEUIServices;
+  LBaseRgb: Cardinal;
+  LPanelIsDark: Boolean;
 begin
   LHavePalette := TryEditorOptions(LOptions);
   LBaseColor := ACanvas.Font.Color;
@@ -532,11 +538,21 @@ begin
   LBlue := LBaseColor;
   LOrange := LBaseColor;
   LGreen := LBaseColor;
+  LMatchColor := clMaroon;
+  // Light TEXT means a dark PANEL, where clMaroon is mud - take the IDE's
+  // theme-aware red accent there instead. Plain luminance of the prepared
+  // font color; the panel's own background is not exposed here.
+  LBaseRgb := ColorToRGB(LBaseColor);
+  LPanelIsDark :=
+    (2 * GetRValue(LBaseRgb) + 5 * GetGValue(LBaseRgb) + GetBValue(LBaseRgb))
+      div 8 > 128;
   if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
   begin
     LBlue := LUI.ThemeAwareColors[itcBlue];
     LOrange := LUI.ThemeAwareColors[itcOrange];
     LGreen := LUI.ThemeAwareColors[itcGreen];
+    if LPanelIsDark then
+      LMatchColor := LUI.ThemeAwareColors[itcRed];
   end;
   LTop := ARect.Top + (ARect.Height - ACanvas.TextHeight('Ag')) div 2;
   LX := ARect.Left + cPad;
@@ -551,9 +567,10 @@ begin
 
   if FIsHeader then
   begin
-    // Find in Files: the full path bold in the panel's text color, the
-    // count in the blue accent - "C:\...\Unit.pas [13]".
-    Put(FFilePath, LBaseColor, LBaseStyle + [TFontStyle.fsBold]);
+    // The whole header - path and count - bold in the same blue accent
+    // the hit rows use for their file names (fourth live run: base-color
+    // bold read as unstyled next to the colored rows).
+    Put(FFilePath, LBlue, LBaseStyle + [TFontStyle.fsBold]);
     Put(FSuffix, LBlue, LBaseStyle + [TFontStyle.fsBold]);
   end
   else
