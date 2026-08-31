@@ -37,6 +37,7 @@ uses
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ClassComplete,
+  PasTreeIdePlugin.BlockClose,
   PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
@@ -380,6 +381,10 @@ begin
   // binding (it is not gated by the Insight Provider selection, so this is
   // the only way to take it over).
   InitializeClassComplete;
+  // Enter after an unclosed block opener: the server (standard LSP
+  // onTypeFormatting) answers with the closer - see
+  // PasTreeIdePlugin.BlockClose. Never swallows the key.
+  InitializeBlockClose;
   // Ctrl+Shift+E (and an editor menu item): rename a symbol across the
   // project, then show every changed line in its own Messages tab. The
   // ToolsAPI has no refactoring surface, so this is a plain command -
@@ -430,6 +435,7 @@ begin
   // manager and the Insight notifier already unregistered (and their
   // closures gated off - see the GAlive flags in each unit).
   FinalizeClassComplete;
+  FinalizeBlockClose;
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;

@@ -154,6 +154,20 @@ type
     const AAnswer: TLspClassComplete; const AError: string);
 
   /// <summary>
+  /// One insertion from textDocument/onTypeFormatting, converted to IDE
+  /// coordinates (1-based row/col). The server only ever answers zero-width
+  /// ranges here - pure insertions - so a range end is not carried.
+  /// </summary>
+  TLspTextEdit = record
+    Row: Integer;
+    Col: Integer;
+    Text: string;
+  end;
+
+  TLspTextEditsProc = reference to procedure(ASuccess: Boolean;
+    const AEdits: TArray<TLspTextEdit>; const AError: string);
+
+  /// <summary>
   /// One replacement from a rename plan (pastree/renamePlan), already in IDE
   /// coordinates - and note that these arrive that way: unlike every other
   /// answer here, our own rename method reports PasTree's own 1-based
@@ -420,6 +434,15 @@ procedure LspClassComplete(const AFileName: string;
   const AOnDone: TLspClassCompleteProc);
 
 /// <summary>
+/// textDocument/onTypeFormatting after Enter (the one trigger character the
+/// server registers): the caret's NEW position goes in, zero or more
+/// insertions come back - in practice zero or one, the missing block closer.
+/// Zero edits with ASuccess=True is the ordinary "nothing to insert".
+/// </summary>
+procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspTextEditsProc);
+
+/// <summary>
 /// Plans a rename of the identifier at an IDE position: every site that
 /// would change, plus a preview of each line as it would read afterwards.
 /// Plans only - nothing is written; the caller applies the edits (see
@@ -615,6 +638,8 @@ type
       const AOnDone: TLspSignatureHelpProc);
     procedure ClassComplete(const AFileName: string;
       const AOnDone: TLspClassCompleteProc);
+    procedure OnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspTextEditsProc);
     procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
       const ANewName: string; const AOnDone: TLspRenamePlanProc);
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
@@ -1417,6 +1442,69 @@ begin
     end);
 end;
 
+procedure TLspSession.OnTypeFormatting(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspTextEditsProc);
+var
+  LParams, LDoc, LPos, LOpts: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+  // Sync FIRST and unconditionally, for ClassComplete's reason: this request
+  // exists BECAUSE the buffer just changed (the Enter is already in it).
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  // Mandatory per the spec; the server copies the opener line's own
+  // indentation and ignores these, but a params shape another server would
+  // reject is a bug waiting for a client swap.
+  LOpts := TJSONObject.Create;
+  LOpts.AddPair('tabSize', TJSONNumber.Create(2));
+  LOpts.AddPair('insertSpaces', TJSONBool.Create(True));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  LParams.AddPair('ch', #10);
+  LParams.AddPair('options', LOpts);
+  // No supersede slot: like ClassComplete, a deliberate keystroke - and the
+  // answer is dropped by the caller if the caret has moved on.
+  FClient.Request('textDocument/onTypeFormatting', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LEdits: TArray<TLspTextEdit>;
+      LItem: TJSONValue;
+      LEdit: TLspTextEdit;
+      LEditLine, LEditChar: Integer;
+    begin
+      if not ASuccess then
+      begin
+        AOnDone(False, nil, AError);
+        Exit;
+      end;
+      LEdits := nil;
+      // null is the spec's "nothing to insert" - success with no edits.
+      if AResult is TJSONArray then
+        for LItem in TJSONArray(AResult) do
+        begin
+          LEditLine := LItem.GetValue<Integer>('range.start.line', -1);
+          LEditChar := LItem.GetValue<Integer>('range.start.character', -1);
+          LEdit.Text := LItem.GetValue<string>('newText', '');
+          if (LEditLine < 0) or (LEditChar < 0) or (LEdit.Text = '') then
+            Continue;
+          LspToIde(LEditLine, LEditChar, LEdit.Row, LEdit.Col);
+          LEdits := LEdits + [LEdit];
+        end;
+      AOnDone(True, LEdits, '');
+    end);
+end;
+
 /// <summary>
 /// A pastree/renamePlan answer. The positions are PasTree's own 1-based
 /// line/column - IDE coordinates already - so unlike every other parser here
@@ -2196,6 +2284,17 @@ begin
     Exit;
   end;
   GSession.ClassComplete(AFileName, AOnDone);
+end;
+
+procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspTextEditsProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.OnTypeFormatting(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;

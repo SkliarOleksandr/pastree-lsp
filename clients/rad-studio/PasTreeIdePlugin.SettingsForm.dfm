@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 386
+  ClientHeight = 451
   ClientWidth = 462
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -75,7 +75,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 16
     Top = 108
     Width = 430
-    Height = 222
+    Height = 287
     Caption = ' Overrides '
     TabOrder = 1
     object lblStructureViewHint: TLabel
@@ -108,6 +108,16 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         'in its own Messages tab. Off hides the command entirely.'
       WordWrap = True
     end
+    object lblBlockCompletionHint: TLabel
+      Left = 35
+      Top = 240
+      Width = 377
+      Height = 30
+      Caption =
+        'Inserts the missing end;/until ; on the next line when Enter is p' +
+        'ressed right after an unclosed block opener.'
+      WordWrap = True
+    end
     object chkStructureView: TCheckBox
       Left = 16
       Top = 24
@@ -138,10 +148,20 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       State = cbChecked
       TabOrder = 2
     end
+    object chkBlockCompletion: TCheckBox
+      Left = 16
+      Top = 219
+      Width = 396
+      Height = 17
+      Caption = 'Block completion (Enter after begin/try/case/repeat)'
+      Checked = True
+      State = cbChecked
+      TabOrder = 3
+    end
   end
   object btnOK: TButton
     Left = 270
-    Top = 346
+    Top = 411
     Width = 85
     Height = 27
     Caption = 'OK'
@@ -151,7 +171,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnCancel: TButton
     Left = 361
-    Top = 346
+    Top = 411
     Width = 85
     Height = 27
     Cancel = True

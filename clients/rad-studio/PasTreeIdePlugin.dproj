@@ -120,6 +120,7 @@
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.BlockClose.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Settings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">

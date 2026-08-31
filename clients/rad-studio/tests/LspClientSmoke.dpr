@@ -1257,6 +1257,73 @@ begin
     'and carries symbols from other units');
 end;
 
+{ 5h. Block completion over the wire: textDocument/onTypeFormatting with the
+  newline trigger. Both sides of the trigger rule from PasLsp.BlockClose:
+  a file one closer short with the opener on the last code line above the
+  caret gets exactly one insertion carrying the OPENER's indentation, and a
+  balanced file gets null - the spec's own "nothing to insert". The text
+  goes in via didOpen only; the path never exists on disk, which also pins
+  that the handler reads the overlay, not the file. }
+procedure TestOnTypeFormatting;
+var
+  LFile: string;
+
+  function TypingParams(ALine, AChar: Integer): TJSONObject;
+  var
+    LOpts: TJSONObject;
+  begin
+    Result := PositionParams(LFile, ALine, AChar);
+    Result.AddPair('ch', #10);
+    LOpts := TJSONObject.Create;
+    LOpts.AddPair('tabSize', TJSONNumber.Create(2));
+    LOpts.AddPair('insertSpaces', TJSONBool.Create(True));
+    Result.AddPair('options', LOpts);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5h. onTypeFormatting closes the block just opened ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoBlockClose.pas');
+  SendDidOpenText(LFile,
+    'unit DemoBlockClose;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'procedure P;'#13#10 +
+    'begin'#13#10 +
+    '  try'#13#10 +          // the opener, line 5
+    '  '#13#10 +             // the caret line, 6 - Enter just landed here
+    'end;'#13#10 +           // steals the try's end - the cascade case
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(6, 2)),
+    'onTypeFormatting answered');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n  end;"'),
+    'inserts end; under the caret line, with the TRY line''s indentation');
+  Check(GOk and GResultJson.Contains('"line":6'),
+    'at the end of the caret line, leaving the caret alone');
+
+  // The balanced file: same shape, try closed - nothing to insert, and the
+  // answer is null rather than an empty array or an error.
+  SendDidOpenText(LFile,
+    'unit DemoBlockClose;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'procedure P;'#13#10 +
+    'begin'#13#10 +
+    '  try'#13#10 +
+    '  '#13#10 +
+    '  finally'#13#10 +
+    '  end;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(6, 2)),
+    'the balanced file answered');
+  // The client hands a JSON null result to the callback as nil, so the
+  // harness records no result text at all - which is exactly the point:
+  // nothing to apply, nothing to parse.
+  Check(GOk and (GResultJson = ''),
+    'and the answer is null - nothing to insert in a balanced file');
+end;
+
 { 6. Cancellation hygiene.
 
   TLspSession cancels a superseded request on every new one, so the invariant
@@ -1479,6 +1546,7 @@ begin
       TestClassComplete;
       TestClassCompleteBrokenBuffer;
       TestWorkspaceSymbol;
+      TestOnTypeFormatting;
       TestCancelHygiene;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;

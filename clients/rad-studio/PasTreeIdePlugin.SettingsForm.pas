@@ -51,6 +51,8 @@ type
     lblDeclImplToggleHint: TLabel;
     chkRename: TCheckBox;
     lblRenameHint: TLabel;
+    chkBlockCompletion: TCheckBox;
+    lblBlockCompletionHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string;
@@ -137,6 +139,7 @@ begin
     LForm.chkStructureView.Checked := LSettings.OverrideStructureView;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
     LForm.chkRename.Checked := LSettings.EnableRename;
+    LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
 
     if LForm.ShowModal <> mrOk then
       Exit;
@@ -144,6 +147,7 @@ begin
     LSettings.OverrideStructureView := LForm.chkStructureView.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
+    LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally

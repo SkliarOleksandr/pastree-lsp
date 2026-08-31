@@ -18,6 +18,7 @@ uses
   PasLsp.Documents in 'source\PasLsp.Documents.pas',
   PasLsp.Completion in 'source\PasLsp.Completion.pas',
   PasLsp.ClassComplete in 'source\PasLsp.ClassComplete.pas',
+  PasLsp.BlockClose in 'source\PasLsp.BlockClose.pas',
   PasLsp.XmlDoc in 'source\PasLsp.XmlDoc.pas',
   PasLsp.ProductVersion in 'source\PasLsp.ProductVersion.pas',
   PasLsp.Version in 'source\PasLsp.Version.pas',

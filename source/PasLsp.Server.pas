@@ -52,6 +52,7 @@ uses
   PasLsp.Documents,
   PasLsp.Completion,
   PasLsp.ClassComplete,
+  PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
   PasLsp.ProductVersion,
@@ -210,6 +211,7 @@ type
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
     function HandleClassComplete(const AMsg: TLspIncoming): string;
+    function HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
     function HandleRenamePlan(const AMsg: TLspIncoming): string;
@@ -1430,6 +1432,10 @@ begin
       '"completionProvider":{"triggerCharacters":["."]},' +
       '"signatureHelpProvider":{"triggerCharacters":["(",","]},' +
       '"workspaceSymbolProvider":true,' +
+      // Block completion: Enter after an unclosed opener answers with the
+      // closer. \n is the trigger the protocol was designed around for
+      // exactly this (the LSP spec's own example is inserting a closer).
+      '"documentOnTypeFormattingProvider":{"firstTriggerCharacter":"\n"},' +
       '"renameProvider":{"prepareProvider":true}' +
     // pastreeVersion is ours, not LSP's. It rides along inside serverInfo
     // because a client's real question is never "which server build is this"
@@ -2815,6 +2821,61 @@ end;
   declaration's full extent yet. Navigation and the tree are correct; what
   suffers is breadcrumb tracking as the cursor moves inside a body, which
   needs a real span (a nav-side NodeSpan belongs in PasTree, not here). }
+{ textDocument/onTypeFormatting — block completion, standard LSP: the client
+  declares us for the "\n" trigger (see HandleInitialize), sends the caret
+  right after Enter, and gets zero or one TextEdit inserting the missing
+  closer. The decision is PasLsp.BlockClose's, over the document truth
+  exactly as completion reads it - open buffer first, file second - because
+  the request exists BECAUSE the buffer just changed. Answering null (not an
+  empty array) for "nothing to insert" is the spec's own idiom.
+
+  The ch parameter is checked and anything but a newline answers null: the
+  protocol allows moreTriggerCharacter registrations we do not make, but a
+  client that sends one anyway must not get a closer for it. }
+function TLspServer.HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
+var
+  LPath, LText, LCh, LNewText: string;
+  LDoc: TLspDocument;
+  LLine, LChar, LInsLine, LInsChar: Integer;
+  LStart: UInt64;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'onTypeFormatting: textDocument.uri required'));
+  LCh := AMsg.Params.GetValue<string>('ch', '');
+  LLine := AMsg.Params.GetValue<Integer>('position.line', -1);
+  LChar := AMsg.Params.GetValue<Integer>('position.character', -1);
+  if (LLine < 0) or (LChar < 0) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'onTypeFormatting: position required'));
+  if (LCh <> #10) and (LCh <> #13#10) and (LCh <> #13) then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LStart := GetTickCount64;
+  if FDocs.TryGet(LPath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(LPath, LText) then
+    LText := '';
+  if LText = '' then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  if not PlanBlockClose(LText, LLine, LInsLine, LInsChar, LNewText) then
+  begin
+    if FTrace then
+      Log(Format('onTypeFormatting: %s line %d -> nothing',
+        [TPath.GetFileName(LPath), LLine]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+
+  Log(Format('onTypeFormatting: %s line %d -> insert %s in %d ms',
+    [TPath.GetFileName(LPath), LLine, JsonQuote(Trim(LNewText)),
+     GetTickCount64 - LStart]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '[{"range":{"start":{"line":%d,"character":%d},' +
+    '"end":{"line":%d,"character":%d}},"newText":%s}]',
+    [LInsLine, LInsChar, LInsLine, LInsChar, JsonQuote(LNewText)]));
+end;
+
 { pastree/classComplete — OUR request, the server half of Ctrl+Shift+C.
 
   Not an LSP method and not pretending to be one: the protocol has no notion
@@ -3490,6 +3551,8 @@ begin
         Exit(HandleWorkspaceSymbol(LMsg));
       if LMsg.Method = 'pastree/classComplete' then
         Exit(HandleClassComplete(LMsg));
+      if LMsg.Method = 'textDocument/onTypeFormatting' then
+        Exit(HandleOnTypeFormatting(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then

@@ -738,12 +738,21 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    overlay AST — decl vs impl diff is exactly what the model knows), apply
    through `CreateUndoableWriter` front-to-back, land the caret in the
    first generated body.
-4. **Block completion, ours.** Same verdict on the native one. Editor-level:
-   an `IOTAKeyboardBinding` on Enter consults the overlay parse for an
-   unclosed block opener at the caret (`begin`/`try`/`case`/`repeat`...)
-   and inserts the matching closer with the opener's indentation. The
-   parser's error-tolerance already knows "unclosed at end" — the answer
-   is a per-keystroke overlay question, the same cost class as completion.
+4. **Block completion, ours — DELIVERED 2026-08-31 (first live run
+   pending).** Same verdict on the native one. Standard LSP, per the
+   standing rule (protocol first, the IDE stretched onto it):
+   `textDocument/onTypeFormatting` with `\n` as the only trigger, declared
+   at initialize, decided lexically in `PasLsp.BlockClose` (a token-stack
+   balance over PasTree's lexer; the cascade reasoning and the context
+   rules for `class`/`interface`/variant-`case` are in its header) — so VS
+   Code gets it free. The plugin (`PasTreeIdePlugin.BlockClose`): an
+   `IOTAKeyboardBinding` on plain Enter that ALWAYS answers `krUnhandled` —
+   the IDE's own line break runs first — then asks from `TThread.ForceQueue`
+   (the buffer holds the newline by then) and applies the answer through
+   `CreateUndoableWriter`, dropping it if the caret left the row. Fourth
+   switch in Settings (`EnableBlockCompletion`), checked at keystroke time.
+   `LspClientSmoke` section 5h pins both the insertion (opener's
+   indentation, caret line untouched) and the balanced-file `null`.
 5. **Rename refactoring, ours — DELIVERED 2026-08-30 (first live run
    pending).** The built-in one existed and Embarcadero DISABLED it for being
    buggy (user, 2026-08-22) — the demand was proven and the field was empty.

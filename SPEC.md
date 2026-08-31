@@ -175,6 +175,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `workspace/symbol` | project-wide substring query over the prefetched index |
 | `textDocument/prepareRename` | the identifier's own span, and the earliest refusal |
 | `textDocument/rename` | symbol: `changes`; unit: `documentChanges` with a `rename` file operation |
+| `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers the closer as one TextEdit ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
 | `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
 
@@ -401,10 +402,12 @@ All four shipped. Two notes worth keeping:
 
 ### Out of scope, with the reason
 
-- **`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`,
-  `willSaveWaitUntil`.** All need a PRINTER. PasTree parses and analyzes; it
-  does not emit source. A formatter is its own project, and a half-correct one
-  reformats code wrongly and silently.
+- **`textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil`.** All
+  need a PRINTER. PasTree parses and analyzes; it does not emit source. A
+  formatter is its own project, and a half-correct one reformats code wrongly
+  and silently. `onTypeFormatting` moved OUT of this list on 2026-08-31: with
+  `\n` as the only trigger it is block completion, one inserted closer - a
+  lexical decision (PasLsp.BlockClose), not printing.
 - **`notebookDocument/*`.** No notebooks in Pascal.
 - **`textDocument/documentColor`, `colorPresentation`, `inlineValue`,
   `moniker`, `linkedEditingRange`.** Either not applicable to the language or

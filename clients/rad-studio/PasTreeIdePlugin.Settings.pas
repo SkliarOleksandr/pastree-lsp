@@ -50,6 +50,13 @@ function OverrideDeclImplToggle: Boolean;
 /// </summary>
 function RenameEnabled: Boolean;
 
+/// <summary>
+/// Whether Enter after an unclosed block opener inserts the closer (block
+/// completion - PasTreeIdePlugin.BlockClose). False stops the plugin from
+/// even asking the server, and Enter is never swallowed either way.
+/// </summary>
+function BlockCompletionEnabled: Boolean;
+
 /// <summary>Registers Tools > PasTree > Settings.</summary>
 procedure InitializeSettings;
 
@@ -77,6 +84,7 @@ type
     OverrideStructureView: Boolean;
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
+    EnableBlockCompletion: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -102,6 +110,7 @@ const
   cValueStructureView = 'OverrideStructureView';
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
+  cValueBlockCompletion = 'EnableBlockCompletion';
 
 var
   // The in-memory copy. Loaded on first read, replaced on every save, so a
@@ -189,6 +198,7 @@ begin
   Result.OverrideStructureView := True;
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
+  Result.EnableBlockCompletion := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -206,6 +216,8 @@ begin
         ReadFlag(LReg, cValueDeclImplToggle, Result.OverrideDeclImplToggle);
       Result.EnableRename :=
         ReadFlag(LReg, cValueRename, Result.EnableRename);
+      Result.EnableBlockCompletion :=
+        ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
     finally
       LReg.CloseKey;
     end;
@@ -241,6 +253,8 @@ begin
         LReg.WriteInteger(cValueDeclImplToggle,
           Ord(ASettings.OverrideDeclImplToggle));
         LReg.WriteInteger(cValueRename, Ord(ASettings.EnableRename));
+        LReg.WriteInteger(cValueBlockCompletion,
+          Ord(ASettings.EnableBlockCompletion));
       finally
         LReg.CloseKey;
       end;
@@ -277,6 +291,11 @@ end;
 function RenameEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableRename;
+end;
+
+function BlockCompletionEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableBlockCompletion;
 end;
 
 procedure ShowSettingsDialog;
