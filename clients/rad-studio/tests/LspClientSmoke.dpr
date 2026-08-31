@@ -1035,6 +1035,29 @@ begin
   Check(not GOk, 'and refused - this client cannot apply a file rename');
   Check(not GOk and GError.Contains('DemoUnitRenamed.pas'),
     'naming the file it would have needed');
+  { A DOTTED unit name, which is one name and not two. Until PasTree 0.13.2
+    the header of `unit Demo.Dotted` identified itself as "." - the dotted
+    name is an nkMember chain whose own first token is the dot - and that
+    reached a user as the pre-filled text of the rename dialog. The
+    placeholder is therefore the check that matters here, and the required
+    file name is the second half of the same question: a dotted unit lives in
+    a file spelled with the dots. }
+  FindPos(LAppFile, 'Demo.Dotted in ', 'Dotted', LLine, LChar);
+  Check(Ask('textDocument/prepareRename',
+    PositionParams(LAppFile, LLine, LChar)),
+    'prepareRename on a dotted uses item answered');
+  Check(GOk and GResultJson.Contains('"placeholder":"Demo.Dotted"'),
+    'the whole dotted name is offered, not one segment and not "."');
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LAppFile, LLine, LChar, 'Demo.Renamed')),
+    'renamePlan on a dotted uses item answered');
+  Check(GOk and GResultJson.Contains('"oldName":"Demo.Dotted"'),
+    'and the plan names it in full too');
+  Check(GOk and GResultJson.Contains(
+    '"requiredFileName":"Demo.Renamed.pas"'),
+    'the file a dotted unit must move to keeps the dots');
+  Check(GOk and GResultJson.Contains('"newText":"Demo.Renamed"'),
+    'every site is written with the full new name');
 end;
 
 { 5f. pastree/classComplete: the server half of Ctrl+Shift+C.

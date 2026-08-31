@@ -10,10 +10,12 @@ program DemoApp;
 
 uses
   DemoUnit in 'DemoUnit.pas',
-  DemoUnicode in 'DemoUnicode.pas';
+  DemoUnicode in 'DemoUnicode.pas',
+  Demo.Dotted in 'Demo.Dotted.pas';
 
 begin
   Writeln(Greet('world'));
   Writeln(Greet('again'));
   Writeln(Shout('quiet'));
+  Writeln(DottedAnswer);
 end.

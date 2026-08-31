@@ -2165,17 +2165,17 @@ begin
   if FNav.UnitAt(LMid, APasLine, APasCol, LTMid, LOther) then
   begin
     APlan.IsUnit := True;
-    // The placeholder is the unit's FULL dotted name as its own header spells
-    // it - not what this `uses` item happens to say, which may be the bare
-    // leaf under a namespace prefix.
+    { UnitAt's own answer, not a re-derivation from the header text: since
+      PasTree 0.13.2 it reports the TARGET unit's full dotted name (before
+      that, `unit Foo.Bar` identified itself as "." - the dotted header is an
+      nkMember chain whose first token is the dot, and that reached a user as
+      the pre-filled text of this very dialog). Deriving it here as well
+      would be a second answer able to disagree with the library's. }
+    APlan.OldName := LOther;
+    // The header hit is still needed for one thing the name cannot give: the
+    // FILE the unit lives in, which is what gets renamed alongside it.
     if FNav.UnitDeclHit(LTMid, LDecl) then
-    begin
-      APlan.OldName := Copy(LDecl.Snippet, LDecl.HiFrom + 1,
-        LDecl.HiTo - LDecl.HiFrom);
       APlan.UnitPath := LDecl.FilePath;
-    end
-    else
-      APlan.OldName := LOther;
     if ANewName = '' then
       Exit(True);
     Result := FNav.PlanUnitRename(LTMid, ANewName, {out} APlan.Edits,
