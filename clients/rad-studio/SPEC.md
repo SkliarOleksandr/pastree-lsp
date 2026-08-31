@@ -824,11 +824,16 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    painted in the user's LIVE editor syntax colors —
    `INTACodeEditorServices.Options.FontColor/BackgroundColor/FontStyles`
    per `TOTASyntaxCode`, read at draw time so a Tools > Options color or
-   theme change shows on the next repaint — with the matched identifier
-   painted bold in the identifier color, no background (settled on the
-   first live run: the `SearchMatch` element is white-on-black by default,
-   a black box punched into every row, and any filled rectangle repeated
-   down a list reads as noise), and file header rows
+   theme change shows on the next repaint. The layout is a HYBRID settled
+   with the user over three live runs: the skeleton replicates the native
+   Find in Files rows — full path bold + blue `[N]` on headers,
+   `Name.pas (line):` prefix in the `ThemeAwareColors` blue/orange accents,
+   snippets with indentation preserved, the match bold + underlined — while
+   the snippet keeps the editor's syntax colors (the match marker stays in
+   the run's own syntax color; two background variants lost first: the
+   `SearchMatch` element is white-on-black by default — a black box punched
+   into every row — and any filled rectangle repeated down a list reads as
+   noise), and file header rows
    (bold name + count) that finally navigate on double-click, which
    `AddToolMessage` headers never could. The line is classified by a
    display-only tokenizer in that unit (best effort, one detached line;

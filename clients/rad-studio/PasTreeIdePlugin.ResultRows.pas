@@ -11,33 +11,50 @@ unit PasTreeIdePlugin.ResultRows;
   from) combined with INTACustomDrawMessage (the panel hands us its TCanvas
   and we paint the whole line).
 
-  THE SNIPPET IS PAINTED IN THE USER'S OWN SYNTAX COLORS, read at draw time
-  from INTACodeEditorServices.Options - FontColor / BackgroundColor /
-  FontStyles per TOTASyntaxCode, the same live palette the code editor
-  itself paints with, theme changes included. Nothing is cached here: a
-  palette read is a property call, and reading it per draw is what makes a
-  Tools > Options > Editor color change show up on the next repaint. The
-  matched identifier is painted BOLD in the identifier color
-  (FontColor[atIdentifier]) - no background at all. Two background attempts
-  preceded this and both lost to a live run: the "Search match" element is
-  white-on-black by default (a black box punched into every row), and any
-  filled rectangle behind text reads as noise repeated down a list of
-  twenty rows. Bold-in-place is what the user asked for instead.
+  THE STYLE IS A HYBRID, settled over three live runs with the user:
+  the SKELETON is a replica of the IDE's own "Find in Files" results, the
+  SNIPPET is painted in the user's live editor syntax colors.
+
+    header:   <full path, bold>  [N]         - the count in IDE blue
+    hit:      Name.pas (95):  <raw line>     - name and punctuation in IDE
+                                               blue, the line number in IDE
+                                               orange, the snippet with its
+                                               INDENTATION PRESERVED and
+                                               syntax-colored, the match
+                                               bold + underlined in its own
+                                               syntax color
+
+  Two color sources, on purpose:
+
+  - The accents (blue / orange / green) come from
+    INTAIDEUIServices.ThemeAwareColors - the same theme-aware accents the
+    IDE paints its panels with, so the dark theme gets its variants free.
+
+  - The snippet colors come from INTACodeEditorServices.Options - FontColor
+    and FontStyles per TOTASyntaxCode, the same live palette the code
+    editor itself paints with, read at draw time so a Tools > Options >
+    Editor color or theme change shows on the next repaint. Nothing cached.
+
+  The match is bold + underline IN THE RUN'S OWN SYNTAX COLOR - the Find
+  in Files marker, not a filled one. Two background variants lost to live
+  runs first: the editor's "Search match" element is white-on-black by
+  default (a black box punched into every row), and any filled rectangle
+  repeated down a result list reads as noise.
 
   The tokenizer below is a DISPLAY tokenizer, one detached line at a time,
   best effort by design: reserved words, identifiers, strings, numbers
   ($ hex, % binary), comments of all three spellings, compiler directives
-  (brace-dollar, painted as atPreproc), symbols. It
-  cannot know that its line sits inside a multi-line block comment or an
-  asm block - such a line degrades to normally-classified text, never to an
-  error. The real tokenizer is Win64-only (PasTree, which this Win32
-  package must never link); the keyword list here is a cosmetic copy, not a
-  second semantic authority - a missed or extra keyword paints a word in
-  the wrong color and nothing else. Directives (private, virtual, name,
-  index...) are deliberately NOT in the list: they are only keywords in
-  context, and half of them are the most common identifier names in
-  existence - coloring every `Name` as a keyword is worse than coloring no
-  directive at all.
+  (brace-dollar, painted as atPreproc), symbols. It cannot know that its
+  line sits inside a multi-line block comment or an asm block - such a
+  line degrades to normally-classified text, never to an error. The real
+  tokenizer is Win64-only (PasTree, which this Win32 package must never
+  link); the keyword list here is a cosmetic copy, not a second semantic
+  authority - a missed or extra keyword paints a word in the wrong color
+  and nothing else. Directives (private, virtual, name, index...) are
+  deliberately NOT in the list: they are only keywords in context, and
+  half of them are the most common identifier names in existence -
+  coloring every `Name` as a keyword is worse than coloring no directive
+  at all.
 
   Rows are inserted through IOTAMessageServices.AddCustomMessagePtr (a root
   row in a group, returns the Pointer used as Parent) and
@@ -51,18 +68,20 @@ uses
   ToolsAPI;
 
 /// <summary>
-/// A file header row: painted as "Name.pas (N)" with the name bold, and -
-/// unlike a tool-message header - navigable to the top of the file.
+/// A file header row: painted as "&lt;full path&gt; [N]" with the path bold -
+/// like Find in Files - and, unlike a tool-message header, navigable to the
+/// top of the file.
 /// </summary>
 function NewFileHeaderRow(const AFilePath: string;
   ARefCount: Integer): IOTACustomMessage;
 
 /// <summary>
 /// A snippet row: ALine/ACol are the navigation target (1-based). ASnippet
-/// is the display text (already left-trimmed by the caller). AMatchStart
-/// (1-based index into ASnippet) and AMatchLen mark the identifier to
-/// highlight; both 0 means no highlight. ATag, if not empty, is painted
-/// dimmed after the snippet - the "declaration" label.
+/// is the RAW source line, indentation included - the row paints its own
+/// "Name.pas (line): " prefix in front of it. AMatchStart (1-based index
+/// into ASnippet) and AMatchLen mark the identifier painted bold+underlined;
+/// both 0 means no highlight. ATag, if not empty, is painted in the green
+/// accent after the snippet - the "declaration" label.
 /// </summary>
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
@@ -72,7 +91,7 @@ implementation
 
 uses
   System.SysUtils, System.Types, System.StrUtils, System.UITypes,
-  Vcl.Graphics, ToolsAPI.Editor;
+  Vcl.Graphics, ToolsAPI.UI, ToolsAPI.Editor;
 
 { ------------------------------------------------------------------------- }
 { The display tokenizer                                                      }
@@ -333,8 +352,8 @@ type
     FFilePath: string;
     FLine: Integer;
     FCol: Integer;
-    FText: string;   // header: the bare file name; snippet: the line text
-    FSuffix: string; // header: ' (N)'; snippet: the tag or ''
+    FText: string;   // header: unused; snippet: the raw line text
+    FSuffix: string; // header: ' [N]'; snippet: the tag or ''
     FMatchStart: Integer; // 1-based into FText, 0 = no highlight
     FMatchLen: Integer;
     FIsHeader: Boolean;
@@ -379,7 +398,11 @@ end;
 function TResultRow.GetLineText: string;
 begin
   // What the panel hands to the clipboard and to F1.
-  Result := FText + FSuffix;
+  if FIsHeader then
+    Result := FFilePath + FSuffix
+  else
+    Result := Format('%s (%d): %s%s',
+      [ExtractFileName(FFilePath), FLine, FText, FSuffix]);
 end;
 
 procedure TResultRow.ShowHelp;
@@ -422,11 +445,11 @@ end;
 
   The panel prepares the canvas for the row - highlight brush and font on
   the selected row - so the row is filled with THAT brush first and the
-  prepared font color is the fallback wherever the palette has no say.
-  Syntax colors stay on the selected row, exactly like the editor's own
-  selection and the completion viewer (see PasTreeIdePlugin.CodeInsight's
-  draw comment - the first pass that flattened colors on selection read as
-  the coloring "disappearing"). }
+  prepared font color is the fallback wherever the accents and the palette
+  have no say. Colors stay on the selected row, exactly like the editor's
+  own selection and the native Find in Files rows (see also
+  PasTreeIdePlugin.CodeInsight's draw comment - the first pass that
+  flattened colors on selection read as the coloring "disappearing"). }
 procedure TResultRow.Paint(ACanvas: TCanvas; const ARect: TRect;
   ADoDraw: Boolean; out AWidth: Integer);
 const
@@ -436,10 +459,10 @@ var
   LHavePalette: Boolean;
   LBaseColor: TColor;
   LBaseStyle: TFontStyles;
+  LBlue, LOrange, LGreen: TColor;
   LTop, LX: Integer;
 
-  procedure Put(const ARun: string; AColor: TColor; AStyle: TFontStyles;
-    ABackColor: TColor; ASolidBack: Boolean);
+  procedure Put(const ARun: string; AColor: TColor; AStyle: TFontStyles);
   begin
     if ARun = '' then
       Exit;
@@ -447,13 +470,6 @@ var
     if ADoDraw then
     begin
       ACanvas.Font.Color := AColor;
-      if ASolidBack then
-      begin
-        ACanvas.Brush.Style := bsSolid;
-        ACanvas.Brush.Color := ABackColor;
-      end
-      else
-        ACanvas.Brush.Style := bsClear;
       ACanvas.TextOut(LX, LTop, ARun);
     end;
     Inc(LX, ACanvas.TextWidth(ARun));
@@ -463,14 +479,11 @@ var
   var
     LRuns: TArray<TTokenRun>;
     LRun: TTokenRun;
-    LColor, LMatchColor: TColor;
+    LColor: TColor;
     LStyle: TFontStyles;
     LFrom, LTake, LCut: Integer;
     LInMatch: Boolean;
   begin
-    LMatchColor := LBaseColor;
-    if LHavePalette then
-      LMatchColor := LOptions.FontColor[atIdentifier];
     LRuns := TokenizeLine(FText);
     for LRun in LRuns do
     begin
@@ -481,8 +494,8 @@ var
         LColor := LOptions.FontColor[LRun.Code];
         LStyle := LOptions.FontStyles[LRun.Code];
       end;
-      // Split the run where it crosses the match boundary, so the match
-      // background lands on exactly the identifier and nothing else.
+      // Split the run where it crosses the match boundary, so the marker
+      // lands on exactly the identifier and nothing else.
       LFrom := LRun.Start;
       while LFrom < LRun.Start + LRun.Len do
       begin
@@ -498,55 +511,66 @@ var
         if LCut < LTake then
           LTake := LCut;
         if LInMatch then
-          // Bold, in the identifier color - see the unit header for the
-          // two rejected background variants.
-          Put(Copy(FText, LFrom, LTake), LMatchColor,
-            LStyle + [TFontStyle.fsBold], LBaseColor, False)
+          // The Find in Files marker - bold + underline - in the run's own
+          // syntax color. See the unit header for the two rejected
+          // background variants.
+          Put(Copy(FText, LFrom, LTake), LColor,
+            LStyle + [TFontStyle.fsBold, TFontStyle.fsUnderline])
         else
-          Put(Copy(FText, LFrom, LTake), LColor, LStyle, LBaseColor, False);
+          Put(Copy(FText, LFrom, LTake), LColor, LStyle);
         Inc(LFrom, LTake);
       end;
     end;
   end;
 
 var
-  LDimColor: TColor;
+  LUI: INTAIDEUIServices;
 begin
   LHavePalette := TryEditorOptions(LOptions);
   LBaseColor := ACanvas.Font.Color;
   LBaseStyle := ACanvas.Font.Style;
-  // The comment color doubles as "dim, theme-correct" for our own labels -
-  // the count on a header, the "declaration" tag.
-  LDimColor := LBaseColor;
-  if LHavePalette then
-    LDimColor := LOptions.FontColor[atComment];
+  LBlue := LBaseColor;
+  LOrange := LBaseColor;
+  LGreen := LBaseColor;
+  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+  begin
+    LBlue := LUI.ThemeAwareColors[itcBlue];
+    LOrange := LUI.ThemeAwareColors[itcOrange];
+    LGreen := LUI.ThemeAwareColors[itcGreen];
+  end;
   LTop := ARect.Top + (ARect.Height - ACanvas.TextHeight('Ag')) div 2;
   LX := ARect.Left + cPad;
 
   if ADoDraw then
   begin
-    // The brush arrives prepared (selection highlight included); fill
-    // before any Put switches it to bsClear.
+    // The brush arrives prepared (selection highlight included). TextOut
+    // paints with it too, which is what keeps the selection bar visible
+    // behind the text - no bsClear here.
     ACanvas.FillRect(ARect);
   end;
 
   if FIsHeader then
   begin
-    Put(FText, LBaseColor, LBaseStyle + [TFontStyle.fsBold], LBaseColor,
-      False);
-    Put(FSuffix, LDimColor, LBaseStyle, LBaseColor, False);
+    // Find in Files: the full path bold in the panel's text color, the
+    // count in the blue accent - "C:\...\Unit.pas [13]".
+    Put(FFilePath, LBaseColor, LBaseStyle + [TFontStyle.fsBold]);
+    Put(FSuffix, LBlue, LBaseStyle + [TFontStyle.fsBold]);
   end
   else
   begin
+    // Find in Files: "Name.pas (95): " with the name and punctuation in
+    // the blue accent and the number in the orange one - then the raw
+    // line, syntax-colored, which is where the hybrid departs.
+    Put(ExtractFileName(FFilePath) + ' (', LBlue, LBaseStyle);
+    Put(IntToStr(FLine), LOrange, LBaseStyle);
+    Put('): ', LBlue, LBaseStyle);
     PutSnippet;
-    if FSuffix <> '' then
-      Put(FSuffix, LDimColor, LBaseStyle, LBaseColor, False);
+    Put(FSuffix, LGreen, LBaseStyle);
   end;
 
   // Leave the canvas the way the panel prepared it.
   ACanvas.Font.Color := LBaseColor;
   ACanvas.Font.Style := LBaseStyle;
-  ACanvas.Brush.Style := bsSolid;
   AWidth := LX + cPad - ARect.Left;
 end;
 
@@ -580,8 +604,7 @@ begin
   LRow.FFilePath := AFilePath;
   LRow.FLine := 1;
   LRow.FCol := 1;
-  LRow.FText := ExtractFileName(AFilePath);
-  LRow.FSuffix := Format(' (%d)', [ARefCount]);
+  LRow.FSuffix := Format(' [%d]', [ARefCount]);
   LRow.FIsHeader := True;
   Result := LRow;
 end;
@@ -596,9 +619,10 @@ begin
   LRow.FFilePath := AFilePath;
   LRow.FLine := ALine;
   LRow.FCol := ACol;
-  // TextOut does not expand tabs - it paints them as boxes. The snippet is
-  // already left-trimmed; interior tabs become single spaces, 1:1, so the
-  // match offsets keep meaning what they meant.
+  // TextOut does not expand tabs - it paints them as boxes. Tabs become
+  // single spaces, 1:1, so the match offsets keep meaning what they meant;
+  // a tab-indented line ends up narrower than in the editor, which is what
+  // the native Find in Files rows show too.
   LRow.FText := ASnippet.Replace(#9, ' ');
   LRow.FMatchStart := AMatchStart;
   LRow.FMatchLen := AMatchLen;

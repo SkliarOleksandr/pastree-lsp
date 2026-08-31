@@ -235,23 +235,20 @@ var
     end;
   end;
 
-  { The hit's column addresses the RAW line; the display text is that line
-    with the indentation cut off. The match lands in the row only when the
-    text at the mapped position still reads as the identifier - anything
-    else (a stale row, a column past the end) degrades to an unhighlighted
+  { The line goes to the row RAW, indentation included - Find in Files
+    shows its snippets that way, and this tab replicates its shape (see
+    PasTreeIdePlugin.ResultRows). The match is highlighted only when the
+    text at the hit's column still reads as the identifier - anything else
+    (a stale row, a column past the end) degrades to an unhighlighted
     snippet, never to a highlight on the wrong characters. }
   procedure AddSnippetRow(const AHit: TLspHit; const ATag: string;
     AParent: Pointer);
   var
-    LRaw, LDisplay: string;
-    LLead, LMatchStart, LMatchLen: Integer;
+    LDisplay: string;
+    LMatchStart, LMatchLen: Integer;
   begin
-    LRaw := LSnippets.LineAt(AHit.FilePath, AHit.Row);
-    LLead := 1;
-    while (LLead <= Length(LRaw)) and CharInSet(LRaw[LLead], [' ', #9]) do
-      Inc(LLead);
-    LDisplay := TrimRight(Copy(LRaw, LLead, MaxInt));
-    LMatchStart := AHit.Col - (LLead - 1);
+    LDisplay := TrimRight(LSnippets.LineAt(AHit.FilePath, AHit.Row));
+    LMatchStart := AHit.Col;
     LMatchLen := Length(AIdentifier);
     if (LMatchLen = 0) or (LMatchStart < 1) or
        (LMatchStart + LMatchLen - 1 > Length(LDisplay)) or
