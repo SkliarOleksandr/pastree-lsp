@@ -83,7 +83,13 @@ const
   /// IsValidRenameName are what textDocument/rename and pastree/renamePlan
   /// ARE - there is no fallback to degrade to, so an older sibling must
   /// fail at compile time rather than at the first F2.
-  cMinPasTreeVersion = '0.12.0';
+  ///
+  /// Raised again to 0.13.2 on 2026-08-31, for the UNIT half: PlanUnitRename
+  /// and IsValidUnitRenameName. Same reasoning, and one extra: a unit rename
+  /// carries a FILE obligation (ARequiredFileName), so a version without it
+  /// would not merely lack a feature - the server would have to guess the
+  /// file name, which is the one thing it must never do.
+  cMinPasTreeVersion = '0.13.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

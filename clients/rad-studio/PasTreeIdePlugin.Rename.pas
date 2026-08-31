@@ -16,12 +16,23 @@ unit PasTreeIdePlugin.Rename;
   server hands those previews over ready-made in pastree/renamePlan; nothing
   here re-reads a buffer to build them.
 
-  WHAT IT WILL AND WILL NOT RENAME. A symbol - a routine, a type, a field, a
-  variable, a parameter. Not a unit (that is a file rename plus every `uses`
-  clause; the server declines it with a sentence saying so, and it is a
-  planned feature, not a gap here) and not a compiler builtin (no declaration
-  exists to rename). Both refusals arrive as the server's own message and are
-  shown verbatim - this unit invents no vocabulary of its own for them.
+  TWO THINGS IT RENAMES. A SYMBOL - a routine, a type, a field, a variable, a
+  parameter - which is text edits and nothing else. And a UNIT, which is text
+  edits AND THE FILE: Object Pascal ties a unit's name to its file name, so
+  the second half is not an extra, it is the difference between a rename and
+  a project that no longer compiles. RenameUnitFile does it through the
+  IDE's own project API, which is also what fixes the one thing the analysis
+  plan cannot express - a program's `uses Foo in 'Foo.pas'` path.
+
+  A compiler builtin is refused (there is no declaration to rename), as is a
+  `uses` spelling the analysis has no rule for. Both refusals arrive as the
+  server's own message and are shown verbatim - this unit invents no
+  vocabulary of its own for them.
+
+  THE NAME UNDER THE CARET IS ASKED FOR, NOT READ. prepareRename runs before
+  the dialog opens, because a unit's name may be dotted - `Namespace.Foo` is
+  ONE name - and the text under the caret is at best one segment of it. A
+  dialog pre-filled from the buffer would offer half a name.
 
   THE NEW NAME IS VALIDATED IN TWO PLACES, AND THAT IS DELIBERATE. Only the
   ANALYSIS knows that `begin` is a reserved word (IsValidRenameName lives in
@@ -29,7 +40,7 @@ unit PasTreeIdePlugin.Rename;
   clients/rad-studio/README.md), so the real verdict always comes from the
   server. What happens here is the cheap half: obvious non-identifiers are
   refused without a round trip, so a typo does not cost a request. Never
-  extend LooksLikeIdentifier into keyword knowledge - a copy of that list
+  extend LooksLikeName into keyword knowledge - a copy of that list
   here would be a second answer able to disagree with the first.
 
   APPLYING IS TWO PASSES OVER THE WHOLE PLAN, NOT PER FILE. Pass one opens
@@ -47,6 +58,12 @@ unit PasTreeIdePlugin.Rename;
   Note that this is where the IDE differs from the demo, which walks each
   file backwards through SynEdit's SelText: a writer's offsets all address
   the original text, so ascending order needs no shifting arithmetic at all.
+
+  A UNIT RENAME THEN RESTARTS THE ANALYSIS. The server fixes its closure at
+  initialize, so a file that has just changed name is not something it can be
+  told about - see LspRestartForClosureChange. It is the one edit in the
+  product the incremental path cannot absorb, and pretending otherwise would
+  have the server answering about a file that no longer exists.
 }
 
 interface
@@ -77,6 +94,7 @@ uses
   System.SysUtils, System.StrUtils, System.Classes,
   System.Generics.Collections,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
+  System.IOUtils,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings;
 
 const
@@ -129,54 +147,35 @@ begin
 end;
 
 { The cheap half of the name check - see the unit header on why the other
-  half is the server's and must stay there. }
-function LooksLikeIdentifier(const AName: string): Boolean;
+  half is the server's and must stay there.
+
+  DOTS ARE ALLOWED, because a UNIT name is dotted: `Namespace.Foo` is one
+  name, and each segment has to be an identifier. Whether a dotted name is
+  legal for what is actually being renamed is NOT decided here - a symbol
+  cannot have one, and the analysis says so (IsValidRenameName), which keeps
+  this to the one question it can answer without knowing the target. }
+function LooksLikeName(const AName: string): Boolean;
 const
   cFirst = ['A'..'Z', 'a'..'z', '_'];
   cRest = ['A'..'Z', 'a'..'z', '0'..'9', '_'];
 var
+  LSegment: string;
   LIdx: Integer;
 begin
   Result := False;
   if AName = '' then
     Exit;
-  if not CharInSet(AName[1], cFirst) then
-    Exit;
-  for LIdx := 2 to Length(AName) do
-    if not CharInSet(AName[LIdx], cRest) then
+  for LSegment in AName.Split(['.']) do
+  begin
+    if LSegment = '' then
+      Exit;   // a leading, trailing or doubled dot
+    if not CharInSet(LSegment[1], cFirst) then
       Exit;
+    for LIdx := 2 to Length(LSegment) do
+      if not CharInSet(LSegment[LIdx], cRest) then
+        Exit;
+  end;
   Result := True;
-end;
-
-{ The identifier under the caret, read out of the text the SERVER was given -
-  the same source, and for the same reason, as FindReferences' own copy of
-  this: it is what the answer will be computed from, and an unsaved buffer's
-  columns only mean anything against it. Used for the prompt's pre-fill only;
-  the authoritative old name comes back in the plan. }
-function IdentifierAt(const AFileName: string; ARow, ACol: Integer): string;
-const
-  cWordChars = ['A'..'Z', 'a'..'z', '0'..'9', '_'];
-var
-  LLines: TArray<string>;
-  LLine: string;
-  LStart, LEnd: Integer;
-begin
-  Result := '';
-  LLines := LspSourceTextOf(AFileName).Replace(#13#10, #10).Split([#10]);
-  if (ARow < 1) or (ARow > Length(LLines)) then
-    Exit;
-  LLine := LLines[ARow - 1];
-  if (ACol < 1) or (ACol > Length(LLine)) then
-    Exit;
-  if not CharInSet(LLine[ACol], cWordChars) then
-    Exit;
-  LStart := ACol;
-  while (LStart > 1) and CharInSet(LLine[LStart - 1], cWordChars) do
-    Dec(LStart);
-  LEnd := ACol;
-  while (LEnd < Length(LLine)) and CharInSet(LLine[LEnd + 1], cWordChars) do
-    Inc(LEnd);
-  Result := Copy(LLine, LStart, LEnd - LStart + 1);
 end;
 
 function GetOrCreateMessageGroup(
@@ -384,7 +383,10 @@ begin
         begin
           LWriter.CopyTo(LOffsets[LOffIdx - LIdx]);
           LWriter.DeleteTo(LOffsets[LOffIdx - LIdx] + APlan.Edits[LOffIdx].Len);
-          LWriter.Insert(UTF8String(APlan.NewName));
+          // The site's OWN new text: a unit rename writes the full dotted
+          // name where the reference was written in full and the bare leaf
+          // where a namespace prefix resolved it, on the same line.
+          LWriter.Insert(UTF8String(APlan.Edits[LOffIdx].NewText));
         end;
       finally
         LWriter := nil;   // the writer commits on release
@@ -393,6 +395,164 @@ begin
     end;
     LIdx := LRun;
   end;
+end;
+
+{ The project the IDE currently considers active - the one a renamed unit
+  belongs to. nil during startup, or with no project open, and every caller
+  treats that as "do the disk half only". }
+function ActiveProject: IOTAProject;
+var
+  LModuleServices: IOTAModuleServices;
+  LGroup: IOTAProjectGroup;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+    Exit;
+  LGroup := LModuleServices.MainProjectGroup;
+  if Assigned(LGroup) then
+    Result := LGroup.ActiveProject;
+end;
+
+{ THE FILE HALF OF A UNIT RENAME, and the only place this package writes to
+  the file system.
+
+  Object Pascal ties a unit's name to its file name, so text edits alone
+  produce a project that does not compile - which makes this not an extra
+  but the other half of the same action. It runs only after every text edit
+  has been applied and SAVED: a file renamed under an unsaved buffer loses
+  whatever the buffer held.
+
+  THROUGH THE PROJECT, NOT ONLY THROUGH THE DISK. RemoveFile + AddFile is
+  what makes the IDE rewrite its own bookkeeping - the .dproj entry and, in a
+  program, the `uses Foo in 'Foo.pas'` path. That path is exactly what the
+  analysis plan CANNOT fix (it has no position for the literal; see the
+  server's UsesInPathSites), so this is not a convenience: it is the reason a
+  unit rename can be complete at all.
+
+  A .dfm goes with it. A form unit's resource directive resolves against the
+  UNIT
+  name, so a renamed unit whose .dfm kept the old name loses its form - and
+  the error appears at run time, not at build. Same for the .dcr/.dcu-adjacent
+  companions we do NOT touch: those are build output and regenerate.
+
+  ORDER, and each step is here because the previous one makes it possible:
+    1. save every touched module      - the edits must be on disk
+    2. remove the file from the project - while it still exists, or the IDE
+                                         cannot find what to remove
+    3. close the module                - Windows will not rename an open file
+    4. move .pas (and .dfm if any)     - the rename itself
+    5. add the new file to the project - the IDE rewrites .dproj and the
+                                         program's uses path here
+    6. reopen it in the editor         - the user was looking at it }
+function RenameUnitFile(const APlan: TLspRenamePlan;
+  const AEditors: TDictionary<string, IOTASourceEditor>): Boolean;
+var
+  LModuleServices: IOTAModuleServices;
+  LActionServices: IOTAActionServices;
+  LModule: IOTAModule;
+  LProject: IOTAProject;
+  LEditor: IOTASourceEditor;
+  LOldDfm, LNewDfm: string;
+begin
+  Result := False;
+  if (APlan.FilePath = '') or (APlan.NewFilePath = '') then
+  begin
+    TellUser('The rename plan did not say what the file must be called, so ' +
+      'the file was left alone. The text edits are applied - rename the ' +
+      'file by hand, or undo.', mtError);
+    Exit;
+  end;
+  if TFile.Exists(APlan.NewFilePath) then
+  begin
+    TellUser(Format('%s already exists. The text edits are applied but the ' +
+      'file was NOT renamed - undo, or move that file out of the way first.',
+      [APlan.NewFilePath]), mtError);
+    Exit;
+  end;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) or
+     not Supports(BorlandIDEServices, IOTAActionServices, LActionServices)
+  then
+    Exit;
+
+  // 1. Every touched buffer to disk. Not just the renamed one: the `uses`
+  //    edits in other units are part of the same rename, and leaving them
+  //    only in buffers while the file name changes underneath is how a
+  //    half-state becomes permanent.
+  for LEditor in AEditors.Values do
+    if Assigned(LEditor.Module) then
+      LEditor.Module.Save(False, False);
+
+  LModule := LModuleServices.FindModule(APlan.FilePath);
+  LProject := ActiveProject;
+
+  // 2-3. Out of the project, then out of the editor. RemoveFile first: it
+  //      addresses the file by the name the project knows, which the move
+  //      below is about to invalidate.
+  if Assigned(LProject) then
+    try
+      LProject.RemoveFile(APlan.FilePath);
+    except
+      on E: Exception do
+        // Not fatal on its own - AddFile below still repairs the project -
+        // but it is the step whose failure explains a duplicated entry.
+        LogDiagnostic(Format('rename: removing %s from the project failed: ' +
+          '%s', [ExtractFileName(APlan.FilePath), E.Message]));
+    end;
+  if Assigned(LModule) then
+    LModule.Close;
+
+  // 4. The rename itself, .dfm included.
+  try
+    TFile.Move(APlan.FilePath, APlan.NewFilePath);
+  except
+    on E: Exception do
+    begin
+      TellUser(Format('Could not rename %s to %s: %s'#13#10#13#10 +
+        'The text edits are applied - rename the file by hand, or undo.',
+        [ExtractFileName(APlan.FilePath),
+         ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
+      // Put the file back in the project even so: a project missing a unit
+      // it still contains is worse than the failed rename.
+      if Assigned(LProject) then
+        try
+          LProject.AddFile(APlan.FilePath, True);
+        except
+        end;
+      Exit;
+    end;
+  end;
+  LOldDfm := TPath.ChangeExtension(APlan.FilePath, '.dfm');
+  LNewDfm := TPath.ChangeExtension(APlan.NewFilePath, '.dfm');
+  if TFile.Exists(LOldDfm) and not TFile.Exists(LNewDfm) then
+    try
+      TFile.Move(LOldDfm, LNewDfm);
+    except
+      on E: Exception do
+        // Said out loud rather than swallowed: a form that has lost its .dfm
+        // fails at RUN time, which is a long way from here.
+        TellUser(Format('The unit was renamed, but its form file could not ' +
+          'be renamed from %s to %s: %s'#13#10#13#10 +
+          'Rename it by hand before running - a unit whose .dfm name does ' +
+          'not match it loses its form.',
+          [ExtractFileName(LOldDfm), ExtractFileName(LNewDfm), E.Message]),
+          mtError);
+    end;
+
+  // 5-6. Back into the project - which is what rewrites the .dproj entry and
+  //      a program's `in '...'` path - and back into the editor.
+  if Assigned(LProject) then
+    try
+      LProject.AddFile(APlan.NewFilePath, True);
+    except
+      on E: Exception do
+        TellUser(Format('%s was renamed to %s, but adding it back to the ' +
+          'project failed: %s'#13#10#13#10 +
+          'Add it to the project by hand.',
+          [ExtractFileName(APlan.FilePath),
+           ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
+    end;
+  LActionServices.OpenFile(APlan.NewFilePath);
+  Result := True;
 end;
 
 { Open everything, verify everything, then write - the two passes the unit
@@ -428,15 +588,99 @@ begin
       Exit;
     end;
     ApplySites(LEditors, APlan);
+    { And, for a unit, the half that is not text at all. Deliberately AFTER
+      the edits: the plan describes the sources as analyzed, so every
+      position must be resolved and written against the old file name. A
+      failure here reports itself and leaves the text edits standing - the
+      user can undo them or finish the file rename by hand, and either way
+      is told which. }
+    if APlan.IsUnit then
+      RenameUnitFile(APlan, LEditors);
     Result := True;
   finally
     LEditors.Free;
   end;
 end;
 
+{ 'unit' or 'symbol' - for the Build tab line, so a reader can tell which of
+  the two renames just happened without counting the edits. }
+function KindWord(AIsUnit: Boolean): string;
+begin
+  if AIsUnit then
+    Result := 'unit'
+  else
+    Result := 'symbol';
+end;
+
+{ The rename proper, once the analysis has said WHAT is being renamed (see
+  ExecuteRename): ask for the new name, plan, apply, report. }
+procedure RenameFrom(const AFileName: string; ARow, ACol: Integer;
+  const AOldName: string);
+var
+  LNewName: string;
+begin
+  LNewName := AOldName;
+  if not InputQuery('Rename', Format('Rename "%s" to:', [AOldName]),
+    LNewName) then
+    Exit;
+  LNewName := Trim(LNewName);
+  if LNewName = AOldName then
+    Exit;   // not a refusal worth a dialog: the user changed nothing
+  if not LooksLikeName(LNewName) then
+  begin
+    TellUser(Format('"%s" is not a valid name.', [LNewName]), mtWarning);
+    Exit;
+  end;
+
+  GPlanning := True;
+  LspRenamePlan(AFileName, ARow, ACol, LNewName,
+    procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
+      const AError: string)
+    begin
+      GPlanning := False;
+      if not GAlive then
+        Exit;
+      // The server's own sentence, verbatim - a reserved word, a builtin, a
+      // `uses` spelling it has no rule for. See the unit header on why none
+      // of these is re-worded here.
+      if not ASuccess then
+      begin
+        TellUser(AError, mtWarning);
+        Exit;
+      end;
+      if Length(APlan.Edits) = 0 then
+      begin
+        TellUser('Nothing to rename.', mtInformation);
+        Exit;
+      end;
+      if not ApplyPlan(APlan) then
+        Exit;   // ApplyPlan has already said why, and changed nothing
+      ReportRename(APlan);
+      LogDiagnostic(Format('rename: %s %s -> %s, %d site(s)%s',
+        [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
+         Length(APlan.Edits),
+         IfThen(APlan.IsUnit, ' + file -> ' + APlan.RequiredFileName, '')]));
+      { A renamed FILE is a different analysis closure, and the server fixes
+        its closure at initialize - so this is the one edit in the product
+        that cannot be absorbed incrementally. Restarting is honest and costs
+        the next request one rebuild; keeping the old server would have it
+        answer every later question about a file that no longer exists. }
+      if APlan.IsUnit then
+        LspRestartForClosureChange(Format('unit %s was renamed to %s',
+          [APlan.OldName, APlan.NewName]));
+    end);
+end;
+
+{ THE ANALYSIS IS ASKED WHAT IS UNDER THE CARET BEFORE THE DIALOG OPENS, and
+  that is not ceremony. A UNIT's name may be dotted - `Namespace.Foo` is ONE
+  name - and the text under the caret is at best one segment of it, so a
+  dialog pre-filled from the buffer would offer half a name and rename it to
+  something the user did not mean. prepareRename answers with the whole of
+  it, and refuses (with a reason) where nothing can be renamed at all, which
+  makes it also the earliest point a refusal can be shown. }
 procedure ExecuteRename(const AView: IOTAEditView);
 var
-  LFileName, LOldName, LNewName: string;
+  LFileName: string;
   LRow, LCol: Integer;
 begin
   try
@@ -447,61 +691,36 @@ begin
     // the feature switched off no matter who calls it.
     if not RenameEnabled then
       Exit;
-    LFileName := AView.Buffer.FileName;
-    LRow := AView.Buffer.EditPosition.Row;
-    LCol := AView.Buffer.EditPosition.Column;
-
-    LOldName := IdentifierAt(LFileName, LRow, LCol);
-    if LOldName = '' then
-    begin
-      TellUser('No identifier under the cursor.', mtInformation);
-      Exit;
-    end;
-    LNewName := LOldName;
-    if not InputQuery('Rename', Format('Rename "%s" to:', [LOldName]),
-      LNewName) then
-      Exit;
-    LNewName := Trim(LNewName);
-    if LNewName = LOldName then
-      Exit;   // not a refusal worth a dialog: the user changed nothing
-    if not LooksLikeIdentifier(LNewName) then
-    begin
-      TellUser(Format('"%s" is not a valid identifier.', [LNewName]),
-        mtWarning);
-      Exit;
-    end;
-
     if GPlanning then
     begin
       TellUser('A rename is already in progress.', mtInformation);
       Exit;
     end;
+    LFileName := AView.Buffer.FileName;
+    LRow := AView.Buffer.EditPosition.Row;
+    LCol := AView.Buffer.EditPosition.Column;
+
     GPlanning := True;
-    LspRenamePlan(LFileName, LRow, LCol, LNewName,
-      procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
-        const AError: string)
+    LspRenameTarget(LFileName, LRow, LCol,
+      procedure(ASuccess: Boolean; const AName, AError: string)
       begin
         GPlanning := False;
         if not GAlive then
           Exit;
-        // The server's own sentence, verbatim - a reserved word, a unit
-        // name, a builtin. See the unit header on why none of these is
-        // re-worded here.
         if not ASuccess then
         begin
           TellUser(AError, mtWarning);
           Exit;
         end;
-        if Length(APlan.Edits) = 0 then
+        if AName = '' then
         begin
-          TellUser('Nothing to rename.', mtInformation);
+          TellUser('No identifier under the cursor.', mtInformation);
           Exit;
         end;
-        if not ApplyPlan(APlan) then
-          Exit;   // ApplyPlan has already said why, and changed nothing
-        ReportRename(APlan);
-        LogDiagnostic(Format('rename: %s -> %s, %d site(s)',
-          [APlan.OldName, APlan.NewName, Length(APlan.Edits)]));
+        // The caret may have moved while we were asking, and that is fine:
+        // the POSITION we asked about is the one we keep renaming from, and
+        // the server still holds the same snapshot it answered from.
+        RenameFrom(LFileName, LRow, LCol, AName);
       end);
   except
     on E: Exception do

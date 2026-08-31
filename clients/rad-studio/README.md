@@ -51,7 +51,7 @@ editor itself. Four features so far:
   Ctrl+Click;
 - **the decl↔impl jump** on Ctrl+Shift+Up/Down, the IDE's own keys for it,
   taken over the same way;
-- **Rename** on Ctrl+Shift+E and in the editor's menu - every use across the
+- **Rename** on Ctrl+Shift+E and in the editor's menu - a symbol or a whole unit (file included) across the
   project, then a results tab showing each changed line as it now reads.
 
 The analysis starts when a project finishes opening rather than on the first
@@ -105,9 +105,16 @@ site and the plugin applies it - one undo step per file.
   grouped by file, navigable, the declaration labelled - where every line is
   the source AS IT NOW READS. A rename you cannot see is a rename you cannot
   trust.
-- **A unit name is refused** (renaming a unit is a file rename plus every
-  `uses` clause - planned, not done), and so is a compiler builtin, which has
-  no declaration to rename. Both refusals are the server's own sentence.
+- **A UNIT can be renamed too**, and then the FILE is renamed with it - a
+  unit's name and its file name are the same thing in Object Pascal, so the
+  two halves are one action. It goes through the IDE's own project API, which
+  is what also rewrites the `.dproj` entry and a program's
+  `uses Foo in 'Foo.pas'` path; a `.dfm` moves with the unit. The analysis
+  restarts afterwards (a renamed file is a different closure), so the next
+  navigation pays for one rebuild.
+- **A compiler builtin is refused** - there is no declaration to rename - as
+  is a `uses` spelling the analysis has no rule for. Both refusals are the
+  server's own sentence.
 - **Switchable off** in Tools > PasTree > Settings. Off hides the menu item
   and hands Ctrl+Shift+E back to the IDE - the same off-switch shape the
   decl/impl toggle has, and a feature that edits your code should have one.

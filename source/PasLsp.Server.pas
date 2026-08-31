@@ -58,6 +58,26 @@ uses
   PasTree.Version;
 
 type
+  { A planned rename, whichever identity it turned out to be - one record
+    rather than seven out-parameters, because every handler needs the same
+    set and a unit rename keeps adding to it.
+
+    IsUnit says which plan this is. For a UNIT: RequiredFileName is what the
+    file MUST be called afterwards (Object Pascal ties the two), UnitPath is
+    the file as it is now, NewFilePath is the two combined, and StaleInPaths
+    lists the project files whose `uses ... in '...'` still spells the old
+    file name - the one part of a unit rename no plan can express (see
+    UsesInPathSites). All of those are empty for a symbol rename. }
+  TLspRenamePlanned = record
+    IsUnit: Boolean;
+    OldName: string;
+    RequiredFileName: string;
+    UnitPath: string;
+    NewFilePath: string;
+    StaleInPaths: TArray<string>;
+    Edits: TArray<TPasRenameEdit>;
+  end;
+
   TLspServer = class
   private
     FInitialized: Boolean;
@@ -135,7 +155,12 @@ type
     // Work-done progress (server-initiated). Reporting is gated on the
     // client's window.workDoneProgress capability, and the token is created
     // with a REQUEST the client may refuse - see StartProgress.
-    FClientProgress: Boolean;     // client supports server-initiated progress
+    FClientProgress: Boolean;
+    { Does the client accept a FILE RENAME inside a WorkspaceEdit? Read from
+      capabilities.workspace.workspaceEdit.resourceOperations at initialize.
+      A unit rename is text edits AND a file rename, so a client without this
+      is refused rather than handed the half that does not compile. }
+    FClientRenamesFiles: Boolean;     // client supports server-initiated progress
     FProgressToken: string;       // '' = no progress stream open
     FProgressCreateId: Integer;   // id of the create request awaiting a reply
     FNextServerId: Integer;       // our own id space for server->client calls
@@ -188,8 +213,10 @@ type
     function HandleRename(const AMsg: TLspIncoming): string;
     function HandleRenamePlan(const AMsg: TLspIncoming): string;
     function PlanRenameAt(const APath: string; APasLine, APasCol: Integer;
-      const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
-      out AOldName, AError: string): Boolean;
+      const ANewName: string; out APlan: TLspRenamePlanned;
+      out AError: string): Boolean;
+    function UsesInPathSites(ATargetMid: Integer;
+      const AUnitPath: string): TArray<string>;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -1349,6 +1376,29 @@ end;
 
 { -------- handlers -------- }
 
+{ Does this client accept a file rename inside a WorkspaceEdit?
+
+  capabilities.workspace.workspaceEdit.resourceOperations is an array of the
+  operations the client can apply - "create", "rename", "delete". Absent
+  means the client supports NONE of them (the specification says so
+  explicitly), which is why the default here is False rather than
+  permissive: a unit rename sent to a client that then drops the rename
+  operation leaves the text edits applied and the file misnamed, i.e. a
+  project that no longer compiles. VS Code advertises all three. }
+function ClientRenamesFiles(AParams: TJSONValue): Boolean;
+var
+  LOps: TJSONArray;
+  LOp: TJSONValue;
+begin
+  Result := False;
+  if (AParams = nil) or not AParams.TryGetValue<TJSONArray>(
+    'capabilities.workspace.workspaceEdit.resourceOperations', LOps) then
+    Exit;
+  for LOp in LOps do
+    if SameText(LOp.Value, 'rename') then
+      Exit(True);
+end;
+
 function TLspServer.HandleInitialize(const AMsg: TLspIncoming): string;
 begin
   if AMsg.Params <> nil then
@@ -1356,10 +1406,12 @@ begin
   else
     ApplyInitOptions(nil);
   if AMsg.Params <> nil then
+  begin
     FClientProgress := AMsg.Params.GetValue<Boolean>(
       'capabilities.window.workDoneProgress', False);
-  if AMsg.Params <> nil then
+    FClientRenamesFiles := ClientRenamesFiles(AMsg.Params);
     StartClientWatchdog(AMsg.Params.GetValue<Integer>('processId', 0));
+  end;
   FInitialized := True;
   Result := BuildResponse(AMsg.IdJson,
     '{"capabilities":{' +
@@ -2034,14 +2086,53 @@ begin
   end;
 end;
 
+{ 'unit' or 'symbol' - the word the log and the plan both use, spelled once
+  so the two can never disagree. }
+function RenameKindWord(AIsUnit: Boolean): string;
+begin
+  if AIsUnit then
+    Result := 'unit'
+  else
+    Result := 'symbol';
+end;
+
+{ The text a planned edit writes. PasTree does not carry it as a field, and
+  does not need to: the preview snippet already holds the line as it will
+  read, so the new spelling is the highlighted span of it. That matters most
+  for a UNIT rename, where two sites on one line can legally get DIFFERENT
+  texts - the full dotted name where it was written in full, the bare leaf
+  where a namespace prefix resolved it - so nothing here may assume the
+  requested name is what lands. }
+function EditNewText(const AEdit: TPasRenameEdit): string;
+begin
+  Result := Copy(AEdit.Snippet, AEdit.HiFrom + 1, AEdit.HiTo - AEdit.HiFrom);
+end;
+
+{ The file a renamed unit must end up in: the required name, in the folder the
+  unit lives in now. A unit rename never MOVES a file - the name decides the
+  file name and nothing else. '' in, '' out, because the callers use that to
+  mean "no file rename". }
+function RenamedFilePath(const AOldPath, ARequiredFileName: string): string;
+begin
+  Result := '';
+  if (AOldPath = '') or (ARequiredFileName = '') then
+    Exit;
+  Result := TPath.Combine(TPath.GetDirectoryName(AOldPath),
+    ARequiredFileName);
+end;
+
 { Rename, the one place this server produces EDITS rather than answers.
 
-  Identity is the symbol one and nothing else: PlanRename is DeclHit +
-  FindReferences turned into replacements, so a rename can never reach
-  further than the references panel already showed. A `uses` item or a
-  module header is declined here on purpose - renaming a unit is a file
-  rename plus every referring `uses` clause, a workspace edit of a different
-  shape (planned, not this). A compiler builtin has no declaration at all.
+  TWO IDENTITIES, TWO PLANS, one entry point. A SYMBOL rename is DeclHit +
+  FindReferences turned into replacements, so it can never reach further than
+  the references panel already showed. A UNIT rename is the module's own
+  header name plus every `uses` item that resolved to it - and, unavoidably,
+  the FILE, because Object Pascal ties a unit's name to its file name. That
+  obligation rides in RequiredFileName and must never be dropped silently:
+  the text edits alone leave a project that does not compile.
+
+  A compiler builtin is the one thing declined outright - it has no
+  declaration site anywhere to rename.
 
   ANewName = '' means "identity check only": resolve the target and say
   whether it COULD be renamed, without judging a name. prepareRename asks
@@ -2049,14 +2140,14 @@ end;
   prepareRename from green-lighting a position that rename then refuses. }
 function TLspServer.PlanRenameAt(const APath: string;
   APasLine, APasCol: Integer; const ANewName: string;
-  out AEdits: TArray<TPasRenameEdit>; out AOldName, AError: string): Boolean;
+  out APlan: TLspRenamePlanned; out AError: string): Boolean;
 var
   LMid, LTMid, LSym: Integer;
   LOther: string;
+  LDecl: TPasRefHit;
 begin
   Result := False;
-  AEdits := nil;
-  AOldName := '';
+  APlan := Default(TLspRenamePlanned);
   AError := '';
   if FNav = nil then
   begin
@@ -2073,12 +2164,35 @@ begin
   // .dpr, SymbolAt claims an `X in '...'` uses item as an ordinary symbol.
   if FNav.UnitAt(LMid, APasLine, APasCol, LTMid, LOther) then
   begin
-    AError := Format('''%s'' is a unit name. Renaming a unit is a file ' +
-      'rename plus every uses clause, which this server does not do yet.',
-      [LOther]);
+    APlan.IsUnit := True;
+    // The placeholder is the unit's FULL dotted name as its own header spells
+    // it - not what this `uses` item happens to say, which may be the bare
+    // leaf under a namespace prefix.
+    if FNav.UnitDeclHit(LTMid, LDecl) then
+    begin
+      APlan.OldName := Copy(LDecl.Snippet, LDecl.HiFrom + 1,
+        LDecl.HiTo - LDecl.HiFrom);
+      APlan.UnitPath := LDecl.FilePath;
+    end
+    else
+      APlan.OldName := LOther;
+    if ANewName = '' then
+      Exit(True);
+    Result := FNav.PlanUnitRename(LTMid, ANewName, {out} APlan.Edits,
+      {out} APlan.RequiredFileName, {out} AError);
+    if not Result then
+    begin
+      APlan.Edits := nil;
+      APlan.RequiredFileName := '';
+      Exit;
+    end;
+    APlan.NewFilePath := RenamedFilePath(APlan.UnitPath,
+      APlan.RequiredFileName);
+    APlan.StaleInPaths := UsesInPathSites(LTMid, APlan.UnitPath);
     Exit;
   end;
-  if not FNav.SymbolAt(LMid, APasLine, APasCol, LTMid, LSym, AOldName) then
+  if not FNav.SymbolAt(LMid, APasLine, APasCol, LTMid, LSym, APlan.OldName)
+  then
   begin
     if FNav.BuiltinNameAt(LMid, APasLine, APasCol, LOther) then
       AError := Format('''%s'' is a compiler builtin - it has no ' +
@@ -2089,23 +2203,69 @@ begin
   end;
   if ANewName = '' then
     Exit(True);
-  Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} AEdits,
+  Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} APlan.Edits,
     {out} AError);
   if not Result then
-    AEdits := nil;
+    APlan.Edits := nil;
+end;
+
+{ Every `uses` item that names the renamed unit with an explicit
+  `in '<file>'` - the ONE thing a rename plan cannot express today, and the
+  reason it is reported rather than ignored.
+
+  A .dpr written by RAD Studio spells every unit that way, so this is the
+  ordinary case rather than an exotic one: `DemoUnit in 'DemoUnit.pas'`
+  becomes `DemoUnitRenamed in 'DemoUnit.pas'` after the plan is applied, and
+  the file no longer exists under that name. PasTree records the path
+  (TPasUsesRef.InPath) but not a POSITION for the literal, so an edit for it
+  cannot be planned here - which is why this returns the SITES, for a host to
+  fix its own way. The RAD Studio client does: renaming the file through
+  IOTAProject.RemoveFile/AddFile makes the IDE rewrite the entry itself.
+  textDocument/rename has no such lever and refuses instead.
+
+  A position for the literal belongs in PasTree, next to the name node; then
+  this becomes one more edit and both hosts stop caring. }
+function TLspServer.UsesInPathSites(ATargetMid: Integer;
+  const AUnitPath: string): TArray<string>;
+var
+  LMi, LIdx: Integer;
+  LModel: TPasSemaModel;
+  LOldFile: string;
+  LSites: TList<string>;
+begin
+  Result := nil;
+  if (FProject = nil) or (AUnitPath = '') then
+    Exit;
+  LOldFile := TPath.GetFileName(AUnitPath);
+  LSites := TList<string>.Create;
+  try
+    for LMi := 0 to FProject.ModelCount - 1 do
+    begin
+      LModel := FProject.Model(LMi);
+      for LIdx := 0 to High(LModel.UsesList) do
+        if (LModel.UsesList[LIdx].UnitId = ATargetMid) and
+           (LModel.UsesList[LIdx].InPath <> '') and
+           SameText(TPath.GetFileName(LModel.UsesList[LIdx].InPath),
+             LOldFile) then
+          LSites.Add(FProject.ModelFile(LMi));
+    end;
+    Result := LSites.ToArray;
+  finally
+    LSites.Free;
+  end;
 end;
 
 { textDocument/prepareRename - the range F2 pre-fills from, and the earliest
-  point a refusal can be shown. Answered as an ERROR rather than null when
-  the position resolves to something unrenameable, because "unit names are
-  not renamed here" is the whole content of the answer: a client puts an
-  error's message in front of the user, a null only greys the command out. }
+  point a refusal can be shown. Answered as an ERROR rather than null when the
+  position resolves to something unrenameable, because "a builtin has no
+  declaration" is the whole content of the answer: a client puts an error's
+  message in front of the user, a null only greys the command out. }
 function TLspServer.HandlePrepareRename(const AMsg: TLspIncoming): string;
 var
-  LPath, LOldName, LError: string;
+  LPath, LError: string;
   LLine, LChar, LPasLine, LPasCol, LMid: Integer;
   LIdent: TPasNavIdent;
-  LEdits: TArray<TPasRenameEdit>;
+  LPlan: TLspRenamePlanned;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -2121,40 +2281,71 @@ begin
   if LMid < 0 then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if not PlanRenameAt(LPath, LPasLine, LPasCol, '', {out} LEdits,
-    {out} LOldName, {out} LError) then
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, '', {out} LPlan,
+    {out} LError) then
   begin
     Log(Format('prepareRename: %s refused - %s',
       [PosTag(LPath, LPasLine, LPasCol), LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
   // The span comes from IdentAt, not from the symbol's declaration: it must
-  // be the identifier UNDER THE CURSOR, in this file.
+  // be the identifier UNDER THE CURSOR, in this file. For a dotted `uses`
+  // name IdentAt reports the whole span as one identifier, which is exactly
+  // right here - the new name replaces all of it.
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
       'There is nothing renameable at that position.'));
-  Log(Format('prepareRename: %s ''%s'' ok',
-    [PosTag(LPath, LPasLine, LPasCol), LOldName]));
+  Log(Format('prepareRename: %s %s ''%s'' ok',
+    [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
+     LPlan.OldName]));
   Result := BuildResponse(AMsg.IdJson, Format('{"range":%s,"placeholder":%s}',
     [RangeJson(LIdent.Line, LIdent.ColFrom, LIdent.ColTo - LIdent.ColFrom),
-     JsonQuote(LOldName)]));
+     JsonQuote(LPlan.OldName)]));
+end;
+
+{ One file's edits as the BODY of a TextEdit array - the elements, without
+  brackets - the shape both WorkspaceEdit forms need, spelled once. Walks
+  from AFrom while the file stays the same and reports where it stopped. }
+function AppendFileEdits(ASB: TStringBuilder;
+  const AEdits: TArray<TPasRenameEdit>; AFrom: Integer): Integer;
+begin
+  Result := AFrom;
+  while (Result <= High(AEdits)) and
+        SameText(AEdits[Result].FilePath, AEdits[AFrom].FilePath) do
+  begin
+    if Result > AFrom then
+      ASB.Append(',');
+    ASB.AppendFormat('{"range":%s,"newText":%s}',
+      [RangeJson(AEdits[Result].Line, AEdits[Result].Col,
+        AEdits[Result].Len),
+       JsonQuote(EditNewText(AEdits[Result]))]);
+    Inc(Result);
+  end;
 end;
 
 { textDocument/rename -> WorkspaceEdit. The plan arrives sorted by (file,
-  line, col), so `changes` is built by walking it and starting a new array
-  whenever the file changes - one key per file, which the shape requires (a
-  repeated key would be a different edit set silently winning).
+  line, col), so the per-file grouping is one walk.
 
-  Every range addresses the OLD identifier as ANALYZED. A client applying a
-  WorkspaceEdit is expected to reject it if its buffer moved since (VS Code
-  checks document versions); the IDE client, which applies by hand, makes
-  the same check itself with the OldText each pastree/renamePlan edit
-  carries. }
+  A SYMBOL rename is `changes`, the shape every client understands. A UNIT
+  rename cannot be: it must also RENAME THE FILE, which only
+  `documentChanges` can express (a `rename` resource operation), and it is
+  refused outright for a client that has not advertised support for one -
+  applying the text half of a unit rename leaves a project that does not
+  compile, which is worse than doing nothing.
+
+  It is refused for the same reason when a `uses` item spells this unit with
+  an explicit `in '<file>'`: that literal is not in the plan (see
+  UsesInPathSites) and a WorkspaceEdit has no way to fix it. Our own IDE
+  client does not come this way at all - it uses pastree/renamePlan and lets
+  the IDE rewrite the project entry.
+
+  Every newText comes from the plan rather than from the request: see
+  EditNewText. }
 function TLspServer.HandleRename(const AMsg: TLspIncoming): string;
 var
-  LPath, LNewName, LOldName, LError: string;
+  LPath, LNewName, LError: string;
   LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
-  LEdits: TArray<TPasRenameEdit>;
+  LPlan: TLspRenamePlanned;
   LSB: TStringBuilder;
 begin
   LPath := DocPathOf(AMsg.Params);
@@ -2167,35 +2358,77 @@ begin
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LEdits,
-    {out} LOldName, {out} LError) then
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LPlan,
+    {out} LError) then
   begin
     Log(Format('rename: %s -> ''%s'' refused - %s',
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  Log(Format('rename: %s ''%s'' -> ''%s'': %d edits',
-    [PosTag(LPath, LPasLine, LPasCol), LOldName, LNewName, Length(LEdits)]));
+  if LPlan.IsUnit and not FClientRenamesFiles then
+  begin
+    Log('rename: unit rename refused - the client advertised no rename '
+      + 'resource operation');
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, Format(
+      'Renaming unit %s also renames its file to %s, and this editor did ' +
+      'not advertise support for file renames in a workspace edit. Nothing ' +
+      'was changed.', [LPlan.OldName, LPlan.RequiredFileName])));
+  end;
+  if LPlan.IsUnit and (Length(LPlan.StaleInPaths) > 0) then
+  begin
+    Log('rename: unit rename refused - uses ... in ''...'' in '
+      + string.Join(', ', LPlan.StaleInPaths));
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, Format(
+      '%s names unit %s as `in ''%s''`, and a workspace edit cannot update ' +
+      'that path - the rename would leave the project unable to compile. ' +
+      'Nothing was changed.',
+      [TPath.GetFileName(LPlan.StaleInPaths[0]), LPlan.OldName,
+       TPath.GetFileName(LPlan.UnitPath)])));
+  end;
+  Log(Format('rename: %s %s ''%s'' -> ''%s'': %d edits%s',
+    [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
+     LPlan.OldName, LNewName, Length(LPlan.Edits),
+     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, '')]));
   LSB := TStringBuilder.Create;
   try
-    LSB.Append('{"changes":{');
-    for LIdx := 0 to High(LEdits) do
+    if LPlan.IsUnit then
     begin
-      if LIdx = 0 then
-        LSB.Append(JsonQuote(PathToUri(LEdits[LIdx].FilePath))).Append(':[')
-      else if not SameText(LEdits[LIdx].FilePath, LEdits[LIdx - 1].FilePath)
-      then
-        LSB.Append('],').Append(JsonQuote(PathToUri(LEdits[LIdx].FilePath)))
-          .Append(':[')
-      else
+      // documentChanges: text edits per file, then the file rename LAST - a
+      // client applies them in order, and renaming the file first would
+      // invalidate every URI above it.
+      LSB.Append('{"documentChanges":[');
+      LIdx := 0;
+      while LIdx <= High(LPlan.Edits) do
+      begin
+        if LIdx > 0 then
+          LSB.Append(',');
+        LSB.AppendFormat('{"textDocument":{"uri":%s,"version":null},' +
+          '"edits":[', [JsonQuote(PathToUri(LPlan.Edits[LIdx].FilePath))]);
+        LIdx := AppendFileEdits(LSB, LPlan.Edits, LIdx);
+        LSB.Append(']}');
+      end;
+      if Length(LPlan.Edits) > 0 then
         LSB.Append(',');
-      LSB.AppendFormat('{"range":%s,"newText":%s}',
-        [RangeJson(LEdits[LIdx].Line, LEdits[LIdx].Col, LEdits[LIdx].Len),
-         JsonQuote(LNewName)]);
+      LSB.AppendFormat('{"kind":"rename","oldUri":%s,"newUri":%s}',
+        [JsonQuote(PathToUri(LPlan.UnitPath)),
+         JsonQuote(PathToUri(LPlan.NewFilePath))]);
+      LSB.Append(']}');
+    end
+    else
+    begin
+      LSB.Append('{"changes":{');
+      LIdx := 0;
+      while LIdx <= High(LPlan.Edits) do
+      begin
+        if LIdx > 0 then
+          LSB.Append(',');
+        LSB.Append(JsonQuote(PathToUri(LPlan.Edits[LIdx].FilePath)))
+          .Append(':[');
+        LIdx := AppendFileEdits(LSB, LPlan.Edits, LIdx);
+        LSB.Append(']');
+      end;
+      LSB.Append('}}');
     end;
-    if Length(LEdits) > 0 then
-      LSB.Append(']');
-    LSB.Append('}}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
     LSB.Free;
@@ -2203,20 +2436,24 @@ begin
 end;
 
 { pastree/renamePlan - OURS, for a host that applies the rename itself and
-  wants to SHOW what it did. The same plan as textDocument/rename, but every
-  edit keeps the two things a WorkspaceEdit throws away: `oldText`, so the
-  host can verify each site against its own buffer before touching it, and
-  `snippet`/`hiFrom`/`hiTo` - the line as it reads AFTER the rename, with
-  the new name highlighted. That is what lets the RAD client fill a Find
+  wants to SHOW what it did. The same two plans as textDocument/rename, but
+  every edit keeps what a WorkspaceEdit throws away: `oldText`, so the host
+  can verify each site against its own buffer before touching it, `newText`
+  per site (a unit rename writes different texts at different sites), and
+  `snippet`/`hiFrom`/`hiTo` - the line as it reads AFTER the rename, with the
+  new name highlighted. That is what lets the RAD client fill a Find
   References-shaped results tab with the OUTCOME rather than a promise.
 
-  A client that does not know this method loses nothing: textDocument/rename
-  is the same plan. }
+  For a unit, `kind` is `unit`, `requiredFileName`/`filePath`/`newFilePath`
+  name the file rename the host must ALSO perform, and `staleInPaths` lists
+  the project files whose `uses ... in '...'` still points at the old file
+  name. Announcing none of that and leaving it out would be the worst
+  outcome: text edits that do not compile. }
 function TLspServer.HandleRenamePlan(const AMsg: TLspIncoming): string;
 var
-  LPath, LNewName, LOldName, LError: string;
+  LPath, LNewName, LError: string;
   LLine, LChar, LPasLine, LPasCol, LIdx: Integer;
-  LEdits: TArray<TPasRenameEdit>;
+  LPlan: TLspRenamePlanned;
   LSB: TStringBuilder;
 begin
   LPath := DocPathOf(AMsg.Params);
@@ -2229,33 +2466,48 @@ begin
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LEdits,
-    {out} LOldName, {out} LError) then
+  if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LPlan,
+    {out} LError) then
   begin
     Log(Format('renamePlan: %s -> ''%s'' refused - %s',
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  Log(Format('renamePlan: %s ''%s'' -> ''%s'': %d edits',
-    [PosTag(LPath, LPasLine, LPasCol), LOldName, LNewName, Length(LEdits)]));
+  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s',
+    [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
+     LPlan.OldName, LNewName, Length(LPlan.Edits),
+     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, '')]));
   LSB := TStringBuilder.Create;
   try
-    LSB.AppendFormat('{"oldName":%s,"newName":%s,"edits":[',
-      [JsonQuote(LOldName), JsonQuote(LNewName)]);
-    for LIdx := 0 to High(LEdits) do
+    LSB.AppendFormat('{"kind":%s,"oldName":%s,"newName":%s,' +
+      '"requiredFileName":%s,"filePath":%s,"newFilePath":%s,' +
+      '"staleInPaths":[',
+      [JsonQuote(RenameKindWord(LPlan.IsUnit)), JsonQuote(LPlan.OldName),
+       JsonQuote(LNewName), JsonQuote(LPlan.RequiredFileName),
+       JsonQuote(LPlan.UnitPath), JsonQuote(LPlan.NewFilePath)]);
+    for LIdx := 0 to High(LPlan.StaleInPaths) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(JsonQuote(LPlan.StaleInPaths[LIdx]));
+    end;
+    LSB.Append('],"edits":[');
+    for LIdx := 0 to High(LPlan.Edits) do
     begin
       if LIdx > 0 then
         LSB.Append(',');
       LSB.AppendFormat('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
-        '"len":%d,"oldText":%s,"isDecl":%s,"snippet":%s,' +
+        '"len":%d,"oldText":%s,"newText":%s,"isDecl":%s,"snippet":%s,' +
         '"hiFrom":%d,"hiTo":%d}',
-        [JsonQuote(PathToUri(LEdits[LIdx].FilePath)),
-         JsonQuote(LEdits[LIdx].FilePath),
-         LEdits[LIdx].Line, LEdits[LIdx].Col, LEdits[LIdx].Len,
-         JsonQuote(LEdits[LIdx].OldText),
-         LowerCase(BoolToStr(LEdits[LIdx].IsDecl, True)),
-         JsonQuote(LEdits[LIdx].Snippet),
-         LEdits[LIdx].HiFrom, LEdits[LIdx].HiTo]);
+        [JsonQuote(PathToUri(LPlan.Edits[LIdx].FilePath)),
+         JsonQuote(LPlan.Edits[LIdx].FilePath),
+         LPlan.Edits[LIdx].Line, LPlan.Edits[LIdx].Col,
+         LPlan.Edits[LIdx].Len,
+         JsonQuote(LPlan.Edits[LIdx].OldText),
+         JsonQuote(EditNewText(LPlan.Edits[LIdx])),
+         LowerCase(BoolToStr(LPlan.Edits[LIdx].IsDecl, True)),
+         JsonQuote(LPlan.Edits[LIdx].Snippet),
+         LPlan.Edits[LIdx].HiFrom, LPlan.Edits[LIdx].HiTo]);
     end;
     LSB.Append(']}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);

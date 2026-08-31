@@ -971,13 +971,6 @@ begin
     RenameParams(LUnitFile, LLine, LChar, '2bad')), 'rename to a non-identifier answered');
   Check(not GOk, 'and refused that too');
 
-  // The unit identity, declined by design (see PlanRenameAt).
-  FindPos(LAppFile, 'DemoUnit in ', 'DemoUnit', LLine, LChar);
-  Check(Ask('textDocument/rename',
-    RenameParams(LAppFile, LLine, LChar, 'RenamedUnit')),
-    'rename on a uses item answered');
-  Check(not GOk, 'and refused - a unit rename is a file rename');
-  Check(not GOk and GError.Contains('unit'), 'saying so');
 
   // pastree/renamePlan: the same plan, plus what a host that applies it
   // itself needs - the old text to verify against its buffer, and the line
@@ -993,6 +986,55 @@ begin
     'the declaration site is flagged - a host pins it first');
   Check(GOk and GResultJson.Contains('Salute'),
     'and the preview snippets already read as the new name');
+  Check(GOk and GResultJson.Contains('"kind":"symbol"'),
+    'and it says which of the two plans this was');
+
+  { The UNIT half. The same request on a `uses` item - which now plans rather
+    than refuses. The file obligation is the part worth pinning: a unit rename
+    reporting edits and no file name would be a project that no longer
+    compiles.
+
+    textDocument/rename is checked to REFUSE here, and that is not a gap:
+    this client advertises no workspaceEdit.resourceOperations, so the server
+    has no way to express the file rename to it and says so instead of
+    applying the text half. The RAD client never comes this way - it uses
+    pastree/renamePlan and renames the file itself. }
+  FindPos(LAppFile, 'DemoUnit in ', 'DemoUnit', LLine, LChar);
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LAppFile, LLine, LChar, 'DemoUnitRenamed')),
+    'renamePlan on a uses item answered');
+  Check(GOk and GResultJson.Contains('"kind":"unit"'), 'as a unit plan');
+  Check(GOk and GResultJson.Contains('"oldName":"DemoUnit"'),
+    'naming the unit as its own header spells it');
+  Check(GOk and GResultJson.Contains(
+    '"requiredFileName":"DemoUnitRenamed.pas"'),
+    'and the file name the rename obliges - the half text edits cannot do');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas'),
+    'the unit''s own header is edited');
+  Check(GOk and GResultJson.Contains('"newText":"DemoUnitRenamed"'),
+    'every site carries its own new text, not the requested name');
+  Check(GOk and GResultJson.Contains('"isDecl":true'),
+    'the header is the declaration row');
+  { The one part of a unit rename a plan cannot express: DemoApp.dpr spells
+    the unit as DemoUnit in 'DemoUnit.pas', and that literal has no
+    position in the model. Reported as a site rather than silently left
+    behind - see UsesInPathSites. }
+  Check(GOk and GResultJson.Contains('DemoApp.dpr') and
+    GResultJson.Contains('"staleInPaths":['),
+    'and the uses ... in ''...'' the plan cannot fix is reported, not hidden');
+
+  Check(Ask('textDocument/prepareRename',
+    PositionParams(LAppFile, LLine, LChar)),
+    'prepareRename on a uses item answered');
+  Check(GOk and GResultJson.Contains('"placeholder":"DemoUnit"'),
+    'and offers the unit name rather than declining the position');
+
+  Check(Ask('textDocument/rename',
+    RenameParams(LAppFile, LLine, LChar, 'DemoUnitRenamed')),
+    'rename on a uses item answered');
+  Check(not GOk, 'and refused - this client cannot apply a file rename');
+  Check(not GOk and GError.Contains('DemoUnitRenamed.pas'),
+    'naming the file it would have needed');
 end;
 
 { 5f. pastree/classComplete: the server half of Ctrl+Shift+C.

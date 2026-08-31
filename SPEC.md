@@ -174,9 +174,9 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
 | `textDocument/prepareRename` | the identifier's own span, and the earliest refusal |
-| `textDocument/rename` | a `WorkspaceEdit` over the resolved references, symbol identity only |
+| `textDocument/rename` | symbol: `changes`; unit: `documentChanges` with a `rename` file operation |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
-| `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText` and a post-rename preview per line |
+| `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
@@ -193,15 +193,35 @@ typed.
 **Rename is the reference search, turned into edits — and its refusals are
 half the feature.** `PlanRename` is `DeclHit` + `FindReferences`, so a rename
 can never reach further than the references panel already showed, and never
-onto a same-spelled unrelated symbol. Only the SYMBOL identity is renamed: a
-`uses` item or a module header is declined (renaming a unit is a file rename
-plus every referring `uses` clause — a different shape of workspace edit, and
-a planned feature rather than a gap), and a compiler builtin has no
-declaration site at all. An invalid name or a reserved word is refused by the
-analysis itself (`IsValidRenameName`), never by a client's own copy of the
-keyword list — a second answer able to disagree with the first is exactly
-what that would be. Every refusal comes back as an error whose message is
-written to be shown to a user, not logged.
+onto a same-spelled unrelated symbol. `PlanUnitRename` is the same idea over
+the unit identity: the module's own header name plus every `uses` item that
+resolved to it, with each site getting the spelling it had (the full dotted
+name where it was written in full, the bare leaf where a namespace prefix
+resolved it — which is why every edit carries its own `newText` and nothing
+assumes the requested name is what lands). A compiler builtin is the one
+thing declined outright: it has no declaration site anywhere. An invalid name
+or a reserved word is refused by the analysis itself (`IsValidRenameName`,
+`IsValidUnitRenameName`), never by a client's own copy of the keyword list —
+a second answer able to disagree with the first is exactly what that would
+be. Every refusal comes back as an error whose message is written to be shown
+to a user, not logged.
+
+**A unit rename is text edits AND A FILE RENAME, and the server never lets a
+client take only half.** Object Pascal ties a unit's name to its file name, so
+`requiredFileName` rides with the plan and `textDocument/rename` expresses the
+file move as a `rename` resource operation inside `documentChanges` — refusing
+outright for a client that has not advertised `resourceOperations` support for
+one, because applying the text half alone produces a project that does not
+compile.
+
+One part is still beyond a plan: a program's `uses Foo in 'Foo.pas'`. PasTree
+records that path (`TPasUsesRef.InPath`) but not a POSITION for the literal,
+so no edit can be planned for it. The server reports those sites instead —
+`staleInPaths` in `pastree/renamePlan`, and a refusal in `textDocument/rename`
+— and the RAD Studio client fixes them by renaming the file through
+`IOTAProject.RemoveFile`/`AddFile`, which makes the IDE rewrite its own
+project entry. A position for that literal belongs in PasTree; then it becomes
+one more edit and both hosts stop caring.
 
 **Why `pastree/renamePlan` exists next to `textDocument/rename`.** They plan
 the same edits; the custom one keeps what a `WorkspaceEdit` throws away —
@@ -318,11 +338,6 @@ All four shipped. Two notes worth keeping:
   search: on a 3747-unit project this is the feature people reach for most
   (the IDE's own Ctrl+T). Every model's unit and implementation scopes already
   hold what it needs, keyed by `NameLower`.
-- **A UNIT rename.** The half `textDocument/rename` declines: a file rename
-  plus every referring `uses` clause (and the `.dproj`/`.dpr` entry). The
-  identity is already there — `FindUnitReferences` — but the edits leave the
-  shape the symbol rename lives in: renaming a file is not replacing an
-  identifier, and a host has to be told to do both.
 - **`workspace/didChangeConfiguration` (+ `workspace/configuration`).**
   Reconfigure without a restart. Today a changed `.dproj` only prints a note
   from the watched-files handler, because search paths, defines and namespaces

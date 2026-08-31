@@ -790,9 +790,21 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    to the IDE. A feature that EDITS the user's code is the one that most
    needs a way to be refused outright.
 
-   Still queued: renaming a UNIT (a file rename plus every `uses` clause —
-   the server declines it today with a sentence saying so), and
-   `IOTASyncEditPoints` as the cheap same-file variant.
+   **The UNIT half landed 2026-08-31**, on PasTree 0.13.2's PlanUnitRename:
+   the module header plus every `uses` item, AND the file. The file is the
+   part that makes it real — Object Pascal ties a unit's name to its file
+   name — and it goes through the IDE's own project API
+   (`IOTAProject.RemoveFile` → `TFile.Move` → `AddFile`), which is also what
+   rewrites the `.dproj` entry and a program's `uses Foo in 'Foo.pas'` path.
+   That path is the one thing no rename plan can express (PasTree has the
+   path but no position for the literal), so the IDE doing it is not a
+   convenience but the reason a unit rename can be complete. A `.dfm` moves
+   with the unit — its resource directive resolves against the unit name, and
+   a mismatch fails at RUN time. Afterwards the analysis restarts: the server
+   fixes its closure at initialize, so a renamed file is the one edit the
+   incremental path cannot absorb.
+
+   Still queued: `IOTASyncEditPoints` as the cheap same-file variant.
 6. **Find References results upgrade** (hierarchy + match highlight in the
    snippet), **custom colored hint window** — carried over from the old
    order, still queued. **Idle-debounced `didChange` DELIVERED 2026-08-22**

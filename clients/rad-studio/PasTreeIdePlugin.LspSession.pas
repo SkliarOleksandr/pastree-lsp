@@ -162,7 +162,10 @@ type
   ///
   /// Row/Col/Len address the OLD identifier in the text the server was given.
   /// OldText is that exact text, for the "has the buffer moved since?" check
-  /// every applier must make. Snippet is the line as it reads AFTER every
+  /// every applier must make. NewText is what goes there - PER SITE, never
+  /// the requested name: a UNIT rename legitimately writes the full dotted
+  /// name at one site and the bare leaf at another. Snippet is the line as it
+  /// reads AFTER every
   /// edit on that same line, with HiFrom/HiTo (0-based, into Snippet)
   /// spanning the NEW name - the preview that lets a results panel show the
   /// outcome rather than a promise.
@@ -172,6 +175,7 @@ type
     Row, Col: Integer;
     Len: Integer;
     OldText: string;
+    NewText: string;
     IsDecl: Boolean;
     Snippet: string;
     HiFrom, HiTo: Integer;
@@ -186,12 +190,37 @@ type
   TLspRenamePlan = record
     OldName: string;
     NewName: string;
+    { True when this renames a UNIT rather than a symbol, and then the four
+      fields below are the part that has nothing to do with text: Object
+      Pascal ties a unit's name to its FILE name, so RequiredFileName is
+      what the file must be called afterwards, FilePath/NewFilePath are the
+      rename to perform, and StaleInPaths lists the project files whose
+      `uses ... in '...'` still spells the old file name. That last one has
+      no edit in the plan at all - the literal has no position in the model
+      - so a host must handle it or refuse; renaming the file through the
+      IDE's own project API is what handles it here. }
+    IsUnit: Boolean;
+    RequiredFileName: string;
+    FilePath: string;
+    NewFilePath: string;
+    StaleInPaths: TArray<string>;
     Edits: TArray<TLspRenameEdit>;
   end;
 
   /// <summary>Same delivery contract as TLspHitsProc.</summary>
   TLspRenamePlanProc = reference to procedure(ASuccess: Boolean;
     const APlan: TLspRenamePlan; const AError: string);
+
+  /// <summary>
+  /// The answer to prepareRename: the name to offer the user as the starting
+  /// point, and nothing else. It is asked BEFORE the dialog rather than
+  /// guessed from the text under the caret, because a UNIT's name may be
+  /// dotted - `Namespace.Foo` is one name - and only the analysis knows the
+  /// whole of it. AName is empty on failure, and AError then says why in a
+  /// sentence written for the user.
+  /// </summary>
+  TLspRenameTargetProc = reference to procedure(ASuccess: Boolean;
+    const AName: string; const AError: string);
 
 
   /// <summary>
@@ -405,6 +434,14 @@ procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
   const ANewName: string; const AOnDone: TLspRenamePlanProc);
 
 /// <summary>
+/// Asks whether the identifier at an IDE position can be renamed at all, and
+/// under what name it is known - the question a rename dialog needs answered
+/// before it can be shown. See TLspRenameTargetProc.
+/// </summary>
+procedure LspRenameTarget(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspRenameTargetProc);
+
+/// <summary>
 /// Starts the server for the active project and lets its first analysis begin,
 /// without any question to answer. Called when a project group finishes opening
 /// and when the active project changes.
@@ -449,6 +486,16 @@ procedure LspProjectOpened;
 /// closure analysis on every open.
 /// </summary>
 procedure LspProjectClosed;
+
+/// <summary>
+/// Forces the next request to start a FRESH server, because the set of files
+/// the analysis is built from has changed in a way no incremental path can
+/// absorb - a unit renamed on disk. The server fixes its closure at
+/// initialize (it reads the project there), so a file that has just changed
+/// name is not something it can be told about; the honest move is a restart,
+/// which costs the next navigation one rebuild and nothing else.
+/// </summary>
+procedure LspRestartForClosureChange(const AWhy: string);
 
 /// <summary>
 /// Writes one line into the SERVER's log (pastree-lsp.log), not the Build tab.
@@ -547,6 +594,7 @@ type
     procedure Prewarm;
     procedure ProjectOpened;
     procedure ProjectClosed;
+    procedure RestartForClosureChange(const AWhy: string);
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
@@ -566,6 +614,8 @@ type
       const AOnDone: TLspClassCompleteProc);
     procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
       const ANewName: string; const AOnDone: TLspRenamePlanProc);
+    procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
     procedure DocumentSymbols(const AFileName: string;
@@ -1372,7 +1422,7 @@ end;
 /// </summary>
 function ParseRenamePlan(AResult: TJSONValue): TLspRenamePlan;
 var
-  LEdits: TJSONArray;
+  LEdits, LStale: TJSONArray;
   LValue: TJSONValue;
   LObj: TJSONObject;
   LEdit: TLspRenameEdit;
@@ -1383,6 +1433,17 @@ begin
     Exit;
   Result.OldName := AResult.GetValue<string>('oldName', '');
   Result.NewName := AResult.GetValue<string>('newName', '');
+  Result.IsUnit := SameText(AResult.GetValue<string>('kind', ''), 'unit');
+  Result.RequiredFileName :=
+    AResult.GetValue<string>('requiredFileName', '');
+  Result.FilePath := AResult.GetValue<string>('filePath', '');
+  Result.NewFilePath := AResult.GetValue<string>('newFilePath', '');
+  if AResult.TryGetValue<TJSONArray>('staleInPaths', LStale) then
+  begin
+    SetLength(Result.StaleInPaths, LStale.Count);
+    for LCount := 0 to LStale.Count - 1 do
+      Result.StaleInPaths[LCount] := LStale.Items[LCount].Value;
+  end;
   if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
     Exit;
   SetLength(Result.Edits, LEdits.Count);
@@ -1397,17 +1458,56 @@ begin
     LEdit.Col := LObj.GetValue<Integer>('col', 0);
     LEdit.Len := LObj.GetValue<Integer>('len', 0);
     LEdit.OldText := LObj.GetValue<string>('oldText', '');
+    LEdit.NewText := LObj.GetValue<string>('newText', '');
     LEdit.IsDecl := LObj.GetValue<Boolean>('isDecl', False);
     LEdit.Snippet := LObj.GetValue<string>('snippet', '');
     LEdit.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LEdit.HiTo := LObj.GetValue<Integer>('hiTo', 0);
     if (LEdit.FilePath = '') or (LEdit.Row < 1) or (LEdit.Col < 1) or
-       (LEdit.Len < 1) or (LEdit.OldText = '') then
+       (LEdit.Len < 1) or (LEdit.OldText = '') or (LEdit.NewText = '') then
       Continue;
     Result.Edits[LCount] := LEdit;
     Inc(LCount);
   end;
   SetLength(Result.Edits, LCount);
+end;
+
+procedure TLspSession.RenameTarget(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspRenameTargetProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, '', 'no LSP server available');
+    Exit;
+  end;
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  FClient.Request('textDocument/prepareRename', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if not ASuccess then
+      begin
+        AOnDone(False, '', AError);
+        Exit;
+      end;
+      // A null result means the server had no opinion (no project yet, or
+      // the file is not in the closure). Not an error, and not a name.
+      if not Assigned(AResult) then
+        AOnDone(False, '', 'There is nothing renameable at that position.')
+      else
+        AOnDone(True, AResult.GetValue<string>('placeholder', ''), '');
+    end);
 end;
 
 procedure TLspSession.RenamePlan(const AFileName: string; ARow, ACol: Integer;
@@ -1926,6 +2026,19 @@ end;
 { The server is deliberately LEFT RUNNING - see LspProjectClosed. This only
   records the boundary, on both sides, while there is still a project to
   name. }
+{ Not a Stop: clearing the recorded project is enough, and it is the same
+  mechanism a project/platform switch already uses (see EnsureSession, which
+  compares what it started against what the IDE now says). The next request
+  therefore restarts the server, re-sends every open document and rebuilds -
+  and if no request ever comes, nothing was paid for. }
+procedure TLspSession.RestartForClosureChange(const AWhy: string);
+begin
+  if not Assigned(FClient) then
+    Exit;
+  LogDiagnostic(AWhy + ' - the analysis will restart on the next request.');
+  FStartedProject := '';
+end;
+
 procedure TLspSession.ProjectClosed;
 begin
   if not Assigned(FClient) or (FClient.State <> lcsReady) or
@@ -2013,6 +2126,12 @@ begin
     GSession.ProjectClosed;
 end;
 
+procedure LspRestartForClosureChange(const AWhy: string);
+begin
+  if Assigned(GSession) then
+    GSession.RestartForClosureChange(AWhy);
+end;
+
 function LspLogToServer(const AText: string): Boolean;
 begin
   Result := Assigned(GSession) and GSession.LogToServer(AText);
@@ -2068,6 +2187,17 @@ begin
     Exit;
   end;
   GSession.RenamePlan(AFileName, ARow, ACol, ANewName, AOnDone);
+end;
+
+procedure LspRenameTarget(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspRenameTargetProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, '', 'LSP session not initialized');
+    Exit;
+  end;
+  GSession.RenameTarget(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;

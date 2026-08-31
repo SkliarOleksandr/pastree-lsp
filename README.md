@@ -68,8 +68,8 @@ Phases 1 and 2 are complete and exercised live.
 | `window/logMessage`, `window/showMessage` | server trouble the user can act on |
 | `textDocument/typeDefinition` | the type of the thing under the cursor, across units |
 | `textDocument/documentHighlight` | occurrences within the current file |
-| `textDocument/rename`, `textDocument/prepareRename` | rename a symbol across the project, as a `WorkspaceEdit`; a unit name or a builtin is refused with a reason |
-| `pastree/renamePlan` | the same plan with each site's old text and a preview of the line after the rename — what the RAD Studio client shows in its results tab |
+| `textDocument/rename`, `textDocument/prepareRename` | rename a symbol or a UNIT across the project; a unit also renames its file, as a `rename` operation in `documentChanges` |
+| `pastree/renamePlan` | the same plan with each site's old and new text, the file a renamed unit must move to, and a preview of every line after the rename — what the RAD Studio client applies and shows |
 
 **Behaviour** — analysis runs on a background session, debounced so a typing
 burst costs one build; a document event only schedules a rebuild when the text
