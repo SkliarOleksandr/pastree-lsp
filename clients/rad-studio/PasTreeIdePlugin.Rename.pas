@@ -749,7 +749,9 @@ begin
   end;
 
   GPlanning := True;
-  ShowWaitDialog(Format('Renaming "%s" to "%s"...', [AOldName, LNewName]));
+  // No names in the text: the dialog does not grow for it, and two
+  // identifiers plus decoration is clipped (user, 2026-08-31).
+  ShowWaitDialog('Renaming...');
   LspRenamePlan(AFileName, ARow, ACol, LNewName,
     procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
       const AError: string)
@@ -867,7 +869,7 @@ begin
     GPlanning := True;
     // Visible progress for the slow half: on a cold big project this
     // prepareRename is what takes the seconds, not the plan.
-    ShowWaitDialog('Rename: resolving the identifier under the cursor...');
+    ShowWaitDialog('Resolving identifier...');
     LspRenameTarget(LFileName, LRow, LCol,
       procedure(ASuccess: Boolean; const AName, AError: string)
       begin

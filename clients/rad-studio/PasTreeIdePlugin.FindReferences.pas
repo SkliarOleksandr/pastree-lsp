@@ -376,7 +376,9 @@ begin
     // anything was happening (user, 2026-08-31). Every terminal path below
     // closes the dialog FIRST - it disables input, and a message box on
     // top of disabled input is a stuck IDE.
-    ShowWaitDialog('Searching for references...');
+    // Short on purpose: the wait dialog does not grow for its text and a
+    // long line is clipped (user, 2026-08-31).
+    ShowWaitDialog('Searching references...');
     LspReferences(LCursorFile, LRow, LCol, False,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
         const AError: string)
