@@ -269,9 +269,11 @@ begin
   LGroup := GetOrCreateMessageGroup(LMessageServices);
   LMessageServices.ClearMessageGroup(LGroup);
 
-  LMessageServices.AddTitleMessage(
-    Format('PasTree Find References: "%s" - %d reference(s)', [AIdentifier, Length(AHits)]),
-    LGroup);
+  // A custom row rather than AddTitleMessage: a title message is IDE-drawn
+  // in the plain text color, and this line is styled like the headers.
+  LMessageServices.AddCustomMessagePtr(
+    NewTitleRow(Format('PasTree Find References: "%s" - %d reference(s)',
+      [AIdentifier, Length(AHits)])), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;

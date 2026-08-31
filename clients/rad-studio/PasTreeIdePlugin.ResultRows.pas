@@ -72,6 +72,14 @@ uses
   ToolsAPI;
 
 /// <summary>
+/// The tab's first line - "PasTree Find References: ..." - painted bold in
+/// the same blue accent as the file headers. A custom row rather than
+/// AddTitleMessage for exactly that reason: a title message is IDE-drawn,
+/// always in the panel's plain text color. Not navigable (no file).
+/// </summary>
+function NewTitleRow(const AText: string): IOTACustomMessage;
+
+/// <summary>
 /// A file header row: painted as "&lt;full path&gt; [N]" with the path bold -
 /// like Find in Files - and, unlike a tool-message header, navigable to the
 /// top of the file.
@@ -356,11 +364,12 @@ type
     FFilePath: string;
     FLine: Integer;
     FCol: Integer;
-    FText: string;   // header: unused; snippet: the raw line text
+    FText: string;   // title: the whole line; header: unused; snippet: the raw line text
     FSuffix: string; // header: ' [N]'; snippet: the tag or ''
     FMatchStart: Integer; // 1-based into FText, 0 = no highlight
     FMatchLen: Integer;
     FIsHeader: Boolean;
+    FIsTitle: Boolean;
     procedure Paint(ACanvas: TCanvas; const ARect: TRect; ADoDraw: Boolean;
       out AWidth: Integer);
   public
@@ -402,7 +411,9 @@ end;
 function TResultRow.GetLineText: string;
 begin
   // What the panel hands to the clipboard and to F1.
-  if FIsHeader then
+  if FIsTitle then
+    Result := FText
+  else if FIsHeader then
     Result := FFilePath + FSuffix
   else
     Result := Format('%s (%d): %s%s',
@@ -565,7 +576,11 @@ begin
     ACanvas.FillRect(ARect);
   end;
 
-  if FIsHeader then
+  if FIsTitle then
+    // The tab's first line, bold in the same blue as the headers below it
+    // (fifth live run: the plain IDE-drawn title read as unstyled).
+    Put(FText, LBlue, LBaseStyle + [TFontStyle.fsBold])
+  else if FIsHeader then
   begin
     // The whole header - path and count - bold in the same blue accent
     // the hit rows use for their file names (fourth live run: base-color
@@ -611,6 +626,16 @@ end;
 { ------------------------------------------------------------------------- }
 { Construction                                                               }
 { ------------------------------------------------------------------------- }
+
+function NewTitleRow(const AText: string): IOTACustomMessage;
+var
+  LRow: TResultRow;
+begin
+  LRow := TResultRow.Create;
+  LRow.FText := AText;
+  LRow.FIsTitle := True;
+  Result := LRow;
+end;
 
 function NewFileHeaderRow(const AFilePath: string;
   ARefCount: Integer): IOTACustomMessage;
