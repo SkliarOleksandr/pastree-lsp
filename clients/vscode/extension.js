@@ -54,6 +54,36 @@ function activate(context) {
       searchPaths: cfg.get('searchPaths') || [],
       defines: cfg.get('defines') || [],
     },
+    middleware: {
+      // Block completion (onTypeFormatting after Enter): the server's plan
+      // re-indents the caret line to the BODY indentation and inserts the
+      // closer below - but where the cursor lands after those edits is up
+      // to VS Code's marker anchoring, and live runs got all three
+      // outcomes (stayed put mid-indent, rode past the closer, worked).
+      // So the cursor is placed EXPLICITLY, the way the RAD plugin does:
+      // the single-line edit on the caret's own line carries the body
+      // indent, and its length is the column typing should resume at.
+      provideOnTypeFormattingEdits: async (document, position, ch, options, token, next) => {
+        const edits = await next(document, position, ch, options, token);
+        if (edits && edits.length) {
+          const indentEdit = edits.find(e =>
+            e.range.start.line === position.line && !e.newText.includes('\n'));
+          if (indentEdit) {
+            // After VS Code applies the returned edits - hence the
+            // deferral; applying happens right after this returns.
+            setTimeout(() => {
+              const editor = vscode.window.activeTextEditor;
+              if (editor && editor.document === document) {
+                const target = new vscode.Position(
+                  position.line, indentEdit.newText.length);
+                editor.selection = new vscode.Selection(target, target);
+              }
+            }, 0);
+          }
+        }
+        return edits;
+      },
+    },
   };
 
   client = new LanguageClient(
