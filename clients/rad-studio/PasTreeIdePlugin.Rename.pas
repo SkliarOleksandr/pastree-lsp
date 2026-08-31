@@ -773,13 +773,34 @@ procedure ReregisterFile(const AProject: IOTAProject;
 begin
   if not Assigned(AProject) then
     Exit;
-  try
-    Trace('  RemoveFile (the stale entry, with its `in` path)');
-    AProject.RemoveFile(AOldPath);
-  except
-    on E: Exception do
-      LogDiagnostic(Format('rename: removing %s from the project failed: %s',
-        [ExtractFileName(AOldPath), E.Message]));
+  { ASK BEFORE ACTING, in both directions. By the time this runs the IDE has
+    usually already fixed its own record - its SaveAs path renames the file
+    AND registers the new name, even when IOTAProject100.Rename reported
+    False (observed 2026-08-31: Rename returned False, the project already
+    held the new name, and the unconditional AddFile below then failed with
+    "the project already contains a form or module named uaviConst2" - an
+    error about a rename that had entirely succeeded).
+
+    FindModuleInfo is the question to ask: it answers nil for a file the
+    project does not list. Two lookups turn this from a sequence of commands
+    into a reconciliation, which is what it has to be - anything else here is
+    a guess about what the IDE already did. }
+  if Assigned(AProject.FindModuleInfo(AOldPath)) then
+    try
+      Trace('  RemoveFile (the stale entry, with its `in` path)');
+      AProject.RemoveFile(AOldPath);
+    except
+      on E: Exception do
+        LogDiagnostic(Format('rename: removing %s from the project failed: %s',
+          [ExtractFileName(AOldPath), E.Message]));
+    end
+  else
+    Trace('  the project no longer lists the old name - nothing to remove');
+
+  if Assigned(AProject.FindModuleInfo(ANewPath)) then
+  begin
+    Trace('  the project already lists the new name - nothing to add');
+    Exit;
   end;
   try
     Trace('  AddFile (the new name, with a matching path)');
@@ -971,17 +992,12 @@ begin
 
   { BY HAND FROM HERE, and every step is individually guarded for the reason
     the header states. }
-  if Assigned(LProject) then
-    try
-      Trace('  RemoveFile');
-      LProject.RemoveFile(APlan.FilePath);
-    except
-      on E: Exception do
-        // Not fatal on its own - AddFile below still repairs the project -
-        // but it is the step whose failure explains a duplicated entry.
-        LogDiagnostic(Format('rename: removing %s from the project failed: ' +
-          '%s', [ExtractFileName(APlan.FilePath), E.Message]));
-    end;
+  { NO RemoveFile HERE ANY MORE. It used to come first, on the reasoning that
+    the project should be told before the file moves - but the IDE gets there
+    on its own (closing a module whose unit clause changed takes its SaveAs
+    path, which renames the file AND rewrites the project), and removing the
+    entry in front of that only made the two disagree. The project is
+    reconciled once, at the end, by ReregisterFile. }
   if Assigned(LModule) then
     try
       Trace('  closing the module');
@@ -1036,18 +1052,7 @@ begin
           mtError);
     end;
 
-  if Assigned(LProject) then
-    try
-      Trace('  AddFile');
-      LProject.AddFile(APlan.NewFilePath, True);
-    except
-      on E: Exception do
-        TellUser(Format('%s was renamed to %s, but adding it back to the ' +
-          'project failed: %s'#13#10#13#10 +
-          'Add it to the project by hand.',
-          [ExtractFileName(APlan.FilePath),
-           ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
-    end;
+  ReregisterFile(LProject, APlan.FilePath, APlan.NewFilePath);
   try
     Trace('  reopening');
     LActionServices.OpenFile(APlan.NewFilePath);
