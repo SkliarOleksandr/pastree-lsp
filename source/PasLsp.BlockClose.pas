@@ -136,6 +136,7 @@ var
   LCandidateKind: TPasTokenKind;
   LCandidateLine: Integer;
   LPushIt: Boolean;
+  LModuleKind: TPasTokenKind;
   LIndent, LBodyIndent, LCloser: string;
   LLineEndChar: Integer;
   LEdit: TBlockCloseEdit;
@@ -175,6 +176,16 @@ begin
   LLastLineAbove := -1;
   LCandidateKind := tkEndOfFile;
   LCandidateLine := -1;
+  // What kind of module this is decides what the final `end.` closes -
+  // see the tkEnd branch. An include file has no head and behaves like a
+  // unit there (its `end.`, if any, closes nothing of ours).
+  LModuleKind := tkEndOfFile;
+  if LCount > 0 then
+    case VisKind(0) of
+      tkProgram: LModuleKind := tkProgram;
+      tkLibrary: LModuleKind := tkLibrary;
+      tkUnit: LModuleKind := tkUnit;
+    end;
 
   for LIdx := 0 to LCount - 1 do
   begin
@@ -184,14 +195,6 @@ begin
 
     LPushIt := False;
     case LTok.Kind of
-      tkUnit, tkProgram, tkLibrary:
-        // The module head opens the block the final `end.` closes - without
-        // this every complete unit would look one closer short the moment a
-        // routine's `end;` count matched, because `end.` would eat a stack
-        // entry that belonged to a routine. First token only: `unit` and
-        // friends are reserved words, but only the head position opens
-        // anything.
-        LPushIt := LIdx = 0;
       tkBegin, tkTry, tkRepeat, tkAsm:
         LPushIt := True;
       tkCase:
@@ -225,7 +228,23 @@ begin
         LPushIt := (LPrevKind = tkEqual) and
           (VisKind(LIdx + 1) <> tkSemicolon);
       tkEnd:
-        if LStackCount > 0 then
+        // `end` followed by `.` is the MODULE terminator and closes no
+        // ordinary block - with one carve-out: in a program/library the
+        // main `begin...end.` is one block, so there (and only there) it
+        // pops an open begin. In a unit it pops nothing: the unit's own
+        // `end.` stands alone, and even an old-style initialization
+        // `begin` shares it rather than owning one. Getting this wrong in
+        // either direction is not cosmetic - counting `end.` as a normal
+        // closer made every COMPLETE program look one closer short (the
+        // head never popped), and Enter after any opener in a balanced
+        // .dpr grew a second `finally/end;` next to a correct one
+        // (user, 2026-08-31, XmlDocDemo.dpr).
+        if (LIdx + 1 < LCount) and (VisKind(LIdx + 1) = tkDot) then
+        begin
+          if (LModuleKind in [tkProgram, tkLibrary]) and (Top = tkBegin) then
+            Dec(LStackCount);
+        end
+        else if LStackCount > 0 then
           Dec(LStackCount);
       tkUntil:
         if Top = tkRepeat then
@@ -237,11 +256,8 @@ begin
       Push(LTok.Kind);
       // The last opener typed above the caret is the one the Enter was
       // pressed after - remember its kind (for until-vs-end) and its line
-      // (for the trigger condition and the indentation). Not the module
-      // head: `unit X;` + Enter must never grow an `end.` - the head is
-      // balance bookkeeping, not a gesture.
-      if (LTok.Start < LCaretStart) and
-         not (LTok.Kind in [tkUnit, tkProgram, tkLibrary]) then
+      // (for the trigger condition and the indentation).
+      if LTok.Start < LCaretStart then
       begin
         LCandidateKind := LTok.Kind;
         LCandidateLine := LineOf(LTok.Start);

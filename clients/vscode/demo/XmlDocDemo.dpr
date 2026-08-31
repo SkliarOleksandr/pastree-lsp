@@ -15,17 +15,16 @@ uses
 
 var
   GGreeter: TGreeter;
-  GName: TPersonName;
+  GName2: TPersonName;
 
 begin
   // Hover any of these, and complete after 'GGreeter.' - the documentation
   // rides with every completion row, not just with the hover.
-  GName.First := 'Ada';
-  GName.Last := 'Lovelace';
-  GGreeter := TGreeter.Create(gsFormal2);
+  GName2.First := 'Ada';
+  GName2.Last := 'Lovelace';
+  GGreeter := TGreeter.Create(gsFormal);
   try
-    TObject.  
-    Writeln(GGreeter.Greet(GName, True));
+    Writeln(GGreeter.Greet(GName2, True));
     Writeln(CAnswer, ' ', EscapesAndOddities);
     UntaggedDoc;
     DocAboveAnAttribute;

@@ -1331,6 +1331,24 @@ begin
   // nothing to apply, nothing to parse.
   Check(GOk and (GResultJson = ''),
     'and the answer is null - nothing to insert in a balanced file');
+
+  // The regression of 2026-08-31 (XmlDocDemo.dpr): in a PROGRAM the final
+  // `end.` closes the main begin, and the head owns no end of its own -
+  // counting it any other way makes every complete .dpr look one closer
+  // short, and Enter after a try that already had its finally/end grew a
+  // second one. Balanced program, Enter inside the try: silence.
+  SendDidOpenText(LFile,
+    'program DemoBlockClose;'#13#10 +
+    'begin'#13#10 +
+    '  try'#13#10 +
+    '  '#13#10 +
+    '  finally'#13#10 +
+    '  end;'#13#10 +
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(3, 2)),
+    'the balanced program answered');
+  Check(GOk and (GResultJson = ''),
+    'and stays silent - end. closed the main begin, not a spare block');
 end;
 
 { 6. Cancellation hygiene.
