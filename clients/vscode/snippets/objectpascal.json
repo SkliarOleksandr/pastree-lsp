@@ -1,0 +1,47 @@
+{
+  "while": {
+    "prefix": "while",
+    "body": ["while ${1:Condition} do", "begin", "\t$0", "end;"],
+    "description": "while ... do begin ... end"
+  },
+  "for": {
+    "prefix": "for",
+    "body": ["for ${1:I} := ${2:0} to ${3:Count - 1} do", "begin", "\t$0", "end;"],
+    "description": "for ... to ... do begin ... end"
+  },
+  "for-in": {
+    "prefix": "forin",
+    "body": ["for ${1:Item} in ${2:Collection} do", "begin", "\t$0", "end;"],
+    "description": "for ... in ... do begin ... end"
+  },
+  "if": {
+    "prefix": "if",
+    "body": ["if ${1:Condition} then", "begin", "\t$0", "end;"],
+    "description": "if ... then begin ... end"
+  },
+  "if-else": {
+    "prefix": "ife",
+    "body": ["if ${1:Condition} then", "begin", "\t$2", "end", "else", "begin", "\t$0", "end;"],
+    "description": "if ... then begin ... end else begin ... end"
+  },
+  "case": {
+    "prefix": "case",
+    "body": ["case ${1:Expr} of", "\t${2:Value}: $0;", "end;"],
+    "description": "case ... of ... end"
+  },
+  "try-finally": {
+    "prefix": "tryf",
+    "body": ["try", "\t$0", "finally", "\t", "end;"],
+    "description": "try ... finally ... end"
+  },
+  "try-except": {
+    "prefix": "trye",
+    "body": ["try", "\t$0", "except", "\ton E: Exception do", "\t\t", "end;"],
+    "description": "try ... except on E: Exception do ... end"
+  },
+  "repeat": {
+    "prefix": "repeat",
+    "body": ["repeat", "\t$0", "until ${1:Condition};"],
+    "description": "repeat ... until ..."
+  }
+}

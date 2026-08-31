@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.15.6",
+  "version": "0.15.7",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -14,6 +14,12 @@
         "editor.formatOnType": true
       }
     },
+    "snippets": [
+      {
+        "language": "objectpascal",
+        "path": "./snippets/objectpascal.json"
+      }
+    ],
     "languages": [
       {
         "id": "objectpascal",
