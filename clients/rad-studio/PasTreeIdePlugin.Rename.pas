@@ -727,9 +727,16 @@ procedure RenameFrom(const AFileName: string; ARow, ACol: Integer;
   const AOldName: string);
 var
   LNewName: string;
+  LUI: INTAIDEUIServices;
 begin
   LNewName := AOldName;
-  if not InputQuery('Rename', Format('Rename "%s" to:', [AOldName]),
+  // The IDE's own prompt, not Vcl.Dialogs.InputQuery: the VCL one knows
+  // nothing about IDE theming and came up light inside the dark theme
+  // (user, 2026-08-31). INTAIDEUIServices is how the settings dialog gets
+  // its colors too, just wholesale rather than per-prompt.
+  if not Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+    Exit;
+  if not LUI.InputQuery('Rename', Format('Rename "%s" to:', [AOldName]),
     LNewName) then
     Exit;
   LNewName := Trim(LNewName);
