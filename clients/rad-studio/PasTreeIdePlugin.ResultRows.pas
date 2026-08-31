@@ -7,9 +7,10 @@ unit PasTreeIdePlugin.ResultRows;
   the match marker).
 
   Each row is one IOTACustomMessage100 (file/line/column plus navigation -
-  double-click, Enter, F8/Shift+F8 all work, INCLUDING on the file header
-  rows, which the previous AddToolMessage headers could never navigate
-  from) combined with INTACustomDrawMessage (the panel hands us its TCanvas
+  double-click, Enter, F8/Shift+F8 all work on snippet rows; header and
+  title rows REFUSE navigation, so double-click on them falls through to
+  the panel's expand/collapse and F8 walks past them to the next real
+  site) combined with INTACustomDrawMessage (the panel hands us its TCanvas
   and we paint the whole line).
 
   THE STYLE IS A HYBRID, settled over three live runs with the user:
@@ -85,8 +86,8 @@ function NewTitleRow(const AText: string;
 
 /// <summary>
 /// A file header row: painted as "&lt;full path&gt; [N]" with the path bold -
-/// like Find in Files - and, unlike a tool-message header, navigable to the
-/// top of the file.
+/// like Find in Files. Deliberately NOT navigable: double-click is the
+/// panel's expand/collapse, not a jump to line 1.
 /// </summary>
 function NewFileHeaderRow(const AFilePath: string;
   ARefCount: Integer): IOTACustomMessage;
@@ -443,19 +444,23 @@ function TResultRow.CanGotoSource(var DefaultHandling: Boolean): Boolean;
 begin
   // DefaultHandling = True hands the actual navigation to the IDE, which
   // uses GetFileName/GetLineNumber/GetColumnNumber - the same jump a tool
-  // message gets, now also available on header rows.
-  DefaultHandling := True;
-  Result := FFilePath <> '';
+  // message gets. Snippet rows only: a header has no position of its own,
+  // and navigating it "to line 1" read as the editor jumping to the top of
+  // the file for no reason (user, 2026-08-31). With navigation refused,
+  // double-click on a header is left to the panel's own tree behavior -
+  // expand/collapse - and F8 walks straight past to the next real site.
+  DefaultHandling := not (FIsHeader or FIsTitle);
+  Result := (FFilePath <> '') and not (FIsHeader or FIsTitle);
 end;
 
 procedure TResultRow.TrackSource(var DefaultHandling: Boolean);
 begin
-  DefaultHandling := True;
+  DefaultHandling := not (FIsHeader or FIsTitle);
 end;
 
 procedure TResultRow.GotoSource(var DefaultHandling: Boolean);
 begin
-  DefaultHandling := True;
+  DefaultHandling := not (FIsHeader or FIsTitle);
 end;
 
 { One routine for both Draw and CalcRect, because the width IS the layout:
