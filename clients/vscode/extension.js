@@ -69,16 +69,27 @@ function activate(context) {
           const indentEdit = edits.find(e =>
             e.range.start.line === position.line && !e.newText.includes('\n'));
           if (indentEdit) {
-            // After VS Code applies the returned edits - hence the
-            // deferral; applying happens right after this returns.
-            setTimeout(() => {
-              const editor = vscode.window.activeTextEditor;
-              if (editor && editor.document === document) {
-                const target = new vscode.Position(
-                  position.line, indentEdit.newText.length);
-                editor.selection = new vscode.Selection(target, target);
-              }
-            }, 0);
+            // AFTER the edits are actually in the buffer, not merely after
+            // this returns: a plain setTimeout(0) fired BEFORE VS Code
+            // applied them, and the premature selection then rode the
+            // insertion to the far side of the closer (live run,
+            // 2026-08-31). The next change to this document IS the
+            // application of these edits - hook it once, place the cursor,
+            // and time-box the listener so a cancelled apply cannot leak it.
+            const targetLine = position.line;
+            const targetCol = indentEdit.newText.length;
+            const sub = vscode.workspace.onDidChangeTextDocument(ev => {
+              if (ev.document !== document) { return; }
+              sub.dispose();
+              setTimeout(() => {
+                const editor = vscode.window.activeTextEditor;
+                if (editor && editor.document === document) {
+                  const target = new vscode.Position(targetLine, targetCol);
+                  editor.selection = new vscode.Selection(target, target);
+                }
+              }, 0);
+            });
+            setTimeout(() => sub.dispose(), 1000);
           }
         }
         return edits;

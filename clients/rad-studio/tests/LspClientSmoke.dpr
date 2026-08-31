@@ -1349,6 +1349,20 @@ begin
     'the balanced program answered');
   Check(GOk and (GResultJson = ''),
     'and stays silent - end. closed the main begin, not a spare block');
+
+  // `while True do begin` + Enter: the begin at the END of a statement
+  // header line is an opener like any other - the header keywords around
+  // it neither push nor pop. In a program, where end. eats one begin.
+  SendDidOpenText(LFile,
+    'program DemoBlockClose;'#13#10 +
+    'begin'#13#10 +
+    '  while True do begin'#13#10 +
+    '    '#13#10 +
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(3, 4)),
+    'while..do begin answered');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n  end;"'),
+    'and closes it at the WHILE line''s indentation');
 end;
 
 { 6. Cancellation hygiene.
