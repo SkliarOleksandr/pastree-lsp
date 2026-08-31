@@ -17,8 +17,12 @@ unit PasTreeIdePlugin.ResultRows;
   itself paints with, theme changes included. Nothing is cached here: a
   palette read is a property call, and reading it per draw is what makes a
   Tools > Options > Editor color change show up on the next repaint. The
-  matched identifier is marked with the editor's own "Search match" element
-  (SearchMatch), so a hit looks exactly like a hit of the editor's Find.
+  matched identifier is painted BOLD in the identifier color
+  (FontColor[atIdentifier]) - no background at all. Two background attempts
+  preceded this and both lost to a live run: the "Search match" element is
+  white-on-black by default (a black box punched into every row), and any
+  filled rectangle behind text reads as noise repeated down a list of
+  twenty rows. Bold-in-place is what the user asked for instead.
 
   The tokenizer below is a DISPLAY tokenizer, one detached line at a time,
   best effort by design: reserved words, identifiers, strings, numbers
@@ -459,18 +463,14 @@ var
   var
     LRuns: TArray<TTokenRun>;
     LRun: TTokenRun;
-    LColor, LMatchBack, LMatchFore: TColor;
+    LColor, LMatchColor: TColor;
     LStyle: TFontStyles;
     LFrom, LTake, LCut: Integer;
     LInMatch: Boolean;
   begin
-    LMatchBack := LBaseColor;
-    LMatchFore := LBaseColor;
+    LMatchColor := LBaseColor;
     if LHavePalette then
-    begin
-      LMatchBack := LOptions.BackgroundColor[SearchMatch];
-      LMatchFore := LOptions.FontColor[SearchMatch];
-    end;
+      LMatchColor := LOptions.FontColor[atIdentifier];
     LRuns := TokenizeLine(FText);
     for LRun in LRuns do
     begin
@@ -497,14 +497,11 @@ var
           LCut := LTake;
         if LCut < LTake then
           LTake := LCut;
-        if LInMatch and not LHavePalette then
-          // No palette to take the search-match colors from: bold is the
-          // degraded-but-honest highlight.
-          Put(Copy(FText, LFrom, LTake), LColor,
+        if LInMatch then
+          // Bold, in the identifier color - see the unit header for the
+          // two rejected background variants.
+          Put(Copy(FText, LFrom, LTake), LMatchColor,
             LStyle + [TFontStyle.fsBold], LBaseColor, False)
-        else if LInMatch then
-          Put(Copy(FText, LFrom, LTake), LMatchFore, LStyle, LMatchBack,
-            True)
         else
           Put(Copy(FText, LFrom, LTake), LColor, LStyle, LBaseColor, False);
         Inc(LFrom, LTake);

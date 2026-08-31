@@ -825,7 +825,10 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    `INTACodeEditorServices.Options.FontColor/BackgroundColor/FontStyles`
    per `TOTASyntaxCode`, read at draw time so a Tools > Options color or
    theme change shows on the next repaint — with the matched identifier
-   marked by the editor's own `SearchMatch` element, and file header rows
+   painted bold in the identifier color, no background (settled on the
+   first live run: the `SearchMatch` element is white-on-black by default,
+   a black box punched into every row, and any filled rectangle repeated
+   down a list reads as noise), and file header rows
    (bold name + count) that finally navigate on double-click, which
    `AddToolMessage` headers never could. The line is classified by a
    display-only tokenizer in that unit (best effort, one detached line;
