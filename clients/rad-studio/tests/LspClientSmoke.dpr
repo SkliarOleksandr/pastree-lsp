@@ -1296,8 +1296,8 @@ begin
     'end.'#13#10);
   Check(Ask('textDocument/onTypeFormatting', TypingParams(6, 2)),
     'onTypeFormatting answered');
-  Check(GOk and GResultJson.Contains('"newText":"\r\n  end;"'),
-    'inserts end; under the caret line, with the TRY line''s indentation');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n  finally\r\n  end;"'),
+    'a try gets the whole finally/end; skeleton, at the TRY line''s indent');
   Check(GOk and GResultJson.Contains('"line":6'),
     'at the end of the caret line, leaving the caret alone');
 

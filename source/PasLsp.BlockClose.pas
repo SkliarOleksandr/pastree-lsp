@@ -38,11 +38,13 @@ unit PasLsp.BlockClose;
   cost model is a typo, not a broken file - but every rule above came out
   of real Pascal, not caution.
 
-  The insertion: a new line AFTER the caret's (empty) line, carrying the
+  The insertion: new line(s) AFTER the caret's (empty) line, carrying the
   OPENER LINE'S OWN indentation plus the closer - `until ;` for repeat,
-  `end;` for everything else. The edit never touches the caret line, so
-  the caret stays exactly where Enter left it, in every client, without
-  any cursor protocol.
+  the `finally`/`end;` skeleton for try, `end;` for everything else
+  (NEVER `end.` - see the closer selection for the cascade that killed
+  that special case). The edit never touches the caret line, so the caret
+  stays exactly where Enter left it, in every client, without any cursor
+  protocol.
 }
 
 interface
@@ -248,13 +250,23 @@ begin
 
   if LCandidateKind = tkRepeat then
     LCloser := 'until ;'
-  else if (LCandidateKind = tkBegin) and (LStackCount = 2) and
-     (LStack[0] in [tkUnit, tkProgram, tkLibrary]) then
-    // The module's MAIN begin - directly over the head, nothing between -
-    // is closed by `end.`, not `end;`: a program's body, or a unit's
-    // old-style initialization block.
-    LCloser := 'end.'
+  else if LCandidateKind = tkTry then
+    // The whole skeleton, not just the end: a bare try is never what the
+    // user is after, and the caret is already sitting on the line where
+    // the protected code goes (user, 2026-08-31 - first live run asked
+    // for exactly this).
+    LCloser := 'finally'#13#10 + LIndent + 'end;'
   else
+    // ALWAYS `end;` - never `end.`. There was a special case here ("a begin
+    // sitting directly over the module head on the final stack must be the
+    // main block") and the first live run disproved it the obvious-in-
+    // hindsight way: a begin typed into an ordinary unit steals a later
+    // closer, the file's own `end.` pops somebody else's begin, and the
+    // stack bottom pairs the NEW begin with the module head - `end.` landed
+    // in the middle of a unit (user, 2026-08-31). Which begin is the main
+    // one is exactly the question the cascade makes unanswerable, and the
+    // main begin of a program is typed once per project - the wrong `;` is
+    // one keystroke there, the wrong `.` was every day.
     LCloser := 'end;';
 
   AInsertLine := ACaretLine;
