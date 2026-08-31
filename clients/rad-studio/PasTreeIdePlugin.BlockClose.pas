@@ -8,15 +8,19 @@ unit PasTreeIdePlugin.BlockClose;
   and this unit only asks the question at the right moment and applies the
   answer through the editor.
 
-  THE MOMENT IS AFTER THE ENTER, NOT INSTEAD OF IT. The keyboard binding
-  claims plain Enter but ALWAYS answers krUnhandled, so the IDE performs
-  its ordinary line break first - swallowing Enter would put this package
-  in charge of the single most-pressed key in the editor, and the native
-  break carries auto-indent, virtual caret placement and everything else
-  nobody should reimplement. The actual work runs from TThread.ForceQueue:
-  by the time that fires, the buffer holds the newline, FDocs.Sync inside
-  the request pushes exactly that text, and the server sees what the user
-  sees.
+  THE MOMENT IS AFTER THE ENTER, NOT INSTEAD OF IT - and the hook is an
+  EDITOR EVENTS OBSERVER (INTACodeEditorEvents.EditorKeyUp, via
+  TNTACodeEditorNotifier like ErrorPaint), NOT a keyboard binding. The
+  first build used an IOTAKeyboardBinding on plain Enter answering
+  krUnhandled, on the assumption the key would fall through to the editor.
+  It does not: the first live run had Enter DEAD IN THE WHOLE EDITOR - no
+  line break anywhere (user, 2026-08-31) - because a binding CLAIMS its
+  keys and krUnhandled only offers them to other bindings/keymaps, not
+  back to the editor's default processing. An observer cannot swallow
+  anything by construction (Handled is left alone), and by key-UP time the
+  editor has long inserted the line break - so the buffer already holds
+  what the user sees, no deferral needed; FDocs.Sync inside the request
+  pushes exactly that text.
 
   STALENESS IS HANDLED AT ANSWER TIME, the same way Rename verifies before
   writing: the answer is applied only if the caret is still on the row the
@@ -32,37 +36,36 @@ unit PasTreeIdePlugin.BlockClose;
 
 interface
 
-/// <summary>Registers the Enter binding. Call once from the wizard.</summary>
+/// <summary>Registers the editor key observer. Call once from the wizard.</summary>
 procedure InitializeBlockClose;
 
-/// <summary>Removes the binding before the BPL unloads.</summary>
+/// <summary>Removes the observer before the BPL unloads.</summary>
 procedure FinalizeBlockClose;
 
 implementation
 
 uses
   System.SysUtils, System.Classes,
-  Vcl.Menus,
+  Vcl.Controls,
   Winapi.Windows,
-  ToolsAPI,
+  ToolsAPI, ToolsAPI.Editor,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings;
 
 type
-  TPasBlockCloseBinding = class(TNotifierObject, IOTAKeyboardBinding)
+  TPasBlockCloseNotifier = class(TNTACodeEditorNotifier)
   private
-    procedure EnterProc(const AContext: IOTAKeyContext; AKeyCode: TShortCut;
-      var ABindingResult: TKeyBindingResult);
+    procedure HandleKeyUp(const AEditor: TWinControl; AKey: Word;
+      AShift: TShiftState; var AHandled: Boolean);
+  protected
+    function AllowedEvents: TCodeEditorEvents; override;
   public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
+    constructor Create;
   end;
 
 var
-  GKeyboardServices: IOTAKeyboardServices;
-  GBindingIndex: Integer = -1;
+  GNotifier: INTACodeEditorEvents;
+  GNotifierIndex: Integer = -1;
   GAlive: Boolean = False;
 
 procedure LogDiagnostic(const AMessage: string);
@@ -81,10 +84,13 @@ begin
   if Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
   begin
     Result := LEditorServices.TopView;
+    if Assigned(Result) and not Assigned(Result.Buffer) then
+      Result := nil;
     // The wrong file's view is worse than none: between the keystroke and
-    // this moment the user can have switched tabs.
-    if Assigned(Result) and (not Assigned(Result.Buffer) or
-       not SameText(Result.Buffer.FileName, AFileName)) then
+    // this moment the user can have switched tabs. '' means "whichever is
+    // on top" - the key-up reads the file from the view it gets.
+    if Assigned(Result) and (AFileName <> '') and
+       not SameText(Result.Buffer.FileName, AFileName) then
       Result := nil;
   end;
 end;
@@ -125,105 +131,96 @@ begin
   end;
 end;
 
-{ TPasBlockCloseBinding }
+{ TPasBlockCloseNotifier }
 
-function TPasBlockCloseBinding.GetBindingType: TBindingType;
+constructor TPasBlockCloseNotifier.Create;
 begin
-  Result := btPartial;
+  inherited Create;
+  // The base class dispatches through event properties, not virtuals -
+  // AllowedEvents is the only override, the handler rides the property
+  // (same shape as TPasErrorPaintNotifier).
+  OnEditorKeyUp := HandleKeyUp;
 end;
 
-function TPasBlockCloseBinding.GetDisplayName: string;
+function TPasBlockCloseNotifier.AllowedEvents: TCodeEditorEvents;
 begin
-  Result := 'PasTree: block completion (Enter)';
+  Result := [cevKeyboardEvents];
 end;
 
-function TPasBlockCloseBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.BlockCloseBinding';
-end;
-
-procedure TPasBlockCloseBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  ABindingServices.AddKeyBinding([ShortCut(VK_RETURN, [])], EnterProc, nil);
-end;
-
-procedure TPasBlockCloseBinding.EnterProc(const AContext: IOTAKeyContext;
-  AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
+procedure TPasBlockCloseNotifier.HandleKeyUp(const AEditor: TWinControl;
+  AKey: Word; AShift: TShiftState; var AHandled: Boolean);
 var
+  LView: IOTAEditView;
   LFileName: string;
+  LRow, LCol: Integer;
 begin
-  // ALWAYS. The IDE's Enter must run whatever happens next - see the unit
-  // header. Everything below only schedules a question about the result.
-  ABindingResult := krUnhandled;
-  if not GAlive or not BlockCompletionEnabled or not Assigned(AContext) or
-     not Assigned(AContext.EditBuffer) then
+  // AHandled is never touched: this is an observer, and the key-up has
+  // nothing left to handle anyway - the editor broke the line on key-down.
+  if (AKey <> VK_RETURN) or (AShift * [ssCtrl, ssAlt] <> []) then
     Exit;
-  LFileName := AContext.EditBuffer.FileName;
+  if not GAlive or not BlockCompletionEnabled then
+    Exit;
+  LView := TopViewOf('');
+  if not Assigned(LView) or not Assigned(LView.Buffer) then
+    Exit;
+  LFileName := LView.Buffer.FileName;
   if not IsPascalSourceFile(LFileName) then
     Exit;
-
-  TThread.ForceQueue(nil,
-    procedure
+  LRow := LView.Buffer.EditPosition.Row;
+  LCol := LView.Buffer.EditPosition.Column;
+  LspOnTypeFormatting(LFileName, LRow, LCol,
+    procedure(ASuccess: Boolean; const AEdits: TArray<TLspTextEdit>;
+      const AError: string)
     var
-      LView: IOTAEditView;
-      LRow, LCol: Integer;
+      LNowView: IOTAEditView;
     begin
-      // Queued behind the IDE's own handling of this Enter: the buffer now
-      // holds the newline and the caret sits on the fresh line.
       if not GAlive then
         Exit;
-      LView := TopViewOf(LFileName);
-      if not Assigned(LView) then
+      if not ASuccess then
+      begin
+        // The ordinary no-server case stays quiet - Enter is pressed
+        // hundreds of times an hour and must never nag.
         Exit;
-      LRow := LView.Buffer.EditPosition.Row;
-      LCol := LView.Buffer.EditPosition.Column;
-      LspOnTypeFormatting(LFileName, LRow, LCol,
-        procedure(ASuccess: Boolean; const AEdits: TArray<TLspTextEdit>;
-          const AError: string)
-        var
-          LNowView: IOTAEditView;
-        begin
-          if not GAlive then
-            Exit;
-          if not ASuccess then
-          begin
-            // The ordinary no-server case stays quiet - Enter is pressed
-            // hundreds of times an hour and must never nag. The log line is
-            // for a diagnosis that already suspects this feature.
-            Exit;
-          end;
-          if Length(AEdits) = 0 then
-            Exit;
-          // Verify, then write - the same discipline as Rename: the answer
-          // describes the buffer as it was asked; apply it only if the
-          // caret still sits where the question was asked from.
-          LNowView := TopViewOf(LFileName);
-          if not Assigned(LNowView) or
-             (LNowView.Buffer.EditPosition.Row <> LRow) then
-            Exit;
-          ApplyEdits(LNowView, AEdits);
-        end);
+      end;
+      if Length(AEdits) = 0 then
+        Exit;
+      // Verify, then write - the same discipline as Rename: the answer
+      // describes the buffer as it was asked; apply it only if the
+      // caret still sits where the question was asked from.
+      LNowView := TopViewOf(LFileName);
+      if not Assigned(LNowView) or
+         (LNowView.Buffer.EditPosition.Row <> LRow) then
+        Exit;
+      ApplyEdits(LNowView, AEdits);
     end);
 end;
 
 procedure InitializeBlockClose;
+var
+  LServices: INTACodeEditorServices;
 begin
   GAlive := True;
-  if not Supports(BorlandIDEServices, IOTAKeyboardServices,
-    GKeyboardServices) then
+  if GNotifierIndex >= 0 then
     Exit;
-  GBindingIndex := GKeyboardServices.AddKeyboardBinding(
-    TPasBlockCloseBinding.Create);
+  if not Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
+    Exit;
+  GNotifier := TPasBlockCloseNotifier.Create;
+  GNotifierIndex := LServices.AddEditorEventsNotifier(GNotifier);
+  if GNotifierIndex < 0 then
+    GNotifier := nil;   // refcount frees it
 end;
 
 procedure FinalizeBlockClose;
+var
+  LServices: INTACodeEditorServices;
 begin
   GAlive := False;
-  if (GBindingIndex >= 0) and Assigned(GKeyboardServices) then
-    GKeyboardServices.RemoveKeyboardBinding(GBindingIndex);
-  GBindingIndex := -1;
-  GKeyboardServices := nil;
+  if GNotifierIndex < 0 then
+    Exit;
+  if Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
+    LServices.RemoveEditorEventsNotifier(GNotifierIndex);
+  GNotifierIndex := -1;
+  GNotifier := nil;
 end;
 
 end.

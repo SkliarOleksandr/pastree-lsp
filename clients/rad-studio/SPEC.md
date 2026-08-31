@@ -746,10 +746,15 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    balance over PasTree's lexer; the cascade reasoning and the context
    rules for `class`/`interface`/variant-`case` are in its header) — so VS
    Code gets it free. The plugin (`PasTreeIdePlugin.BlockClose`): an
-   `IOTAKeyboardBinding` on plain Enter that ALWAYS answers `krUnhandled` —
-   the IDE's own line break runs first — then asks from `TThread.ForceQueue`
-   (the buffer holds the newline by then) and applies the answer through
-   `CreateUndoableWriter`, dropping it if the caret left the row. Fourth
+   `INTACodeEditorEvents.EditorKeyUp` OBSERVER (`TNTACodeEditorNotifier`,
+   like ErrorPaint) — NOT a keyboard binding: the first build bound plain
+   Enter with `krUnhandled` and the first live run had Enter dead in the
+   whole editor, because a binding CLAIMS its keys and `krUnhandled` only
+   offers them to other bindings, never back to the editor's default
+   processing. The observer cannot swallow anything; at key-up the buffer
+   already holds the line break, so it asks right there and applies the
+   answer through `CreateUndoableWriter`, dropping it if the caret left
+   the row. Fourth
    switch in Settings (`EnableBlockCompletion`), checked at keystroke time.
    `LspClientSmoke` section 5h pins both the insertion (opener's
    indentation, caret line untouched) and the balanced-file `null`.
