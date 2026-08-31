@@ -145,6 +145,31 @@ begin
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
+{ ONE LINE PER STEP OF A RENAME, into pastree-lsp.log beside the project.
+
+  ALWAYS ON, and that is a decision rather than an oversight. A rename is a
+  rare, deliberate act - a dozen lines per invocation is nothing next to what
+  an analysis writes - and it is the one command here that CHANGES the user's
+  code across several files and the project file. When something about it
+  behaves oddly, the question is always "which step did that", and answering
+  it by adding logging after the fact costs another round trip through a live
+  IDE (it cost several, 2026-08-31). So the trace is part of the feature.
+
+  Into the SERVER'S log rather than the Build tab: the Build tab is where
+  the user's own compiler output lives and a step-by-step trace would bury
+  it, while the log is already the place this product answers "what actually
+  happened" from. Failures still go to the Build tab through LogDiagnostic. }
+procedure Trace(const AWhat: string);
+begin
+  LspLogToServer('rename: ' + AWhat);
+end;
+
+{ The same, formatted - saves every caller a Format call. }
+procedure TraceFmt(const AFormat: string; const AArgs: array of const);
+begin
+  Trace(Format(AFormat, AArgs));
+end;
+
 /// <summary>
 /// A modal message for the user - as opposed to LogDiagnostic, which files
 /// something in the Build tab. A rename is a deliberate act, so its refusals
@@ -299,20 +324,68 @@ type
 
   TRenameFiles = TDictionary<string, TRenameFile>;
 
+{ Is APath the same file as BPath? Compared as PATHS, not as strings.
+
+  THIS IS LOAD-BEARING, and the way it is written is the fix for the ugliest
+  bug of the 2026-08-31 live runs. Every path in a rename plan comes from
+  PasTree, which spells the drive letter in lower case (`c:\Repos\...`); the
+  IDE spells its own as the user opened them (`C:\Repos\...`). Comparing those
+  as strings makes an OPEN file look closed - and a file that looks closed is
+  rewritten on disk, under a buffer that still holds the old text. The IDE
+  then asks what to do about the file having changed underneath it, for every
+  file, which is exactly what "it keeps asking me to save things" was. }
+function SameFile(const APath, BPath: string): Boolean;
+begin
+  Result := False;
+  if (APath = '') or (BPath = '') then
+    Exit;
+  try
+    Result := SameText(TPath.GetFullPath(APath), TPath.GetFullPath(BPath));
+  except
+    // A path the RTL cannot expand (a stale entry, a bad drive) is not equal
+    // to anything rather than an exception in the middle of a rename.
+    Result := SameText(APath, BPath);
+  end;
+end;
+
 { The editor holding AFileName, or nil if nobody has it open. Deliberately
-  never OPENS one - see TRenameFile. }
-function OpenEditorOf(const AFileName: string): IOTASourceEditor;
+  never OPENS one - see TRenameFile.
+
+  FindModule FIRST, then the module list by hand: FindModule matches on the
+  name it is given, and "the same file, spelled differently" is a case it
+  answers nil to (see SameFile). Getting that wrong is not a missed
+  optimisation - it silently turns an open file into a disk write. }
+{ The open module for APath, spelling-tolerantly - the half of OpenEditorOf
+  the file rename needs on its own. }
+function ModuleOf(const APath: string): IOTAModule;
 var
   LModuleServices: IOTAModuleServices;
-  LModule: IOTAModule;
   LIdx: Integer;
 begin
   Result := nil;
   if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
     Exit;
-  LModule := LModuleServices.FindModule(AFileName);
+  Result := LModuleServices.FindModule(APath);
+  if Assigned(Result) then
+    Exit;
+  for LIdx := 0 to LModuleServices.ModuleCount - 1 do
+    if SameFile(LModuleServices.Modules[LIdx].FileName, APath) then
+      Exit(LModuleServices.Modules[LIdx]);
+  Result := nil;
+end;
+
+function OpenEditorOf(const AFileName: string): IOTASourceEditor;
+var
+  LModule: IOTAModule;
+  LIdx: Integer;
+begin
+  Result := nil;
+  LModule := ModuleOf(AFileName);
   if not Assigned(LModule) then
     Exit;
+  if not SameText(LModule.FileName, AFileName) then
+    TraceFmt('  %s: open under a different spelling (%s)',
+      [ExtractFileName(AFileName), LModule.FileName]);
   for LIdx := 0 to LModule.GetModuleFileCount - 1 do
     if Supports(LModule.GetModuleFileEditor(LIdx), IOTASourceEditor,
       Result) then
@@ -372,14 +445,23 @@ begin
     LFile := Default(TRenameFile);
     LFile.Path := LEdit.FilePath;
     LFile.Editor := OpenEditorOf(LEdit.FilePath);
-    if not Assigned(LFile.Editor) then
+    if Assigned(LFile.Editor) then
+      TraceFmt('  %s: open in the editor (modified=%s)',
+        [ExtractFileName(LEdit.FilePath),
+         BoolToStr(LFile.Editor.Modified, True)])
+    else
       if not TryReadSourceForEdit(LEdit.FilePath, LFile.Text,
         LFile.Encoding) then
       begin
+        TraceFmt('  %s: NOT open and NOT readable - refusing',
+          [ExtractFileName(LEdit.FilePath)]);
         AError := Format('%s is not open and could not be read.'#13#10#13#10 +
           'Nothing was renamed.', [LEdit.FilePath]);
         Exit;
-      end;
+      end
+      else
+        TraceFmt('  %s: not open, will be patched on disk (encoding=%d)',
+          [ExtractFileName(LEdit.FilePath), Ord(LFile.Encoding)]);
     AFiles.Add(LKey, LFile);
   end;
   Result := True;
@@ -548,16 +630,20 @@ begin
   LFiles := TRenameFiles.Create;
   LDisk := TList<string>.Create;
   try
+    TraceFmt('applying %d edit(s) - collecting files', [Length(APlan.Edits)]);
     if not CollectFiles(APlan, LFiles, {out} LError) then
     begin
       TellUser(LError, mtError);
       Exit;
     end;
+    Trace('verifying every site against the text that will be rewritten');
     if not VerifySites(APlan, LFiles, {out} LError) then
     begin
+      Trace('verify FAILED: ' + LError);
       TellUser(LError, mtError);
       Exit;
     end;
+    Trace('verified; writing');
     LIdx := 0;
     while LIdx <= High(APlan.Edits) do
     begin
@@ -570,9 +656,17 @@ begin
       if LFiles.TryGetValue(LowerCase(APlan.Edits[LIdx].FilePath), LFile) then
       begin
         if Assigned(LFile.Editor) then
-          WriteBuffer(LFile.Editor, APlan, LIdx, LRun)
+        begin
+          WriteBuffer(LFile.Editor, APlan, LIdx, LRun);
+          TraceFmt('  %s: %d edit(s) written to the buffer',
+            [ExtractFileName(LFile.Path), LRun - LIdx + 1]);
+        end
         else if WriteDisk(LFile, APlan, LIdx, LRun) then
-          LDisk.Add(LFile.Path)
+        begin
+          LDisk.Add(LFile.Path);
+          TraceFmt('  %s: %d edit(s) written to disk',
+            [ExtractFileName(LFile.Path), LRun - LIdx + 1]);
+        end
         else
           // One file of several failed to write. Said out loud rather than
           // silently: the rename is now partial, and only the user can decide
@@ -633,10 +727,18 @@ begin
         Continue;
       LSeen.Add(LKey, True);
       LEditor := OpenEditorOf(LEdit.FilePath);
-      if Assigned(LEditor) and LEditor.Modified and
-         Assigned(LEditor.Module) then
+      if Assigned(LEditor) and Assigned(LEditor.Module) then
         try
-          LEditor.Module.Save(False, False);
+          TraceFmt('  saving %s (modified=%s)',
+            [ExtractFileName(LEdit.FilePath),
+             BoolToStr(LEditor.Modified, True)]);
+          { FORCED, and not only when the editor reports Modified: the buffer
+            we just wrote through a writer is what has to reach disk before
+            the file moves, and taking Modified's word for it is what left
+            the IDE asking about these files afterwards. ForceSave = True is
+            the second parameter (ToolsAPI.pas:3098 - "ForceSave will not
+            prompt"). }
+          LEditor.Module.Save(False, True);
         except
           on E: Exception do
             // Reported, not raised: the caller is mid-rename and the next
@@ -647,6 +749,35 @@ begin
     end;
   finally
     LSeen.Free;
+  end;
+end;
+
+{ THE PROJECT FILE, SAVED BY US.
+
+  A unit rename edits the .dproj - a different file name in it - whichever way
+  the rename was performed, and the IDE then asks "Save changes to project
+  X?" at some later moment of its own choosing. That prompt was reported
+  twice (2026-08-31), and it is not a bug in the rename: it is an unsaved
+  project file, exactly as if the user had dragged a unit in the project
+  manager. Predates the switch to IOTAProject100.Rename, which is the proof
+  that the rename mechanism was never the cause.
+
+  So it is saved here, immediately, while the rename is still the thing on
+  screen. A project is an IOTAModule, and ForceSave (the second parameter)
+  means no prompt - ToolsAPI.pas:3098. }
+procedure SaveProject(const AProject: IOTAProject);
+begin
+  if not Assigned(AProject) then
+    Exit;
+  try
+    Trace('  saving the project file');
+    AProject.Save(False, True);
+  except
+    on E: Exception do
+      // Not fatal: the rename is done, and the worst case is the prompt this
+      // was meant to avoid.
+      LogDiagnostic(Format('rename: saving the project failed: %s',
+        [E.Message]));
   end;
 end;
 
@@ -750,24 +881,29 @@ begin
   then
     Exit;
 
+  TraceFmt('file half: %s -> %s', [APlan.FilePath, APlan.NewFilePath]);
   SaveTouchedModules(APlan);
 
-  LModule := LModuleServices.FindModule(APlan.FilePath);
+  LModule := ModuleOf(APlan.FilePath);
   LProject := ActiveProject;
+  TraceFmt('  module found=%s, active project=%s',
+    [BoolToStr(Assigned(LModule), True),
+     IfThen(Assigned(LProject), 'yes', 'NO')]);
 
   // The IDE first, by preference - see RenameThroughProject.
   if RenameThroughProject(LProject, APlan.FilePath, APlan.NewFilePath) then
   begin
-    LogDiagnostic(Format('rename: %s -> %s, through the project manager',
-      [ExtractFileName(APlan.FilePath),
-       ExtractFileName(APlan.NewFilePath)]));
+    Trace('  IOTAProject100.Rename succeeded');
+    SaveProject(LProject);
     Exit(True);
   end;
+  Trace('  IOTAProject100.Rename unavailable or declined - by hand');
 
   { BY HAND FROM HERE, and every step is individually guarded for the reason
     the header states. }
   if Assigned(LProject) then
     try
+      Trace('  RemoveFile');
       LProject.RemoveFile(APlan.FilePath);
     except
       on E: Exception do
@@ -778,6 +914,7 @@ begin
     end;
   if Assigned(LModule) then
     try
+      Trace('  closing the module');
       LModule.Close;
     except
       on E: Exception do
@@ -786,6 +923,7 @@ begin
     end;
 
   try
+    Trace('  moving the file');
     TFile.Move(APlan.FilePath, APlan.NewFilePath);
   except
     on E: Exception do
@@ -821,6 +959,7 @@ begin
 
   if Assigned(LProject) then
     try
+      Trace('  AddFile');
       LProject.AddFile(APlan.NewFilePath, True);
     except
       on E: Exception do
@@ -831,12 +970,14 @@ begin
            ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
     end;
   try
+    Trace('  reopening');
     LActionServices.OpenFile(APlan.NewFilePath);
   except
     on E: Exception do
       LogDiagnostic(Format('rename: reopening %s failed: %s',
         [ExtractFileName(APlan.NewFilePath), E.Message]));
   end;
+  SaveProject(LProject);
   Result := True;
 end;
 
@@ -895,6 +1036,8 @@ begin
       if not GAlive then
         Exit;
       try
+        TraceFmt('plan for %s -> %s: success=%s',
+          [AOldName, LNewName, BoolToStr(ASuccess, True)]);
         // The server's own sentence, verbatim - a reserved word, a builtin, a
         // `uses` spelling it has no rule for. See the unit header on why none
         // of these is re-worded here.
@@ -908,8 +1051,15 @@ begin
           TellUser('Nothing to rename.', mtInformation);
           Exit;
         end;
+        TraceFmt('plan: kind=%s old=%s new=%s edits=%d file=%s stale=%d',
+          [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
+           Length(APlan.Edits), APlan.RequiredFileName,
+           Length(APlan.StaleInPaths)]);
         if not ApplyPlan(APlan, {out} LDiskFiles) then
+        begin
+          Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
+        end;
         ReportRename(APlan, LDiskFiles);
         LogDiagnostic(Format('rename: %s %s -> %s, %d site(s)%s%s',
           [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
@@ -919,13 +1069,15 @@ begin
            IfThen(APlan.IsUnit, ' + file -> ' + APlan.RequiredFileName, '')]));
         if APlan.IsUnit then
         begin
-          RenameUnitFile(APlan);
+          TraceFmt('file half returned %s',
+            [BoolToStr(RenameUnitFile(APlan), True)]);
           { A renamed FILE is a different analysis closure, and the server
             fixes its closure at initialize - so this is the one edit in the
             product that cannot be absorbed incrementally. Restarting is
             honest and costs the next request one rebuild; keeping the old
             server would have it answer every later question about a file
             that no longer exists. }
+          Trace('done - restarting the analysis');
           LspRestartForClosureChange(Format('unit %s was renamed to %s',
             [APlan.OldName, APlan.NewName]));
         end
@@ -933,7 +1085,11 @@ begin
           // A file written on disk is invisible to the analysis until it is
           // told - no editor event ever happens for it. Not needed in the
           // unit case above, which restarts the whole session anyway.
+        begin
+          TraceFmt('done - telling the server about %d disk file(s)',
+            [Length(LDiskFiles)]);
           LspFilesChangedOnDisk(LDiskFiles);
+        end;
       except
         on E: Exception do
           LogDiagnostic(Format('Rename: unhandled %s: %s',
