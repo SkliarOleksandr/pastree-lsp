@@ -36,6 +36,7 @@ uses
   System.StrUtils,
   System.Classes,
   System.Generics.Collections,
+  System.Generics.Defaults,
   System.JSON,
   System.IOUtils,
   System.Hash,
@@ -216,7 +217,8 @@ type
       const ANewName: string; out APlan: TLspRenamePlanned;
       out AError: string): Boolean;
     function UsesInPathSites(ATargetMid: Integer;
-      const AUnitPath: string): TArray<string>;
+      const AUnitPath: string;
+      const AEdits: TArray<TPasRenameEdit>): TArray<string>;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -2107,6 +2109,164 @@ function EditNewText(const AEdit: TPasRenameEdit): string;
 begin
   Result := Copy(AEdit.Snippet, AEdit.HiFrom + 1, AEdit.HiTo - AEdit.HiFrom);
 end;
+type
+  { A planned edit and the text it writes, together. The text is normally
+    derivable from the edit's own preview (EditNewText), which is exactly why
+    this pairing is needed here: AugmentUsesInPaths REBUILDS those previews,
+    so it cannot read the answer back out of them while it works. }
+  TPlannedEdit = record
+    Edit: TPasRenameEdit;
+    NewText: string;
+  end;
+
+{ THE `in '...'` PATH OF A `uses` ITEM, TURNED INTO AN EDIT - the last piece
+  of a unit rename, and the one that cost the most to find.
+
+  A program spells its units `Foo in 'Foo.pas'`, and RAD Studio writes every
+  one of them that way. PlanUnitRename renames the NAME; the path stays. The
+  result reads `Foo2 in 'Foo.pas'` - a line naming a file that no longer
+  exists, and in the IDE that line IS the project's own entry for the unit, so
+  the IDE then refuses to re-register it: "the project already contains a
+  module named Foo2". Three live runs ended there (2026-08-31). Reporting the
+  site and hoping the host would cope was not enough - there is nothing a host
+  can do about it that is not this edit.
+
+  WHY HERE AND NOT IN PasTree. The library records the path
+  (TPasUsesRef.InPath) but no POSITION for the literal, so it cannot plan the
+  edit; that gap belongs there eventually. What can be built from here is the
+  plan's own line: every `uses` edit carries the line it sits on, so the
+  literal is found by walking that ONE line forward from the end of the name,
+  at a site the resolver already resolved. Bounded, and not the text search
+  the rest of this file avoids.
+
+  ONLY THE FILE NAME INSIDE THE QUOTES CHANGES: `'..\src\Foo.pas'` keeps its
+  directory, because a unit rename never moves a file. }
+procedure AugmentUsesInPaths(var AEdits: TArray<TPasRenameEdit>;
+  const AOldFile, ANewFile: string);
+var
+  LIdx, LEnd, LQuote, LClose, LNameAt, LDelta, LGroup, LRun, LAdded: Integer;
+  LOrig, LLiteral, LLine: string;
+  LList: TList<TPlannedEdit>;
+  LItem: TPlannedEdit;
+
+  // The line as it read BEFORE an edit: its preview minus its own
+  // replacement. The plan carries no original text, but it carries both ends
+  // of the span it changed, which is the same thing.
+  function OriginalLine(const AEdit: TPasRenameEdit): string;
+  begin
+    Result := Copy(AEdit.Snippet, 1, AEdit.HiFrom) + AEdit.OldText +
+      Copy(AEdit.Snippet, AEdit.HiTo + 1, MaxInt);
+  end;
+
+begin
+  if (AOldFile = '') or (ANewFile = '') or (Length(AEdits) = 0) then
+    Exit;
+  LList := TList<TPlannedEdit>.Create;
+  try
+    for LIdx := 0 to High(AEdits) do
+    begin
+      LItem.Edit := AEdits[LIdx];
+      LItem.NewText := EditNewText(AEdits[LIdx]);
+      LList.Add(LItem);
+    end;
+
+    LAdded := 0;
+    for LIdx := 0 to High(AEdits) do
+    begin
+      if AEdits[LIdx].IsDecl then
+        Continue;   // the module's own header has no `in` clause
+      LOrig := OriginalLine(AEdits[LIdx]);
+      { Between the end of the name and the first quote after it there must be
+        nothing but whitespace and the word `in`. Anything else means this is
+        an ordinary uses item and the quote belongs to something further along
+        the line - a string constant, a comment - which must not be touched. }
+      LEnd := AEdits[LIdx].HiFrom + Length(AEdits[LIdx].OldText) + 1;
+      LQuote := LEnd;
+      while (LQuote <= Length(LOrig)) and (LOrig[LQuote] <> '''') do
+        Inc(LQuote);
+      if LQuote > Length(LOrig) then
+        Continue;
+      if LowerCase(Trim(Copy(LOrig, LEnd, LQuote - LEnd))) <> 'in' then
+        Continue;
+      LClose := LQuote + 1;
+      while (LClose <= Length(LOrig)) and (LOrig[LClose] <> '''') do
+        Inc(LClose);
+      if LClose > Length(LOrig) then
+        Continue;
+      LLiteral := Copy(LOrig, LQuote + 1, LClose - LQuote - 1);
+      if not SameText(TPath.GetFileName(LLiteral), AOldFile) then
+        Continue;   // a path to some other file, or a spelling with no rule
+      // 1-based column of the file NAME inside the literal.
+      LNameAt := LQuote + 1 + (Length(LLiteral) - Length(AOldFile));
+      LItem.Edit := AEdits[LIdx];
+      LItem.Edit.Col := LNameAt;
+      LItem.Edit.Len := Length(AOldFile);
+      LItem.Edit.OldText := Copy(LOrig, LNameAt, Length(AOldFile));
+      LItem.Edit.IsDecl := False;
+      LItem.NewText := ANewFile;
+      LList.Add(LItem);
+      Inc(LAdded);
+    end;
+    if LAdded = 0 then
+      Exit;
+
+    LList.Sort(TComparer<TPlannedEdit>.Construct(
+      function(const A, B: TPlannedEdit): Integer
+      begin
+        Result := CompareText(A.Edit.FilePath, B.Edit.FilePath);
+        if Result = 0 then
+          Result := A.Edit.Line - B.Edit.Line;
+        if Result = 0 then
+          Result := A.Edit.Col - B.Edit.Col;
+      end));
+
+    { THE PREVIEWS, REBUILT PER LINE. PasTree builds them assuming every edit
+      on a line writes the same new name; the path edit writes a different one,
+      so any line that now holds more than one edit is re-derived here. Same
+      arithmetic as the library's own pass: left to right, carrying the
+      accumulated length delta. }
+    LGroup := 0;
+    while LGroup < LList.Count do
+    begin
+      LRun := LGroup;
+      while (LRun + 1 < LList.Count) and
+            (LList[LRun + 1].Edit.Line = LList[LGroup].Edit.Line) and
+            SameText(LList[LRun + 1].Edit.FilePath,
+              LList[LGroup].Edit.FilePath) do
+        Inc(LRun);
+      if LRun > LGroup then
+      begin
+        LLine := OriginalLine(LList[LGroup].Edit);
+        LDelta := 0;
+        for LIdx := LGroup to LRun do
+        begin
+          LItem := LList[LIdx];
+          LLine := Copy(LLine, 1, LItem.Edit.Col - 1 + LDelta) +
+            LItem.NewText +
+            Copy(LLine, LItem.Edit.Col + LItem.Edit.Len + LDelta, MaxInt);
+          LItem.Edit.HiFrom := LItem.Edit.Col - 1 + LDelta;
+          LItem.Edit.HiTo := LItem.Edit.HiFrom + Length(LItem.NewText);
+          Inc(LDelta, Length(LItem.NewText) - LItem.Edit.Len);
+          LList[LIdx] := LItem;
+        end;
+        for LIdx := LGroup to LRun do
+        begin
+          LItem := LList[LIdx];
+          LItem.Edit.Snippet := LLine;
+          LList[LIdx] := LItem;
+        end;
+      end;
+      LGroup := LRun + 1;
+    end;
+
+    SetLength(AEdits, LList.Count);
+    for LIdx := 0 to LList.Count - 1 do
+      AEdits[LIdx] := LList[LIdx].Edit;
+  finally
+    LList.Free;
+  end;
+end;
+
 
 { The file a renamed unit must end up in: the required name, in the folder the
   unit lives in now. A unit rename never MOVES a file - the name decides the
@@ -2188,7 +2348,13 @@ begin
     end;
     APlan.NewFilePath := RenamedFilePath(APlan.UnitPath,
       APlan.RequiredFileName);
-    APlan.StaleInPaths := UsesInPathSites(LTMid, APlan.UnitPath);
+    { The `in '...'` paths, fixed in the plan itself - see
+      AugmentUsesInPaths. Before the report below, so what it reports is
+      only what could NOT be fixed. }
+    AugmentUsesInPaths(APlan.Edits, TPath.GetFileName(APlan.UnitPath),
+      APlan.RequiredFileName);
+    APlan.StaleInPaths := UsesInPathSites(LTMid, APlan.UnitPath,
+      APlan.Edits);
     Exit;
   end;
   if not FNav.SymbolAt(LMid, APasLine, APasCol, LTMid, LSym, APlan.OldName)
@@ -2226,12 +2392,28 @@ end;
   A position for the literal belongs in PasTree, next to the name node; then
   this becomes one more edit and both hosts stop caring. }
 function TLspServer.UsesInPathSites(ATargetMid: Integer;
-  const AUnitPath: string): TArray<string>;
+  const AUnitPath: string;
+  const AEdits: TArray<TPasRenameEdit>): TArray<string>;
 var
   LMi, LIdx: Integer;
   LModel: TPasSemaModel;
   LOldFile: string;
   LSites: TList<string>;
+
+  // Is this file's `in '...'` already covered by an edit? AugmentUsesInPaths
+  // adds one whose OldText is the file name itself, which no other edit in a
+  // rename can be - a unit rename replaces NAMES everywhere else.
+  function AlreadyPlanned(const AFile: string): Boolean;
+  var
+    LEi: Integer;
+  begin
+    Result := False;
+    for LEi := 0 to High(AEdits) do
+      if SameText(AEdits[LEi].FilePath, AFile) and
+         SameText(AEdits[LEi].OldText, LOldFile) then
+        Exit(True);
+  end;
+
 begin
   Result := nil;
   if (FProject = nil) or (AUnitPath = '') then
@@ -2246,7 +2428,8 @@ begin
         if (LModel.UsesList[LIdx].UnitId = ATargetMid) and
            (LModel.UsesList[LIdx].InPath <> '') and
            SameText(TPath.GetFileName(LModel.UsesList[LIdx].InPath),
-             LOldFile) then
+             LOldFile) and
+           not AlreadyPlanned(FProject.ModelFile(LMi)) then
           LSites.Add(FProject.ModelFile(LMi));
     end;
     Result := LSites.ToArray;
@@ -2334,10 +2517,11 @@ end;
   compile, which is worse than doing nothing.
 
   It is refused for the same reason when a `uses` item spells this unit with
-  an explicit `in '<file>'`: that literal is not in the plan (see
-  UsesInPathSites) and a WorkspaceEdit has no way to fix it. Our own IDE
-  client does not come this way at all - it uses pastree/renamePlan and lets
-  the IDE rewrite the project entry.
+  an `in ''<file>''` this server could not plan an edit for - see
+  AugmentUsesInPaths, which handles the ordinary spellings, and
+  UsesInPathSites, which reports whatever is left. A path left pointing at the
+  old file name is a project that does not compile, so half of one is worse
+  than none.
 
   Every newText comes from the plan rather than from the request: see
   EditNewText. }

@@ -807,11 +807,19 @@ begin
     AProject.AddFile(ANewPath, True);
   except
     on E: Exception do
-      TellUser(Format('%s was renamed to %s, but adding it back to the ' +
-        'project failed: %s'#13#10#13#10 +
-        'Add it to the project by hand.',
-        [ExtractFileName(AOldPath), ExtractFileName(ANewPath), E.Message]),
-        mtError);
+      { LOGGED, NOT SHOWN. The refusal this hits in practice is "the project
+        already contains a form or module named X" - by UNIT NAME, not by
+        path, and the name is already right because the plan renamed it in
+        the project source itself (`X in 'X.pas'`, both halves - see the
+        server's AugmentUsesInPaths). So the project knows about the file and
+        there is nothing for the user to do; a modal error over it is how
+        three live runs ended up looking like failures after the rename had
+        entirely succeeded. A real problem still leaves its reason in the
+        log, next to every other step. }
+      LogDiagnostic(Format('rename: adding %s to the project was declined: ' +
+        '%s (the project source already names it, so this is expected when ' +
+        'the IDE registered it itself)',
+        [ExtractFileName(ANewPath), E.Message]));
   end;
 end;
 

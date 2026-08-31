@@ -1015,13 +1015,20 @@ begin
     'every site carries its own new text, not the requested name');
   Check(GOk and GResultJson.Contains('"isDecl":true'),
     'the header is the declaration row');
-  { The one part of a unit rename a plan cannot express: DemoApp.dpr spells
-    the unit as DemoUnit in 'DemoUnit.pas', and that literal has no
-    position in the model. Reported as a site rather than silently left
-    behind - see UsesInPathSites. }
-  Check(GOk and GResultJson.Contains('DemoApp.dpr') and
-    GResultJson.Contains('"staleInPaths":['),
-    'and the uses ... in ''...'' the plan cannot fix is reported, not hidden');
+  { THE `in '...'` PATH, WHICH IS PART OF THE PLAN NOW. DemoApp.dpr spells the
+    unit as `DemoUnit in 'DemoUnit.pas'`, and renaming only the NAME leaves a
+    line pointing at a file that no longer exists - in the IDE that line is the
+    project's own entry, and three live runs died on it. AugmentUsesInPaths
+    adds the edit; staleInPaths is then what could NOT be fixed, and for this
+    fixture that is nothing. }
+  Check(GOk and GResultJson.Contains('"oldText":"DemoUnit.pas"') and
+    GResultJson.Contains('"newText":"DemoUnitRenamed.pas"'),
+    'the in-clause path is renamed too, as its own edit');
+  Check(GOk and GResultJson.Contains(
+    'DemoUnitRenamed in ''DemoUnitRenamed.pas'''),
+    'and the preview of that line reads right end to end');
+  Check(GOk and GResultJson.Contains('"staleInPaths":[]'),
+    'so nothing is left for the host to fix by hand');
 
   Check(Ask('textDocument/prepareRename',
     PositionParams(LAppFile, LLine, LChar)),

@@ -800,8 +800,10 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    `RemoveFile` → `TFile.Move` → `AddFile` stays only as the fallback for a
    project that does not answer that interface — it reconstructs by hand what
    the IDE does properly.
-   That path is the one thing no rename plan can express (PasTree has the
-   path but no position for the literal), so the IDE doing it is not a
+   That path is also renamed by the plan itself since 0.21.0 (the server
+   derives the literal''s position from the line - see its SPEC), so the two
+   agree; before that it was the one thing no plan could express, and the
+   disagreement cost three live runs. The IDE doing the file half is not a
    convenience but the reason a unit rename can be complete. A `.dfm` moves
    with the unit — its resource directive resolves against the unit name, and
    a mismatch fails at RUN time. Afterwards the analysis restarts: the server
