@@ -219,8 +219,8 @@ records that path (`TPasUsesRef.InPath`) but not a POSITION for the literal,
 so no edit can be planned for it. The server reports those sites instead —
 `staleInPaths` in `pastree/renamePlan`, and a refusal in `textDocument/rename`
 — and the RAD Studio client fixes them by renaming the file through
-`IOTAProject.RemoveFile`/`AddFile`, which makes the IDE rewrite its own
-project entry. A position for that literal belongs in PasTree; then it becomes
+`IOTAProject100.Rename`, the project manager's own rename, which makes the IDE
+rewrite its own project entry. A position for that literal belongs in PasTree; then it becomes
 one more edit and both hosts stop caring.
 
 **Why `pastree/renamePlan` exists next to `textDocument/rename`.** They plan

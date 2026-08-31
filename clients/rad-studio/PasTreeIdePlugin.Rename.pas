@@ -650,6 +650,41 @@ begin
   end;
 end;
 
+{ THE IDE'S OWN RENAME, which is what this should have been doing from the
+  start: IOTAProject100.Rename is documented as "renames file using the same
+  logic as an inplace rename in the project manager" (ToolsAPI.pas:3809), so
+  the IDE moves the file, rewrites its own project entry and fires its own
+  BeforeRename/AfterRename notifiers - all the bookkeeping the manual
+  sequence below reconstructs by hand, done by the code that owns it.
+
+  Preferred for exactly that reason. The hand-rolled path stays as a fallback
+  for a project that does not answer IOTAProject100 (or answers False), which
+  is the only case left where reconstructing it is better than nothing.
+
+  False here is not an error yet - the caller falls back - so nothing is said
+  to the user from in here. }
+function RenameThroughProject(const AProject: IOTAProject;
+  const AOldPath, ANewPath: string): Boolean;
+var
+  LProject100: IOTAProject100;
+begin
+  Result := False;
+  if not Assigned(AProject) or
+     not Supports(AProject, IOTAProject100, LProject100) then
+    Exit;
+  try
+    Result := LProject100.Rename(AOldPath, ANewPath);
+  except
+    on E: Exception do
+    begin
+      LogDiagnostic(Format('rename: the IDE''s own project rename of %s ' +
+        'raised %s: %s - falling back to renaming it by hand',
+        [ExtractFileName(AOldPath), E.ClassName, E.Message]));
+      Result := False;
+    end;
+  end;
+end;
+
 { THE FILE HALF OF A UNIT RENAME, and the only place this package renames
   anything on disk.
 
@@ -657,12 +692,14 @@ end;
   produce a project that does not compile - which makes this not an extra but
   the other half of the same action.
 
-  THROUGH THE PROJECT, NOT ONLY THROUGH THE DISK. RemoveFile + AddFile is what
-  makes the IDE rewrite its own bookkeeping - the .dproj entry and, in a
-  program, the `uses Foo in ''Foo.pas''` path. That path is exactly what the
-  analysis plan CANNOT fix (it has no position for the literal; see the
-  server's UsesInPathSites), so this is not a convenience: it is the reason a
-  unit rename can be complete at all.
+  THE IDE DOES IT IF IT WILL: RenameThroughProject above, which is the project
+  manager's own rename. Only if that is unavailable does the sequence below
+  reconstruct it - RemoveFile, move, AddFile - and the reconstruction exists
+  for one reason: something has to rewrite the .dproj entry and, in a program,
+  the `uses Foo in ''Foo.pas''` path. That path is exactly what the analysis
+  plan CANNOT fix (it has no position for the literal; see the server''s
+  UsesInPathSites), so this is not a convenience - it is the reason a unit
+  rename can be complete at all.
 
   A .dfm goes with it. A form unit's resource directive resolves against the
   UNIT name, so a renamed unit whose .dfm kept the old name loses its form -
@@ -675,7 +712,8 @@ end;
   still runs, because a rename stopped halfway is worse than one that finishes
   with a warning.
 
-  ORDER, and each step is here because the previous one makes it possible:
+  ORDER OF THE FALLBACK, and each step is here because the previous one makes
+  it possible:
     1. save every touched module      - the edits must be on disk
     2. remove the file from the project - while it still exists, or the IDE
                                          cannot find what to remove
@@ -717,6 +755,17 @@ begin
   LModule := LModuleServices.FindModule(APlan.FilePath);
   LProject := ActiveProject;
 
+  // The IDE first, by preference - see RenameThroughProject.
+  if RenameThroughProject(LProject, APlan.FilePath, APlan.NewFilePath) then
+  begin
+    LogDiagnostic(Format('rename: %s -> %s, through the project manager',
+      [ExtractFileName(APlan.FilePath),
+       ExtractFileName(APlan.NewFilePath)]));
+    Exit(True);
+  end;
+
+  { BY HAND FROM HERE, and every step is individually guarded for the reason
+    the header states. }
   if Assigned(LProject) then
     try
       LProject.RemoveFile(APlan.FilePath);

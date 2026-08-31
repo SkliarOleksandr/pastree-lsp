@@ -793,9 +793,13 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    **The UNIT half landed 2026-08-31**, on PasTree 0.13.2's PlanUnitRename:
    the module header plus every `uses` item, AND the file. The file is the
    part that makes it real — Object Pascal ties a unit's name to its file
-   name — and it goes through the IDE's own project API
-   (`IOTAProject.RemoveFile` → `TFile.Move` → `AddFile`), which is also what
-   rewrites the `.dproj` entry and a program's `uses Foo in 'Foo.pas'` path.
+   name — and it goes through **`IOTAProject100.Rename`**, documented as "the
+   same logic as an inplace rename in the project manager" (ToolsAPI.pas:3809):
+   the IDE moves the file, rewrites its own `.dproj` entry and a program's
+   `uses Foo in 'Foo.pas'` path, and fires its own BeforeRename/AfterRename.
+   `RemoveFile` → `TFile.Move` → `AddFile` stays only as the fallback for a
+   project that does not answer that interface — it reconstructs by hand what
+   the IDE does properly.
    That path is the one thing no rename plan can express (PasTree has the
    path but no position for the literal), so the IDE doing it is not a
    convenience but the reason a unit rename can be complete. A `.dfm` moves

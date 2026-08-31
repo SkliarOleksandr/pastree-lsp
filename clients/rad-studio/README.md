@@ -111,9 +111,10 @@ site and the plugin applies it - one undo step per file.
   trust.
 - **A UNIT can be renamed too**, and then the FILE is renamed with it - a
   unit's name and its file name are the same thing in Object Pascal, so the
-  two halves are one action. It goes through the IDE's own project API, which
-  is what also rewrites the `.dproj` entry and a program's
-  `uses Foo in 'Foo.pas'` path; a `.dfm` moves with the unit. The analysis
+  two halves are one action. It goes through the project manager's own rename
+  (`IOTAProject100.Rename`), so the IDE rewrites the `.dproj` entry and a
+  program's `uses Foo in 'Foo.pas'` path itself; a `.dfm` moves with the unit.
+  The analysis
   restarts afterwards (a renamed file is a different closure), so the next
   navigation pays for one rebuild.
 - **A compiler builtin is refused** - there is no declaration to rename - as
