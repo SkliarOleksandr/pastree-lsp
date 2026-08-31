@@ -443,7 +443,7 @@ properly and knows which branches are really dead.
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Grouped, navigable result tree | Ready | `IOTACustomMessage50` child messages + `IOTACustomMessage100` (`6316`) + `INTACustomDrawMessage` (`6332`) | a real upgrade on `AddToolMessage`: hierarchy, controlled navigation, owner-drawn rows — which is also how to highlight the match inside a snippet, the open TODO in FindReferences |
+| Grouped, navigable result tree | **Done 2026-08-31** | `IOTACustomMessage100` (`6316`) + `INTACustomDrawMessage` (`6332`), tree via `AddCustomMessagePtr`/`AddCustomMessage(Parent)` | `PasTreeIdePlugin.ResultRows`, used by Find References: owner-drawn syntax-colored snippets, match highlight, navigable headers. The Rename tab is the same shape and the natural next adopter |
 | Menu items on results | Ready | `INTAMessageNotifier.MessageViewMenuShown` (`6458`) | "rename this", "open all" |
 | A filterable results pane | Ready | `IOTAToDoManager` (`8330`) + `INTAToDoItem` (`8250`) | free filtering and navigation; **Professional/Enterprise only** (`10858`), so gate on `IOTAVersionSKUInfoService` (`10810`) |
 | Hierarchy views (call, type) | Server | `INTACustomEditorView` (`7882`) or `INTACustomDockableForm` (`7121`) | a whole frame as an editor tab or a dockable window; an editor view also gets a Structure pane via `IOTACustomEditorViewStructure` |
@@ -817,9 +817,25 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    the `feature/unit-rename` branch.
 
    Still queued: `IOTASyncEditPoints` as the cheap same-file variant.
-6. **Find References results upgrade** (hierarchy + match highlight in the
-   snippet), **custom colored hint window** — carried over from the old
-   order, still queued. **Idle-debounced `didChange` DELIVERED 2026-08-22**
+6. **Find References results upgrade — DELIVERED 2026-08-31 (first live run
+   pending).** Owner-drawn rows (`PasTreeIdePlugin.ResultRows`:
+   `IOTACustomMessage100` + `INTACustomDrawMessage`, inserted via
+   `AddCustomMessagePtr`/`AddCustomMessage(Parent)`): every snippet is
+   painted in the user's LIVE editor syntax colors —
+   `INTACodeEditorServices.Options.FontColor/BackgroundColor/FontStyles`
+   per `TOTASyntaxCode`, read at draw time so a Tools > Options color or
+   theme change shows on the next repaint — with the matched identifier
+   marked by the editor's own `SearchMatch` element, and file header rows
+   (bold name + count) that finally navigate on double-click, which
+   `AddToolMessage` headers never could. The line is classified by a
+   display-only tokenizer in that unit (best effort, one detached line;
+   reserved words only, no context directives — its header says why), the
+   real tokenizer being Win64-only in PasTree. A match is highlighted only
+   if the text at the mapped column still reads as the identifier —
+   anything stale degrades to an unhighlighted snippet, never to a
+   highlight on the wrong characters. The **custom colored hint window**
+   is carried over from the old order, still queued.
+   **Idle-debounced `didChange` DELIVERED 2026-08-22**
    (`PasTreeIdePlugin.IdleSync`: `EditorViewModified` + 600 ms timer →
    `LspIdleSync`, a no-op without a running server) — first live run
    found squiggles updating only on save, because the doc sync ran only in

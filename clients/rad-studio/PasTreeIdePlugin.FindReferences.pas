@@ -11,10 +11,14 @@ unit PasTreeIdePlugin.FindReferences;
   one implementation shared with every other LSP client.
 
     - Results go to a dedicated "Find References" tab in the Messages
-      panel (see ReportHits), grouped by file (one header row per file via
-      AddToolMessage's own Parent/LineRef mechanism - same tree structure
-      "Find in Files" uses), one line per hit with file/line/column so the
-      IDE's own message navigation jumps straight to it.
+      panel (see ReportHits), grouped by file: one owner-drawn header row
+      per file, one owner-drawn snippet row per hit (custom message tree
+      via AddCustomMessagePtr/AddCustomMessage Parent pointers - the
+      custom-message parallel of the AddToolMessage tree "Find in Files"
+      uses). Rows come from PasTreeIdePlugin.ResultRows: the snippet is
+      painted in the user's live editor syntax colors, the matched
+      identifier carries the editor's own "Search match" element, and
+      every row - headers included - navigates on double-click/Enter/F8.
 
   ASYNCHRONOUS, AND IT SHOWS IN TWO PLACES. The menu handler returns
   immediately and the panel fills in on a later main-thread turn. Two
@@ -27,16 +31,6 @@ unit PasTreeIdePlugin.FindReferences;
       content, where TPasRefHit carried one. TSnippetCache reads it from the
       same server-side snapshot, never from a fresh file read, so an unsaved
       buffer's line numbers still line up with the text shown.
-
-  TODO (next):
-    1. Highlight the matched identifier within each hit's snippet text.
-       The LSP Location's range already carries the identifier's extent on the
-       line, so the offsets are available without a protocol extension.
-       AddToolMessage draws plain text only; doing this means a message class
-       implementing IOTACustomMessage100 (for FileName/Line/Col + navigation)
-       and INTACustomDrawMessage (Draw/CalcRect on a TCanvas -
-       ToolsAPI.pas:6335) together, registered via AddCustomMessage instead of
-       AddToolMessage. Deliberately deferred - a cosmetic-only improvement.
 }
 
 interface
@@ -63,7 +57,7 @@ implementation
 uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession;
+  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows;
 
 const
   cMessageGroupName = 'Find References';
@@ -185,21 +179,25 @@ begin
     FLines.Add(LKey, LLines);
   end;
   // ARow is 1-based, and a stale row against a file we could not read must
-  // degrade to an empty snippet rather than raise.
+  // degrade to an empty snippet rather than raise. The line comes back RAW
+  // (untrimmed): the caller maps the hit's column into the display text, so
+  // it must be the one deciding how much leading whitespace went away.
   if (ARow >= 1) and (ARow <= Length(LLines)) then
-    Result := Trim(LLines[ARow - 1]);
+    Result := LLines[ARow - 1];
 end;
 
 /// <summary>
 /// Reports the declaration site (if any) plus every found reference, grouped
 /// by file, in a dedicated "Find References" tab in the Messages panel
 /// (distinct from the Build tab, reused across searches - each call clears
-/// it first). Grouping uses AddToolMessage's own Parent/LineRef mechanism -
-/// one header line per file (its LineRef captured), every hit in that file
-/// added as a child of that header - no custom message class needed, this
-/// is the same mechanism the IDE's own "Find in Files" tree uses. Each leaf
-/// line carries a file/line/column, so the IDE's own message-view navigation
-/// (double-click, Enter, F8/Shift+F8) jumps straight to it.
+/// it first). Every row is an owner-drawn custom message from
+/// PasTreeIdePlugin.ResultRows: one navigable header per file (bold name +
+/// count, double-click opens the file - the AddToolMessage headers never
+/// could), one syntax-colored snippet per hit with the matched identifier
+/// highlighted the way the editor highlights a search match. The tree is
+/// AddCustomMessagePtr (header, returns the Parent pointer) plus
+/// AddCustomMessage(row, Parent) (hits) - the custom-message parallel of
+/// the AddToolMessage Parent/LineRef mechanism used before.
 /// </summary>
 procedure ReportHits(const AIdentifier: string; AHasDecl: Boolean;
   const ADeclHit: TLspHit; const AHits: TArray<TLspHit>);
@@ -208,7 +206,7 @@ var
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
   LFileHeaders: TDictionary<string, Pointer>;
-  LLineRef, LParentRef: Pointer;
+  LParentRef: Pointer;
   LHit: TLspHit;
   LSnippets: TSnippetCache;
 
@@ -231,16 +229,40 @@ var
     if not LFileHeaders.TryGetValue(LKey, Result) then
     begin
       LFileCounts.TryGetValue(LKey, LFileCount);
-      // LineNumber stays 1 (not the file's reference count) - double-click
-      // still jumps to the top of the file rather than doing nothing/
-      // expand-only. Fixing that needs a custom IOTACustomMessage100 class
-      // (CanGotoSource/DefaultHandling) - deliberately not done yet, see
-      // this procedure's own doc comment.
-      LMessageServices.AddToolMessage(AFilePath,
-        Format('%s (%d)', [ExtractFileName(AFilePath), LFileCount]),
-        '', 1, 1, nil, Result, LGroup);
+      Result := LMessageServices.AddCustomMessagePtr(
+        NewFileHeaderRow(AFilePath, LFileCount), LGroup);
       LFileHeaders.Add(LKey, Result);
     end;
+  end;
+
+  { The hit's column addresses the RAW line; the display text is that line
+    with the indentation cut off. The match lands in the row only when the
+    text at the mapped position still reads as the identifier - anything
+    else (a stale row, a column past the end) degrades to an unhighlighted
+    snippet, never to a highlight on the wrong characters. }
+  procedure AddSnippetRow(const AHit: TLspHit; const ATag: string;
+    AParent: Pointer);
+  var
+    LRaw, LDisplay: string;
+    LLead, LMatchStart, LMatchLen: Integer;
+  begin
+    LRaw := LSnippets.LineAt(AHit.FilePath, AHit.Row);
+    LLead := 1;
+    while (LLead <= Length(LRaw)) and CharInSet(LRaw[LLead], [' ', #9]) do
+      Inc(LLead);
+    LDisplay := TrimRight(Copy(LRaw, LLead, MaxInt));
+    LMatchStart := AHit.Col - (LLead - 1);
+    LMatchLen := Length(AIdentifier);
+    if (LMatchLen = 0) or (LMatchStart < 1) or
+       (LMatchStart + LMatchLen - 1 > Length(LDisplay)) or
+       not SameText(Copy(LDisplay, LMatchStart, LMatchLen), AIdentifier) then
+    begin
+      LMatchStart := 0;
+      LMatchLen := 0;
+    end;
+    LMessageServices.AddCustomMessage(
+      NewSnippetRow(AHit.FilePath, AHit.Row, AHit.Col, LDisplay,
+        LMatchStart, LMatchLen, ATag), AParent);
   end;
 
 begin
@@ -266,17 +288,13 @@ begin
     if AHasDecl then
     begin
       LParentRef := GetOrCreateFileHeader(ADeclHit.FilePath);
-      LMessageServices.AddToolMessage(ADeclHit.FilePath,
-        Format('declaration of "%s"', [AIdentifier]),
-        '', ADeclHit.Row, ADeclHit.Col, LParentRef, LLineRef, LGroup);
+      AddSnippetRow(ADeclHit, 'declaration', LParentRef);
     end;
 
     for LHit in AHits do
     begin
       LParentRef := GetOrCreateFileHeader(LHit.FilePath);
-      LMessageServices.AddToolMessage(LHit.FilePath,
-        LSnippets.LineAt(LHit.FilePath, LHit.Row),
-        '', LHit.Row, LHit.Col, LParentRef, LLineRef, LGroup);
+      AddSnippetRow(LHit, '', LParentRef);
     end;
   finally
     LSnippets.Free;
