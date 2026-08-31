@@ -73,11 +73,14 @@ uses
 
 /// <summary>
 /// The tab's first line - "PasTree Find References: ..." - painted bold in
-/// the same blue accent as the file headers. A custom row rather than
-/// AddTitleMessage for exactly that reason: a title message is IDE-drawn,
+/// the same blue accent as the file headers, with the span at AOrangeStart
+/// (1-based, AOrangeLen chars - the reference count) in the orange accent
+/// the hit rows use for line numbers; 0/0 paints it all blue. A custom row
+/// rather than AddTitleMessage because a title message is IDE-drawn,
 /// always in the panel's plain text color. Not navigable (no file).
 /// </summary>
-function NewTitleRow(const AText: string): IOTACustomMessage;
+function NewTitleRow(const AText: string;
+  AOrangeStart: Integer = 0; AOrangeLen: Integer = 0): IOTACustomMessage;
 
 /// <summary>
 /// A file header row: painted as "&lt;full path&gt; [N]" with the path bold -
@@ -365,9 +368,10 @@ type
     FLine: Integer;
     FCol: Integer;
     FText: string;   // title: the whole line; header: unused; snippet: the raw line text
-    FSuffix: string; // header: ' [N]'; snippet: the tag or ''
-    FMatchStart: Integer; // 1-based into FText, 0 = no highlight
-    FMatchLen: Integer;
+    FSuffix: string; // snippet: the tag or ''
+    FMatchStart: Integer; // 1-based into FText; snippet: the match,
+    FMatchLen: Integer;   // title: the orange span; 0 = none
+    FCount: Integer; // header only: the [N]
     FIsHeader: Boolean;
     FIsTitle: Boolean;
     procedure Paint(ACanvas: TCanvas; const ARect: TRect; ADoDraw: Boolean;
@@ -414,7 +418,7 @@ begin
   if FIsTitle then
     Result := FText
   else if FIsHeader then
-    Result := FFilePath + FSuffix
+    Result := Format('%s [%d]', [FFilePath, FCount])
   else
     Result := Format('%s (%d): %s%s',
       [ExtractFileName(FFilePath), FLine, FText, FSuffix]);
@@ -577,16 +581,31 @@ begin
   end;
 
   if FIsTitle then
+  begin
     // The tab's first line, bold in the same blue as the headers below it
-    // (fifth live run: the plain IDE-drawn title read as unstyled).
-    Put(FText, LBlue, LBaseStyle + [TFontStyle.fsBold])
+    // (fifth live run: the plain IDE-drawn title read as unstyled), the
+    // reference count in the orange the hit rows use for line numbers.
+    if FMatchLen > 0 then
+    begin
+      Put(Copy(FText, 1, FMatchStart - 1), LBlue,
+        LBaseStyle + [TFontStyle.fsBold]);
+      Put(Copy(FText, FMatchStart, FMatchLen), LOrange,
+        LBaseStyle + [TFontStyle.fsBold]);
+      Put(Copy(FText, FMatchStart + FMatchLen, MaxInt), LBlue,
+        LBaseStyle + [TFontStyle.fsBold]);
+    end
+    else
+      Put(FText, LBlue, LBaseStyle + [TFontStyle.fsBold]);
+  end
   else if FIsHeader then
   begin
-    // The whole header - path and count - bold in the same blue accent
-    // the hit rows use for their file names (fourth live run: base-color
-    // bold read as unstyled next to the colored rows).
-    Put(FFilePath, LBlue, LBaseStyle + [TFontStyle.fsBold]);
-    Put(FSuffix, LBlue, LBaseStyle + [TFontStyle.fsBold]);
+    // The whole header bold: path and brackets in the same blue accent the
+    // hit rows use for their file names (fourth live run: base-color bold
+    // read as unstyled next to the colored rows), the count between the
+    // brackets in the line-number orange (sixth run).
+    Put(FFilePath + ' [', LBlue, LBaseStyle + [TFontStyle.fsBold]);
+    Put(IntToStr(FCount), LOrange, LBaseStyle + [TFontStyle.fsBold]);
+    Put(']', LBlue, LBaseStyle + [TFontStyle.fsBold]);
   end
   else
   begin
@@ -627,12 +646,15 @@ end;
 { Construction                                                               }
 { ------------------------------------------------------------------------- }
 
-function NewTitleRow(const AText: string): IOTACustomMessage;
+function NewTitleRow(const AText: string;
+  AOrangeStart: Integer; AOrangeLen: Integer): IOTACustomMessage;
 var
   LRow: TResultRow;
 begin
   LRow := TResultRow.Create;
   LRow.FText := AText;
+  LRow.FMatchStart := AOrangeStart;
+  LRow.FMatchLen := AOrangeLen;
   LRow.FIsTitle := True;
   Result := LRow;
 end;
@@ -646,7 +668,7 @@ begin
   LRow.FFilePath := AFilePath;
   LRow.FLine := 1;
   LRow.FCol := 1;
-  LRow.FSuffix := Format(' [%d]', [ARefCount]);
+  LRow.FCount := ARefCount;
   LRow.FIsHeader := True;
   Result := LRow;
 end;

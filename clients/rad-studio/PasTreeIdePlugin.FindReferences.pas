@@ -209,6 +209,7 @@ var
   LParentRef: Pointer;
   LHit: TLspHit;
   LSnippets: TSnippetCache;
+  LTitleHead, LTitleCount: string;
 
   procedure CountFile(const AFilePath: string);
   var
@@ -270,10 +271,14 @@ begin
   LMessageServices.ClearMessageGroup(LGroup);
 
   // A custom row rather than AddTitleMessage: a title message is IDE-drawn
-  // in the plain text color, and this line is styled like the headers.
+  // in the plain text color, and this line is styled like the headers -
+  // blue bold, the count in the line-number orange (built by concatenation
+  // so the count's span is known, not searched for).
+  LTitleHead := Format('PasTree Find References: "%s" - ', [AIdentifier]);
+  LTitleCount := IntToStr(Length(AHits));
   LMessageServices.AddCustomMessagePtr(
-    NewTitleRow(Format('PasTree Find References: "%s" - %d reference(s)',
-      [AIdentifier, Length(AHits)])), LGroup);
+    NewTitleRow(LTitleHead + LTitleCount + ' reference(s)',
+      Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
