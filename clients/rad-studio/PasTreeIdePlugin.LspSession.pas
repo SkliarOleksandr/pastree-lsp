@@ -154,13 +154,15 @@ type
     const AAnswer: TLspClassComplete; const AError: string);
 
   /// <summary>
-  /// One insertion from textDocument/onTypeFormatting, converted to IDE
-  /// coordinates (1-based row/col). The server only ever answers zero-width
-  /// ranges here - pure insertions - so a range end is not carried.
+  /// One edit from textDocument/onTypeFormatting, converted to IDE
+  /// coordinates (1-based row/col): replace [Row,Col .. EndRow,EndCol) with
+  /// Text. Equal ends mean a pure insertion.
   /// </summary>
   TLspTextEdit = record
     Row: Integer;
     Col: Integer;
+    EndRow: Integer;
+    EndCol: Integer;
     Text: string;
   end;
 
@@ -1499,6 +1501,9 @@ begin
           if (LEditLine < 0) or (LEditChar < 0) or (LEdit.Text = '') then
             Continue;
           LspToIde(LEditLine, LEditChar, LEdit.Row, LEdit.Col);
+          LEditLine := LItem.GetValue<Integer>('range.end.line', LEditLine);
+          LEditChar := LItem.GetValue<Integer>('range.end.character', LEditChar);
+          LspToIde(LEditLine, LEditChar, LEdit.EndRow, LEdit.EndCol);
           LEdits := LEdits + [LEdit];
         end;
       AOnDone(True, LEdits, '');

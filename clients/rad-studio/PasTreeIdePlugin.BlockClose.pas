@@ -106,16 +106,22 @@ var
   LIdx: Integer;
   LWriter: IOTAEditWriter;
   LCharPos: TOTACharPos;
-  LOffsets: TArray<Integer>;
+  LStarts, LEnds: TArray<Integer>;
+  LCaretRow, LCaretCol: Integer;
+  LPos: IOTAEditPosition;
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) then
     Exit;
-  SetLength(LOffsets, Length(AEdits));
+  SetLength(LStarts, Length(AEdits));
+  SetLength(LEnds, Length(AEdits));
   for LIdx := 0 to High(AEdits) do
   begin
     LCharPos.Line := AEdits[LIdx].Row;
     LCharPos.CharIndex := AEdits[LIdx].Col - 1;
-    LOffsets[LIdx] := AView.CharPosToPos(LCharPos);
+    LStarts[LIdx] := AView.CharPosToPos(LCharPos);
+    LCharPos.Line := AEdits[LIdx].EndRow;
+    LCharPos.CharIndex := AEdits[LIdx].EndCol - 1;
+    LEnds[LIdx] := AView.CharPosToPos(LCharPos);
   end;
   LWriter := AView.Buffer.CreateUndoableWriter;
   if not Assigned(LWriter) then
@@ -123,12 +129,36 @@ begin
   try
     for LIdx := 0 to High(AEdits) do
     begin
-      LWriter.CopyTo(LOffsets[LIdx]);
+      LWriter.CopyTo(LStarts[LIdx]);
+      if LEnds[LIdx] > LStarts[LIdx] then
+        LWriter.DeleteTo(LEnds[LIdx]);
       LWriter.Insert(UTF8String(AEdits[LIdx].Text));
     end;
   finally
     LWriter := nil;   // the writer commits on release
   end;
+  // The caret, INTO the block. The indent edit is the single-line one on
+  // the caret's own row (the closer starts with a line break); its text IS
+  // the body indentation, so the column after it is where typing resumes.
+  // RAD's virtual caret never rode the replacement the way VS Code's does,
+  // which is why this is explicit here.
+  LCaretRow := 0;
+  LCaretCol := 0;
+  for LIdx := 0 to High(AEdits) do
+    if AEdits[LIdx].Text.IndexOf(#10) < 0 then
+    begin
+      LCaretRow := AEdits[LIdx].Row;
+      LCaretCol := Length(AEdits[LIdx].Text) + 1;
+    end;
+  if LCaretRow > 0 then
+  begin
+    LPos := AView.Buffer.EditPosition;
+    if Assigned(LPos) then
+      LPos.Move(LCaretRow, LCaretCol);
+  end;
+  // The insertion came from a keystroke whose visible effect already
+  // happened; repaint now rather than at the next natural refresh.
+  AView.Paint;
 end;
 
 { TPasBlockCloseNotifier }

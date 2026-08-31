@@ -2834,9 +2834,11 @@ end;
   client that sends one anyway must not get a closer for it. }
 function TLspServer.HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
 var
-  LPath, LText, LCh, LNewText: string;
+  LPath, LText, LCh, LJson: string;
   LDoc: TLspDocument;
-  LLine, LChar, LInsLine, LInsChar: Integer;
+  LLine, LChar, LTabSize, LIdx: Integer;
+  LInsertSpaces: Boolean;
+  LEdits: TArray<TBlockCloseEdit>;
   LStart: UInt64;
 begin
   LPath := DocPathOf(AMsg.Params);
@@ -2859,7 +2861,10 @@ begin
   if LText = '' then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
-  if not PlanBlockClose(LText, LLine, LInsLine, LInsChar, LNewText) then
+  LTabSize := AMsg.Params.GetValue<Integer>('options.tabSize', 2);
+  LInsertSpaces := AMsg.Params.GetValue<Boolean>('options.insertSpaces', True);
+
+  if not PlanBlockClose(LText, LLine, LTabSize, LInsertSpaces, LEdits) then
   begin
     if FTrace then
       Log(Format('onTypeFormatting: %s line %d -> nothing',
@@ -2867,13 +2872,22 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
 
-  Log(Format('onTypeFormatting: %s line %d -> insert %s in %d ms',
-    [TPath.GetFileName(LPath), LLine, JsonQuote(Trim(LNewText)),
-     GetTickCount64 - LStart]));
-  Result := BuildResponse(AMsg.IdJson, Format(
-    '[{"range":{"start":{"line":%d,"character":%d},' +
-    '"end":{"line":%d,"character":%d}},"newText":%s}]',
-    [LInsLine, LInsChar, LInsLine, LInsChar, JsonQuote(LNewText)]));
+  LJson := '';
+  for LIdx := 0 to High(LEdits) do
+  begin
+    if LJson <> '' then
+      LJson := LJson + ',';
+    LJson := LJson + Format(
+      '{"range":{"start":{"line":%d,"character":%d},' +
+      '"end":{"line":%d,"character":%d}},"newText":%s}',
+      [LEdits[LIdx].Line, LEdits[LIdx].StartChar,
+       LEdits[LIdx].Line, LEdits[LIdx].EndChar,
+       JsonQuote(LEdits[LIdx].Text)]);
+  end;
+  Log(Format('onTypeFormatting: %s line %d -> %d edit(s), closer %s in %d ms',
+    [TPath.GetFileName(LPath), LLine, Length(LEdits),
+     JsonQuote(Trim(LEdits[High(LEdits)].Text)), GetTickCount64 - LStart]));
+  Result := BuildResponse(AMsg.IdJson, '[' + LJson + ']');
 end;
 
 { pastree/classComplete — OUR request, the server half of Ctrl+Shift+C.

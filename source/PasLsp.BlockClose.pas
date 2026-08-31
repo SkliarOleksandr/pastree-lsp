@@ -49,15 +49,32 @@ unit PasLsp.BlockClose;
 
 interface
 
+type
+  /// <summary>
+  /// One single-line edit of the plan: replace [StartChar..EndChar) on Line
+  /// (0-based, UTF-16) with Text. StartChar = EndChar is a pure insertion.
+  /// </summary>
+  TBlockCloseEdit = record
+    Line: Integer;
+    StartChar: Integer;
+    EndChar: Integer;
+    Text: string;
+  end;
+
 /// <summary>
-/// Decides the block-completion insertion for a caret that just arrived on
-/// ACaretLine (0-based, LSP convention) by pressing Enter. True with the
-/// insertion point (0-based line, UTF-16 character - always the end of the
-/// caret line) and the text to insert there; False when nothing should be
-/// inserted - which is the common case and never an error.
+/// Decides the block-completion edits for a caret that just arrived on
+/// ACaretLine (0-based, LSP convention) by pressing Enter. True with up to
+/// two edits: the caret line's whitespace replaced by the BODY indentation
+/// (the opener's plus one level of ATabSize/AInsertSpaces - and the caret,
+/// sitting at the end of that whitespace, rides the replacement to the end
+/// of the new indent in any client that anchors it after the replaced
+/// span, which is how the cursor lands inside the block without any cursor
+/// protocol), and the closer inserted at the end of the caret line. False
+/// when nothing should be inserted - the common case, never an error.
 /// </summary>
 function PlanBlockClose(const AText: string; ACaretLine: Integer;
-  out AInsertLine, AInsertChar: Integer; out ANewText: string): Boolean;
+  ATabSize: Integer; AInsertSpaces: Boolean;
+  out AEdits: TArray<TBlockCloseEdit>): Boolean;
 
 implementation
 
@@ -66,7 +83,8 @@ uses
   PasTree.Types, PasTree.Lexer;
 
 function PlanBlockClose(const AText: string; ACaretLine: Integer;
-  out AInsertLine, AInsertChar: Integer; out ANewText: string): Boolean;
+  ATabSize: Integer; AInsertSpaces: Boolean;
+  out AEdits: TArray<TBlockCloseEdit>): Boolean;
 var
   LStream: TPasTokenStream;
   LStack: TArray<TPasTokenKind>;
@@ -118,12 +136,12 @@ var
   LCandidateKind: TPasTokenKind;
   LCandidateLine: Integer;
   LPushIt: Boolean;
-  LIndent, LCloser: string;
+  LIndent, LBodyIndent, LCloser: string;
+  LLineEndChar: Integer;
+  LEdit: TBlockCloseEdit;
 begin
   Result := False;
-  AInsertLine := 0;
-  AInsertChar := 0;
-  ANewText := '';
+  AEdits := nil;
 
   LStream := TPasLexer.Tokenize(AText);
   if (ACaretLine < 0) or (ACaretLine > High(LStream.LineStarts)) then
@@ -269,17 +287,43 @@ begin
     // one keystroke there, the wrong `.` was every day.
     LCloser := 'end;';
 
-  AInsertLine := ACaretLine;
   // End of the caret line, before its break: its full width is whitespace
   // (checked above), CR/LF excluded.
-  AInsertChar := 0;
+  LLineEndChar := 0;
   LOfs := LCaretStart;
   while (LOfs < LCaretEnd) and not CharInSet(AText[LOfs + 1], [#13, #10]) do
   begin
-    Inc(AInsertChar);
+    Inc(LLineEndChar);
     Inc(LOfs);
   end;
-  ANewText := #13#10 + LIndent + LCloser;
+
+  // Edit 1: the caret line's whitespace becomes the body indentation - the
+  // opener's own indent plus one level, in the client's declared units.
+  // The caret sits at the end of that whitespace (RAD's virtual caret
+  // leaves the line empty and is repositioned by the plugin explicitly),
+  // so a client that anchors it after the replaced span lands it at the
+  // end of the new indent: inside the block, correctly indented.
+  if ATabSize < 1 then
+    ATabSize := 2;   // the Delphi convention, and a shield against 0
+  if AInsertSpaces then
+    LBodyIndent := LIndent + StringOfChar(' ', ATabSize)
+  else
+    LBodyIndent := LIndent + #9;
+  if LBodyIndent <> Copy(AText, LCaretStart + 1, LLineEndChar) then
+  begin
+    LEdit.Line := ACaretLine;
+    LEdit.StartChar := 0;
+    LEdit.EndChar := LLineEndChar;
+    LEdit.Text := LBodyIndent;
+    AEdits := AEdits + [LEdit];
+  end;
+
+  // Edit 2: the closer, on its own line(s) after the caret line.
+  LEdit.Line := ACaretLine;
+  LEdit.StartChar := LLineEndChar;
+  LEdit.EndChar := LLineEndChar;
+  LEdit.Text := #13#10 + LIndent + LCloser;
+  AEdits := AEdits + [LEdit];
   Result := True;
 end;
 

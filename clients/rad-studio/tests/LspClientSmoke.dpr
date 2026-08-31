@@ -1300,6 +1300,15 @@ begin
     'a try gets the whole finally/end; skeleton, at the TRY line''s indent');
   Check(GOk and GResultJson.Contains('"line":6'),
     'at the end of the caret line, leaving the caret alone');
+  // The second edit of the plan: the caret line's whitespace becomes the
+  // BODY indent (try's two spaces plus one tabSize level), which is what
+  // carries the cursor into the block on clients that anchor it after the
+  // replaced span.
+  Check(GOk and GResultJson.Contains(
+    '"start":{"line":6,"character":0},"end":{"line":6,"character":2}'),
+    'the caret line''s own whitespace is replaced...');
+  Check(GOk and GResultJson.Contains('"newText":"    "'),
+    '...by the body indentation, one level under the try');
 
   // The balanced file: same shape, try closed - nothing to insert, and the
   // answer is null rather than an empty array or an error.
