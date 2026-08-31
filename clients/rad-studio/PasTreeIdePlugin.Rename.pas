@@ -384,7 +384,10 @@ begin
   if not Assigned(LModule) then
     Exit;
   if not SameText(LModule.FileName, AFileName) then
-    TraceFmt('  %s: open under a different spelling (%s)',
+    // Not always a spelling difference: the IDE answers for a program's
+    // .dpr with its PROJECT module, whose own FileName is the .dproj. Both
+    // cases are fine and both are worth seeing in the log.
+    TraceFmt('  %s: answered by the module %s',
       [ExtractFileName(AFileName), LModule.FileName]);
   for LIdx := 0 to LModule.GetModuleFileCount - 1 do
     if Supports(LModule.GetModuleFileEditor(LIdx), IOTASourceEditor,
@@ -752,6 +755,45 @@ begin
   end;
 end;
 
+{ THE PROJECT''S OWN RECORD OF THE FILE, after the file has moved.
+
+  Renaming the file is not the whole job even when the IDE did it on save:
+  the project still lists the OLD name, and in a program that entry carries
+  the path - `uaviConst in ''uaviConst.pas''`. That literal is the one thing a
+  rename plan cannot express (the server reports it as staleInPaths), so if
+  nothing rewrites the entry the project stops compiling for a reason no
+  diff explains.
+
+  RemoveFile then AddFile is what rewrites it: the IDE drops the stale entry,
+  including its path, and writes a fresh one for the file that now exists.
+  Both are guarded and both are logged - a duplicated or missing entry is
+  exactly the kind of thing that needs to be readable afterwards. }
+procedure ReregisterFile(const AProject: IOTAProject;
+  const AOldPath, ANewPath: string);
+begin
+  if not Assigned(AProject) then
+    Exit;
+  try
+    Trace('  RemoveFile (the stale entry, with its `in` path)');
+    AProject.RemoveFile(AOldPath);
+  except
+    on E: Exception do
+      LogDiagnostic(Format('rename: removing %s from the project failed: %s',
+        [ExtractFileName(AOldPath), E.Message]));
+  end;
+  try
+    Trace('  AddFile (the new name, with a matching path)');
+    AProject.AddFile(ANewPath, True);
+  except
+    on E: Exception do
+      TellUser(Format('%s was renamed to %s, but adding it back to the ' +
+        'project failed: %s'#13#10#13#10 +
+        'Add it to the project by hand.',
+        [ExtractFileName(AOldPath), ExtractFileName(ANewPath), E.Message]),
+        mtError);
+  end;
+end;
+
 { THE PROJECT FILE, SAVED BY US.
 
   A unit rename edits the .dproj - a different file name in it - whichever way
@@ -800,11 +842,17 @@ var
   LProject100: IOTAProject100;
 begin
   Result := False;
-  if not Assigned(AProject) or
-     not Supports(AProject, IOTAProject100, LProject100) then
+  if not Assigned(AProject) then
     Exit;
+  if not Supports(AProject, IOTAProject100, LProject100) then
+  begin
+    Trace('  the project does not answer IOTAProject100');
+    Exit;
+  end;
   try
     Result := LProject100.Rename(AOldPath, ANewPath);
+    TraceFmt('  IOTAProject100.Rename returned %s',
+      [BoolToStr(Result, True)]);
   except
     on E: Exception do
     begin
@@ -884,6 +932,28 @@ begin
   TraceFmt('file half: %s -> %s', [APlan.FilePath, APlan.NewFilePath]);
   SaveTouchedModules(APlan);
 
+  { THE IDE MAY HAVE DONE IT ALREADY, and on a real project it does.
+
+    Saving a module whose `unit` clause no longer matches its file name makes
+    the IDE take the SaveAs path - it writes the file under the name the unit
+    now claims. Since the text edits go in first, that is the ORDINARY case
+    for an open unit, not an exotic one: by the time we get here the file has
+    moved and the old name is gone. Measured 2026-08-31 on a 3759-unit
+    project, where the previous version then failed the whole file half with
+    "The specified file was not found" - after the rename had actually
+    succeeded.
+
+    So the state is checked rather than assumed. Old gone and new present is a
+    SUCCESS, whoever performed it; the only thing left to do is the project
+    file, which the IDE marks modified either way. }
+  if not TFile.Exists(APlan.FilePath) and TFile.Exists(APlan.NewFilePath) then
+  begin
+    Trace('  the file had already moved - the IDE renamed it on save');
+    ReregisterFile(ActiveProject, APlan.FilePath, APlan.NewFilePath);
+    SaveProject(ActiveProject);
+    Exit(True);
+  end;
+
   LModule := ModuleOf(APlan.FilePath);
   LProject := ActiveProject;
   TraceFmt('  module found=%s, active project=%s',
@@ -922,6 +992,15 @@ begin
           [ExtractFileName(APlan.FilePath), E.Message]));
     end;
 
+  if not TFile.Exists(APlan.FilePath) and TFile.Exists(APlan.NewFilePath) then
+  begin
+    // Something in the steps above moved it - the project rename, or a save
+    // the close triggered. Nothing to move, and nothing wrong.
+    Trace('  the file moved during the earlier steps');
+    ReregisterFile(LProject, APlan.FilePath, APlan.NewFilePath);
+    SaveProject(LProject);
+    Exit(True);
+  end;
   try
     Trace('  moving the file');
     TFile.Move(APlan.FilePath, APlan.NewFilePath);
