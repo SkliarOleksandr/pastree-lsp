@@ -43,13 +43,23 @@ unit PasTreeIdePlugin.Rename;
   extend LooksLikeName into keyword knowledge - a copy of that list
   here would be a second answer able to disagree with the first.
 
-  APPLYING IS TWO PASSES OVER THE WHOLE PLAN, NOT PER FILE. Pass one opens
-  every touched file and checks that each site still reads the old name;
-  pass two writes. A single mismatch aborts everything before anything has
-  been written, because a half-applied rename across five files is far worse
-  than one that did not happen - and it is a real case, not a theoretical
-  one: the plan describes the buffers as the server last saw them, and the
-  user may have typed since.
+  APPLYING IS TWO PASSES OVER THE WHOLE PLAN, NOT PER FILE. Pass one takes
+  hold of every touched file - the buffer if it is open, the text on disk if
+  it is not - and checks that each site still reads the old name; pass two
+  writes. A single mismatch aborts everything before anything has been
+  written, because a half-applied rename across five files is far worse than
+  one that did not happen - and it is a real case, not a theoretical one: the
+  plan describes the sources as the server last saw them, and the user may
+  have typed since.
+
+  A FILE NOBODY HAS OPEN IS NOT OPENED. It is rewritten on disk instead. The
+  first live run opened one editor tab per touched file - a dozen tabs the
+  user never asked for, every one of them a modified buffer, so the IDE then
+  asked what to do with each at the next close, which read as "something told
+  it to close everything" (2026-08-31). The cost is real and is stated where
+  it belongs, in the results tab: those files have no undo step. The server
+  is told about them too - a disk write is invisible to the analysis
+  otherwise (LspFilesChangedOnDisk).
 
   Within a file the edits are applied ASCENDING through one undoable writer -
   the same rule (and the same reason) as PasTreeIdePlugin.ClassComplete: a
@@ -95,7 +105,8 @@ uses
   System.Generics.Collections,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
   System.IOUtils,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings;
+  ToolsAPI.UI, PasLsp.SourceText,
+  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -192,7 +203,8 @@ end;
   POST-rename lines. See PasTreeIdePlugin.FindReferences for why the removal
   below is conditional on the IDE not terminating - it is the same group
   mechanism and the same 2026-08-22 access violation. }
-procedure ReportRename(const APlan: TLspRenamePlan);
+procedure ReportRename(const APlan: TLspRenamePlan;
+  const ADiskFiles: TArray<string>);
 var
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
@@ -211,6 +223,14 @@ begin
   LMessageServices.AddTitleMessage(
     Format('PasTree Rename: "%s" -> "%s" - %d site(s) changed',
       [APlan.OldName, APlan.NewName, Length(APlan.Edits)]), LGroup);
+  { The one thing about this rename the editor cannot show: files nobody had
+    open were rewritten ON DISK, and those changes have no undo step. Said
+    here rather than in a dialog because it is a fact about the result, and
+    this tab IS the result. }
+  if Length(ADiskFiles) > 0 then
+    LMessageServices.AddTitleMessage(
+      Format('%d file(s) were not open and were changed on disk - no undo ' +
+        'step for those.', [Length(ADiskFiles)]), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
@@ -247,13 +267,42 @@ begin
 end;
 
 /// <summary>
-/// Opens AFileName if it is not open already and returns its source editor.
-/// nil when the file cannot be opened or is not a source editor - which
-/// aborts the whole rename, by design (see the unit header).
-/// </summary>
-function OpenSourceEditor(const AFileName: string): IOTASourceEditor;
+{ One touched FILE, and how it is going to be written.
+
+  TWO KINDS, AND THE DISTINCTION IS THE WHOLE REASON THIS RECORD EXISTS. A
+  file somebody has open is edited through its buffer, so the change is
+  undoable and the editor shows it immediately. A file nobody has open is
+  edited ON DISK - and, crucially, is NOT OPENED to do it.
+
+  Opening it would be easier and it is what this did first (2026-08-31): a
+  rename of anything with a dozen references buried the user in a dozen new
+  editor tabs they never asked for, which is how the first live run reported
+  it. Worse than the clutter, every one of those tabs is a MODIFIED buffer -
+  so the IDE then asks what to do with each of them at the next close, which
+  is the "it wants to save everything" symptom from the same run.
+
+  The cost of the disk half is honest and stated to the user: those files
+  have no undo step. Everything else about the rename stays the same, checks
+  included - a site is verified against the text that will be rewritten,
+  whichever kind it is. }
+type
+  TRenameFile = record
+    Path: string;
+    // nil for a file nobody has open - see above.
+    Editor: IOTASourceEditor;
+    // Only for the disk kind: the text as read, and the encoding to put it
+    // back in (a .pas is UTF-8-with-BOM, bare UTF-8 or ANSI, and rewriting
+    // it as a different one of those moves every non-ASCII column in it).
+    Text: string;
+    Encoding: TPasSourceEncoding;
+  end;
+
+  TRenameFiles = TDictionary<string, TRenameFile>;
+
+{ The editor holding AFileName, or nil if nobody has it open. Deliberately
+  never OPENS one - see TRenameFile. }
+function OpenEditorOf(const AFileName: string): IOTASourceEditor;
 var
-  LActionServices: IOTAActionServices;
   LModuleServices: IOTAModuleServices;
   LModule: IOTAModule;
   LIdx: Integer;
@@ -263,16 +312,7 @@ begin
     Exit;
   LModule := LModuleServices.FindModule(AFileName);
   if not Assigned(LModule) then
-  begin
-    if not Supports(BorlandIDEServices, IOTAActionServices,
-      LActionServices) then
-      Exit;
-    if not LActionServices.OpenFile(AFileName) then
-      Exit;
-    LModule := LModuleServices.FindModule(AFileName);
-    if not Assigned(LModule) then
-      Exit;
-  end;
+    Exit;
   for LIdx := 0 to LModule.GetModuleFileCount - 1 do
     if Supports(LModule.GetModuleFileEditor(LIdx), IOTASourceEditor,
       Result) then
@@ -280,122 +320,277 @@ begin
   Result := nil;
 end;
 
-{ Pass one of two: every site is checked against the LIVE buffer before
-  anything is written. The plan's coordinates describe the text the server
-  holds, and the user may have typed since; a mismatch here means the whole
-  rename is refused, with the file and line named, rather than applied to
-  whatever now sits at those columns.
+{ The 1-based character offset of (ARow, ACol) in AText, or 0 when the text is
+  too short for it.
 
-  Per EDIT rather than per rename, deliberately: a peer routine header's own
-  parameter is a separate symbol and could, in already-broken code, be
-  spelled differently from the one that was clicked. }
-function VerifySites(const AEditors: TDictionary<string, IOTASourceEditor>;
-  const APlan: TLspRenamePlan; out AError: string): Boolean;
+  Line ends are counted as they are FOUND rather than assumed: a file may hold
+  CRLF, LF or a mixture, and a rename that guessed two characters where there
+  was one would land its edit somewhere else entirely. }
+function OffsetOf(const AText: string; ARow, ACol: Integer): Integer;
+var
+  LIdx, LRow: Integer;
+begin
+  Result := 0;
+  if (ARow < 1) or (ACol < 1) then
+    Exit;
+  LIdx := 1;
+  LRow := 1;
+  while (LRow < ARow) and (LIdx <= Length(AText)) do
+  begin
+    if AText[LIdx] = #13 then
+    begin
+      Inc(LRow);
+      if (LIdx < Length(AText)) and (AText[LIdx + 1] = #10) then
+        Inc(LIdx);
+    end
+    else if AText[LIdx] = #10 then
+      Inc(LRow);
+    Inc(LIdx);
+  end;
+  if LRow <> ARow then
+    Exit;
+  Result := LIdx + ACol - 1;
+end;
+
+{ Every file the plan touches, each one told apart into the two kinds. False
+  (with AError set) only for a file that can be neither: not open AND not
+  readable, which aborts the whole rename rather than skipping a site. }
+function CollectFiles(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
+  out AError: string): Boolean;
 var
   LEdit: TLspRenameEdit;
-  LEditor: IOTASourceEditor;
-  LView: IOTAEditView;
-  LPos: IOTAEditPosition;
-  LRow, LCol: Integer;
+  LFile: TRenameFile;
+  LKey: string;
 begin
   Result := False;
   AError := '';
   for LEdit in APlan.Edits do
   begin
-    if not AEditors.TryGetValue(LowerCase(LEdit.FilePath), LEditor) or
-       (LEditor.GetEditViewCount = 0) then
-    begin
-      AError := Format('%s could not be opened.',
-        [ExtractFileName(LEdit.FilePath)]);
-      Exit;
-    end;
-    LView := LEditor.GetEditView(0);
-    LPos := LView.Buffer.EditPosition;
-    if not Assigned(LPos) then
-    begin
-      AError := Format('%s has no editable buffer.',
-        [ExtractFileName(LEdit.FilePath)]);
-      Exit;
-    end;
-    // The caret is a side effect of reading; put it back where it was, or
-    // a cancelled rename would still have moved the user's cursor.
-    LRow := LPos.Row;
-    LCol := LPos.Column;
-    try
-      LPos.Move(LEdit.Row, LEdit.Col);
-      if not SameText(LPos.Read(LEdit.Len), LEdit.OldText) then
+    LKey := LowerCase(LEdit.FilePath);
+    if AFiles.ContainsKey(LKey) then
+      Continue;
+    LFile := Default(TRenameFile);
+    LFile.Path := LEdit.FilePath;
+    LFile.Editor := OpenEditorOf(LEdit.FilePath);
+    if not Assigned(LFile.Editor) then
+      if not TryReadSourceForEdit(LEdit.FilePath, LFile.Text,
+        LFile.Encoding) then
       begin
-        AError := Format('%s line %d no longer reads "%s" - the buffer has ' +
-          'changed since the last analysis.'#13#10#13#10 +
-          'Nothing was renamed. Try again in a moment.',
-          [ExtractFileName(LEdit.FilePath), LEdit.Row, LEdit.OldText]);
+        AError := Format('%s is not open and could not be read.'#13#10#13#10 +
+          'Nothing was renamed.', [LEdit.FilePath]);
         Exit;
       end;
-    finally
-      LPos.Move(LRow, LCol);
+    AFiles.Add(LKey, LFile);
+  end;
+  Result := True;
+end;
+
+{ Pass one of two: every site is checked against the text that is about to be
+  rewritten - the live buffer for an open file, the text just read for a
+  closed one. The plan's coordinates describe what the server last saw, and
+  the user may have typed since; a mismatch refuses the WHOLE rename, naming
+  the file and line, rather than writing over whatever now sits there.
+
+  Per EDIT rather than per rename, deliberately: a peer routine header's own
+  parameter is a separate symbol and could, in already-broken code, be spelled
+  differently from the one that was clicked. }
+function VerifySites(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
+  out AError: string): Boolean;
+var
+  LEdit: TLspRenameEdit;
+  LFile: TRenameFile;
+  LView: IOTAEditView;
+  LPos: IOTAEditPosition;
+  LRow, LCol, LOffset: Integer;
+  LFound: string;
+begin
+  Result := False;
+  AError := '';
+  for LEdit in APlan.Edits do
+  begin
+    if not AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) then
+      Exit;   // CollectFiles succeeded, so this cannot happen
+    LFound := '';
+    if Assigned(LFile.Editor) then
+    begin
+      if LFile.Editor.GetEditViewCount = 0 then
+      begin
+        AError := Format('%s is open but has no view.',
+          [ExtractFileName(LEdit.FilePath)]);
+        Exit;
+      end;
+      LView := LFile.Editor.GetEditView(0);
+      LPos := LView.Buffer.EditPosition;
+      if not Assigned(LPos) then
+      begin
+        AError := Format('%s has no editable buffer.',
+          [ExtractFileName(LEdit.FilePath)]);
+        Exit;
+      end;
+      // The caret is a side effect of reading; put it back, or a cancelled
+      // rename would still have moved the user's cursor.
+      LRow := LPos.Row;
+      LCol := LPos.Column;
+      try
+        LPos.Move(LEdit.Row, LEdit.Col);
+        LFound := LPos.Read(LEdit.Len);
+      finally
+        LPos.Move(LRow, LCol);
+      end;
+    end
+    else
+    begin
+      LOffset := OffsetOf(LFile.Text, LEdit.Row, LEdit.Col);
+      if LOffset > 0 then
+        LFound := Copy(LFile.Text, LOffset, LEdit.Len);
+    end;
+    if not SameText(LFound, LEdit.OldText) then
+    begin
+      AError := Format('%s line %d no longer reads "%s" - the buffer has ' +
+        'changed since the last analysis.'#13#10#13#10 +
+        'Nothing was renamed. Try again in a moment.',
+        [ExtractFileName(LEdit.FilePath), LEdit.Row, LEdit.OldText]);
+      Exit;
     end;
   end;
   Result := True;
 end;
 
-{ Pass two: the writes. One undoable writer per FILE, so each file's rename
-  is one Ctrl+Z - the closest this can get to the single undo step the demo
-  gets from one editor per file.
+{ Pass two, the buffer half: one undoable writer per FILE, so each file's
+  rename is one Ctrl+Z.
 
-  Offsets are all resolved before the first write of that file (a writer's
-  positions address the ORIGINAL text, and CharPosToPos answers about the
-  buffer as it is now - converting inside the loop would read a buffer the
-  earlier writes had already changed; see ApplyClassComplete, which learned
-  this the expensive way). }
-procedure ApplySites(const AEditors: TDictionary<string, IOTASourceEditor>;
-  const APlan: TLspRenamePlan);
+  Offsets are all resolved before the first write of that file - a writer's
+  positions address the ORIGINAL text while CharPosToPos answers about the
+  buffer as it is NOW, so converting inside the loop would read a buffer the
+  earlier writes had already changed (see ApplyClassComplete, which learned
+  that the expensive way). Within the file the edits go ASCENDING, the only
+  direction a writer can move. }
+procedure WriteBuffer(const AEditor: IOTASourceEditor;
+  const APlan: TLspRenamePlan; AFrom, ATo: Integer);
 var
-  LIdx, LRun, LOffIdx: Integer;
-  LEditor: IOTASourceEditor;
+  LIdx: Integer;
   LView: IOTAEditView;
   LWriter: IOTAEditWriter;
   LCharPos: TOTACharPos;
   LOffsets: TArray<Integer>;
 begin
-  LIdx := 0;
-  while LIdx <= High(APlan.Edits) do
+  if AEditor.GetEditViewCount = 0 then
+    Exit;
+  LView := AEditor.GetEditView(0);
+  SetLength(LOffsets, ATo - AFrom + 1);
+  for LIdx := AFrom to ATo do
   begin
-    // The run of edits belonging to one file - the plan is sorted by file.
-    LRun := LIdx;
-    while (LRun <= High(APlan.Edits)) and
-          SameText(APlan.Edits[LRun].FilePath, APlan.Edits[LIdx].FilePath) do
-      Inc(LRun);
-    if AEditors.TryGetValue(LowerCase(APlan.Edits[LIdx].FilePath), LEditor) and
-       (LEditor.GetEditViewCount > 0) then
+    LCharPos.Line := APlan.Edits[LIdx].Row;
+    LCharPos.CharIndex := APlan.Edits[LIdx].Col - 1;
+    LOffsets[LIdx - AFrom] := LView.CharPosToPos(LCharPos);
+  end;
+  LWriter := LView.Buffer.CreateUndoableWriter;
+  if not Assigned(LWriter) then
+    Exit;
+  try
+    for LIdx := AFrom to ATo do
     begin
-      LView := LEditor.GetEditView(0);
-      SetLength(LOffsets, LRun - LIdx);
-      for LOffIdx := LIdx to LRun - 1 do
-      begin
-        LCharPos.Line := APlan.Edits[LOffIdx].Row;
-        LCharPos.CharIndex := APlan.Edits[LOffIdx].Col - 1;
-        LOffsets[LOffIdx - LIdx] := LView.CharPosToPos(LCharPos);
-      end;
-      LWriter := LView.Buffer.CreateUndoableWriter;
-      if Assigned(LWriter) then
-      try
-        for LOffIdx := LIdx to LRun - 1 do
-        begin
-          LWriter.CopyTo(LOffsets[LOffIdx - LIdx]);
-          LWriter.DeleteTo(LOffsets[LOffIdx - LIdx] + APlan.Edits[LOffIdx].Len);
-          // The site's OWN new text: a unit rename writes the full dotted
-          // name where the reference was written in full and the bare leaf
-          // where a namespace prefix resolved it, on the same line.
-          LWriter.Insert(UTF8String(APlan.Edits[LOffIdx].NewText));
-        end;
-      finally
-        LWriter := nil;   // the writer commits on release
-      end;
-      LView.Paint;
+      LWriter.CopyTo(LOffsets[LIdx - AFrom]);
+      LWriter.DeleteTo(LOffsets[LIdx - AFrom] + APlan.Edits[LIdx].Len);
+      // The site's OWN new text: a unit rename writes the full dotted name
+      // where the reference was written in full and the bare leaf where a
+      // namespace prefix resolved it, on the same line.
+      LWriter.Insert(UTF8String(APlan.Edits[LIdx].NewText));
     end;
-    LIdx := LRun;
+  finally
+    LWriter := nil;   // the writer commits on release
+  end;
+  LView.Paint;
+end;
+
+{ Pass two, the disk half: the same edits into the text already in hand,
+  walked BACKWARDS so an earlier replacement cannot move a later one's offset,
+  then written back in the encoding the file came in.
+
+  The opposite direction from the buffer half, and both are right: a writer
+  streams forward through the original text, while string surgery mutates what
+  the next offset is measured against. }
+function WriteDisk(var AFile: TRenameFile; const APlan: TLspRenamePlan;
+  AFrom, ATo: Integer): Boolean;
+var
+  LIdx, LOffset: Integer;
+begin
+  for LIdx := ATo downto AFrom do
+  begin
+    LOffset := OffsetOf(AFile.Text, APlan.Edits[LIdx].Row,
+      APlan.Edits[LIdx].Col);
+    if LOffset <= 0 then
+      Exit(False);   // verified above, so this is a bug rather than a race
+    Delete(AFile.Text, LOffset, APlan.Edits[LIdx].Len);
+    Insert(APlan.Edits[LIdx].NewText, AFile.Text, LOffset);
+  end;
+  Result := TryWriteSource(AFile.Path, AFile.Text, AFile.Encoding);
+end;
+
+{ Open everything that is already open, read the rest, verify EVERYTHING, then
+  write - the two passes the unit header describes.
+
+  ADiskFiles comes back holding every file that was changed on disk rather
+  than in a buffer: the caller owes those two things the buffer half gets for
+  free - telling the server they moved, and telling the USER they have no undo
+  step. }
+function ApplyPlan(const APlan: TLspRenamePlan;
+  out ADiskFiles: TArray<string>): Boolean;
+var
+  LFiles: TRenameFiles;
+  LFile: TRenameFile;
+  LError: string;
+  LIdx, LRun: Integer;
+  LDisk: TList<string>;
+begin
+  Result := False;
+  ADiskFiles := nil;
+  LFiles := TRenameFiles.Create;
+  LDisk := TList<string>.Create;
+  try
+    if not CollectFiles(APlan, LFiles, {out} LError) then
+    begin
+      TellUser(LError, mtError);
+      Exit;
+    end;
+    if not VerifySites(APlan, LFiles, {out} LError) then
+    begin
+      TellUser(LError, mtError);
+      Exit;
+    end;
+    LIdx := 0;
+    while LIdx <= High(APlan.Edits) do
+    begin
+      // The run of edits belonging to one file - the plan is sorted by file.
+      LRun := LIdx;
+      while (LRun < High(APlan.Edits)) and
+            SameText(APlan.Edits[LRun + 1].FilePath,
+              APlan.Edits[LIdx].FilePath) do
+        Inc(LRun);
+      if LFiles.TryGetValue(LowerCase(APlan.Edits[LIdx].FilePath), LFile) then
+      begin
+        if Assigned(LFile.Editor) then
+          WriteBuffer(LFile.Editor, APlan, LIdx, LRun)
+        else if WriteDisk(LFile, APlan, LIdx, LRun) then
+          LDisk.Add(LFile.Path)
+        else
+          // One file of several failed to write. Said out loud rather than
+          // silently: the rename is now partial, and only the user can decide
+          // what to do about it.
+          TellUser(Format('%s could not be written - it may be read-only. ' +
+            'The rename is INCOMPLETE: everything else was changed.',
+            [LFile.Path]), mtError);
+      end;
+      LIdx := LRun + 1;
+    end;
+    ADiskFiles := LDisk.ToArray;
+    Result := True;
+  finally
+    LDisk.Free;
+    LFiles.Free;
   end;
 end;
+
 
 { The project the IDE currently considers active - the one a renamed unit
   belongs to. nil during startup, or with no project open, and every caller
@@ -413,27 +608,72 @@ begin
     Result := LGroup.ActiveProject;
 end;
 
-{ THE FILE HALF OF A UNIT RENAME, and the only place this package writes to
-  the file system.
+
+{ Every module the plan touched, to disk - the open ones only, since the
+  closed ones were written directly.
+
+  BEFORE THE FILE MOVES, and that ordering is the fix for the ugliest symptom
+  of the first live run: a unit renamed while its own buffer (and its
+  callers' buffers) still held unsaved edits left the IDE asking what to do
+  with each of them afterwards, which reads exactly like "something told it to
+  close everything". Saving first means there is nothing left to ask about. }
+procedure SaveTouchedModules(const APlan: TLspRenamePlan);
+var
+  LEdit: TLspRenameEdit;
+  LSeen: TDictionary<string, Boolean>;
+  LEditor: IOTASourceEditor;
+  LKey: string;
+begin
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for LEdit in APlan.Edits do
+    begin
+      LKey := LowerCase(LEdit.FilePath);
+      if LSeen.ContainsKey(LKey) then
+        Continue;
+      LSeen.Add(LKey, True);
+      LEditor := OpenEditorOf(LEdit.FilePath);
+      if Assigned(LEditor) and LEditor.Modified and
+         Assigned(LEditor.Module) then
+        try
+          LEditor.Module.Save(False, False);
+        except
+          on E: Exception do
+            // Reported, not raised: the caller is mid-rename and the next
+            // steps still have to run or the state gets worse, not better.
+            LogDiagnostic(Format('rename: saving %s failed: %s',
+              [ExtractFileName(LEdit.FilePath), E.Message]));
+        end;
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+{ THE FILE HALF OF A UNIT RENAME, and the only place this package renames
+  anything on disk.
 
   Object Pascal ties a unit's name to its file name, so text edits alone
-  produce a project that does not compile - which makes this not an extra
-  but the other half of the same action. It runs only after every text edit
-  has been applied and SAVED: a file renamed under an unsaved buffer loses
-  whatever the buffer held.
+  produce a project that does not compile - which makes this not an extra but
+  the other half of the same action.
 
-  THROUGH THE PROJECT, NOT ONLY THROUGH THE DISK. RemoveFile + AddFile is
-  what makes the IDE rewrite its own bookkeeping - the .dproj entry and, in a
-  program, the `uses Foo in 'Foo.pas'` path. That path is exactly what the
+  THROUGH THE PROJECT, NOT ONLY THROUGH THE DISK. RemoveFile + AddFile is what
+  makes the IDE rewrite its own bookkeeping - the .dproj entry and, in a
+  program, the `uses Foo in ''Foo.pas''` path. That path is exactly what the
   analysis plan CANNOT fix (it has no position for the literal; see the
   server's UsesInPathSites), so this is not a convenience: it is the reason a
   unit rename can be complete at all.
 
   A .dfm goes with it. A form unit's resource directive resolves against the
-  UNIT
-  name, so a renamed unit whose .dfm kept the old name loses its form - and
-  the error appears at run time, not at build. Same for the .dcr/.dcu-adjacent
-  companions we do NOT touch: those are build output and regenerate.
+  UNIT name, so a renamed unit whose .dfm kept the old name loses its form -
+  and that fails at RUN time, not at build.
+
+  EVERY STEP IS INDIVIDUALLY GUARDED, and that is not defensive habit: an
+  exception escaping this ran through an LSP callback into the IDE's message
+  loop on the first live run, which is how a rename that had already succeeded
+  ended with no results tab and a confused IDE. Each step reports and the rest
+  still runs, because a rename stopped halfway is worse than one that finishes
+  with a warning.
 
   ORDER, and each step is here because the previous one makes it possible:
     1. save every touched module      - the edits must be on disk
@@ -444,14 +684,12 @@ end;
     5. add the new file to the project - the IDE rewrites .dproj and the
                                          program's uses path here
     6. reopen it in the editor         - the user was looking at it }
-function RenameUnitFile(const APlan: TLspRenamePlan;
-  const AEditors: TDictionary<string, IOTASourceEditor>): Boolean;
+function RenameUnitFile(const APlan: TLspRenamePlan): Boolean;
 var
   LModuleServices: IOTAModuleServices;
   LActionServices: IOTAActionServices;
   LModule: IOTAModule;
   LProject: IOTAProject;
-  LEditor: IOTASourceEditor;
   LOldDfm, LNewDfm: string;
 begin
   Result := False;
@@ -474,20 +712,11 @@ begin
   then
     Exit;
 
-  // 1. Every touched buffer to disk. Not just the renamed one: the `uses`
-  //    edits in other units are part of the same rename, and leaving them
-  //    only in buffers while the file name changes underneath is how a
-  //    half-state becomes permanent.
-  for LEditor in AEditors.Values do
-    if Assigned(LEditor.Module) then
-      LEditor.Module.Save(False, False);
+  SaveTouchedModules(APlan);
 
   LModule := LModuleServices.FindModule(APlan.FilePath);
   LProject := ActiveProject;
 
-  // 2-3. Out of the project, then out of the editor. RemoveFile first: it
-  //      addresses the file by the name the project knows, which the move
-  //      below is about to invalidate.
   if Assigned(LProject) then
     try
       LProject.RemoveFile(APlan.FilePath);
@@ -499,9 +728,14 @@ begin
           '%s', [ExtractFileName(APlan.FilePath), E.Message]));
     end;
   if Assigned(LModule) then
-    LModule.Close;
+    try
+      LModule.Close;
+    except
+      on E: Exception do
+        LogDiagnostic(Format('rename: closing %s failed: %s',
+          [ExtractFileName(APlan.FilePath), E.Message]));
+    end;
 
-  // 4. The rename itself, .dfm included.
   try
     TFile.Move(APlan.FilePath, APlan.NewFilePath);
   except
@@ -511,8 +745,8 @@ begin
         'The text edits are applied - rename the file by hand, or undo.',
         [ExtractFileName(APlan.FilePath),
          ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
-      // Put the file back in the project even so: a project missing a unit
-      // it still contains is worse than the failed rename.
+      // Put the file back in the project even so: a project missing a unit it
+      // still contains is worse than the failed rename.
       if Assigned(LProject) then
         try
           LProject.AddFile(APlan.FilePath, True);
@@ -528,8 +762,6 @@ begin
       TFile.Move(LOldDfm, LNewDfm);
     except
       on E: Exception do
-        // Said out loud rather than swallowed: a form that has lost its .dfm
-        // fails at RUN time, which is a long way from here.
         TellUser(Format('The unit was renamed, but its form file could not ' +
           'be renamed from %s to %s: %s'#13#10#13#10 +
           'Rename it by hand before running - a unit whose .dfm name does ' +
@@ -538,8 +770,6 @@ begin
           mtError);
     end;
 
-  // 5-6. Back into the project - which is what rewrites the .dproj entry and
-  //      a program's `in '...'` path - and back into the editor.
   if Assigned(LProject) then
     try
       LProject.AddFile(APlan.NewFilePath, True);
@@ -551,56 +781,16 @@ begin
           [ExtractFileName(APlan.FilePath),
            ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
     end;
-  LActionServices.OpenFile(APlan.NewFilePath);
+  try
+    LActionServices.OpenFile(APlan.NewFilePath);
+  except
+    on E: Exception do
+      LogDiagnostic(Format('rename: reopening %s failed: %s',
+        [ExtractFileName(APlan.NewFilePath), E.Message]));
+  end;
   Result := True;
 end;
 
-{ Open everything, verify everything, then write - the two passes the unit
-  header describes, with the opening folded into the first because a file
-  that will not open is the same kind of refusal as a site that moved. }
-function ApplyPlan(const APlan: TLspRenamePlan): Boolean;
-var
-  LEditors: TDictionary<string, IOTASourceEditor>;
-  LEdit: TLspRenameEdit;
-  LEditor: IOTASourceEditor;
-  LKey, LError: string;
-begin
-  Result := False;
-  LEditors := TDictionary<string, IOTASourceEditor>.Create;
-  try
-    for LEdit in APlan.Edits do
-    begin
-      LKey := LowerCase(LEdit.FilePath);
-      if LEditors.ContainsKey(LKey) then
-        Continue;
-      LEditor := OpenSourceEditor(LEdit.FilePath);
-      if not Assigned(LEditor) then
-      begin
-        TellUser(Format('Cannot open %s.'#13#10#13#10 +
-          'Nothing was renamed.', [LEdit.FilePath]), mtError);
-        Exit;
-      end;
-      LEditors.Add(LKey, LEditor);
-    end;
-    if not VerifySites(LEditors, APlan, {out} LError) then
-    begin
-      TellUser(LError, mtError);
-      Exit;
-    end;
-    ApplySites(LEditors, APlan);
-    { And, for a unit, the half that is not text at all. Deliberately AFTER
-      the edits: the plan describes the sources as analyzed, so every
-      position must be resolved and written against the old file name. A
-      failure here reports itself and leaves the text edits standing - the
-      user can undo them or finish the file rename by hand, and either way
-      is told which. }
-    if APlan.IsUnit then
-      RenameUnitFile(APlan, LEditors);
-    Result := True;
-  finally
-    LEditors.Free;
-  end;
-end;
 
 { 'unit' or 'symbol' - for the Build tab line, so a reader can tell which of
   the two renames just happened without counting the edits. }
@@ -613,7 +803,20 @@ begin
 end;
 
 { The rename proper, once the analysis has said WHAT is being renamed (see
-  ExecuteRename): ask for the new name, plan, apply, report. }
+  ExecuteRename): ask for the new name, plan, apply, report.
+
+  THE RESULTS TAB COMES BEFORE THE FILE RENAME, deliberately. The text edits
+  are done by then and the user is entitled to see them whatever happens next;
+  on the first live run a failure inside the file half took the tab down with
+  it and the rename looked like it had done nothing (2026-08-31). Reporting
+  first also means the tab is the record of what was changed even when the
+  file half then complains.
+
+  EVERYTHING HERE RUNS INSIDE A CALLBACK, which is why the whole body is
+  guarded. ExecuteRename's own try/except only covers issuing the request -
+  by the time the answer arrives that frame is long gone, so an exception
+  raised here would escape into the IDE's message loop with nothing to catch
+  it. That is exactly what happened on the first live run. }
 procedure RenameFrom(const AFileName: string; ARow, ACol: Integer;
   const AOldName: string);
 var
@@ -636,40 +839,60 @@ begin
   LspRenamePlan(AFileName, ARow, ACol, LNewName,
     procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
       const AError: string)
+    var
+      LDiskFiles: TArray<string>;
     begin
       GPlanning := False;
       if not GAlive then
         Exit;
-      // The server's own sentence, verbatim - a reserved word, a builtin, a
-      // `uses` spelling it has no rule for. See the unit header on why none
-      // of these is re-worded here.
-      if not ASuccess then
-      begin
-        TellUser(AError, mtWarning);
-        Exit;
+      try
+        // The server's own sentence, verbatim - a reserved word, a builtin, a
+        // `uses` spelling it has no rule for. See the unit header on why none
+        // of these is re-worded here.
+        if not ASuccess then
+        begin
+          TellUser(AError, mtWarning);
+          Exit;
+        end;
+        if Length(APlan.Edits) = 0 then
+        begin
+          TellUser('Nothing to rename.', mtInformation);
+          Exit;
+        end;
+        if not ApplyPlan(APlan, {out} LDiskFiles) then
+          Exit;   // ApplyPlan has already said why, and changed nothing
+        ReportRename(APlan, LDiskFiles);
+        LogDiagnostic(Format('rename: %s %s -> %s, %d site(s)%s%s',
+          [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
+           Length(APlan.Edits),
+           IfThen(Length(LDiskFiles) > 0,
+             Format(', %d on disk', [Length(LDiskFiles)]), ''),
+           IfThen(APlan.IsUnit, ' + file -> ' + APlan.RequiredFileName, '')]));
+        if APlan.IsUnit then
+        begin
+          RenameUnitFile(APlan);
+          { A renamed FILE is a different analysis closure, and the server
+            fixes its closure at initialize - so this is the one edit in the
+            product that cannot be absorbed incrementally. Restarting is
+            honest and costs the next request one rebuild; keeping the old
+            server would have it answer every later question about a file
+            that no longer exists. }
+          LspRestartForClosureChange(Format('unit %s was renamed to %s',
+            [APlan.OldName, APlan.NewName]));
+        end
+        else if Length(LDiskFiles) > 0 then
+          // A file written on disk is invisible to the analysis until it is
+          // told - no editor event ever happens for it. Not needed in the
+          // unit case above, which restarts the whole session anyway.
+          LspFilesChangedOnDisk(LDiskFiles);
+      except
+        on E: Exception do
+          LogDiagnostic(Format('Rename: unhandled %s: %s',
+            [E.ClassName, E.Message]));
       end;
-      if Length(APlan.Edits) = 0 then
-      begin
-        TellUser('Nothing to rename.', mtInformation);
-        Exit;
-      end;
-      if not ApplyPlan(APlan) then
-        Exit;   // ApplyPlan has already said why, and changed nothing
-      ReportRename(APlan);
-      LogDiagnostic(Format('rename: %s %s -> %s, %d site(s)%s',
-        [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
-         Length(APlan.Edits),
-         IfThen(APlan.IsUnit, ' + file -> ' + APlan.RequiredFileName, '')]));
-      { A renamed FILE is a different analysis closure, and the server fixes
-        its closure at initialize - so this is the one edit in the product
-        that cannot be absorbed incrementally. Restarting is honest and costs
-        the next request one rebuild; keeping the old server would have it
-        answer every later question about a file that no longer exists. }
-      if APlan.IsUnit then
-        LspRestartForClosureChange(Format('unit %s was renamed to %s',
-          [APlan.OldName, APlan.NewName]));
     end);
 end;
+
 
 { THE ANALYSIS IS ASKED WHAT IS UNDER THE CARET BEFORE THE DIALOG OPENS, and
   that is not ceremony. A UNIT's name may be dotted - `Namespace.Foo` is ONE
@@ -707,20 +930,28 @@ begin
         GPlanning := False;
         if not GAlive then
           Exit;
-        if not ASuccess then
-        begin
-          TellUser(AError, mtWarning);
-          Exit;
+        // Guarded for RenameFrom's reason: this body runs long after the
+        // frame below returned, so there is nothing else to catch it.
+        try
+          if not ASuccess then
+          begin
+            TellUser(AError, mtWarning);
+            Exit;
+          end;
+          if AName = '' then
+          begin
+            TellUser('No identifier under the cursor.', mtInformation);
+            Exit;
+          end;
+          // The caret may have moved while we were asking, and that is fine:
+          // the POSITION we asked about is the one we keep renaming from,
+          // and the server still holds the snapshot it answered from.
+          RenameFrom(LFileName, LRow, LCol, AName);
+        except
+          on E: Exception do
+            LogDiagnostic(Format('Rename: unhandled %s: %s',
+              [E.ClassName, E.Message]));
         end;
-        if AName = '' then
-        begin
-          TellUser('No identifier under the cursor.', mtInformation);
-          Exit;
-        end;
-        // The caret may have moved while we were asking, and that is fine:
-        // the POSITION we asked about is the one we keep renaming from, and
-        // the server still holds the same snapshot it answered from.
-        RenameFrom(LFileName, LRow, LCol, AName);
       end);
   except
     on E: Exception do

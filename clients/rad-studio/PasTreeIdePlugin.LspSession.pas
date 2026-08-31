@@ -488,6 +488,18 @@ procedure LspProjectOpened;
 procedure LspProjectClosed;
 
 /// <summary>
+/// Tells the server that these files changed ON DISK, outside any editor -
+/// which is exactly what a rename does to a unit nobody has open. Sent as
+/// workspace/didChangeWatchedFiles, whose whole purpose is this: the client
+/// says what moved, the server decides whether a rebuild is due (a file it
+/// holds an overlay for is left alone; anything else schedules one).
+///
+/// Without it a disk edit is INVISIBLE to the analysis - every later answer
+/// about that file describes text that is no longer there.
+/// </summary>
+procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
+
+/// <summary>
 /// Forces the next request to start a FRESH server, because the set of files
 /// the analysis is built from has changed in a way no incremental path can
 /// absorb - a unit renamed on disk. The server fixes its closure at
@@ -594,6 +606,7 @@ type
     procedure Prewarm;
     procedure ProjectOpened;
     procedure ProjectClosed;
+    procedure FilesChangedOnDisk(const APaths: TArray<string>);
     procedure RestartForClosureChange(const AWhy: string);
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
@@ -2026,6 +2039,34 @@ end;
 { The server is deliberately LEFT RUNNING - see LspProjectClosed. This only
   records the boundary, on both sides, while there is still a project to
   name. }
+{ A notification, so there is nothing to wait for and nothing to fail: if the
+  server is not up, the files will be read from disk by the analysis that
+  starts it anyway. FileChangeType 2 is `Changed`, which is what a rewritten
+  file is - even a renamed one, from the point of view of the two paths
+  involved (the old one is gone, the new one is new, and both are covered by
+  reporting them as changed; the server re-reads either way). }
+procedure TLspSession.FilesChangedOnDisk(const APaths: TArray<string>);
+var
+  LParams: TJSONObject;
+  LChanges: TJSONArray;
+  LChange: TJSONObject;
+  LPath: string;
+begin
+  if not Assigned(FClient) or not FClient.IsReady or (Length(APaths) = 0) then
+    Exit;
+  LChanges := TJSONArray.Create;
+  for LPath in APaths do
+  begin
+    LChange := TJSONObject.Create;
+    LChange.AddPair('uri', PathToLspUri(LPath));
+    LChange.AddPair('type', TJSONNumber.Create(2));
+    LChanges.AddElement(LChange);
+  end;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('changes', LChanges);
+  FClient.Notify('workspace/didChangeWatchedFiles', LParams);
+end;
+
 { Not a Stop: clearing the recorded project is enough, and it is the same
   mechanism a project/platform switch already uses (see EnsureSession, which
   compares what it started against what the IDE now says). The next request
@@ -2124,6 +2165,12 @@ procedure LspProjectClosed;
 begin
   if Assigned(GSession) then
     GSession.ProjectClosed;
+end;
+
+procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
+begin
+  if Assigned(GSession) then
+    GSession.FilesChangedOnDisk(APaths);
 end;
 
 procedure LspRestartForClosureChange(const AWhy: string);

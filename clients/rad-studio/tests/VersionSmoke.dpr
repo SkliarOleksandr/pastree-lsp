@@ -76,12 +76,31 @@ end;
 /// the buffer's text must compare equal even though a tolerant ANSI decode of
 /// those same bytes would not (the rebuild gate).
 /// </summary>
+/// Byte-for-byte equality of a FILE and the bytes it should hold - the only
+/// comparison an encoding round-trip test can be built on. A text comparison
+/// would pass on exactly the bug this is looking for.
+function SameBytes(const APath: string; const ABytes: TBytes): Boolean;
+var
+  LFile: TBytes;
+begin
+  try
+    LFile := TFile.ReadAllBytes(APath);
+  except
+    Exit(False);
+  end;
+  Result := Length(LFile) = Length(ABytes);
+  if Result and (Length(LFile) > 0) then
+    Result := CompareMem(@LFile[0], @ABytes[0], Length(LFile));
+end;
+
 procedure TestSourceText;
 var
-  LDir, LPlain, LBom, LMissing: string;
+  LDir, LPlain, LBom, LMissing, LAnsi, LUtf16: string;
   LText: string;
+  LEnc: TPasSourceEncoding;
 const
   cText = 'unit A;'#13#10'// em dash — here'#13#10'end.'#13#10;
+  LText2 = 'unit B;'#13#10'end.'#13#10;
 begin
   Check(StripLeadingBom('') = '', 'empty text survives the BOM strip');
   Check(StripLeadingBom('abc') = 'abc', 'text with no BOM is untouched');
@@ -97,6 +116,8 @@ begin
   TDirectory.CreateDirectory(LDir);
   try
     LPlain := TPath.Combine(LDir, 'plain.pas');
+    LAnsi := TPath.Combine(LDir, 'ansi.pas');
+    LUtf16 := TPath.Combine(LDir, 'utf16.pas');
     LBom := TPath.Combine(LDir, 'bom.pas');
     LMissing := TPath.Combine(LDir, 'nosuchfile.pas');
 
@@ -122,6 +143,42 @@ begin
       'reading a BOM''d file gives the same text, with no BOM');
     Check((not TryReadTextNoBom(LMissing, LText)) and (LText = ''),
       'a missing file reports failure and yields no text');
+
+    { The edit pair, and what it is for: the IDE plugin rewrites a source file
+      that nobody has open (a rename reaching a closed unit), and it has to put
+      the file back in the encoding it found it in. Getting that wrong is
+      invisible in the diff and moves every non-ASCII column in the file -
+      which is why the em-dash in cText is doing double duty here. }
+    Check(TryReadSourceForEdit(LBom, LText, LEnc) and (LText = cText) and
+      (LEnc = peUtf8Bom),
+      'a BOM''d file reads as UTF-8-with-BOM, text without the BOM');
+    Check(TryReadSourceForEdit(LPlain, LText, LEnc) and (LText = cText) and
+      (LEnc = peUtf8),
+      'a preamble-less file whose bytes are valid UTF-8 reads as UTF-8');
+
+    // ANSI: a high byte that is NOT valid UTF-8, so the round-trip test has
+    // to fall through to it. dcc's own rule for a preamble-less file.
+    TFile.WriteAllBytes(LAnsi, TBytes.Create(Ord('a'), $E4, Ord('b')));
+    Check(TryReadSourceForEdit(LAnsi, LText, LEnc) and (LEnc = peBytes) and
+      (Length(LText) = 3),
+      'bytes that are not UTF-8 read byte-for-byte, not as U+FFFD');
+
+    Check(TryWriteSource(LBom, LText2, peUtf8Bom) and
+      SameBytes(LBom, TBytes.Create($EF, $BB, $BF) +
+        TEncoding.UTF8.GetBytes(LText2)),
+      'writing UTF-8-with-BOM puts the preamble back');
+    Check(TryWriteSource(LPlain, LText2, peUtf8) and
+      SameBytes(LPlain, TEncoding.UTF8.GetBytes(LText2)),
+      'writing bare UTF-8 adds no preamble');
+    Check(TryReadSourceForEdit(LAnsi, LText, LEnc) and
+      TryWriteSource(LAnsi, LText, LEnc) and
+      SameBytes(LAnsi, TBytes.Create(Ord('a'), $E4, Ord('b'))),
+      'a non-UTF-8 file round-trips byte for byte through read then write');
+
+    // UTF-16 is the one encoding this pair refuses rather than transcodes.
+    TFile.WriteAllBytes(LUtf16, TBytes.Create($FF, $FE, Ord('a'), 0));
+    Check(not TryReadSourceForEdit(LUtf16, LText, LEnc),
+      'a UTF-16 source is declined, not silently rewritten as UTF-8');
   finally
     try
       TDirectory.Delete(LDir, True);

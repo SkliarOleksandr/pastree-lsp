@@ -97,10 +97,14 @@ Ctrl+Shift+E, or "Rename..." in the editor's right-click menu. A dialog
 prefilled with the identifier under the caret, then the server plans every
 site and the plugin applies it - one undo step per file.
 
-- **Nothing is written unless everything can be.** Every touched file is
-  opened and every site checked against the live buffer first; if one has
-  moved since the analysis the whole rename is refused, naming the file and
-  line, with nothing changed.
+- **Nothing is written unless everything can be.** Every site is checked
+  first - against the live buffer for a file you have open, against the text
+  on disk for one you do not; if any has moved since the analysis the whole
+  rename is refused, naming the file and line, with nothing changed.
+- **Files you do not have open are not opened.** They are rewritten on disk,
+  in the encoding they were stored in. That keeps a rename of something with
+  a dozen references from burying you in a dozen new editor tabs - the cost
+  is that those files have no undo step, which the results tab says.
 - **Results go to a "PasTree Rename" tab** shaped like Find References -
   grouped by file, navigable, the declaration labelled - where every line is
   the source AS IT NOW READS. A rename you cannot see is a rename you cannot
