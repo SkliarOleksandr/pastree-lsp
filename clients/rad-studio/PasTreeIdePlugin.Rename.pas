@@ -115,7 +115,7 @@ uses
   System.IOUtils,
   ToolsAPI.UI, PasLsp.SourceText,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings,
-  PasTreeIdePlugin.ResultRows;
+  PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.WaitDialog;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -749,12 +749,17 @@ begin
   end;
 
   GPlanning := True;
+  ShowWaitDialog(Format('Renaming "%s" to "%s"...', [AOldName, LNewName]));
   LspRenamePlan(AFileName, ARow, ACol, LNewName,
     procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
       const AError: string)
     var
       LDiskFiles: TArray<string>;
     begin
+      // Before anything else, the GAlive check included: the wait dialog
+      // disables input, and every path below (TellUser, ApplyPlan's own
+      // dialogs, the report) needs it gone.
+      CloseWaitDialog;
       GPlanning := False;
       if not GAlive then
         Exit;
@@ -860,9 +865,13 @@ begin
     LCol := AView.Buffer.EditPosition.Column;
 
     GPlanning := True;
+    // Visible progress for the slow half: on a cold big project this
+    // prepareRename is what takes the seconds, not the plan.
+    ShowWaitDialog('Rename: resolving the identifier under the cursor...');
     LspRenameTarget(LFileName, LRow, LCol,
       procedure(ASuccess: Boolean; const AName, AError: string)
       begin
+        CloseWaitDialog;
         GPlanning := False;
         if not GAlive then
           Exit;
@@ -892,6 +901,7 @@ begin
   except
     on E: Exception do
     begin
+      CloseWaitDialog;
       GPlanning := False;
       LogDiagnostic(Format('Rename: unhandled %s: %s',
         [E.ClassName, E.Message]));

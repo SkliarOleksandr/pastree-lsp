@@ -57,7 +57,8 @@ implementation
 uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows;
+  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
+  PasTreeIdePlugin.WaitDialog;
 
 const
   cMessageGroupName = 'Find References';
@@ -370,6 +371,12 @@ begin
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
 
+    // Visible progress: on a cold big project the first of these requests
+    // waits for the whole analysis, and until now nothing on screen said
+    // anything was happening (user, 2026-08-31). Every terminal path below
+    // closes the dialog FIRST - it disables input, and a message box on
+    // top of disabled input is a stuck IDE.
+    ShowWaitDialog('Searching for references...');
     LspReferences(LCursorFile, LRow, LCol, False,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
         const AError: string)
@@ -379,6 +386,7 @@ begin
       begin
         if not ASuccess then
         begin
+          CloseWaitDialog;
           LogDiagnostic('Find References: ' + AError);
           Exit;
         end;
@@ -389,6 +397,7 @@ begin
         LName := IdentifierAt(LCursorFile, LRow, LCol);
         if (Length(AHits) = 0) and (LName = '') then
         begin
+          CloseWaitDialog;
           (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
             'No identifier under the cursor.', mtInformation, [mbOK], -1);
           Exit;
@@ -399,6 +408,7 @@ begin
           procedure(ADeclOk: Boolean; const ADeclHits: TArray<TLspHit>;
             const ADeclError: string)
           begin
+            CloseWaitDialog;
             // No declaration is a legitimate answer, not a failure: a compiler
             // builtin has none anywhere. Report the references either way.
             if ADeclOk and (Length(ADeclHits) > 0) then
@@ -412,7 +422,10 @@ begin
     // instead of letting an unhandled one pop the IDE's generic "Error"
     // dialog with no context. Remove once the pipeline is stable.
     on E: Exception do
+    begin
+      CloseWaitDialog;
       LogDiagnostic(Format('Find References: unhandled %s: %s', [E.ClassName, E.Message]));
+    end;
   end;
 end;
 

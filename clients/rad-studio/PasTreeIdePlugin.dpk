@@ -53,6 +53,7 @@ contains
   PasTreeIdePlugin.LspSession in 'PasTreeIdePlugin.LspSession.pas',
   PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
   PasTreeIdePlugin.ResultRows in 'PasTreeIdePlugin.ResultRows.pas',
+  PasTreeIdePlugin.WaitDialog in 'PasTreeIdePlugin.WaitDialog.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
   PasTreeIdePlugin.CodeInsight in 'PasTreeIdePlugin.CodeInsight.pas',
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
