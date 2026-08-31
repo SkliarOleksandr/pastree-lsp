@@ -51,7 +51,7 @@ editor itself. Four features so far:
   Ctrl+Click;
 - **the decl↔impl jump** on Ctrl+Shift+Up/Down, the IDE's own keys for it,
   taken over the same way;
-- **Rename** on Ctrl+Shift+E and in the editor's menu - a symbol or a whole unit (file included) across the
+- **Rename** on Ctrl+Shift+E and in the editor's menu - every use of a symbol across the
   project, then a results tab showing each changed line as it now reads.
 
 The analysis starts when a project finishes opening rather than on the first
@@ -109,14 +109,13 @@ site and the plugin applies it - one undo step per file.
   grouped by file, navigable, the declaration labelled - where every line is
   the source AS IT NOW READS. A rename you cannot see is a rename you cannot
   trust.
-- **A UNIT can be renamed too**, and then the FILE is renamed with it - a
-  unit's name and its file name are the same thing in Object Pascal, so the
-  two halves are one action. It goes through the project manager's own rename
-  (`IOTAProject100.Rename`), so the IDE rewrites the `.dproj` entry and a
-  program's `uses Foo in 'Foo.pas'` path itself; a `.dfm` moves with the unit.
-  The analysis
-  restarts afterwards (a renamed file is a different closure), so the next
-  navigation pays for one rebuild.
+- **A UNIT is refused, with the reason.** The server plans one correctly (the
+  header, every `uses` item, the `in '...'` path and the file the unit then
+  requires) and a plain LSP client applies it in one edit - but the IDE
+  performs a rename of its own the moment a unit's name changes, through its
+  project manager and SaveAs paths, and the two collide. Four live runs each
+  ended in a different collision. Rename a unit through the Project Manager;
+  the removed half is kept on the `feature/unit-rename` branch.
 - **A compiler builtin is refused** - there is no declaration to rename - as
   is a `uses` spelling the analysis has no rule for. Both refusals are the
   server's own sentence.

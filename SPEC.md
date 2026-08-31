@@ -207,7 +207,10 @@ be. Every refusal comes back as an error whose message is written to be shown
 to a user, not logged.
 
 **A unit rename is text edits AND A FILE RENAME, and the server never lets a
-client take only half.** Object Pascal ties a unit's name to its file name, so
+client take only half.** (The RAD Studio client stopped taking it at all on
+2026-08-31 — the IDE renames a unit's file itself the moment the `unit` clause
+changes, and the two mechanisms collide; see `clients/rad-studio/SPEC.md`. The
+server half below is unchanged and is what an ordinary LSP client uses.) Object Pascal ties a unit's name to its file name, so
 `requiredFileName` rides with the plan and `textDocument/rename` expresses the
 file move as a `rename` resource operation inside `documentChanges` — refusing
 outright for a client that has not advertised `resourceOperations` support for

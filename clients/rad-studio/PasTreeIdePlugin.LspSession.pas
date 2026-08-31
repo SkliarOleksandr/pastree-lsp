@@ -499,15 +499,6 @@ procedure LspProjectClosed;
 /// </summary>
 procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
 
-/// <summary>
-/// Forces the next request to start a FRESH server, because the set of files
-/// the analysis is built from has changed in a way no incremental path can
-/// absorb - a unit renamed on disk. The server fixes its closure at
-/// initialize (it reads the project there), so a file that has just changed
-/// name is not something it can be told about; the honest move is a restart,
-/// which costs the next navigation one rebuild and nothing else.
-/// </summary>
-procedure LspRestartForClosureChange(const AWhy: string);
 
 /// <summary>
 /// Writes one line into the SERVER's log (pastree-lsp.log), not the Build tab.
@@ -607,7 +598,6 @@ type
     procedure ProjectOpened;
     procedure ProjectClosed;
     procedure FilesChangedOnDisk(const APaths: TArray<string>);
-    procedure RestartForClosureChange(const AWhy: string);
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
@@ -2067,18 +2057,6 @@ begin
   FClient.Notify('workspace/didChangeWatchedFiles', LParams);
 end;
 
-{ Not a Stop: clearing the recorded project is enough, and it is the same
-  mechanism a project/platform switch already uses (see EnsureSession, which
-  compares what it started against what the IDE now says). The next request
-  therefore restarts the server, re-sends every open document and rebuilds -
-  and if no request ever comes, nothing was paid for. }
-procedure TLspSession.RestartForClosureChange(const AWhy: string);
-begin
-  if not Assigned(FClient) then
-    Exit;
-  LogDiagnostic(AWhy + ' - the analysis will restart on the next request.');
-  FStartedProject := '';
-end;
 
 procedure TLspSession.ProjectClosed;
 begin
@@ -2173,11 +2151,6 @@ begin
     GSession.FilesChangedOnDisk(APaths);
 end;
 
-procedure LspRestartForClosureChange(const AWhy: string);
-begin
-  if Assigned(GSession) then
-    GSession.RestartForClosureChange(AWhy);
-end;
 
 function LspLogToServer(const AText: string): Boolean;
 begin

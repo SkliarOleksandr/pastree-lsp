@@ -790,25 +790,31 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    to the IDE. A feature that EDITS the user's code is the one that most
    needs a way to be refused outright.
 
-   **The UNIT half landed 2026-08-31**, on PasTree 0.13.2's PlanUnitRename:
-   the module header plus every `uses` item, AND the file. The file is the
-   part that makes it real — Object Pascal ties a unit's name to its file
-   name — and it goes through **`IOTAProject100.Rename`**, documented as "the
-   same logic as an inplace rename in the project manager" (ToolsAPI.pas:3809):
-   the IDE moves the file, rewrites its own `.dproj` entry and a program's
-   `uses Foo in 'Foo.pas'` path, and fires its own BeforeRename/AfterRename.
-   `RemoveFile` → `TFile.Move` → `AddFile` stays only as the fallback for a
-   project that does not answer that interface — it reconstructs by hand what
-   the IDE does properly.
-   That path is also renamed by the plan itself since 0.21.0 (the server
-   derives the literal''s position from the line - see its SPEC), so the two
-   agree; before that it was the one thing no plan could express, and the
-   disagreement cost three live runs. The IDE doing the file half is not a
-   convenience but the reason a unit rename can be complete. A `.dfm` moves
-   with the unit — its resource directive resolves against the unit name, and
-   a mismatch fails at RUN time. Afterwards the analysis restarts: the server
-   fixes its closure at initialize, so a renamed file is the one edit the
-   incremental path cannot absorb.
+   **The UNIT half was built and then WITHDRAWN from the plugin (2026-08-31),
+   and the reason is worth keeping.** The server side is done and stays: it
+   plans the header, every `uses` item, the `in '...'` path and the file name
+   the unit then requires, and a plain LSP client applies all of it as one
+   workspace edit (see the server SPEC).
+
+   Inside the IDE it does not work, and not because of a missing API. The IDE
+   performs a rename of its OWN the moment a unit whose `unit` clause changed
+   is saved or closed - through the project manager and SaveAs paths - and it
+   cannot be asked to hold still while ours runs. Four live runs on a
+   3759-unit project each ended in a different collision between the two:
+   the file already moved under us (so `TFile.Move` reported "file not
+   found"), the project entry already rewritten (so `AddFile` reported "the
+   project already contains a module named X"), and finally the IDE's own
+   "Unable to rename A to B" over a rename that had already happened.
+   `IOTAProject100.Rename` returned False throughout while doing part of the
+   work anyway.
+
+   The lesson for whoever picks this up: the IDE is not a passive file store
+   here, and the sequence has to be ITS sequence, not ours with reconciliation
+   bolted on. A plausible next attempt is to let the IDE do the whole thing -
+   rename through the Project Manager first and let its own save path rewrite
+   the unit clause - and to contribute only the OTHER units' `uses` edits.
+   The withdrawn implementation, its trace and its four failure modes are on
+   the `feature/unit-rename` branch.
 
    Still queued: `IOTASyncEditPoints` as the cheap same-file variant.
 6. **Find References results upgrade** (hierarchy + match highlight in the

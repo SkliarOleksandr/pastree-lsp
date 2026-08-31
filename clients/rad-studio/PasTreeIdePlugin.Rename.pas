@@ -16,16 +16,25 @@ unit PasTreeIdePlugin.Rename;
   server hands those previews over ready-made in pastree/renamePlan; nothing
   here re-reads a buffer to build them.
 
-  TWO THINGS IT RENAMES. A SYMBOL - a routine, a type, a field, a variable, a
-  parameter - which is text edits and nothing else. And a UNIT, which is text
-  edits AND THE FILE: Object Pascal ties a unit's name to its file name, so
-  the second half is not an extra, it is the difference between a rename and
-  a project that no longer compiles. RenameUnitFile does it through the
-  IDE's own project API, which is also what fixes the one thing the analysis
-  plan cannot express - a program's `uses Foo in 'Foo.pas'` path.
+  SYMBOLS ONLY - a routine, a type, a field, a variable, a parameter. Text
+  edits and nothing else.
 
-  A compiler builtin is refused (there is no declaration to rename), as is a
-  `uses` spelling the analysis has no rule for. Both refusals arrive as the
+  A UNIT IS DECLINED, and not for want of a plan: the server produces a
+  correct one (the header, every `uses` item, the `in '...'` path, and the
+  file name the unit then requires), and a plain LSP client applies all of it
+  as one workspace edit. Inside the IDE it does not work. The IDE performs a
+  rename of its OWN the moment a unit whose `unit` clause changed is saved or
+  closed - through its project manager and SaveAs paths - and it cannot be
+  asked to stand still while ours runs. Four live runs on a 3759-unit project
+  each ended in a different collision between the two: a file already moved
+  under us, a project entry already rewritten, an IDE dialog "Unable to
+  rename A to B" over a rename that had already happened. Whatever the right
+  approach is, it is not "do it ourselves and hope", so the plugin refuses
+  and says where to do it instead. The removed half is kept on the
+  feature/unit-rename branch, trace and all.
+
+  A compiler builtin is refused too (there is no declaration to rename), as is
+  a `uses` spelling the analysis has no rule for. Those refusals arrive as the
   server's own message and are shown verbatim - this unit invents no
   vocabulary of its own for them.
 
@@ -69,11 +78,10 @@ unit PasTreeIdePlugin.Rename;
   file backwards through SynEdit's SelText: a writer's offsets all address
   the original text, so ascending order needs no shifting arithmetic at all.
 
-  A UNIT RENAME THEN RESTARTS THE ANALYSIS. The server fixes its closure at
-  initialize, so a file that has just changed name is not something it can be
-  told about - see LspRestartForClosureChange. It is the one edit in the
-  product the incremental path cannot absorb, and pretending otherwise would
-  have the server answering about a file that no longer exists.
+  EVERY STEP IS TRACED into pastree-lsp.log, always - see Trace. A rename is
+  rare and deliberate, and the question after something odd is always "which
+  step did that"; answering that by adding logging afterwards cost several
+  round trips through a live IDE.
 }
 
 interface
@@ -689,401 +697,6 @@ begin
 end;
 
 
-{ The project the IDE currently considers active - the one a renamed unit
-  belongs to. nil during startup, or with no project open, and every caller
-  treats that as "do the disk half only". }
-function ActiveProject: IOTAProject;
-var
-  LModuleServices: IOTAModuleServices;
-  LGroup: IOTAProjectGroup;
-begin
-  Result := nil;
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-    Exit;
-  LGroup := LModuleServices.MainProjectGroup;
-  if Assigned(LGroup) then
-    Result := LGroup.ActiveProject;
-end;
-
-
-{ Every module the plan touched, to disk - the open ones only, since the
-  closed ones were written directly.
-
-  BEFORE THE FILE MOVES, and that ordering is the fix for the ugliest symptom
-  of the first live run: a unit renamed while its own buffer (and its
-  callers' buffers) still held unsaved edits left the IDE asking what to do
-  with each of them afterwards, which reads exactly like "something told it to
-  close everything". Saving first means there is nothing left to ask about. }
-procedure SaveTouchedModules(const APlan: TLspRenamePlan);
-var
-  LEdit: TLspRenameEdit;
-  LSeen: TDictionary<string, Boolean>;
-  LEditor: IOTASourceEditor;
-  LKey: string;
-begin
-  LSeen := TDictionary<string, Boolean>.Create;
-  try
-    for LEdit in APlan.Edits do
-    begin
-      LKey := LowerCase(LEdit.FilePath);
-      if LSeen.ContainsKey(LKey) then
-        Continue;
-      LSeen.Add(LKey, True);
-      LEditor := OpenEditorOf(LEdit.FilePath);
-      if Assigned(LEditor) and Assigned(LEditor.Module) then
-        try
-          TraceFmt('  saving %s (modified=%s)',
-            [ExtractFileName(LEdit.FilePath),
-             BoolToStr(LEditor.Modified, True)]);
-          { FORCED, and not only when the editor reports Modified: the buffer
-            we just wrote through a writer is what has to reach disk before
-            the file moves, and taking Modified's word for it is what left
-            the IDE asking about these files afterwards. ForceSave = True is
-            the second parameter (ToolsAPI.pas:3098 - "ForceSave will not
-            prompt"). }
-          LEditor.Module.Save(False, True);
-        except
-          on E: Exception do
-            // Reported, not raised: the caller is mid-rename and the next
-            // steps still have to run or the state gets worse, not better.
-            LogDiagnostic(Format('rename: saving %s failed: %s',
-              [ExtractFileName(LEdit.FilePath), E.Message]));
-        end;
-    end;
-  finally
-    LSeen.Free;
-  end;
-end;
-
-{ THE PROJECT''S OWN RECORD OF THE FILE, after the file has moved.
-
-  Renaming the file is not the whole job even when the IDE did it on save:
-  the project still lists the OLD name, and in a program that entry carries
-  the path - `uaviConst in ''uaviConst.pas''`. That literal is the one thing a
-  rename plan cannot express (the server reports it as staleInPaths), so if
-  nothing rewrites the entry the project stops compiling for a reason no
-  diff explains.
-
-  RemoveFile then AddFile is what rewrites it: the IDE drops the stale entry,
-  including its path, and writes a fresh one for the file that now exists.
-  Both are guarded and both are logged - a duplicated or missing entry is
-  exactly the kind of thing that needs to be readable afterwards. }
-procedure ReregisterFile(const AProject: IOTAProject;
-  const AOldPath, ANewPath: string);
-begin
-  if not Assigned(AProject) then
-    Exit;
-  { ASK BEFORE ACTING, in both directions. By the time this runs the IDE has
-    usually already fixed its own record - its SaveAs path renames the file
-    AND registers the new name, even when IOTAProject100.Rename reported
-    False (observed 2026-08-31: Rename returned False, the project already
-    held the new name, and the unconditional AddFile below then failed with
-    "the project already contains a form or module named uaviConst2" - an
-    error about a rename that had entirely succeeded).
-
-    FindModuleInfo is the question to ask: it answers nil for a file the
-    project does not list. Two lookups turn this from a sequence of commands
-    into a reconciliation, which is what it has to be - anything else here is
-    a guess about what the IDE already did. }
-  if Assigned(AProject.FindModuleInfo(AOldPath)) then
-    try
-      Trace('  RemoveFile (the stale entry, with its `in` path)');
-      AProject.RemoveFile(AOldPath);
-    except
-      on E: Exception do
-        LogDiagnostic(Format('rename: removing %s from the project failed: %s',
-          [ExtractFileName(AOldPath), E.Message]));
-    end
-  else
-    Trace('  the project no longer lists the old name - nothing to remove');
-
-  if Assigned(AProject.FindModuleInfo(ANewPath)) then
-  begin
-    Trace('  the project already lists the new name - nothing to add');
-    Exit;
-  end;
-  try
-    Trace('  AddFile (the new name, with a matching path)');
-    AProject.AddFile(ANewPath, True);
-  except
-    on E: Exception do
-      { LOGGED, NOT SHOWN. The refusal this hits in practice is "the project
-        already contains a form or module named X" - by UNIT NAME, not by
-        path, and the name is already right because the plan renamed it in
-        the project source itself (`X in 'X.pas'`, both halves - see the
-        server's AugmentUsesInPaths). So the project knows about the file and
-        there is nothing for the user to do; a modal error over it is how
-        three live runs ended up looking like failures after the rename had
-        entirely succeeded. A real problem still leaves its reason in the
-        log, next to every other step. }
-      LogDiagnostic(Format('rename: adding %s to the project was declined: ' +
-        '%s (the project source already names it, so this is expected when ' +
-        'the IDE registered it itself)',
-        [ExtractFileName(ANewPath), E.Message]));
-  end;
-end;
-
-{ THE PROJECT FILE, SAVED BY US.
-
-  A unit rename edits the .dproj - a different file name in it - whichever way
-  the rename was performed, and the IDE then asks "Save changes to project
-  X?" at some later moment of its own choosing. That prompt was reported
-  twice (2026-08-31), and it is not a bug in the rename: it is an unsaved
-  project file, exactly as if the user had dragged a unit in the project
-  manager. Predates the switch to IOTAProject100.Rename, which is the proof
-  that the rename mechanism was never the cause.
-
-  So it is saved here, immediately, while the rename is still the thing on
-  screen. A project is an IOTAModule, and ForceSave (the second parameter)
-  means no prompt - ToolsAPI.pas:3098. }
-procedure SaveProject(const AProject: IOTAProject);
-begin
-  if not Assigned(AProject) then
-    Exit;
-  try
-    Trace('  saving the project file');
-    AProject.Save(False, True);
-  except
-    on E: Exception do
-      // Not fatal: the rename is done, and the worst case is the prompt this
-      // was meant to avoid.
-      LogDiagnostic(Format('rename: saving the project failed: %s',
-        [E.Message]));
-  end;
-end;
-
-{ THE IDE'S OWN RENAME, which is what this should have been doing from the
-  start: IOTAProject100.Rename is documented as "renames file using the same
-  logic as an inplace rename in the project manager" (ToolsAPI.pas:3809), so
-  the IDE moves the file, rewrites its own project entry and fires its own
-  BeforeRename/AfterRename notifiers - all the bookkeeping the manual
-  sequence below reconstructs by hand, done by the code that owns it.
-
-  Preferred for exactly that reason. The hand-rolled path stays as a fallback
-  for a project that does not answer IOTAProject100 (or answers False), which
-  is the only case left where reconstructing it is better than nothing.
-
-  False here is not an error yet - the caller falls back - so nothing is said
-  to the user from in here. }
-function RenameThroughProject(const AProject: IOTAProject;
-  const AOldPath, ANewPath: string): Boolean;
-var
-  LProject100: IOTAProject100;
-begin
-  Result := False;
-  if not Assigned(AProject) then
-    Exit;
-  if not Supports(AProject, IOTAProject100, LProject100) then
-  begin
-    Trace('  the project does not answer IOTAProject100');
-    Exit;
-  end;
-  try
-    Result := LProject100.Rename(AOldPath, ANewPath);
-    TraceFmt('  IOTAProject100.Rename returned %s',
-      [BoolToStr(Result, True)]);
-  except
-    on E: Exception do
-    begin
-      LogDiagnostic(Format('rename: the IDE''s own project rename of %s ' +
-        'raised %s: %s - falling back to renaming it by hand',
-        [ExtractFileName(AOldPath), E.ClassName, E.Message]));
-      Result := False;
-    end;
-  end;
-end;
-
-{ THE FILE HALF OF A UNIT RENAME, and the only place this package renames
-  anything on disk.
-
-  Object Pascal ties a unit's name to its file name, so text edits alone
-  produce a project that does not compile - which makes this not an extra but
-  the other half of the same action.
-
-  THE IDE DOES IT IF IT WILL: RenameThroughProject above, which is the project
-  manager's own rename. Only if that is unavailable does the sequence below
-  reconstruct it - RemoveFile, move, AddFile - and the reconstruction exists
-  for one reason: something has to rewrite the .dproj entry and, in a program,
-  the `uses Foo in ''Foo.pas''` path. That path is exactly what the analysis
-  plan CANNOT fix (it has no position for the literal; see the server''s
-  UsesInPathSites), so this is not a convenience - it is the reason a unit
-  rename can be complete at all.
-
-  A .dfm goes with it. A form unit's resource directive resolves against the
-  UNIT name, so a renamed unit whose .dfm kept the old name loses its form -
-  and that fails at RUN time, not at build.
-
-  EVERY STEP IS INDIVIDUALLY GUARDED, and that is not defensive habit: an
-  exception escaping this ran through an LSP callback into the IDE's message
-  loop on the first live run, which is how a rename that had already succeeded
-  ended with no results tab and a confused IDE. Each step reports and the rest
-  still runs, because a rename stopped halfway is worse than one that finishes
-  with a warning.
-
-  ORDER OF THE FALLBACK, and each step is here because the previous one makes
-  it possible:
-    1. save every touched module      - the edits must be on disk
-    2. remove the file from the project - while it still exists, or the IDE
-                                         cannot find what to remove
-    3. close the module                - Windows will not rename an open file
-    4. move .pas (and .dfm if any)     - the rename itself
-    5. add the new file to the project - the IDE rewrites .dproj and the
-                                         program's uses path here
-    6. reopen it in the editor         - the user was looking at it }
-function RenameUnitFile(const APlan: TLspRenamePlan): Boolean;
-var
-  LModuleServices: IOTAModuleServices;
-  LActionServices: IOTAActionServices;
-  LModule: IOTAModule;
-  LProject: IOTAProject;
-  LOldDfm, LNewDfm: string;
-begin
-  Result := False;
-  if (APlan.FilePath = '') or (APlan.NewFilePath = '') then
-  begin
-    TellUser('The rename plan did not say what the file must be called, so ' +
-      'the file was left alone. The text edits are applied - rename the ' +
-      'file by hand, or undo.', mtError);
-    Exit;
-  end;
-  if TFile.Exists(APlan.NewFilePath) then
-  begin
-    TellUser(Format('%s already exists. The text edits are applied but the ' +
-      'file was NOT renamed - undo, or move that file out of the way first.',
-      [APlan.NewFilePath]), mtError);
-    Exit;
-  end;
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) or
-     not Supports(BorlandIDEServices, IOTAActionServices, LActionServices)
-  then
-    Exit;
-
-  TraceFmt('file half: %s -> %s', [APlan.FilePath, APlan.NewFilePath]);
-  SaveTouchedModules(APlan);
-
-  { THE IDE MAY HAVE DONE IT ALREADY, and on a real project it does.
-
-    Saving a module whose `unit` clause no longer matches its file name makes
-    the IDE take the SaveAs path - it writes the file under the name the unit
-    now claims. Since the text edits go in first, that is the ORDINARY case
-    for an open unit, not an exotic one: by the time we get here the file has
-    moved and the old name is gone. Measured 2026-08-31 on a 3759-unit
-    project, where the previous version then failed the whole file half with
-    "The specified file was not found" - after the rename had actually
-    succeeded.
-
-    So the state is checked rather than assumed. Old gone and new present is a
-    SUCCESS, whoever performed it; the only thing left to do is the project
-    file, which the IDE marks modified either way. }
-  if not TFile.Exists(APlan.FilePath) and TFile.Exists(APlan.NewFilePath) then
-  begin
-    Trace('  the file had already moved - the IDE renamed it on save');
-    ReregisterFile(ActiveProject, APlan.FilePath, APlan.NewFilePath);
-    SaveProject(ActiveProject);
-    Exit(True);
-  end;
-
-  LModule := ModuleOf(APlan.FilePath);
-  LProject := ActiveProject;
-  TraceFmt('  module found=%s, active project=%s',
-    [BoolToStr(Assigned(LModule), True),
-     IfThen(Assigned(LProject), 'yes', 'NO')]);
-
-  // The IDE first, by preference - see RenameThroughProject.
-  if RenameThroughProject(LProject, APlan.FilePath, APlan.NewFilePath) then
-  begin
-    Trace('  IOTAProject100.Rename succeeded');
-    SaveProject(LProject);
-    Exit(True);
-  end;
-  Trace('  IOTAProject100.Rename unavailable or declined - by hand');
-
-  { BY HAND FROM HERE, and every step is individually guarded for the reason
-    the header states. }
-  { NO RemoveFile HERE ANY MORE. It used to come first, on the reasoning that
-    the project should be told before the file moves - but the IDE gets there
-    on its own (closing a module whose unit clause changed takes its SaveAs
-    path, which renames the file AND rewrites the project), and removing the
-    entry in front of that only made the two disagree. The project is
-    reconciled once, at the end, by ReregisterFile. }
-  if Assigned(LModule) then
-    try
-      Trace('  closing the module');
-      LModule.Close;
-    except
-      on E: Exception do
-        LogDiagnostic(Format('rename: closing %s failed: %s',
-          [ExtractFileName(APlan.FilePath), E.Message]));
-    end;
-
-  if not TFile.Exists(APlan.FilePath) and TFile.Exists(APlan.NewFilePath) then
-  begin
-    // Something in the steps above moved it - the project rename, or a save
-    // the close triggered. Nothing to move, and nothing wrong.
-    Trace('  the file moved during the earlier steps');
-    ReregisterFile(LProject, APlan.FilePath, APlan.NewFilePath);
-    SaveProject(LProject);
-    Exit(True);
-  end;
-  try
-    Trace('  moving the file');
-    TFile.Move(APlan.FilePath, APlan.NewFilePath);
-  except
-    on E: Exception do
-    begin
-      TellUser(Format('Could not rename %s to %s: %s'#13#10#13#10 +
-        'The text edits are applied - rename the file by hand, or undo.',
-        [ExtractFileName(APlan.FilePath),
-         ExtractFileName(APlan.NewFilePath), E.Message]), mtError);
-      // Put the file back in the project even so: a project missing a unit it
-      // still contains is worse than the failed rename.
-      if Assigned(LProject) then
-        try
-          LProject.AddFile(APlan.FilePath, True);
-        except
-        end;
-      Exit;
-    end;
-  end;
-  LOldDfm := TPath.ChangeExtension(APlan.FilePath, '.dfm');
-  LNewDfm := TPath.ChangeExtension(APlan.NewFilePath, '.dfm');
-  if TFile.Exists(LOldDfm) and not TFile.Exists(LNewDfm) then
-    try
-      TFile.Move(LOldDfm, LNewDfm);
-    except
-      on E: Exception do
-        TellUser(Format('The unit was renamed, but its form file could not ' +
-          'be renamed from %s to %s: %s'#13#10#13#10 +
-          'Rename it by hand before running - a unit whose .dfm name does ' +
-          'not match it loses its form.',
-          [ExtractFileName(LOldDfm), ExtractFileName(LNewDfm), E.Message]),
-          mtError);
-    end;
-
-  ReregisterFile(LProject, APlan.FilePath, APlan.NewFilePath);
-  try
-    Trace('  reopening');
-    LActionServices.OpenFile(APlan.NewFilePath);
-  except
-    on E: Exception do
-      LogDiagnostic(Format('rename: reopening %s failed: %s',
-        [ExtractFileName(APlan.NewFilePath), E.Message]));
-  end;
-  SaveProject(LProject);
-  Result := True;
-end;
-
-
-{ 'unit' or 'symbol' - for the Build tab line, so a reader can tell which of
-  the two renames just happened without counting the edits. }
-function KindWord(AIsUnit: Boolean): string;
-begin
-  if AIsUnit then
-    Result := 'unit'
-  else
-    Result := 'symbol';
-end;
-
 { The rename proper, once the analysis has said WHAT is being renamed (see
   ExecuteRename): ask for the new name, plan, apply, report.
 
@@ -1138,46 +751,54 @@ begin
           TellUser(AError, mtWarning);
           Exit;
         end;
+        { A UNIT, DECLINED HERE - BEFORE ANYTHING IS WRITTEN. The server plans
+          one correctly (the header, every `uses` item, the `in '...'` path and
+          the file name the unit then requires), and a plain LSP client applies
+          all of that as one workspace edit. Inside the IDE it does not work,
+          and the reason is not in this code: the IDE performs a rename of its
+          own the moment a unit whose `unit` clause changed is saved or closed,
+          through its project manager and SaveAs paths, and those cannot be
+          told to stand still while ours runs. Four live runs on a 3759-unit
+          project each ended in a different collision between the two - a file
+          already moved, a project entry already rewritten, an IDE dialog
+          "Unable to rename A to B" over a rename that had already happened.
+
+          The refusal is deliberately at this point rather than earlier: the
+          plan is what says whether the target is a unit, and asking is one
+          round trip that changes nothing. Nothing has been applied yet, so
+          there is nothing to undo. }
+        if APlan.IsUnit then
+        begin
+          Trace('declined: a unit rename is not applied from the IDE');
+          TellUser(Format('"%s" is a unit.'#13#10#13#10 +
+            'Renaming a unit also renames its file, and the IDE performs a ' +
+            'rename of its own whenever a unit''s name changes - the two ' +
+            'collide, so this plugin does not do it. Rename the unit through ' +
+            'the Project Manager instead; renaming symbols works as usual.',
+            [APlan.OldName]), mtInformation);
+          Exit;
+        end;
         if Length(APlan.Edits) = 0 then
         begin
           TellUser('Nothing to rename.', mtInformation);
           Exit;
         end;
-        TraceFmt('plan: kind=%s old=%s new=%s edits=%d file=%s stale=%d',
-          [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
-           Length(APlan.Edits), APlan.RequiredFileName,
-           Length(APlan.StaleInPaths)]);
+        TraceFmt('plan: old=%s new=%s edits=%d',
+          [APlan.OldName, APlan.NewName, Length(APlan.Edits)]);
         if not ApplyPlan(APlan, {out} LDiskFiles) then
         begin
           Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
         end;
         ReportRename(APlan, LDiskFiles);
-        LogDiagnostic(Format('rename: %s %s -> %s, %d site(s)%s%s',
-          [KindWord(APlan.IsUnit), APlan.OldName, APlan.NewName,
-           Length(APlan.Edits),
+        LogDiagnostic(Format('rename: %s -> %s, %d site(s)%s',
+          [APlan.OldName, APlan.NewName, Length(APlan.Edits),
            IfThen(Length(LDiskFiles) > 0,
-             Format(', %d on disk', [Length(LDiskFiles)]), ''),
-           IfThen(APlan.IsUnit, ' + file -> ' + APlan.RequiredFileName, '')]));
-        if APlan.IsUnit then
+             Format(', %d on disk', [Length(LDiskFiles)]), '')]));
+        if Length(LDiskFiles) > 0 then
         begin
-          TraceFmt('file half returned %s',
-            [BoolToStr(RenameUnitFile(APlan), True)]);
-          { A renamed FILE is a different analysis closure, and the server
-            fixes its closure at initialize - so this is the one edit in the
-            product that cannot be absorbed incrementally. Restarting is
-            honest and costs the next request one rebuild; keeping the old
-            server would have it answer every later question about a file
-            that no longer exists. }
-          Trace('done - restarting the analysis');
-          LspRestartForClosureChange(Format('unit %s was renamed to %s',
-            [APlan.OldName, APlan.NewName]));
-        end
-        else if Length(LDiskFiles) > 0 then
           // A file written on disk is invisible to the analysis until it is
-          // told - no editor event ever happens for it. Not needed in the
-          // unit case above, which restarts the whole session anyway.
-        begin
+          // told - no editor event ever happens for one.
           TraceFmt('done - telling the server about %d disk file(s)',
             [Length(LDiskFiles)]);
           LspFilesChangedOnDisk(LDiskFiles);
