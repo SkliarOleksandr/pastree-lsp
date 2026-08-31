@@ -114,7 +114,8 @@ uses
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
   System.IOUtils,
   ToolsAPI.UI, PasLsp.SourceText,
-  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.ResultRows;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -232,10 +233,13 @@ begin
   Result := GMessageGroup;
 end;
 
-{ The rename's own results tab: the tree Find References fills, fed the
-  POST-rename lines. See PasTreeIdePlugin.FindReferences for why the removal
-  below is conditional on the IDE not terminating - it is the same group
-  mechanism and the same 2026-08-22 access violation. }
+{ The rename's own results tab: the same owner-drawn rows Find References
+  uses (PasTreeIdePlugin.ResultRows - Find in Files skeleton, editor syntax
+  colors), fed the POST-rename lines, with the NEW name carrying the maroon
+  match marker: the server's HiFrom/HiTo (0-based, end-exclusive, into the
+  snippet) span exactly it. See PasTreeIdePlugin.FindReferences for why the
+  removal below is conditional on the IDE not terminating - it is the same
+  group mechanism and the same 2026-08-22 access violation. }
 procedure ReportRename(const APlan: TLspRenamePlan;
   const ADiskFiles: TArray<string>);
 var
@@ -243,9 +247,9 @@ var
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
   LFileHeaders: TDictionary<string, Pointer>;
-  LLineRef, LParentRef: Pointer;
+  LParentRef: Pointer;
   LEdit: TLspRenameEdit;
-  LKey: string;
+  LKey, LTitleHead, LTitleCount: string;
   LExisting, LFileCount: Integer;
 begin
   if not Supports(BorlandIDEServices, IOTAMessageServices,
@@ -253,13 +257,19 @@ begin
     Exit;
   LGroup := GetOrCreateMessageGroup(LMessageServices);
   LMessageServices.ClearMessageGroup(LGroup);
-  LMessageServices.AddTitleMessage(
-    Format('PasTree Rename: "%s" -> "%s" - %d site(s) changed',
-      [APlan.OldName, APlan.NewName, Length(APlan.Edits)]), LGroup);
+  // Built by concatenation so the count's orange span is known, not
+  // searched for - same as the Find References title.
+  LTitleHead := Format('PasTree Rename: "%s" -> "%s" - ',
+    [APlan.OldName, APlan.NewName]);
+  LTitleCount := IntToStr(Length(APlan.Edits));
+  LMessageServices.AddCustomMessagePtr(
+    NewTitleRow(LTitleHead + LTitleCount + ' site(s) changed',
+      Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
   { The one thing about this rename the editor cannot show: files nobody had
     open were rewritten ON DISK, and those changes have no undo step. Said
     here rather than in a dialog because it is a fact about the result, and
-    this tab IS the result. }
+    this tab IS the result. Deliberately a plain IDE-drawn title message:
+    a warning styled like the decor around it stops being one. }
   if Length(ADiskFiles) > 0 then
     LMessageServices.AddTitleMessage(
       Format('%d file(s) were not open and were changed on disk - no undo ' +
@@ -280,17 +290,18 @@ begin
       if not LFileHeaders.TryGetValue(LKey, LParentRef) then
       begin
         LFileCounts.TryGetValue(LKey, LFileCount);
-        LMessageServices.AddToolMessage(LEdit.FilePath,
-          Format('%s (%d)', [ExtractFileName(LEdit.FilePath), LFileCount]),
-          '', 1, 1, nil, LParentRef, LGroup);
+        LParentRef := LMessageServices.AddCustomMessagePtr(
+          NewFileHeaderRow(LEdit.FilePath, LFileCount), LGroup);
         LFileHeaders.Add(LKey, LParentRef);
       end;
       // The declaration is labelled rather than shown as its own line: the
       // snippet is worth more than the word "declaration", and losing which
       // row it was is exactly what the demo's pinned first row avoids.
-      LMessageServices.AddToolMessage(LEdit.FilePath,
-        Trim(LEdit.Snippet) + IfThen(LEdit.IsDecl, '   [declaration]', ''),
-        '', LEdit.Row, LEdit.Col, LParentRef, LLineRef, LGroup);
+      LMessageServices.AddCustomMessage(
+        NewSnippetRow(LEdit.FilePath, LEdit.Row, LEdit.Col,
+          TrimRight(LEdit.Snippet), LEdit.HiFrom + 1,
+          LEdit.HiTo - LEdit.HiFrom,
+          IfThen(LEdit.IsDecl, 'declaration', '')), LParentRef);
     end;
   finally
     LFileHeaders.Free;

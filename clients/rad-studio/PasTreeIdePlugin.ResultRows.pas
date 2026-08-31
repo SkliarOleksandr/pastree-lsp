@@ -3,7 +3,8 @@ unit PasTreeIdePlugin.ResultRows;
 {
   Owner-drawn rows for the plugin's result tabs in the Messages panel -
   Find References today; the "PasTree Rename" tab is deliberately the same
-  shape and is the natural next adopter.
+  shape and joined on 2026-08-31 (ReportRename, with the NEW name under
+  the match marker).
 
   Each row is one IOTACustomMessage100 (file/line/column plus navigation -
   double-click, Enter, F8/Shift+F8 all work, INCLUDING on the file header
