@@ -6,17 +6,40 @@ unit PasTreeIdePlugin.GotoDeclaration;
   NavigateToPosition/PushHistoryAndNavigate machinery they (and Alt+Left/
   Alt+Right) run on.
 
-  THE CTRL+CLICK MOUSE OVERRIDE IS GONE - PHASE C (2026-08-22, COMPLETION.md).
-  From 2026-08-15 to phase C this unit intercepted Ctrl+Click through a
-  TNTACodeEditorNotifier mouse hook (with a stepping-stone period where the
-  hook stood down when PasTree was the selected Insight Provider). Since
-  phase C, Ctrl+Click navigation belongs entirely to the IDE's own click
-  chain, which ends in PasTreeIdePlugin.CodeInsight.AsyncGotoDefinitionEx
-  when the user has selected "PasTree" under Tools > Options > Editor >
-  Source > Insight Provider - the IDE draws the Ctrl+hover underline,
-  navigates, and keeps history itself. With another provider selected, the
-  native navigation runs; that is the provider contract, not a regression:
-  one combobox decides the whole insight family.
+  THE CTRL+CLICK MOUSE OVERRIDE, AND WHY IT CAME BACK (2026-09-01). From
+  2026-08-15 this unit intercepted Ctrl+Click through a TNTACodeEditorNotifier
+  mouse hook; phase C (2026-08-22, COMPLETION.md) deleted it, on the reasoning
+  that declaration navigation belongs to the IDE's own click chain - which
+  ends in PasTreeIdePlugin.CodeInsight.AsyncGotoDefinitionEx when the user has
+  selected "PasTree" under Tools > Options > Editor > Source > Insight
+  Provider, so the IDE draws the Ctrl+hover underline, navigates and keeps
+  history itself.
+
+  That reasoning holds, and it is still the better path - but it costs the
+  whole Insight Provider slot, and RAD Studio deliberately gates some editor
+  UI on DelphiLSP being the selected provider. Selecting PasTree there is
+  therefore not a trade everyone can make, and for those users phase C left
+  Ctrl+Click on the native navigation this project exists to replace. So the
+  hook is back, as an INDEPENDENT feature with its own switch
+  (Settings.CtrlClickNavigation), not as a rival to the manager:
+
+    - PasTree IS the selected Insight Provider -> the hook stands down
+      unconditionally (PasTreeIsActiveInsightProvider), switch or no switch.
+      The IDE's own chain already resolves through us, and two resolvers on
+      one click means two history entries.
+    - Any other provider -> the hook claims plain Ctrl+Click when the switch
+      is on, and does nothing at all when it is off.
+
+  Mechanism: INTACodeEditorServices.AddEditorEventsNotifier with a
+  TNTACodeEditorNotifier subclass (ToolsAPI.Editor.pas), hooked on
+  OnEditorMouseDownEx/OnEditorMouseUpEx - both carry a `var Handled: Boolean`
+  documented as "Set to True to mark the event as handled and prevent further
+  processing". Same technique RAD Studio's own "KeyboardMouse Events Demo"
+  sample uses. Split across the two events: MouseDown only suppresses the
+  default down-side processing (starting a selection drag), MouseUp suppresses
+  and starts the resolve. Suppression is unconditional once the chord matches,
+  even if nothing resolves - the point is to stop the native path, not to fall
+  back to it on a miss.
 
   ASYNCHRONOUS: each entry point returns immediately and the jump happens on
   a later main-thread turn, when the server answers. By then the cursor may
@@ -45,11 +68,31 @@ uses
   ToolsAPI;
 
 /// <summary>
-/// Removes every history item this unit handed to the IDE. Call once (from
-/// TIDEWizard.Destroy) BEFORE the package unloads - a stale entry would
-/// call .Execute on freed package code from Alt+Left/Alt+Right.
+/// Registers the Ctrl+Click mouse override for the lifetime of the package.
+/// Call once (from PasTreeIdePlugin.Wizard's TIDEWizard.Create). The notifier
+/// is registered unconditionally; whether a given click is claimed is decided
+/// per click, so toggling the setting takes effect on the next click rather
+/// than at the next IDE start.
+/// </summary>
+procedure InitializeGotoDeclaration;
+
+/// <summary>
+/// Unregisters the mouse override and removes every history item this unit
+/// handed to the IDE. Call once (from TIDEWizard.Destroy) BEFORE the package
+/// unloads - a stale entry would call .Execute on freed package code from
+/// Alt+Left/Alt+Right, and a live notifier would call into unloaded code on
+/// the next click.
 /// </summary>
 procedure FinalizeGotoDeclaration;
+
+/// <summary>
+/// The declaration jump from the cursor, run explicitly rather than from a
+/// click - the same resolve+navigate the Ctrl+Click override performs. Not
+/// bound to a menu item of our own (the native "Find Declaration" item stays
+/// the IDE's, no action-list takeover), but this is the entry point any
+/// future explicit affordance would call.
+/// </summary>
+procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
 
 /// <summary>
 /// Entry point for the "Find Type Declaration" editor menu item
@@ -79,8 +122,10 @@ procedure NavigateHistoryAware(const AFileName: string; ARow, ACol: Integer);
 implementation
 
 uses
-  System.SysUtils, System.Generics.Collections,
-  PasTreeIdePlugin.LspSession;
+  System.SysUtils, System.Types, System.Classes, System.UITypes,
+  System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
+  PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight,
+  PasTreeIdePlugin.Settings;
 
 /// <summary>
 /// Goes to the IDE's own default Messages tab (nil group = the "Build" tab)
@@ -300,6 +345,54 @@ begin
     NavigateToPosition(AToFile, AToRow, AToCol);
 end;
 
+/// <summary>
+/// The actual resolve+navigate logic, shared by the Ctrl+Click override
+/// (DoMouseUp) and ExecuteGotoDeclaration. Only logs on failure - this fires
+/// on every claimed Ctrl+Click, so logging every successful step would be far
+/// noisier than useful; a miss is still always visible and says where it
+/// happened.
+/// </summary>
+procedure ResolveAndNavigate(const AFileName: string; ARow, ACol: Integer);
+begin
+  try
+    // The three-identity resolve (unit before symbol, builtins declining to
+    // have a declaration at all) lives in the server's HandleDefinition - one
+    // implementation for this plugin and any other LSP client, instead of the
+    // same ordering rule written twice.
+    LspDefinition(AFileName, ARow, ACol,
+      // Captures AFileName/ARow/ACol, which are parameters of THIS call, so
+      // every Ctrl+Click gets its own closure frame and its own "jumped from"
+      // position. Capturing a shared local instead would send the history
+      // entry to wherever the cursor happened to be when the answer arrived.
+      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
+        const AError: string)
+      begin
+        if not ASuccess then
+          LogDiagnostic('Goto Declaration: ' + AError)
+        else if Length(AHits) = 0 then
+          // Also the honest answer for a compiler builtin: no source
+          // declaration exists anywhere, so there is nothing to navigate to.
+          LogDiagnostic('Goto Declaration: no identifier/declaration '
+            + 'resolved at cursor.')
+        else
+          PushHistoryAndNavigate(AFileName, ARow, ACol, AHits[0].FilePath,
+            AHits[0].Row, AHits[0].Col);
+      end);
+  except
+    on E: Exception do
+      LogDiagnostic(Format('Goto Declaration: unhandled %s: %s',
+        [E.ClassName, E.Message]));
+  end;
+end;
+
+procedure ExecuteGotoDeclaration(const AView: IOTAEditView);
+begin
+  if not Assigned(AView) then
+    Exit;
+  ResolveAndNavigate(AView.Buffer.FileName, AView.Buffer.EditPosition.Row,
+    AView.Buffer.EditPosition.Column);
+end;
+
 procedure ExecuteTypeDefinition(const AView: IOTAEditView);
 var
   LFileName: string;
@@ -418,8 +511,163 @@ begin
     NavigateToPosition(AFileName, ARow, ACol);
 end;
 
+{ THE CTRL+CLICK OVERRIDE ITSELF. See this unit's header for why it exists
+  alongside the Code Insight manager rather than instead of it. }
+
+type
+  // AllowedEvents can only be customized by overriding it - there is no
+  // event property for it on TNTACodeEditorNotifier, unlike the mouse
+  // callbacks below (see the official KeyboardMouse Events Demo, which does
+  // the same subclassing for the same reason).
+  TGotoDeclarationNotifier = class(TNTACodeEditorNotifier)
+  protected
+    function AllowedEvents: TCodeEditorEvents; override;
+  end;
+
+  TGotoDeclarationManager = class
+  private
+    FEditorServices: INTACodeEditorServices;
+    FNotifier: TGotoDeclarationNotifier;
+    FNotifierIndex: Integer;
+    function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
+      out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
+    procedure DoMouseDown(const Editor: TWinControl; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+    procedure DoMouseUp(const Editor: TWinControl; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+  public
+    constructor Create;
+    destructor Destroy; override;
+  end;
+
+var
+  GManager: TGotoDeclarationManager;
+
+function TGotoDeclarationNotifier.AllowedEvents: TCodeEditorEvents;
+begin
+  Result := [cevMouseEvents];
+end;
+
+function TGotoDeclarationManager.TryGetPosition(const Editor: TWinControl;
+  X, Y: Integer; out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
+var
+  LState: INTACodeEditorState;
+  LLineState: INTACodeEditorLineState;
+  LColumn, LVisibleLine: Integer;
+begin
+  Result := False;
+  AView := FEditorServices.GetViewForEditor(Editor);
+  if not Assigned(AView) then
+    Exit;
+
+  LState := FEditorServices.EditorState[Editor];
+  if not Assigned(LState) then
+    Exit;
+  if not LState.PointToCharacterPos(Point(X, Y), LColumn, LVisibleLine) then
+    Exit;
+
+  // LVisibleLine is a screen-visible line index, which can differ from the
+  // file's own line numbering under code folding (elided sections). Convert
+  // through LineState to get the LogicalLineNum PasTree's row numbers
+  // actually correspond to.
+  LLineState := LState.LineState[LVisibleLine];
+  if not Assigned(LLineState) then
+    Exit;
+
+  ARow := LLineState.LogicalLineNum;
+  ACol := LColumn;
+  Result := True;
+end;
+
+/// <summary>
+/// True only for a left click whose keyboard chord is EXACTLY Ctrl - masking
+/// to the modifier keys first, because in mouse events Shift also carries
+/// button-state flags (ssLeft etc.) that must not affect the comparison. A
+/// bare `ssCtrl in Shift` would also swallow Ctrl+Shift+Click and
+/// Ctrl+Alt+Click, silently taking those chords away from the IDE or any
+/// other plugin that binds them; this override claims plain Ctrl+Click and
+/// nothing else.
+/// </summary>
+function IsPlainCtrlLeftClick(Shift: TShiftState; Button: TMouseButton): Boolean;
+begin
+  Result := (Button = mbLeft)
+    and (Shift * [ssShift, ssCtrl, ssAlt] = [ssCtrl]);
+end;
+
+/// <summary>
+/// Whether THIS click is ours: the right chord, the feature switched on, and
+/// PasTree not already serving the IDE's own click chain as the selected
+/// Insight Provider. Asked identically on down and up, so the two events can
+/// never disagree about who owns the click.
+/// </summary>
+function ClaimsClick(Shift: TShiftState; Button: TMouseButton): Boolean;
+begin
+  Result := IsPlainCtrlLeftClick(Shift, Button)
+    and CtrlClickNavigation
+    and not PasTreeIsActiveInsightProvider;
+end;
+
+procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
+  Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+begin
+  // Suppress default down-side handling only (e.g. starting a text selection
+  // drag) - the actual navigation happens on mouse-up, below.
+  if ClaimsClick(Shift, Button) then
+    Handled := True;
+end;
+
+procedure TGotoDeclarationManager.DoMouseUp(const Editor: TWinControl;
+  Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+var
+  LView: IOTAEditView;
+  LRow, LCol: Integer;
+begin
+  if not ClaimsClick(Shift, Button) then
+    Exit;
+
+  // Always suppress the native handler once the click is ours, even if we end
+  // up resolving nothing below - the whole point is to stop the slow/broken
+  // native path from running, not to fall back to it on a miss.
+  Handled := True;
+
+  if not TryGetPosition(Editor, X, Y, LView, LRow, LCol) then
+  begin
+    LogDiagnostic('Goto Declaration: could not resolve click position to a '
+      + 'file/row/col.');
+    Exit;
+  end;
+
+  ResolveAndNavigate(LView.Buffer.FileName, LRow, LCol);
+end;
+
+constructor TGotoDeclarationManager.Create;
+begin
+  inherited;
+  FNotifierIndex := -1;
+  if not Supports(BorlandIDEServices, INTACodeEditorServices, FEditorServices) then
+    Exit;
+  FNotifier := TGotoDeclarationNotifier.Create;
+  FNotifier.OnEditorMouseDownEx := DoMouseDown;
+  FNotifier.OnEditorMouseUpEx := DoMouseUp;
+  FNotifierIndex := FEditorServices.AddEditorEventsNotifier(FNotifier);
+end;
+
+destructor TGotoDeclarationManager.Destroy;
+begin
+  if Assigned(FEditorServices) and (FNotifierIndex >= 0) then
+    FEditorServices.RemoveEditorEventsNotifier(FNotifierIndex);
+  inherited;
+end;
+
+procedure InitializeGotoDeclaration;
+begin
+  if not Assigned(GManager) then
+    GManager := TGotoDeclarationManager.Create;
+end;
+
 procedure FinalizeGotoDeclaration;
 begin
+  FreeAndNil(GManager);
   ClearHistoryItems;
 end;
 

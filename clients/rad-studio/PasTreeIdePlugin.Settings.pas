@@ -39,6 +39,27 @@ interface
 function OverrideStructureView: Boolean;
 
 /// <summary>
+/// Whether "Find Declaration" is OURS - both the Ctrl+Click gesture
+/// (PasTreeIdePlugin.GotoDeclaration's mouse override) and the editor menu
+/// item (the cEdMenuCatIdentifier takeover in PasTreeIdePlugin.Wizard).
+///
+/// Independent of the Insight Provider selection, and it has to be: the
+/// override exists precisely for the people who cannot select PasTree there,
+/// because RAD Studio gates part of the Code Insight UI on DelphiLSP being
+/// the provider. When PasTree IS the selected provider the CLICK override
+/// stands down on its own regardless of this switch - the IDE's own click
+/// chain already resolves through us.
+///
+/// THE ONE SWITCH WHOSE TWO HALVES ANSWER AT DIFFERENT TIMES. The click is
+/// asked per click, so turning it off takes effect immediately. The menu
+/// takeover is asked once, at package load, because it cannot be undone
+/// within a session - unregistering the native action list is a one-way
+/// door. Turned off mid-session, our menu item hides and the slot stays
+/// empty until the IDE restarts; the dialog's hint says so.
+/// </summary>
+function CtrlClickNavigation: Boolean;
+
+/// <summary>
 /// Whether Ctrl+Shift+Up/Down runs OUR declaration/implementation jump. False
 /// hands the keystroke back to the IDE, which then runs its own - see
 /// TToggleKeyBinding.ToggleProc, where that fallback is the whole mechanism.
@@ -121,6 +142,7 @@ procedure ShowSettingsDialog;
 type
   TPasTreeSettings = record
     OverrideStructureView: Boolean;
+    CtrlClickNavigation: Boolean;
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
     EnableBlockCompletion: Boolean;
@@ -150,6 +172,7 @@ uses
 const
   cSettingsKey = 'PasTree';
   cValueStructureView = 'OverrideStructureView';
+  cValueCtrlClick = 'CtrlClickNavigation';
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
   cValueBlockCompletion = 'EnableBlockCompletion';
@@ -241,6 +264,7 @@ var
 begin
   // DEFAULTS FIRST, so every early exit below lands on them.
   Result.OverrideStructureView := True;
+  Result.CtrlClickNavigation := True;
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
   Result.EnableBlockCompletion := True;
@@ -261,6 +285,8 @@ begin
     try
       Result.OverrideStructureView :=
         ReadFlag(LReg, cValueStructureView, Result.OverrideStructureView);
+      Result.CtrlClickNavigation :=
+        ReadFlag(LReg, cValueCtrlClick, Result.CtrlClickNavigation);
       Result.OverrideDeclImplToggle :=
         ReadFlag(LReg, cValueDeclImplToggle, Result.OverrideDeclImplToggle);
       Result.EnableRename :=
@@ -305,6 +331,7 @@ begin
       try
         LReg.WriteInteger(cValueStructureView,
           Ord(ASettings.OverrideStructureView));
+        LReg.WriteInteger(cValueCtrlClick, Ord(ASettings.CtrlClickNavigation));
         LReg.WriteInteger(cValueDeclImplToggle,
           Ord(ASettings.OverrideDeclImplToggle));
         LReg.WriteInteger(cValueRename, Ord(ASettings.EnableRename));
@@ -341,6 +368,11 @@ end;
 function OverrideStructureView: Boolean;
 begin
   Result := CurrentSettings.OverrideStructureView;
+end;
+
+function CtrlClickNavigation: Boolean;
+begin
+  Result := CurrentSettings.CtrlClickNavigation;
 end;
 
 function OverrideDeclImplToggle: Boolean;

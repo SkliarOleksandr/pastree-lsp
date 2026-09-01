@@ -76,6 +76,20 @@ procedure FinalizeCodeInsight;
 /// </summary>
 procedure CheckInsightProviderSelected;
 
+/// <summary>
+/// Whether the manager registered here is the one the IDE is currently
+/// asking - i.e. whether the user has selected "PasTree" in the Tools >
+/// Options > Editor > Source "Insight Provider" combobox.
+///
+/// The Ctrl+Click override in PasTreeIdePlugin.GotoDeclaration stands down
+/// when this is True: with PasTree selected, the IDE's own click chain ends
+/// in AsyncGotoDefinitionEx here, so it already resolves through PasTree,
+/// draws the Ctrl+hover underline and keeps history itself. Intercepting the
+/// mouse as well would resolve the same position twice and push the history
+/// entry twice.
+/// </summary>
+function PasTreeIsActiveInsightProvider: Boolean;
+
 implementation
 
 uses
@@ -1647,6 +1661,24 @@ begin
   // first: the provider is already selected, so the line is a step report
   // nobody needs, and this panel earns its keep only if what appears in it is
   // worth reading. Log failures, not steps.
+end;
+
+function PasTreeIsActiveInsightProvider: Boolean;
+var
+  LServices: IOTACodeInsightServices;
+  LCurrent: IOTACodeInsightManager;
+begin
+  Result := False;
+  if not Assigned(GManager) then
+    Exit;
+  if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+    Exit;
+  LCurrent := nil;
+  LServices.GetCurrentCodeInsightManager(LCurrent);
+  // By IDString, not interface identity: the services may hand back a
+  // different interface reference onto the same registered manager.
+  Result := Assigned(LCurrent)
+    and SameText(LCurrent.GetIDString, GManager.GetIDString);
 end;
 
 procedure FinalizeCodeInsight;

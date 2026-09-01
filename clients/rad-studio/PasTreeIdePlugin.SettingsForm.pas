@@ -47,6 +47,8 @@ type
     gbOverrides: TGroupBox;
     chkStructureView: TCheckBox;
     lblStructureViewHint: TLabel;
+    chkCtrlClick: TCheckBox;
+    lblCtrlClickHint: TLabel;
     chkDeclImplToggle: TCheckBox;
     lblDeclImplToggleHint: TLabel;
     chkRename: TCheckBox;
@@ -156,6 +158,7 @@ begin
 
     LSettings := LoadSettings;
     LForm.chkStructureView.Checked := LSettings.OverrideStructureView;
+    LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
@@ -170,6 +173,7 @@ begin
       Exit;
 
     LSettings.OverrideStructureView := LForm.chkStructureView.Checked;
+    LSettings.CtrlClickNavigation := LForm.chkCtrlClick.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;

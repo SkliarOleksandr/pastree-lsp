@@ -279,7 +279,13 @@ implementer does not re-derive it:
   the IDE's own Ctrl+Click: the mouse-notifier override in
   `PasTreeIdePlugin.GotoDeclaration` (down/up suppression, position mapping)
   and the `cEdMenuCatIdentifier` menu takeover in `PasTreeIdePlugin.Wizard` both
-  get **deleted**, and with them the one-way-door caveat. The IDE draws the
+  get **deleted**, and with them the one-way-door caveat. (BOTH were restored on 2026-09-01, for the
+  users who cannot spend the Insight Provider slot - RAD Studio gates part of
+  the editor UI on DelphiLSP being selected. The mouse override stands down
+  whenever PasTree IS the selected provider, so the two never both run; the
+  menu takeover has no such option, because the native item never reaches the
+  package at all, and it is therefore decided once at load from the same
+  switch. The one-way-door caveat comes back with it, knowingly.) The IDE draws the
   Ctrl+hover underline from OUR resolver (today it underlines from the native
   engine while the click resolves through ours - a visible disagreement we
   currently just live with), navigates, and feeds its own history.
@@ -362,7 +368,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Go to declaration | Have | the Code Insight manager (phase C, 2026-08-22) | Ctrl+Click and the native menu item route through `AsyncGotoDefinitionEx` when PasTree is the selected Insight Provider; the mouse-notifier override and the menu takeover are deleted |
+| Go to declaration | Have | the Code Insight manager, plus a mouse override and the menu takeover for everyone else | With PasTree selected as Insight Provider, Ctrl+Click routes through `AsyncGotoDefinitionEx`. Under any other provider the mouse-notifier override in `PasTreeIdePlugin.GotoDeclaration` claims plain Ctrl+Click. The `cEdMenuCatIdentifier` takeover is back too - a menu item never reaches the package, so nothing else can reach it. Both restored 2026-09-01 under one switch; the click is decided per click, the takeover once at load (one-way door) |
 | Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
 | Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |

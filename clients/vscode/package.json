@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.23.2",
+  "version": "0.27.1",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },

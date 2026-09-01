@@ -82,14 +82,20 @@ unofficial/community API surface.
 
 ### Menu
 
-"Find Type Declaration" and "Find References" live in the editor's
-right-click menu under the plugin's own category, ALONGSIDE the native
-items (since phase C, 2026-08-22, nothing native is replaced - the native
-"Find Declaration" is back in its own slot and, like Ctrl+Click, routes
-through our Code Insight manager whenever "PasTree" is the selected
-Insight Provider). A miss is reported in the Messages panel tagged
-`[pastree]`, which is where the origin shows. See "Go to
-Declaration" below for how navigation is reached now.
+"Find Type Declaration", "Find References" and "Rename..." live in the
+editor's right-click menu under the plugin's own category, ALONGSIDE the
+native items - they replace nothing and unregister cleanly at unload.
+
+**"Find Declaration" is the one native item we replace** (again, since
+2026-09-01): our own action takes over the `Identifier` category, in the
+same first menu position. A menu item cannot be intercepted the way a click
+can - it never reaches the package at all - so the takeover is the only
+mechanism available, and it is opened only when the override is switched on
+at package load. "Go to Declaration" below has the whole rule, including
+what the one-way door costs.
+
+A miss is reported in the Messages panel tagged `[pastree]`, which is where
+the origin shows.
 
 ### Prototype sync (part of Ctrl+Shift+C)
 
@@ -182,15 +188,34 @@ work, and the jump happens in a callback rather than before the handler
 returns. How it is REACHED has changed twice, and the two mechanisms below are
 history:
 
-> **Both mechanisms below were REMOVED in phase C (2026-08-22)** and are
-> described here only because the reasoning behind them is worth keeping. The
-> native "Find Declaration" is no longer unregistered, and there is no
-> mouse-event interception: both the native menu item and Ctrl+Click route
-> through our Code Insight manager whenever "PasTree" is the selected Insight
-> Provider, which is the whole point of becoming the manager. See "Menu" above
-> for what the editor menu looks like today.
+> **Both mechanisms below were removed in phase C (2026-08-22) and BOTH CAME
+> BACK on 2026-09-01.** Phase C priced declaration navigation at the whole
+> Insight Provider slot, and RAD Studio gates part of the editor UI on
+> DelphiLSP being the selected provider - so not everyone can pay it, and for
+> those users phase C left Ctrl+Click and the menu item on the native
+> navigation this plugin exists to replace. Both are governed by one switch,
+> **Find Declaration (Ctrl+Click and the editor menu)** in Tools > PasTree >
+> Settings, default on - but they answer at different times:
+>
+> - **Ctrl+Click** is decided per click. With PasTree selected as Insight
+>   Provider the mouse override stands down entirely: the IDE's own click
+>   chain runs into `AsyncGotoDefinitionEx`, draws the Ctrl+hover underline,
+>   navigates and keeps history itself. Under any other provider the override
+>   claims plain Ctrl+Left-click - and only that; Ctrl+Shift+Click and
+>   Ctrl+Alt+Click stay with the IDE. Switching it off takes effect at once.
+> - **The menu item** is decided once, at package load, because the takeover
+>   cannot be undone within a session (there is no handle to the native action
+>   list). With the switch off at load, nothing is taken over and the native
+>   item behaves exactly as it always did. Switched off mid-session, our item
+>   hides and the slot stays empty until the IDE restarts.
+>
+> A menu item cannot be intercepted the way a click can - it never reaches
+> the package at all - which is why the takeover is the only mechanism
+> available for it, and why the one-way door is opened deliberately rather
+> than avoided. See "Menu" above for the rest of the editor menu.
 
-- **Native menu item replaced** *(removed in phase C)*. The built-in "Find
+
+- **Native menu item replaced** *(removed in phase C, restored 2026-09-01)*. The built-in "Find
   Declaration" was removed via
   `INTAEditorLocalMenu.UnregisterActionList(cEdMenuCatIdentifier)` and
   replaced with our own action registered under that same category string
@@ -198,7 +223,7 @@ history:
   went:** a one-way door within a running IDE session - there is no handle to
   the native action list to restore it, so uninstalling the package without
   restarting the IDE left "Find Declaration" missing until restart.
-- **Ctrl+Click override** *(removed in phase C)*. Hooked
+- **Ctrl+Click override** *(removed in phase C, restored 2026-09-01)*. Hooked
   `INTACodeEditorServices.AddEditorEventsNotifier` (`ToolsAPI.Editor.pas`, the
   same mechanism the official "KeyboardMouse Events Demo" sample uses) and
   intercepted `OnEditorMouseDownEx`/`OnEditorMouseUpEx`: on Ctrl+Left-click it

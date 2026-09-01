@@ -9,13 +9,29 @@ unit PasTreeIdePlugin.Wizard;
   PHASE C (2026-08-22, COMPLETION.md): this unit used to REPLACE the native
   "Find Declaration" menu item (UnregisterActionList on
   cEdMenuCatIdentifier, a one-way door within a session) and pair it with a
-  Ctrl+Click mouse override. Both are gone: declaration navigation belongs
-  to the IDE's own gestures, served by our Code Insight manager when the
-  user selects "PasTree" as the Insight Provider. The native menu item and
-  action list are untouched now - no takeover, no one-way door - and our two
-  remaining items (references and the type jump are NOT Code Insight
-  concepts, so they stay ours) live under cMenuCategory, unregistered
-  cleanly at unload.
+  Ctrl+Click mouse override. BOTH ARE BACK as of 2026-09-01, and for one
+  reason: phase C priced declaration navigation at the whole Insight Provider
+  slot, and RAD Studio gates part of the editor UI on DelphiLSP being the
+  selected provider - so not everyone can pay it, and for those users phase C
+  left Ctrl+Click and the menu item on the native navigation this plugin
+  exists to replace. The reasoning is written out once, in
+  PasTreeIdePlugin.GotoDeclaration's header.
+
+  The two halves are NOT symmetric, and the difference is worth knowing
+  before touching either:
+
+    - Ctrl+CLICK is a mouse hook, decided per click. It stands down when
+      PasTree IS the selected provider (the IDE's own chain already resolves
+      through us), and it costs nothing to switch off.
+    - The MENU item is a category takeover (UnregisterActionList on
+      cEdMenuCatIdentifier, then our list under that same category string) -
+      a one-way door within a session, because the native list cannot be put
+      back. So it happens at load, only if the override is switched on. See
+      the long comment in TMenuManager.Create.
+
+  Our other three items - "Find Type Declaration", "Find References" and
+  "Rename..." - replace nothing and live under cMenuCategory, registered
+  alongside the native ones and unregistered cleanly at unload.
 
   Modelled on the official samples shipped with RAD Studio:
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Local Menu Demo
@@ -50,9 +66,18 @@ type
   TMenuManager = class
   private
     FActionList: TActionList;
+    { The SECOND action list, registered under the IDE's own 'Identifier'
+      category in place of the native one - see TMenuManager.Create. Separate
+      from FActionList because the two lists live under different categories
+      and are registered and unregistered independently. }
+    FIdentifierActionList: TActionList;
     FEditorServices: IOTAEditorServices;
     FRegistered: Boolean;
+    FIdentifierRegistered: Boolean;
     procedure AddActions;
+    procedure AddIdentifierActions;
+    procedure OnFindDeclarationExecute(Sender: TObject);
+    procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure OnFindReferencesExecute(Sender: TObject);
     procedure OnFindReferencesUpdate(Sender: TObject);
     procedure OnRenameExecute(Sender: TObject);
@@ -187,6 +212,23 @@ begin
   // Prototypes" item cannot be fixed or replaced safely).
 end;
 
+{ Our "Find Declaration", standing where the native one stood. Same caption,
+  deliberately: it is the same command, and this is the slot people already
+  reach for. }
+procedure TMenuManager.AddIdentifierActions;
+var
+  LAction: TAction;
+begin
+  LAction := TAction.Create(FIdentifierActionList);
+  LAction.Name := 'PasTreeFindDeclaration';
+  LAction.Caption := 'Find Declaration';
+  LAction.Category := 'PasTreeFindDeclaration';
+  LAction.OnUpdate := OnFindDeclarationUpdate;
+  LAction.OnExecute := OnFindDeclarationExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FIdentifierActionList;
+end;
+
 constructor TMenuManager.Create;
 begin
   inherited;
@@ -195,12 +237,44 @@ begin
   if Supports(BorlandIDEServices, IOTAEditorServices, FEditorServices) then
   begin
     var LLocalMenuIntf := FEditorServices.GetEditorLocalMenu;
-    // Our own category, ALONGSIDE the native items - phase C removed the
-    // cEdMenuCatIdentifier takeover, so the IDE's own "Find Declaration"
-    // is back in its native slot and nothing needs restoring at unload.
+    // Our own category, ALONGSIDE the native items: "Find Type Declaration",
+    // "Find References" and "Rename..." are not Code Insight concepts and
+    // replace nothing, so they need no takeover and unregister cleanly.
     LLocalMenuIntf.RegisterActionList(FActionList, cMenuCategory);
     FRegistered := True;
     AddActions;
+
+    { THE ONE TAKEOVER, AND THE ONE PLACE A SETTING IS READ AT STARTUP
+      RATHER THAN AT THE POINT OF USE.
+
+      The native "Find Declaration" is the IDE's own item and never reaches
+      this package: under any Insight Provider but PasTree it runs the native
+      navigation, which on a large project is the thing this plugin exists to
+      replace - it silently does nothing, with nothing in any log, because
+      nothing of ours ever ran. Ctrl+Click can be intercepted at the mouse; a
+      menu item cannot. Taking the category over is the only way.
+
+      IT IS A ONE-WAY DOOR WITHIN A SESSION: UnregisterActionList removes
+      whatever list the IDE registered under 'Identifier' and there is no
+      handle to put it back, so an Uninstall without an IDE restart leaves
+      the slot empty. That is why the door is only opened when the user has
+      the override switched ON, and why this is the one switch read at
+      startup: with it off at load we take nothing, and the native item is
+      untouched and behaves exactly as it always did.
+
+      Turned OFF mid-session, the item cannot become native again - so it
+      hides instead (OnFindDeclarationUpdate) rather than staying and acting
+      against the setting. It comes back native at the next IDE start. The
+      settings dialog says so. }
+    if CtrlClickNavigation then
+    begin
+      FIdentifierActionList := TActionList.Create(nil);
+      LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
+      LLocalMenuIntf.RegisterActionList(FIdentifierActionList,
+        cEdMenuCatIdentifier);
+      FIdentifierRegistered := True;
+      AddIdentifierActions;
+    end;
   end
   else
     FRegistered := False;
@@ -218,10 +292,31 @@ begin
     begin
       var LLocalMenuIntf := LEditorServices.GetEditorLocalMenu;
       LLocalMenuIntf.UnregisterActionList(cMenuCategory);
+      if FIdentifierRegistered then
+        // Leaves the 'Identifier' category empty rather than native - the
+        // one-way door in Create. The package's own workflow restarts the
+        // IDE after every rebuild anyway (see the README).
+        LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
     end;
   end;
   FreeAndNil(FActionList);
+  FreeAndNil(FIdentifierActionList);
   inherited;
+end;
+
+procedure TMenuManager.OnFindDeclarationUpdate(Sender: TObject);
+begin
+  // HIDDEN, not greyed, when the override was switched off after the takeover
+  // already happened: the native item cannot be given back until the IDE
+  // restarts, and an item that acts against the setting is worse than a
+  // missing one. See the takeover comment in Create.
+  TAction(Sender).Visible := CtrlClickNavigation;
+  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+end;
+
+procedure TMenuManager.OnFindDeclarationExecute(Sender: TObject);
+begin
+  ExecuteGotoDeclaration(FEditorServices.TopView);
 end;
 
 procedure TMenuManager.OnFindTypeDeclarationUpdate(Sender: TObject);
@@ -371,6 +466,12 @@ begin
   // "PasTree" as the Insight Provider in Options - and since phase C that
   // selection is what carries ALL declaration navigation.
   InitializeCodeInsight;
+  // Ctrl+Click in the editor, as a mouse override independent of the Insight
+  // Provider selection - for the users who cannot give that combobox up (RAD
+  // Studio gates part of the editor UI on DelphiLSP being the provider). It
+  // stands down by itself whenever PasTree IS the selected provider, so the
+  // two paths never both run; see PasTreeIdePlugin.GotoDeclaration's header.
+  InitializeGotoDeclaration;
   // Project-wide symbol search in the IDE Insight dialog (Ctrl+.).
   InitializeIdeInsight;
   // Painted error squiggles over the server's pushed diagnostics. (The

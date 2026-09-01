@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 677
+  ClientHeight = 742
   ClientWidth = 462
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -75,7 +75,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 16
     Top = 108
     Width = 430
-    Height = 352
+    Height = 417
     Caption = ' Overrides '
     TabOrder = 1
     object lblStructureViewHint: TLabel
@@ -88,9 +88,29 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         'o the IDE'#39's own provider.'
       WordWrap = True
     end
-    object lblDeclImplToggleHint: TLabel
+    object lblCtrlClickHint: TLabel
       Left = 35
       Top = 110
+      Width = 377
+      Height = 30
+      Caption =
+        'Ctrl+Click and the editor menu item resolve through PasTree. The men' +
+        'u half only changes at the next IDE restart.'
+      WordWrap = True
+    end
+    object chkCtrlClick: TCheckBox
+      Left = 16
+      Top = 89
+      Width = 396
+      Height = 17
+      Caption = 'Find Declaration (Ctrl+Click and the editor menu)'
+      Checked = True
+      State = cbChecked
+      TabOrder = 1
+    end
+    object lblDeclImplToggleHint: TLabel
+      Left = 35
+      Top = 175
       Width = 377
       Height = 30
       Caption =
@@ -100,7 +120,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object lblRenameHint: TLabel
       Left = 35
-      Top = 175
+      Top = 240
       Width = 377
       Height = 30
       Caption =
@@ -110,7 +130,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object lblBlockCompletionHint: TLabel
       Left = 35
-      Top = 240
+      Top = 305
       Width = 377
       Height = 30
       Caption =
@@ -130,37 +150,37 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object chkDeclImplToggle: TCheckBox
       Left = 16
-      Top = 89
+      Top = 154
       Width = 396
       Height = 17
       Caption = 'Ctrl+Shift+Up / Ctrl+Shift+Down declaration'#8596'implementation jump'
       Checked = True
       State = cbChecked
-      TabOrder = 1
+      TabOrder = 2
     end
     object chkRename: TCheckBox
       Left = 16
-      Top = 154
+      Top = 219
       Width = 396
       Height = 17
       Caption = 'Rename (Ctrl+Shift+E)'
       Checked = True
       State = cbChecked
-      TabOrder = 2
+      TabOrder = 3
     end
     object chkBlockCompletion: TCheckBox
       Left = 16
-      Top = 219
+      Top = 284
       Width = 396
       Height = 17
       Caption = 'Block completion (Enter after begin/try/case/repeat)'
       Checked = True
       State = cbChecked
-      TabOrder = 3
+      TabOrder = 4
     end
     object lblClassCompleteHint: TLabel
       Left = 35
-      Top = 305
+      Top = 370
       Width = 377
       Height = 30
       Caption =
@@ -170,18 +190,18 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object chkClassComplete: TCheckBox
       Left = 16
-      Top = 284
+      Top = 349
       Width = 396
       Height = 17
       Caption = 'Complete Class At Cursor (Ctrl+Shift+C)'
       Checked = True
       State = cbChecked
-      TabOrder = 4
+      TabOrder = 5
     end
   end
   object gbLogging: TGroupBox
     Left = 16
-    Top = 468
+    Top = 533
     Width = 430
     Height = 150
     Caption = ' Logging '
@@ -229,7 +249,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnOK: TButton
     Left = 270
-    Top = 637
+    Top = 702
     Width = 85
     Height = 27
     Caption = 'OK'
@@ -239,7 +259,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnCancel: TButton
     Left = 361
-    Top = 637
+    Top = 702
     Width = 85
     Height = 27
     Cancel = True
