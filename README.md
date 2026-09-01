@@ -8,9 +8,9 @@ over JSON-RPC 2.0, plus the clients that ship with it.
 
 It serves two kinds of clients with the same protocol:
 
-- **the RAD Studio IDE package** (`clients/rad-studio/`) — a thin LSP client
+- **the RAD Studio IDE package** (`clients/rad-studio/`) - a thin LSP client
   over ToolsAPI, replacing the IDE's own DelphiLSP-based navigation;
-- **standard editors** — VS Code (`clients/vscode/`), Neovim, anything with an
+- **standard editors** - VS Code (`clients/vscode/`), Neovim, anything with an
   LSP client.
 
 ## Layout
@@ -31,7 +31,7 @@ The RAD Studio package lived in its own repository (`pastree-ide-plugin`) until
 2026-08-20 and was merged here with its history. The reason is the dependency
 shape: the server is useful without that package, the package is useless
 without the server, and they are always deployed as a pair. Two repositories
-gave the pair two version numbers and therefore a way for them to disagree —
+gave the pair two version numbers and therefore a way for them to disagree -
 which they did, silently, until a human read a version string out of the IDE's
 Build tab. One repository makes that an equality check. `clients/vscode` was
 already here, so the layout is unchanged in kind: a server and its clients.
@@ -69,7 +69,7 @@ Phases 1 and 2 are complete and exercised live.
 | `textDocument/typeDefinition` | the type of the thing under the cursor, across units |
 | `textDocument/documentHighlight` | occurrences within the current file |
 | `textDocument/rename`, `textDocument/prepareRename` | rename a symbol or a UNIT across the project; a unit also renames its file, as a `rename` operation in `documentChanges` |
-| `pastree/renamePlan` | the same plan with each site's old and new text, the file a renamed unit must move to, and a preview of every line after the rename — what the RAD Studio client applies and shows |
+| `pastree/renamePlan` | the same plan with each site's old and new text, the file a renamed unit must move to, and a preview of every line after the rename - what the RAD Studio client applies and shows |
 | `textDocument/completion` | PasTree's completion engine at the cursor, each item carrying its own `documentation` |
 | `textDocument/signatureHelp` | the call under the cursor, its overloads and the active parameter |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
@@ -77,7 +77,7 @@ Phases 1 and 2 are complete and exercised live.
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C in the RAD Studio client) |
 | `$/pastree.hostEvent` | OURS, not LSP: a client-side event (the IDE opening or closing a project) written into the server's own log, so its timeline has the boundaries the server cannot see |
 
-**Behaviour** — analysis runs on a background session, debounced so a typing
+**Behaviour** - analysis runs on a background session, debounced so a typing
 burst costs one build; a document event only schedules a rebuild when the text
 really differs from what was analyzed; a result whose buffer versions went
 stale mid-build is swapped in and immediately rebuilt; and a client that dies
@@ -85,11 +85,11 @@ without closing stdin is noticed by the liveness watchdog.
 
 **An edit does not rebuild the closure** (since 0.17.0, on PasTree 0.11.0).
 When exactly one document's text changed, the server re-analyzes that one
-module in place instead — including an INTERFACE edit, where PasTree recomputes
+module in place instead - including an INTERFACE edit, where PasTree recomputes
 the units the change can reach. Measured on a 3676-unit client project: a body
 edit 310 ms and an interface edit 1.5 s, against a 29 s rebuild. Everything
-that does not qualify — several files at once, a new `uses` entry, a blast
-radius past `moduleRedoLimit` — falls back to an ordinary rebuild, and that
+that does not qualify - several files at once, a new `uses` entry, a blast
+radius past `moduleRedoLimit` - falls back to an ordinary rebuild, and that
 rebuild reuses the previous analysis's parse of every unchanged file (29 s →
 23 s). Which path an edit took is in the log; `SPEC.md` has the decision rule
 and PasTree's `docs/incremental-analysis.md` the mechanisms.
@@ -98,27 +98,27 @@ Verified against VS Code (`clients/vscode`, also installable as a VSIX):
 go-to-definition, find-all-references, outline, hover and diagnostics all work
 live against the demo project's 197-unit closure.
 
-The full specification — architecture, protocol phases, key
-decisions and their costs, order of work — is in [SPEC.md](SPEC.md).
+The full specification - architecture, protocol phases, key
+decisions and their costs, order of work - is in [SPEC.md](SPEC.md).
 
 The PasTree-side prerequisites (versioned overlay buffers and mid-pass
 cancellation in the analysis) landed in the PasTree repo on 2026-08-16.
 
 ## Why out-of-process
 
-- Large projects need more address space than a 32-bit IDE can offer —
+- Large projects need more address space than a 32-bit IDE can offer -
   analysis of a multi-thousand-unit project runs comfortably only on Win64.
 - An analyzer crash must not take the IDE down.
 - The same executable serves editor-agnostic LSP clients for free.
 
 ## Versions
 
-**One version for the whole product** — the server and every client in
-`clients/` — in `source/PasLsp.ProductVersion.pas`. Patch bump per commit, minor
+**One version for the whole product** - the server and every client in
+`clients/` - in `source/PasLsp.ProductVersion.pas`. Patch bump per commit, minor
 for a substantial change; see [SPEC.md](SPEC.md) for the policy and why the
 patch component exists. PasTree keeps its own independent version, and is the
 one dependency this product states a minimum against
-(`cMinPasTreeVersion` in `PasLsp.Version.pas`, checked at startup — PasTree is
+(`cMinPasTreeVersion` in `PasLsp.Version.pas`, checked at startup - PasTree is
 linked into this exe, so a stale sibling checkout should fail loudly instead of
 producing quietly wrong answers).
 
@@ -138,14 +138,14 @@ conforming clients ignore members they do not know.
 incompatibility.** Both are built from one commit by `build.bat`, so the RAD
 Studio client checks the server's reported version for *equality* with its own
 and warns in the Build tab when they differ. That is a stricter check than the
-"at least version X" it replaced — and a necessary one: the loose check failed
+"at least version X" it replaced - and a necessary one: the loose check failed
 to notice a fresh package running against the previous day's exe, because the
 stale exe still satisfied the minimum.
 
 ## Building
 
-`build.bat` builds all of it — server (Win64), RAD Studio package (Win32), the
-four test harnesses — and runs the harnesses. **RAD Studio must be closed**: a
+`build.bat` builds all of it - server (Win64), RAD Studio package (Win32), the
+four test harnesses - and runs the harnesses. **RAD Studio must be closed**: a
 running IDE holds the `.bpl`, and a live LSP session holds
 `pastree-server.exe`.
 

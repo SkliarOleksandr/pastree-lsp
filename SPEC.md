@@ -1,4 +1,4 @@
-# PasTree LSP Server — specification
+# PasTree LSP Server - specification
 
 Status: 2026-08-19. Phases 1-2 are implemented and exercised live against
 VS Code; see "Protocol coverage" below for what the standard still holds and
@@ -11,9 +11,9 @@ the Language Server Protocol (JSON-RPC 2.0). It serves two kinds of clients
 with the SAME protocol:
 
 1. the RAD Studio IDE package (`clients/rad-studio/`, merged into this
-   repository on 2026-08-20 — see the README for why), reduced to a
+   repository on 2026-08-20 - see the README for why), reduced to a
    thin LSP client over ToolsAPI;
-2. standard editors — VS Code, Neovim, anything with an LSP client.
+2. standard editors - VS Code, Neovim, anything with an LSP client.
 
 We deliberately do NOT build a private RPC for the plugin first and LSP later:
 that is the same protocol written twice. LSP is the native protocol from day
@@ -21,14 +21,14 @@ one; the plugin is just its first client.
 
 ## Versioning
 
-**One version for the whole product** — this server and every client in
-`clients/` — as `PasTreeLspVersion` in `source/PasLsp.ProductVersion.pas`. Two
+**One version for the whole product** - this server and every client in
+`clients/` - as `PasTreeLspVersion` in `source/PasLsp.ProductVersion.pas`. Two
 rules; PasTree counts its own commits under the same two:
 
 - **Every commit bumps the PATCH.** `0.5.0` → `0.5.1` → `0.5.2`, mechanically,
   no judgement call about whether a change "deserves" it.
 - **A substantial change bumps the MINOR** and resets the patch: a newly
-  supported request, a new initializationOption, a reworked subsystem — anything
+  supported request, a new initializationOption, a reworked subsystem - anything
   a consumer might reasonably need to *require*.
 
 The per-commit patch bump exists so that a version identifies a **build**. The
@@ -39,14 +39,14 @@ number that only moved on release could not answer it.
 **Why one number rather than one per component.** The server and the RAD Studio
 package are one deliverable built from one commit by one script, so "which
 version is the package" and "which version is the server" were never two
-questions — giving them two numbers only created a way for the answers to
+questions - giving them two numbers only created a way for the answers to
 disagree. They did, on 2026-08-20: a freshly built package ran against the
 previous day's exe, the old `cMinServerVersion` gate was satisfied by the stale
 server, and nothing was reported. The mismatch was caught by a human reading a
 version string. With one number the client checks **equality** and says so,
 which is the difference between a guess about compatibility and a fact about
 deployment. `clients/vscode` shares the number too, at the mild cost that a
-package-only fix moves a version VS Code users see — acceptable, since the
+package-only fix moves a version VS Code users see - acceptable, since the
 number identifies a build rather than a feature set.
 
 The minor component keeps its ordinary semver meaning, which is what makes the
@@ -88,16 +88,16 @@ one remaining compatibility constant readable:
 
 Three layers, strict dependency direction:
 
-1. **PasTree core** (existing repo) — no knowledge of transport. Exposes a
+1. **PasTree core** (existing repo) - no knowledge of transport. Exposes a
    facade API over (project, file, position) plus:
    - **overlay buffers**: in-memory file contents supplied by the host,
      consulted before disk everywhere, including Prefetch; versioned;
    - **cancellation**: long analysis takes a token and polls it.
    These two items live in the PasTree repo's To do and are prerequisites.
-2. **pastree-server.exe** (this repo) — owns the JSON-RPC loop, LSP lifecycle,
+2. **pastree-server.exe** (this repo) - owns the JSON-RPC loop, LSP lifecycle,
    project state, and all caches (the plugin's BuildNavigator cache moves
    here). Win64 only, like every PasTree tool.
-3. **Clients** — the IDE plugin translates ToolsAPI events to LSP and LSP
+3. **Clients** - the IDE plugin translates ToolsAPI events to LSP and LSP
    results back to IDE actions; IDE-specific features (IOTAHistoryServices
    Backward/Forward) stay in the plugin, layered over LSP results.
 
@@ -110,8 +110,8 @@ System.NeverSleepOnMMThreadContention := True;
 **The first statement in `pastree-server.dpr`, and it must stay there.** PasTree
 fans parse and resolve out across cores, and with this global left at its default
 (`False`) Delphi's memory manager *sleeps* when it cannot take its lock. Every
-one of those passes allocates heavily — a token stream, a tree and a model per
-unit — so the workers sit in `Sleep` instead of allocating. The library cannot
+one of those passes allocates heavily - a token stream, a tree and a model per
+unit - so the workers sit in `Sleep` instead of allocating. The library cannot
 set it: it is a process-wide mode the application owns.
 
 Missed here until 2026-08-20, at a cost of **4.5x**. Measured on a 3757-unit
@@ -125,7 +125,7 @@ project, identical closure and inputs:
 Two things in that table are worth memorising, because they are how this gets
 recognised next time rather than re-investigated for an afternoon:
 
-- **CPU went DOWN while wall time went up.** Threads waiting, not working —
+- **CPU went DOWN while wall time went up.** Threads waiting, not working -
   sampling showed one thread running and thirty-odd asleep. A slowdown that
   burns *less* CPU is never a "we compute too much" problem.
 - **`cross` was unaffected; `intf` and `full` were 3x worse than a deliberately
@@ -135,7 +135,7 @@ recognised next time rather than re-investigated for an afternoon:
 
 What it was NOT, both checked by measurement rather than argument: the cost of
 running out of process (the same analysis in-process takes the same 15 s), and
-a Debug-versus-Release build — rebuilding the server with full release flags
+a Debug-versus-Release build - rebuilding the server with full release flags
 (`-$O+ -$C- -$D- -$R- -$Q-`) was worth about 2%, inside the noise. The server
 and the demo are built by identical `dcc64` invocations and neither carries
 debug-only directives, so there is no Release build to switch to.
@@ -147,7 +147,7 @@ this server is the host that proved a host can forget.
 ## Protocol coverage
 
 Phases 1-2 (the plugin-parity set) and part of phase 3 are implemented. What
-follows walks the whole LSP 3.17 inventory, so this list is CLOSED — every
+follows walks the whole LSP 3.17 inventory, so this list is CLOSED - every
 request in the standard is either implemented, in a tier below, or explicitly
 out of scope with a reason. Tiers are by value-per-effort for OUR clients (the
 IDE plugin first, VS Code second), not by protocol order.
@@ -178,13 +178,13 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers up to TWO TextEdits - the caret line re-indented to the body indent, then the closer ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
 | `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
-| `$/pastree.hostEvent` | OURS, not LSP: a NOTIFICATION carrying a line for the server's own log (`params.message`, prefixed `host:` on the way in so a line that did not come from the server says so). It exists because reopening the SAME project restarts nothing here — the configuration is identical — so without it one session's requests run straight into the next's with no boundary between them, which is exactly the confusion it was added for (2026-08-29). `$/`-prefixed so any other server drops it silently rather than treating it as a violation. |
+| `$/pastree.hostEvent` | OURS, not LSP: a NOTIFICATION carrying a line for the server's own log (`params.message`, prefixed `host:` on the way in so a line that did not come from the server says so). It exists because reopening the SAME project restarts nothing here - the configuration is identical - so without it one session's requests run straight into the next's with no boundary between them, which is exactly the confusion it was added for (2026-08-29). `$/`-prefixed so any other server drops it silently rather than treating it as a violation. |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
 **Why one custom request rather than a code action.** `pastree/classComplete`
 answers "implement what I declared", which `textDocument/codeAction` could
-carry — at the price of advertising a capability, agreeing on a kind, and a
+carry - at the price of advertising a capability, agreeing on a kind, and a
 resolve round-trip, all so that exactly one client can send it. The custom
 method is honest about who it is for, and the `pastree/` prefix marks it the
 same way the `pastreeCall` and `pastreeHtml` result fields do. It is also the
@@ -192,70 +192,70 @@ one request that must NOT wait for the analysis: it is a parse of the live
 buffer, because the declaration the user wants a body for is the one they just
 typed.
 
-**Rename is the reference search, turned into edits — and its refusals are
+**Rename is the reference search, turned into edits - and its refusals are
 half the feature.** `PlanRename` is `DeclHit` + `FindReferences`, so a rename
 can never reach further than the references panel already showed, and never
 onto a same-spelled unrelated symbol. `PlanUnitRename` is the same idea over
 the unit identity: the module's own header name plus every `uses` item that
 resolved to it, with each site getting the spelling it had (the full dotted
 name where it was written in full, the bare leaf where a namespace prefix
-resolved it — which is why every edit carries its own `newText` and nothing
+resolved it - which is why every edit carries its own `newText` and nothing
 assumes the requested name is what lands). A compiler builtin is the one
 thing declined outright: it has no declaration site anywhere. An invalid name
 or a reserved word is refused by the analysis itself (`IsValidRenameName`,
-`IsValidUnitRenameName`), never by a client's own copy of the keyword list —
+`IsValidUnitRenameName`), never by a client's own copy of the keyword list -
 a second answer able to disagree with the first is exactly what that would
 be. Every refusal comes back as an error whose message is written to be shown
 to a user, not logged.
 
 **A unit rename is text edits AND A FILE RENAME, and the server never lets a
 client take only half.** (The RAD Studio client stopped taking it at all on
-2026-08-31 — the IDE renames a unit's file itself the moment the `unit` clause
+2026-08-31 - the IDE renames a unit's file itself the moment the `unit` clause
 changes, and the two mechanisms collide; see `clients/rad-studio/SPEC.md`. The
 server half below is unchanged and is what an ordinary LSP client uses.) Object Pascal ties a unit's name to its file name, so
 `requiredFileName` rides with the plan and `textDocument/rename` expresses the
-file move as a `rename` resource operation inside `documentChanges` — refusing
+file move as a `rename` resource operation inside `documentChanges` - refusing
 outright for a client that has not advertised `resourceOperations` support for
 one, because applying the text half alone produces a project that does not
 compile.
 
 A program's `uses Foo in 'Foo.pas'` needs the PATH renamed too, and that edit
-is in the plan — but it is the server's, not PasTree's. The library records the
+is in the plan - but it is the server's, not PasTree's. The library records the
 path (`TPasUsesRef.InPath`) and no POSITION for the literal, so
 `AugmentUsesInPaths` derives one: every `uses` edit carries the line it sits
 on, and the literal is found by walking that one line forward from the end of
-the name (only the file name inside the quotes changes — a unit rename never
+the name (only the file name inside the quotes changes - a unit rename never
 moves a file). Bounded to one line, at a site the resolver already resolved.
 
 Skipping it is not an option, and three live runs proved it: renaming only the
-name leaves `Foo2 in 'Foo.pas'`, a line naming a file that no longer exists —
+name leaves `Foo2 in 'Foo.pas'`, a line naming a file that no longer exists -
 and in the IDE that line IS the project's entry for the unit, so the IDE then
 refuses to re-register it ("the project already contains a module named Foo2")
 and the rename looks like a failure after having entirely succeeded.
 `staleInPaths` now reports only what could NOT be fixed, and a position for
-that literal still belongs in PasTree — then this becomes one more of its own
+that literal still belongs in PasTree - then this becomes one more of its own
 edits.
 
 **Why `pastree/renamePlan` exists next to `textDocument/rename`.** They plan
-the same edits; the custom one keeps what a `WorkspaceEdit` throws away —
+the same edits; the custom one keeps what a `WorkspaceEdit` throws away -
 `oldText` for each site, so a host that applies the rename ITSELF can verify
 the buffer has not moved since the analysis, and a `snippet` with
 `hiFrom`/`hiTo`: the line as it reads AFTER the rename, with the new name
 highlighted. That is what lets the RAD Studio client fill a Find
-References-shaped results tab with the OUTCOME rather than a promise — the
+References-shaped results tab with the OUTCOME rather than a promise - the
 ToolsAPI has no refactoring surface to plug into, so the plugin edits buffers
 and then shows what it did. A client that does not know the method loses
 nothing: `textDocument/rename` is the same plan.
 
-**Encoding disagreement — fixed 2026-08-20, in PasTree, and the diagnosis is
+**Encoding disagreement - fixed 2026-08-20, in PasTree, and the diagnosis is
 worth keeping because the obvious explanation was wrong.** PasTree used to
 decode a source with no BOM as ANSI (dcc's own rule, and the point of its
 tolerant loader) while an editor decodes it as UTF-8. Three consequences, in the
 order they were understood:
 
 - *the visible cost:* every PasTree source with an em-dash in a comment looked
-  "modified" to the rebuild gate, so peeking a declaration — VS Code opens the
-  target file and closes it milliseconds later — cost two full closure rebuilds,
+  "modified" to the rebuild gate, so peeking a declaration - VS Code opens the
+  target file and closes it milliseconds later - cost two full closure rebuilds,
   about 14 seconds of the editor apparently reparsing a file nobody touched. The
   gate now also accepts "re-encoding the editor's text as UTF-8 reproduces the
   file's bytes", because a decode disagreement is not an edit (`FileMatches`,
@@ -263,13 +263,13 @@ order they were understood:
 - *what this document used to claim, and it was wrong:* that the remaining skew
   only affected files the editor does NOT have open. It affected open ones too,
   and by way of the fix above. The gate correctly concludes "no edit, so no
-  rebuild" — but the analysis then keeps its own ANSI reading of a file the
+  rebuild" - but the analysis then keeps its own ANSI reading of a file the
   editor has open, and no rebuild is ever due to correct it. The log said
   `textDocument/definition: DemoUnicode.pas(31,31) no identifier at that
   position` for a column that was
   right: 31 is where `Wrap` sits in UTF-16 code units, while the analysis, with
   13 Cyrillic characters inflated to 26, had it at 44.
-- *the fix, and why it is not here:* the server cannot paper over this — it
+- *the fix, and why it is not here:* the server cannot paper over this - it
   would have to re-decode every file the analysis reads. It is a decode decision
   for the library, and PasTree 0.2.3 makes it: a preamble-less file whose bytes
   are valid UTF-8 decodes as UTF-8, ANSI only when they are not. Both sides then
@@ -280,7 +280,7 @@ order they were understood:
   [PasLsp.Version](source/PasLsp.Version.pas) is the only authority, and it
   moves forward as other library requirements land.)
 
-**The suite is fully green as of 0.5.4** — `build.bat` ends with `all built, all
+**The suite is fully green as of 0.5.4** - `build.bat` ends with `all built, all
 harnesses passed`. The two long-standing red checks in
 `clients/rad-studio/tests/LspClientSmoke` (*"Wrap resolves despite the Cyrillic
 literal earlier on the line"* and *"and lands exactly on Wrap's declaration
@@ -288,15 +288,15 @@ literal earlier on the line"* and *"and lands exactly on Wrap's declaration
 above turned green. If they return, suspect which PasTree the server was built
 against before suspecting the resolver.
 
-**A leading BOM in `didOpen` text breaks navigation for the whole file — server
-side — fixed 0.5.3, and worth keeping the symptom written down.** Measured
+**A leading BOM in `didOpen` text breaks navigation for the whole file - server
+side - fixed 0.5.3, and worth keeping the symptom written down.** Measured
 2026-08-20: open a document whose text begins with U+FEFF and `FNav.IdentAt`
 then finds nothing at *any* position in that file, not merely on line 1. The log
 says only `no identifier at ...`, which reads exactly like a resolver failure
 and sent one debugging session down the wrong path entirely.
 
 The RAD Studio client already stripped a leading BOM before sending
-(`ReadBufferText`), so the IDE was covered — but that was one client defending
+(`ReadBufferText`), so the IDE was covered - but that was one client defending
 itself against a server-side flaw, and any other client still hit it. An editor
 is free to hand its buffer over with the BOM included, and a UTF-8-with-BOM
 `.pas` is completely ordinary in Delphi projects. So the strip now happens at
@@ -304,12 +304,12 @@ the one place documents enter: `StripLeadingBom` (in `PasLsp.SourceText`, called
 from `PasLsp.Server`), applied to `didOpen` text and to a rangeless (full-replacement) `didChange`, before the
 rebuild gate so a BOM'd file still compares equal to its own bytes on disk. The
 residual cost is one column on line 1 for a client that counts the BOM as a
-character — strictly smaller than a file where nothing resolves. Pinned by
+character - strictly smaller than a file where nothing resolves. Pinned by
 `LspClientSmoke` section 4b, which sends the BOM as a raw notification
 precisely because the plugin's own document layer can no longer produce one.
 
 **The standing rule, since this was the third layer to learn it separately: any
-source text entering the product — from a client's buffer or from a file — may
+source text entering the product - from a client's buffer or from a file - may
 begin with a BOM, and a BOM is not content.** Delphi writes UTF-8-with-BOM by
 default, so it is the ordinary case. Do not open-code the handling; use
 `PasLsp.SourceText` (`StripLeadingBom`, `TryReadTextNoBom`, `FileHoldsText`),
@@ -317,29 +317,29 @@ which is one of the two units shared with the RAD Studio package and therefore
 dependency-free by construction. A new rule about incoming text goes in there,
 where both halves get it, rather than in the layer that happened to notice.
 
-### Tier 1 — done 2026-08-19
+### Tier 1 - done 2026-08-19
 
 All four shipped. Two notes worth keeping:
 
 - **No percentage in `$/progress`.** `Total` is "modules discovered so far"
-  and grows as the closure opens up — measured going 3/4 → 3/145 within a
-  second — so a percentage during discovery is arithmetic about a denominator
+  and grows as the closure opens up - measured going 3/4 → 3/145 within a
+  second - so a percentage during discovery is arithmetic about a denominator
   that has not happened yet. Clamping it monotonic (tried first) parked the bar
   at 75%% while the real ratio was 2%%, which is worse than no bar: a wrong
   number reads as fact. The message carries phase and counts instead.
 - **Not cancellable.** The machinery exists (the session cancels mid-pass), but
-  a cancelled build leaves the user with no results at all — worse than
+  a cancelled build leaves the user with no results at all - worse than
   waiting. The demo can offer a Stop button because it keeps the previous
   project; here that is what the next edit does anyway.
 
-### Tier 2 — real features, bounded work
+### Tier 2 - real features, bounded work
 
-- **Syntax colouring in VS Code — asked for 2026-08-23**, on seeing XMLDoc
+- **Syntax colouring in VS Code - asked for 2026-08-23**, on seeing XMLDoc
   render there in grey. Two mechanisms, and we ship neither:
   1. **A TextMate grammar** (`contributes.grammars` + a `.tmLanguage.json`)
      for `objectpascal`, with `pascal` as an alias. Nothing to do with LSP,
-     but it is the only thing that colours a fenced code block — including
-     the ```pascal declaration line inside our own hover card — and it is
+     but it is the only thing that colours a fenced code block - including
+     the ```pascal declaration line inside our own hover card - and it is
      what paints while the user types, before any server answer.
   2. **`textDocument/semanticTokens`** (full + range + delta). This is the
      LSP half, and it is where we should be better than any grammar: a
@@ -370,9 +370,9 @@ All four shipped. Two notes worth keeping:
   resolve split doing the counting lazily.
 - **`textDocument/diagnostic` + `workspace/diagnostic` (pull model).** Lets a
   client ask for whole-closure diagnostics instead of only the open documents
-  we push — the natural home for the "diagnostics beyond open files" idea.
+  we push - the natural home for the "diagnostics beyond open files" idea.
 
-### Tier 3 — large, or blocked on library work
+### Tier 3 - large, or blocked on library work
 
 - **`textDocument/completion`. DELIVERED** (see the Implemented table). The
   position-in-invalid-text lookup this entry called missing is what PasTree's
@@ -380,14 +380,14 @@ All four shipped. Two notes worth keeping:
   [COMPLETION.md](COMPLETION.md) is what it dropped into. `completionItem/resolve`
   is still open - today every item carries its own `documentation`.
 - **`textDocument/semanticTokens/full|range|full/delta`.** Semantic
-  highlighting is a strong fit — the model knows what every identifier
-  resolved to, and the demo's own PasTree highlighter is the precedent — but
+  highlighting is a strong fit - the model knows what every identifier
+  resolved to, and the demo's own PasTree highlighter is the precedent - but
   it means emitting every token of a file, plus the delta protocol to keep it
   affordable while typing.
 - **`textDocument/signatureHelp`.** DELIVERED 2026-08-22 alongside
   completion (see [COMPLETION.md](COMPLETION.md)): PasTree's `CallAt`
   answers through the same seam, active argument counted per request.
-- **`textDocument/selectionRange`.** Wants a declaration's full extent — the
+- **`textDocument/selectionRange`.** Wants a declaration's full extent - the
   `NodeSpan` the PasTree To-do already lists, which is also the fix for
   `documentSymbol`'s name-only ranges.
 - **`textDocument/codeAction` (+ resolve), `workspace/executeCommand`,
@@ -413,7 +413,7 @@ All four shipped. Two notes worth keeping:
   `moniker`, `linkedEditingRange`.** Either not applicable to the language or
   they serve tooling we do not have (a debugger, an indexer protocol).
 - **`workspace/didChangeWorkspaceFolders`, `willCreate|Rename|DeleteFiles`.**
-  The server tracks one project, not a folder set — multi-root stays a
+  The server tracks one project, not a folder set - multi-root stays a
   non-goal.
 
 ### Explicit non-goals (for now)
@@ -426,8 +426,8 @@ All four shipped. Two notes worth keeping:
 - **Position encoding.** LSP defaults to UTF-16 code units for columns; the
   Delphi editor and PasTree each count their own way. One conversion layer at
   the protocol boundary, written once, tested on non-ASCII lines. The server
-  DECLARES `positionEncoding: utf-16` unconditionally rather than negotiating —
-  it does not read the client's `general.positionEncodings` — which is safe
+  DECLARES `positionEncoding: utf-16` unconditionally rather than negotiating -
+  it does not read the client's `general.positionEncodings` - which is safe
   because utf-16 is the one encoding LSP requires every client to support.
   Reading the client's list would only matter in order to offer utf-8.
 - **Document truth.** Once a file is open (`didOpen`), the overlay is the
@@ -440,7 +440,7 @@ All four shipped. Two notes worth keeping:
   results.
 - **Process lifetime.** The plugin starts the server, restarts it on crash
   (with backoff and a give-up count), and the server exits when its stdio
-  closes — no orphans after an IDE crash. Two IDEs on one project = two
+  closes - no orphans after an IDE crash. Two IDEs on one project = two
   independent server processes; no shared state.
 - **Project configuration.** The server needs what the CLI tools need: the
   `.dproj`, platform (`-p:Win64` semantics), and the IDE registry search
@@ -451,40 +451,40 @@ All four shipped. Two notes worth keeping:
 
 Done, in this order (2026-08-16 … 19):
 
-1. (PasTree repo) overlay buffers + cancellation in the facade — versioned
+1. (PasTree repo) overlay buffers + cancellation in the facade - versioned
    `SetBuffer`/`BufferVersion` and mid-pass cancellation.
 2. Server skeleton: JSON-RPC loop, lifecycle, document sync, `definition`.
 3. Diagnostics, file logging, and a VS Code dev client.
 4. Async core: background session, reader thread, honored `$/cancelRequest`.
 5. `references`, the decl-impl toggle, `documentSymbol`, `hover`.
 6. Incremental sync, the watched-files handler, the liveness watchdog.
-7. Validated with VS Code as a second client — the proof that no IDE-specific
+7. Validated with VS Code as a second client - the proof that no IDE-specific
    assumption leaked into the protocol.
 
 Next, and NOT in protocol order:
 
-8. The IDE plugin becomes an LSP client (its own repo) — the point of the
+8. The IDE plugin becomes an LSP client (its own repo) - the point of the
    whole exercise, and the only step that retires in-process analysis.
 9. Tier 1 of the coverage list above, `$/progress` first: a 5-second rebuild
    the client cannot see is the most visible remaining gap.
-10. (PasTree repo) incremental reanalysis — **DONE, both sides.** PasTree
+10. (PasTree repo) incremental reanalysis - **DONE, both sides.** PasTree
     0.9.0 shipped the parse donor and single-module reanalysis, 0.10.0 put
     INTERFACE edits on the fast path (the units a change can reach are
     recomputed instead of the call being refused), 0.11.0 made the
     blast-radius ceiling the `ModuleRedoLimit` property. The server drives
-    all three — see "The incremental fast path" below.
+    all three - see "The incremental fast path" below.
 
 ## The incremental fast path
 
 An edit no longer rebuilds the closure. The mechanisms are PasTree's and
 documented in that repo (`docs/incremental-analysis.md`, with the measured
-numbers); what belongs here is the part the server owns — **deciding** which
+numbers); what belongs here is the part the server owns - **deciding** which
 path an edit takes, and being honest in the log about which one it took.
 
 The decision is one question: *did exactly one document's text change since
 the last completed analysis?* The overlay signature is kept as its sorted
 per-document parts, and the two lists are merged by path. One differing path
-— in any of the three ways a file's text can change — takes the module path:
+- in any of the three ways a file's text can change - takes the module path:
 
 | | |
 |---|---|
@@ -497,8 +497,8 @@ its guards inspected one unit, so this is not a place to be clever.
 
 Then: `TPasAsyncSession.CreateForModule` takes ownership of the project, the
 document buffers go in exactly as for a full session, and the project comes
-back through `TakeProject` accepted or refused. A refusal costs one finalize —
-the project is untouched, so nothing is republished — and the rebuild that
+back through `TakeProject` accepted or refused. A refusal costs one finalize -
+the project is untouched, so nothing is republished - and the rebuild that
 follows adopts it as the parse donor. Every full rebuild does that too,
 whether or not a module run preceded it.
 
@@ -516,7 +516,7 @@ Two details that are easy to get wrong and were:
   keystroke buries the rebuild that matters.
 
 `moduleRedoLimit` in the initializationOptions writes PasTree's
-`ModuleRedoLimit` — how many affected units an interface edit may pull in
+`ModuleRedoLimit` - how many affected units an interface edit may pull in
 before rebuilding instead. 0 keeps the library's measured default of 128.
 It is per-project by nature: on a 3676-unit closure a COM type-library unit
 reaches 28 consumers (redone in ~2 s against a 29 s rebuild) while a core
@@ -537,20 +537,20 @@ edit, and a revert.
   to own the child process's pipes; ToolsAPI imposes no obstacle, but verify)
 - how much of `TPasAsyncSession` (the demo's async layer) is reusable as the
   server's scheduling core vs. server-owned from scratch
-- ~~incremental reanalysis granularity~~ — **ANSWERED, shipped 2026-08-28.**
+- ~~incremental reanalysis granularity~~ - **ANSWERED, shipped 2026-08-28.**
   The question was where to cut, given that a rebuild splits 21% interface
   parse / 27% full parse / 52% cross passes, so caching the parse could never
   be more than half the answer. The cut is per MODULE, with the units an
   interface change can reach recomputed alongside it, and the parse donor
   underneath as the fallback. See "The incremental fast path" above
-- **a git hash in the build stamp — deliberately deferred, 2026-08-20.** The
+- **a git hash in the build stamp - deliberately deferred, 2026-08-20.** The
   version identifies a commit only if nobody forgets to bump it, and the
   binary's timestamp identifies a compile rather than a commit; embedding
   `git rev-parse --short HEAD` would identify both exactly, with no discipline
   required (`0.5.1+a1b2c3d`). Not done because it needs a real build step:
   `build.bat` would generate an include file, and the package builds through
   msbuild, which would need a pre-build event. Decided to wait until a missed
-  bump actually causes confusion — the two existing signals have not failed yet.
+  bump actually causes confusion - the two existing signals have not failed yet.
   Revisit rather than re-derive.
 - **the RAD Studio package's `.dproj` version resource** still says
   `FileVersion=1.0.0.0`, unrelated to `PasTreeLspVersion`. Harmless today (the

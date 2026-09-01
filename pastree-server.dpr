@@ -70,7 +70,7 @@ begin
     // Dispatch loop: the READER thread owns stdin (so $/cancelRequest is
     // seen even while a handler waits out an analysis); this thread owns
     // everything else, including all stdout writes. A pop timeout is the
-    // idle tick — it finalizes finished background analyses, which is how
+    // idle tick - it finalizes finished background analyses, which is how
     // diagnostics reach the client when no request follows an edit.
     GDone := False;
     while not (GDone or GServer.ExitRequested) do
@@ -98,7 +98,7 @@ begin
     GServer.Free;
     // Deliberately NOT freeing GReader: its thread may sit in a blocking
     // stdin read that nothing can interrupt, and process exit (right here)
-    // is the one clean way out. Freeing the rest first is safe — the reader
+    // is the one clean way out. Freeing the rest first is safe - the reader
     // touches only the transport's IN stream and the cancel set.
   end;
 end.

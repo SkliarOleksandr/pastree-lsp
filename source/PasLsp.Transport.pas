@@ -41,7 +41,7 @@ type
     constructor Create;
     destructor Destroy; override;
     { Blocks until a full message arrives. False = clean EOF (client closed
-      our stdin — the LSP way of saying the session is over). Raises on a
+      our stdin - the LSP way of saying the session is over). Raises on a
       malformed header: there is no way to resync a broken frame stream. }
     function ReadMessage(out AJson: string): Boolean;
     procedure WriteMessage(const AJson: string);
@@ -51,7 +51,7 @@ type
     the dispatcher is busy (waiting out an analysis, typically). Every frame
     goes into Queue in arrival order; a $/cancelRequest is ADDITIONALLY noted
     in the cancel set right here, before the dispatcher gets anywhere near
-    it. EOF (client gone) is signaled by an empty-string sentinel — a real
+    it. EOF (client gone) is signaled by an empty-string sentinel - a real
     message is never empty, ReadMessage yields at least two brace bytes.
 
     The full-parse cost for cancel detection is only paid for frames that
@@ -215,7 +215,7 @@ end;
   deadlock to the first caller who believed it. }
 destructor TLspReader.Destroy;
 begin
-  // The thread is normally already gone (EOF or exit) — Terminate covers the
+  // The thread is normally already gone (EOF or exit) - Terminate covers the
   // abnormal teardown path.
   Terminate;
   FQueue.DoShutDown;
@@ -242,7 +242,7 @@ begin
         if not FTransport.ReadMessage(LJson) then
           Break;
       except
-        Break;   // framing is unrecoverable — treat like EOF
+        Break;   // framing is unrecoverable - treat like EOF
       end;
       if (Pos('"$/cancelRequest"', LJson) > 0) and
          ParseIncoming(LJson, LMsg) then

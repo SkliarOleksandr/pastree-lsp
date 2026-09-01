@@ -1,4 +1,4 @@
-# PasTree LSP — RAD Studio package
+# PasTree LSP - RAD Studio package
 
 The RAD Studio client of [PasTree LSP](../../README.md). `SPEC.md` here is the
 companion to this file: what the package COULD present and what each option
@@ -10,7 +10,7 @@ repository root README covers the server and the product as a whole.
 Two moves brought it here: out of `object-pascal-tree`'s `ide-plugin/` directory
 into its own repository (2026-08-16), then into the server's repository as
 `clients/rad-studio/` (2026-08-20, history preserved). The second move was
-because the server and this package are one deliverable with one version — see
+because the server and this package are one deliverable with one version - see
 the root README.
 
 **THE PACKAGE LINKS NO PASTREE, AND MUST NOT START.** It is a 32-bit designtime
@@ -24,19 +24,19 @@ requires rtl, vcl, designide;
 plus exactly two units from outside this directory, both dependency-free by
 construction and both shared with the server:
 
-- `PasLsp.ProductVersion` — so the two halves cannot disagree about their
+- `PasLsp.ProductVersion` - so the two halves cannot disagree about their
   version;
-- `PasLsp.SourceText` — the BOM and buffer-vs-file rules. Shared because the
+- `PasLsp.SourceText` - the BOM and buffer-vs-file rules. Shared because the
   same BOM bug was fixed locally in three separate layers before it was fixed
   once; anything this package learns about incoming text belongs in there.
 
-This used to be guaranteed by geography — PasTree was in another repository
+This used to be guaranteed by geography - PasTree was in another repository
 entirely. Now it is in the same tree, one directory up, and "just link this one
 unit" is an easy and plausible mistake that would quietly undo the whole
 out-of-process design. `tests/VersionSmoke` is the tripwire for the most likely
 version of it: it is a Win32 program over both shared units, so it stops
 compiling the moment either one grows a PasTree dependency. A third shared unit
-is a decision to weigh, not a convenience — each one is a route in.
+is a decision to weigh, not a convenience - each one is a route in.
 
 The analysis itself lives in `pastree-server.exe`; **both features run through
 it**. See "Architecture" below.

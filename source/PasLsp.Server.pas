@@ -8,23 +8,23 @@ unit PasLsp.Server;
   the reader thread keeps noting $/cancelRequest.
 
   Project state: one TPasSemaProject + TPasNavigator pair, kept across
-  requests (this IS the analysis cache — the same shape as the IDE plugin's
+  requests (this IS the analysis cache - the same shape as the IDE plugin's
   BuildNavigator cache). A document event only SCHEDULES a rebuild, and only
   when the text actually differs from what was analyzed; the previous project
   keeps answering until the new one is ready.
 
-  Configuration comes from initialize's initializationOptions — an object
+  Configuration comes from initialize's initializationOptions - an object
   with these keys (all optional):
-    "projectFile" — path to a .dproj (or a bare .dpr)
-    "platform"    — e.g. "Win64", overrides the project's own
-    "config"      — build configuration name, .dproj only
-    "searchPaths", "defines" — string arrays, appended after the project's
-    "logFile", "logUnits" — where the log goes, and whether it inventories
+    "projectFile" - path to a .dproj (or a bare .dpr)
+    "platform"    - e.g. "Win64", overrides the project's own
+    "config"      - build configuration name, .dproj only
+    "searchPaths", "defines" - string arrays, appended after the project's
+    "logFile", "logUnits" - where the log goes, and whether it inventories
                   every unit of the closure
-    "moduleRedoLimit" — the incremental fast path's blast-radius ceiling;
+    "moduleRedoLimit" - the incremental fast path's blast-radius ceiling;
                   0 keeps PasTree's measured default
   A .dproj brings its own MainSource/search paths/defines/namespaces/aliases
-  (TPasDProj — the same MSBuild evaluation the CLI tools use). Without a
+  (TPasDProj - the same MSBuild evaluation the CLI tools use). Without a
   projectFile the open documents themselves become the analysis roots.
 }
 
@@ -102,7 +102,7 @@ type
     FNamespaces: TArray<string>;
     FAliases: TArray<TPasUnitAlias>;
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
-    // the async session's worker builds its own project in isolation —
+    // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
     FProject: TPasSemaProject;      // last COMPLETED analysis (may be nil)
     FNav: TPasNavigator;
@@ -115,7 +115,7 @@ type
     // Debounce: document events SCHEDULE an analysis rather than start one,
     // so a keystroke burst costs one build, not one per keystroke. The idle
     // tick fires it when the deadline passes; a REQUEST fires it instantly
-    // (the user stopped typing and asked a question — the answer must be
+    // (the user stopped typing and asked a question - the answer must be
     // computed from the text they see, not the pre-burst snapshot).
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
@@ -241,7 +241,7 @@ type
       a stderr line for notifications. }
     function Handle(const AJson: string): string;
     { Server-initiated notifications produced while handling the last
-      message (publishDiagnostics, ...) — the caller sends each and the
+      message (publishDiagnostics, ...) - the caller sends each and the
       queue resets. Drained AFTER the Handle reply by the main loop; order
       within the queue is preserved. }
     function TakeOutgoing: TArray<string>;
@@ -274,10 +274,10 @@ begin
   inherited;
 end;
 
-{ Diagnostics channel for the server ITSELF (not the analyzer — those go to
+{ Diagnostics channel for the server ITSELF (not the analyzer - those go to
   the client as publishDiagnostics): stderr when PASTREE_LSP_TRACE is set
   (LSP clients capture stderr; VS Code shows it in the Output panel), and a
-  file when a path is configured — PASTREE_LSP_LOG env var or the "logFile"
+  file when a path is configured - PASTREE_LSP_LOG env var or the "logFile"
   initializationOption, the latter winning. The file survives the client
   swallowing stderr, which is exactly the situation a transport bug puts you
   in. Append per line, open/close each time: crash-safe, and the volume is
@@ -419,7 +419,7 @@ begin
   if FSession <> nil then
   begin
     FSession.Cancel;
-    FreeAndNil(FSession);   // Destroy drains the worker — quick, the cancel
+    FreeAndNil(FSession);   // Destroy drains the worker - quick, the cancel
                             // lands mid-pass (FCancelCheck in PasTree)
   end;
   FreeAndNil(FNav);
@@ -490,7 +490,7 @@ begin
         // itself never spells out (they live in the IDE's targets file).
         FNamespaces := LDProj.Namespaces + PasDefaultNamespaces(FPlatform);
         // Defaults FIRST, project entries after: AddUnitAlias overwrites on
-        // collision, which gives the project the last word (dcc semantics —
+        // collision, which gives the project the last word (dcc semantics -
         // see PasDefaultUnitAliases' own comment).
         FAliases := nil;
         for LDef in PasDefaultUnitAliases(FPlatform) do
@@ -510,7 +510,7 @@ begin
   end
   else if LProjectFile <> '' then
   begin
-    // A bare .dpr root: no MSBuild properties to evaluate — IDE-default
+    // A bare .dpr root: no MSBuild properties to evaluate - IDE-default
     // namespaces/aliases (see PasDefaultNamespaces: dcc itself has none,
     // they come from the project template).
     FMainSource := TPath.GetFullPath(LProjectFile);
@@ -579,7 +579,7 @@ end;
   the current document snapshot. Non-blocking: the dispatcher keeps
   processing messages (didChange restarts, $/cancelRequest lands) while the
   session's worker builds. The PREVIOUS completed project stays live until
-  the new one is taken — the demo's double-buffering discipline. }
+  the new one is taken - the demo's double-buffering discipline. }
 procedure TLspServer.StartAnalysis(const APriorityFile: string);
 var
   LRoots, LPriority: TArray<string>;
@@ -670,7 +670,7 @@ begin
   if FProject <> nil then
     if not FSession.SetParseDonor(FProject) then
       Log('parse donor refused: the analysis configuration changed');
-  // Document truth, stamped with the client's version — compared on
+  // Document truth, stamped with the client's version - compared on
   // completion to catch a snapshot that went stale mid-build.
   for LDoc in FDocs.All do
     FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
@@ -701,7 +701,7 @@ begin
   FPendingDue := GetTickCount64 + DEBOUNCE_MS;
 end;
 
-// Fires a scheduled analysis NOW (deadline ignored) — requests call this so
+// Fires a scheduled analysis NOW (deadline ignored) - requests call this so
 // they never sit out the debounce window.
 procedure TLspServer.FlushPending;
 begin
@@ -732,7 +732,7 @@ begin
   StartAnalysis(FPendingPriority);
 end;
 
-{ WHAT WAS ACTUALLY PARSED, AND EVERYTHING WRONG WITH IT — the whole closure,
+{ WHAT WAS ACTUALLY PARSED, AND EVERYTHING WRONG WITH IT - the whole closure,
   every unit and every diagnostic, written once per completed analysis.
 
   Not a debug-only extra. The client sees a null answer and can say only "no
@@ -803,10 +803,10 @@ begin
   LogBlock(LLines);
 end;
 
-{ Swaps a finished session's project in (on the dispatcher thread — the
+{ Swaps a finished session's project in (on the dispatcher thread - the
   worker is done, TakeProject is the ownership handoff) and publishes
   diagnostics. If any open document changed since the session snapshotted
-  its buffers — detected via the version stamps SetBuffer carried — the
+  its buffers - detected via the version stamps SetBuffer carried - the
   result is already stale: swap it in anyway (better navigation than none)
   but immediately start the replacement build. }
 procedure TLspServer.FinalizeAnalysisIfDone;
@@ -889,7 +889,7 @@ begin
       // Only documents whose text DIFFERS from disk can make a result
       // stale: a non-differing one reads identically from either source,
       // and it may legitimately have no overlay in this build at all
-      // (opened after the build started, no rebuild scheduled) — comparing
+      // (opened after the build started, no rebuild scheduled) - comparing
       // its version against the missing overlay's -1 would spin a rebuild
       // loop out of plain tab switching.
       if LDoc.Differs and
@@ -911,7 +911,7 @@ end;
   Normally the session ends when the client closes our stdin: the reader
   thread sees EOF and the dispatcher stops. That covers every orderly exit and
   most disorderly ones. What it does not cover is a client that DIES while
-  something else keeps the pipe's write end open — then stdin never reaches
+  something else keeps the pipe's write end open - then stdin never reaches
   EOF and this process would sit here forever, holding a multi-hundred-MB
   analysis, invisible to the user who just restarted their editor. LSP exists
   for exactly this: `initialize` carries the client's own processId so a server
@@ -1321,7 +1321,7 @@ begin
   if (FProject = nil) and (FSession = nil) then
     StartAnalysis(APriorityFile);
   // Wait out the in-flight build (if any), polling the cancel set: this is
-  // exactly the moment $/cancelRequest exists for — the reader thread keeps
+  // exactly the moment $/cancelRequest exists for - the reader thread keeps
   // noting cancels while we sit here.
   while FSession <> nil do
   begin
@@ -1339,7 +1339,7 @@ end;
 
 // LSP DiagnosticSeverity from a PasTree diagnostic code. E/F are dcc's own
 // error classes; W maps to warning; everything else (PPIF/PPBAD/PPENC/PPINT,
-// our own "the ANALYZER could not decide" family) is information — calling
+// our own "the ANALYZER could not decide" family) is information - calling
 // those errors in the USER's code would be a lie (the demo draws the same
 // line, DiagSeverityLabel).
 function DiagSeverity(const ACode: string): Integer;
@@ -1354,10 +1354,10 @@ end;
 
 { Analyzer diagnostics -> the client, as textDocument/publishDiagnostics for
   every OPEN document (phase 1 scope: the whole-closure report stays a
-  phase-3 concern — an editor shows squiggles for what the user is looking
+  phase-3 concern - an editor shows squiggles for what the user is looking
   at, and open docs keep the volume bounded on a big project). Publishing
-  for every open doc every time — including an EMPTY array when a doc has
-  none — is what clears stale squiggles after a fixing edit; LSP has no
+  for every open doc every time - including an EMPTY array when a doc has
+  none - is what clears stale squiggles after a fixing edit; LSP has no
   "unchanged" shorthand. A diagnostic raised inside an $I include is matched
   by the include's own FileId path, so it lands on the include's buffer if
   that file is open, and is dropped otherwise (its unit's main file is the
@@ -1388,7 +1388,7 @@ begin
           FProject.ModelFile(LMid))) = LKey;
         for LIdx := 0 to High(LModel.Diags) do
         begin
-          // FileId indexes the MODEL'S own file table ($I includes) — see
+          // FileId indexes the MODEL'S own file table ($I includes) - see
           // the demo's ReportProjectResult for why assuming the main file
           // misplaces include diagnostics.
           LFileId := LModel.Diags[LIdx].FileId;
@@ -1459,7 +1459,7 @@ begin
   end;
 end;
 
-// didClose: the client owns no more squiggles for this doc — clear them.
+// didClose: the client owns no more squiggles for this doc - clear them.
 procedure TLspServer.PublishEmptyDiagnostics(const APath: string);
 begin
   Notify(Format(
@@ -1556,12 +1556,12 @@ begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
     Exit;
-  // A leading BOM is not content — see StripLeadingBom. Before the gate
+  // A leading BOM is not content - see StripLeadingBom. Before the gate
   // below, so a BOM'd file still compares equal to its own bytes on disk.
   LText := StripLeadingBom(AParams.GetValue<string>('textDocument.text', ''));
   LVersion := AParams.GetValue<Integer>('textDocument.version', 0);
   // The rebuild gate: VS Code opens a document for every tab switch and
-  // every peek popup, and the analysis already read this file from disk —
+  // every peek popup, and the analysis already read this file from disk -
   // if the editor's text IS the disk text (decoded the same tolerant way
   // the analysis decodes it), nothing about the project changed and no
   // rebuild is due. Every real session log showed exactly this churn:
@@ -1612,7 +1612,7 @@ begin
   LText := LOld.Text;
 
   { Incremental sync (TextDocumentSyncKind.Incremental): each change carries a
-    range, and they must be applied IN ORDER — every range after the first
+    range, and they must be applied IN ORDER - every range after the first
     refers to the text as the previous ones left it. A change with no range is
     a full replacement and is honored too: the spec allows a client to mix
     them, and a resync arrives that way.
@@ -1621,7 +1621,7 @@ begin
     not fail, it silently leaves the server analyzing text the editor never
     had, and LSP gives a server no way to ask for a resend. Hence the clamping
     in PositionToIndex rather than exceptions, and the log line below carrying
-    the resulting length — the cheapest thing that makes a divergence
+    the resulting length - the cheapest thing that makes a divergence
     noticeable at all. }
   LFullReplace := False;
   for LIdx := 0 to LChanges.Count - 1 do
@@ -1675,7 +1675,7 @@ begin
   FDocs.Close(LPath);
   PublishEmptyDiagnostics(LPath);
   Log('textDocument/didClose ' + LPath);
-  // The disk file is the truth again — a rebuild is due only if the overlay
+  // The disk file is the truth again - a rebuild is due only if the overlay
   // ever DIFFERED from it (analysis results built from unsaved text now
   // describe content that no longer exists anywhere).
   if LDiffered then
@@ -1708,7 +1708,7 @@ begin
   end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   // Failures answer null to the client (per protocol) but SAY WHY in the
-  // log — "F12 did nothing" is otherwise undebuggable from the outside.
+  // log - "F12 did nothing" is otherwise undebuggable from the outside.
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
   begin
     Log(Format(AMsg.Method + ': %s no identifier at that position',
@@ -1730,23 +1730,23 @@ begin
       Length(LTarget.Name)));
 end;
 
-{ textDocument/completion — the answers come from PasLsp.Completion, which
+{ textDocument/completion - the answers come from PasLsp.Completion, which
   runs PasTree's completion engine over a fresh single-file parse of the live
   overlay text, BRIDGED to the last completed analysis when this file is in
   its closure (see that unit's header for the pipeline).
 
   THE ONE DELIBERATE DIFFERENCE from every other request handler: NO
   WaitAnalyzed. That helper flushes the pending rebuild and blocks until the
-  whole closure is analyzed — right for a click on stable code, wrong per
+  whole closure is analyzed - right for a click on stable code, wrong per
   keystroke (a full rebuild is ~15 s on the reference project). Completion
   answers from what exists RIGHT NOW: the live overlay text always (that is
   what the user is typing into), bridged to whatever analysis snapshot is
-  ready — or standalone (locals, own-unit names, keywords) when none is. It
+  ready - or standalone (locals, own-unit names, keywords) when none is. It
   does not schedule a rebuild either; didChange already did. }
 // The item's data member (',"data":{...}') - our own side channel: the
 // routine head word for the RAD viewer's class column, hasParams for its
 // auto-parenthesis. '' when there is nothing to carry.
-{ textDocument/signatureHelp — same rules as completion: never WaitAnalyzed,
+{ textDocument/signatureHelp - same rules as completion: never WaitAnalyzed,
   the live overlay text is the truth, answered by the engine's CallAt
   through the seam (member calls and freshly typed cross-unit calls both
   resolve; the interim locator this replaced could do neither).
@@ -1854,7 +1854,7 @@ begin
   end;
 end;
 
-{ workspace/symbol — project-wide symbol search by name, the Ctrl+T /
+{ workspace/symbol - project-wide symbol search by name, the Ctrl+T /
   Ctrl+. question. Unit-level names and struct members from every model in
   the closure; locals, params, builtins and unit refs are noise at project
   scope and stay out. Empty query legitimately means "everything" - the RAD
@@ -2039,7 +2039,7 @@ begin
     // analysis session sees it.
     SyncCompletionOverlays;
     // Bridge only when the last-good analysis actually holds this file;
-    // otherwise standalone — a half-bridge (project without a model id)
+    // otherwise standalone - a half-bridge (project without a model id)
     // has nothing to anchor cross-unit answers to.
     LMid := -1;
     if FNav <> nil then
@@ -2098,12 +2098,12 @@ begin
     AHit.HiTo - AHit.HiFrom);
 end;
 
-{ textDocument/references — the three-identity model, straight from the
+{ textDocument/references - the three-identity model, straight from the
   navigator (see PasTree.Sema.Nav's own comments for why three): a SYMBOL
-  (unit, symbol id — the normal case), a UNIT (header/uses click: each
+  (unit, symbol id - the normal case), a UNIT (header/uses click: each
   referrer holds its own skUnitRef symbol, so the target model id is the
   only project-wide identity), or a compiler-seeded BUILTIN (no declaration
-  anywhere; the name is the identity). Tried in that order — SymbolAt
+  anywhere; the name is the identity). Tried in that order - SymbolAt
   declines the latter two by design. FindReferences never includes the
   declaration site, so context.includeDeclaration is honored by prepending
   the separate DeclHit/UnitDeclHit answer (builtins have no declaration to
@@ -2140,7 +2140,7 @@ begin
   LHits := nil;
   // UnitAt BEFORE SymbolAt (the IDE plugin now uses the same order):
   // UnitAt only ever matches a `uses` item or the module's own header
-  // name — positions where the unit identity IS the right answer — while
+  // name - positions where the unit identity IS the right answer - while
   // SymbolAt, tested first, CLAIMS a program's `X in '...'` uses item as an
   // ordinary symbol whose reference search then finds nothing (observed on
   // a .dpr; a unit's plain uses items it declines as documented).
@@ -2796,7 +2796,7 @@ begin
   end;
 end;
 
-{ textDocument/implementation and textDocument/declaration — the decl<->impl
+{ textDocument/implementation and textDocument/declaration - the decl<->impl
   toggle, a Pascal-specific navigation the navigator implements as pure CST
   walks (GotoImplementation/GotoDeclaration; they never cross units, because
   the language requires the body in the same one).
@@ -2804,7 +2804,7 @@ end;
   Note how this differs from textDocument/definition above: definition asks
   "where is this NAME declared" and follows a resolved reference anywhere in
   the closure, while these two ask "where is the OTHER HALF of the routine I
-  am standing in" — from a method header or a `forward` to the body's first
+  am standing in" - from a method header or a `forward` to the body's first
   statement, and from anywhere inside an implementation back to its own
   header. An editor binds them to separate commands (VS Code: Go to
   Implementation / Go to Declaration), and the IDE plugin's own decl<->impl
@@ -2895,7 +2895,7 @@ begin
   end;
 end;
 
-{ textDocument/documentSymbol — the unit's own outline (VS Code: Outline
+{ textDocument/documentSymbol - the unit's own outline (VS Code: Outline
   pane, Ctrl+Shift+O, breadcrumbs; the IDE plugin's Structure view maps here
   too).
 
@@ -2903,7 +2903,7 @@ end;
   implementation scopes list their symbols in declaration order, which is the
   order a reader expects, and a type's MemberScope gives its fields, methods
   and properties as children with no separate traversal. Routine bodies
-  (sckRoutine/sckBlock) are deliberately not descended into — locals are not
+  (sckRoutine/sckBlock) are deliberately not descended into - locals are not
   outline material.
 
   Known limit: range = selectionRange = the NAME's span, because NodeSite
@@ -2911,7 +2911,7 @@ end;
   declaration's full extent yet. Navigation and the tree are correct; what
   suffers is breadcrumb tracking as the cursor moves inside a body, which
   needs a real span (a nav-side NodeSpan belongs in PasTree, not here). }
-{ textDocument/onTypeFormatting — block completion, standard LSP: the client
+{ textDocument/onTypeFormatting - block completion, standard LSP: the client
   declares us for the "\n" trigger (see HandleInitialize), sends the caret
   right after Enter, and gets zero or one TextEdit inserting the missing
   closer. The decision is PasLsp.BlockClose's, over the document truth
@@ -2980,7 +2980,7 @@ begin
   Result := BuildResponse(AMsg.IdJson, '[' + LJson + ']');
 end;
 
-{ pastree/classComplete — OUR request, the server half of Ctrl+Shift+C.
+{ pastree/classComplete - OUR request, the server half of Ctrl+Shift+C.
 
   Not an LSP method and not pretending to be one: the protocol has no notion
   of "implement what I declared", `textDocument/codeAction` is the nearest
@@ -2991,7 +2991,7 @@ end;
 
   Like completion, it must NOT call WaitAnalyzed: the whole point is the
   declaration typed a second ago, which no rebuild has seen. It is a parse of
-  the live buffer, nothing more — the answer never depends on the closure. }
+  the live buffer, nothing more - the answer never depends on the closure. }
 function TLspServer.HandleClassComplete(const AMsg: TLspIncoming): string;
 var
   LPath, LText, LEdits, LNames: string;
@@ -3074,7 +3074,7 @@ var
     LScope := LModel.Scopes[AScopeIdx];
     // A scope's containers are created LAZILY by the model (Names/Symbols are
     // nil until something is declared into it), so an EMPTY scope has no list
-    // at all — reading Count there is an access violation, not an empty loop.
+    // at all - reading Count there is an access violation, not an empty loop.
     // Cost of learning this: every documentSymbol answered with an
     // EAccessViolation once a closure contained such a scope (2026-08-23).
     if (LScope = nil) or (LScope.Symbols = nil) then
@@ -3094,7 +3094,7 @@ var
           LPasCol) then
           Continue;
         // A symbol declared in an $I include belongs to THAT document, not
-        // this one — LSP documentSymbol is strictly per-document.
+        // this one - LSP documentSymbol is strictly per-document.
         if not SameText(TPath.GetFullPath(LFile), LPath) then
           Continue;
         // Members of a type, one level down. Asking only types for their
@@ -3153,7 +3153,7 @@ begin
   LPath := TPath.GetFullPath(LPath);
   LModel := FProject.Model(LMid);
 
-  // Interface first, then implementation — source order, and the two are
+  // Interface first, then implementation - source order, and the two are
   // separate sibling scopes rather than a nested pair.
   LItems := '';
   for LScopeIdx := 0 to LModel.Scopes.Count - 1 do
@@ -3168,7 +3168,7 @@ begin
 end;
 
 // The word a reader expects in front of a name, per symbol kind. Not the
-// LSP SymbolKind enum (that is SymbolKindOf above) — this is prose for a
+// LSP SymbolKind enum (that is SymbolKindOf above) - this is prose for a
 // hover card.
 function KindWord(AKind: TSemaSymbolKind): string;
 begin
@@ -3190,12 +3190,12 @@ begin
   end;
 end;
 
-{ textDocument/hover — what is under the cursor, as a small markdown card:
+{ textDocument/hover - what is under the cursor, as a small markdown card:
   the DECLARATION's own source line in a Pascal code fence, plus a prose line
   naming the kind and where it lives.
 
   The declaration line comes from the navigator's DeclHit, the same snippet
-  Find References shows for a declaration site — so the hover can never
+  Find References shows for a declaration site - so the hover can never
   disagree with the results list, and there is no second formatter to keep in
   sync. A routine header that spans several source lines shows only its
   first: DeclHit is line-based, and inventing a multi-line reconstruction
@@ -3227,7 +3227,7 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   // No identifier under the cursor is the COMMON case for a hover (any
-  // keyword, any whitespace) — answered with null and NOT logged, or a
+  // keyword, any whitespace) - answered with null and NOT logged, or a
   // session log becomes unreadable from mouse movement alone.
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -3296,7 +3296,7 @@ begin
     LMd := LMd + LDoc + #10#10;
   LMd := LMd + '_' + LNote + '_';
   // The range is the identifier's own span, so the editor underlines exactly
-  // the name it is describing — including all segments of a qualified `uses`
+  // the name it is describing - including all segments of a qualified `uses`
   // name, which IdentAt reports as one span.
   PasTreeToLsp(LIdent.Line, LIdent.ColFrom, LStartLine, LStartChar);
   PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
@@ -3318,7 +3318,7 @@ begin
      LStartLine, LStartChar, LEndLine, LEndChar]));
 end;
 
-{ workspace/didChangeWatchedFiles — a file changed on disk, outside any
+{ workspace/didChangeWatchedFiles - a file changed on disk, outside any
   editor buffer we hold.
 
   The CLIENT owns the watching: an editor already knows about file system
@@ -3331,11 +3331,11 @@ end;
   What matters here is deciding whether a rebuild is actually due:
 
   - a file we hold OPEN cannot change the analysis, because the analysis reads
-    the OVERLAY for it, not the disk (document truth). No rebuild — but the
+    the OVERLAY for it, not the disk (document truth). No rebuild - but the
     cached disk text is refreshed, or the rebuild gate and didClose would keep
     comparing against a file that no longer exists in that form;
   - a file we do NOT hold open was read from disk by the analysis, so its
-    change (or creation, or deletion — both move unit resolution) does mean a
+    change (or creation, or deletion - both move unit resolution) does mean a
     rebuild;
   - anything that is not Pascal source is ignored outright: a build writing
     .dcu/.exe next to the sources would otherwise restart the analysis
@@ -3402,7 +3402,7 @@ begin
   end;
 end;
 
-{ textDocument/typeDefinition — "go to the TYPE of the thing under the cursor",
+{ textDocument/typeDefinition - "go to the TYPE of the thing under the cursor",
   as distinct from definition's "go to where this name is declared". For
   `FProj: TPasSemaProject` on the field's own name, definition stays on the
   field and this jumps to the class. The resolved type is already on the
@@ -3473,7 +3473,7 @@ begin
 end;
 
 
-{ textDocument/documentHighlight — every occurrence of the symbol under the
+{ textDocument/documentHighlight - every occurrence of the symbol under the
   cursor WITHIN this document, which is what an editor paints when the caret
   rests on a name.
 
@@ -3735,7 +3735,7 @@ begin
       end;
     end;
   finally
-    // Answered (or never will be) — late cancels for this id are meaningless.
+    // Answered (or never will be) - late cancels for this id are meaningless.
     //
     // AND ONLY FOR A REQUEST WE HANDLED. IsRequest is just `IdJson <> ''`,
     // which is equally true of a RESPONSE from the client (an id and no

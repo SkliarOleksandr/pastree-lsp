@@ -14,7 +14,7 @@ unit PasLsp.SourceText;
 
   SHARED WITH THE RAD STUDIO PACKAGE, and therefore under the same rule as
   PasLsp.ProductVersion: this unit uses the RTL and NOTHING from this project,
-  and it must never gain a dependency — above all not on PasTree, which is
+  and it must never gain a dependency - above all not on PasTree, which is
   Win64-only while the package is a Win32 designtime BPL. That is the entire
   reason the analysis runs out of process. tests/VersionSmoke links this unit
   into a Win32 program for exactly that reason: if a `uses` line creeps in
@@ -25,7 +25,7 @@ unit PasLsp.SourceText;
 
   - A leading U+FEFF in document text made PasTree's position index treat it as
     content, and `IdentAt` then found nothing at ANY position in that file, not
-    merely on line 1 — navigation in the file stopped working entirely while
+    merely on line 1 - navigation in the file stopped working entirely while
     the log said only "no identifier at ...", which reads exactly like a
     resolver bug. Measured 2026-08-20; it cost a debugging session.
   - The IDE client had its own strip (ReadBufferText), so the IDE was covered
@@ -45,35 +45,35 @@ uses
 
 { AText with a leading U+FEFF removed.
 
-  A BOM is an encoding marker, not content — but a client is free to hand its
+  A BOM is an encoding marker, not content - but a client is free to hand its
   buffer over with the character still in it, and a UTF-8-with-BOM .pas is
   completely ordinary in a Delphi project. Call this at the boundary where
   text arrives, not at every place that later reads it.
 
   The residual cost is that a client which counts the BOM as a character is
-  then off by one on line 1 alone — strictly smaller than a file in which
+  then off by one on line 1 alone - strictly smaller than a file in which
   nothing resolves at all. }
 function StripLeadingBom(const AText: string): string;
 
 { The file's text, decoded, with no BOM; False (and AText = '') if it cannot be
-  read. Non-raising on purpose: every caller so far degrades gracefully — no
-  snippet, or "treat the buffer as the truth" — and none of them wants an
+  read. Non-raising on purpose: every caller so far degrades gracefully - no
+  snippet, or "treat the buffer as the truth" - and none of them wants an
   exception from a file that was deleted between two IDE events.
 
-  DECODED THE WAY THE ANALYSIS DECODES IT — same detection as
+  DECODED THE WAY THE ANALYSIS DECODES IT - same detection as
   TryReadSourceForEdit, which is the point (see the body). One consequence
   worth naming: a UTF-16 source is "cannot be read", exactly as it is there,
   because no answer this unit gives can describe it. A .pas the Delphi IDE
   wrote is never UTF-16. }
 function TryReadTextNoBom(const APath: string; out AText: string): Boolean;
 
-{ Whether the file at APath holds exactly AText, encoded as UTF-8 — a leading
+{ Whether the file at APath holds exactly AText, encoded as UTF-8 - a leading
   UTF-8 BOM in the file being not-content, as above.
 
   This is a BYTE comparison rather than a text one, and that is the point. Any
-  decode disagreement between what wrote the file and what read it — the
+  decode disagreement between what wrote the file and what read it - the
   historical one was the analysis reading a preamble-less source as ANSI while
-  an editor read it as UTF-8 — reports every file containing an em-dash as
+  an editor read it as UTF-8 - reports every file containing an em-dash as
   "modified", which made the rebuild gate rebuild the whole closure twice for a
   peek that touched nothing. A decode disagreement is not an edit, and bytes
   are the one question no decoder gets to answer differently. False if the file

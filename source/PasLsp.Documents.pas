@@ -2,7 +2,7 @@ unit PasLsp.Documents;
 
 {
   Open-document store: the server-side half of the LSP "document truth" rule
-  (SPEC.md) — once a file is open here, its text and version come from the
+  (SPEC.md) - once a file is open here, its text and version come from the
   client and PasTree must never read that path from disk until didClose.
   Enforced by handing every entry to TPasSemaProject.SetBuffer (with the
   version) before each analysis.
@@ -23,7 +23,7 @@ type
     Text: string;
     Version: Integer;  // client's didOpen/didChange version
     DiskText: string;  // the file's on-disk text at didOpen (tolerant decode)
-    // Whether Text differs from DiskText — the REBUILD gate: an editor sends
+    // Whether Text differs from DiskText - the REBUILD gate: an editor sends
     // didOpen/didClose for every tab switch and every peek popup, and a
     // document whose text equals the disk file cannot change any analysis
     // result, so those events must not cost a full project rebuild.
@@ -40,7 +40,7 @@ type
     procedure Open(const APath, AText: string; AVersion: Integer;
       const ADiskText: string; ADiffers: Boolean);
     { Replaces the stored text (the caller has already applied whatever
-      incremental edits arrived). DiskText is carried over from the open —
+      incremental edits arrived). DiskText is carried over from the open -
       the caller compares against it without re-reading. }
     procedure Change(const APath, AText: string; AVersion: Integer;
       const ADiskText: string; ADiffers: Boolean);
@@ -57,7 +57,7 @@ type
 
 { An LSP position (0-based line, 0-based UTF-16 code unit) as a 1-based index
   into AText. Delphi strings ARE UTF-16, so a character offset is an index
-  offset and no encoding conversion happens here — see PasLsp.Protocol's own
+  offset and no encoding conversion happens here - see PasLsp.Protocol's own
   note on position encoding.
 
   Lines are split on CRLF, LF or a lone CR, all three, because that is the
@@ -68,7 +68,7 @@ type
 function PositionToIndex(const AText: string; ALine, ACharacter: Integer):
   Integer;
 
-{ AText with the given LSP range replaced by ANewText — one incremental
+{ AText with the given LSP range replaced by ANewText - one incremental
   contentChange. A reversed range is treated as empty (an insertion at its
   start) rather than as an error. }
 function ApplyRangeChange(const AText: string; AStartLine, AStartChar,

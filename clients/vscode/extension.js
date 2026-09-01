@@ -24,7 +24,7 @@ function activate(context) {
   if (!fs.existsSync(serverPath)) {
     vscode.window.showErrorMessage(
       'pastree-server.exe not found: ' + serverPath +
-      ' — set pastree.serverPath or run build.bat');
+      ' - set pastree.serverPath or run build.bat');
     return;
   }
 

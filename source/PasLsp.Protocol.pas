@@ -8,7 +8,7 @@ unit PasLsp.Protocol;
   Positions: LSP counts 0-based lines and 0-based UTF-16 code units;
   PasTree's lexer counts 1-based lines and 1-based Char (= UTF-16 code unit)
   columns. Delphi strings ARE UTF-16, so the unit matches and the whole
-  conversion is the +/-1 in LspToPasTree/PasTreeToLsp — kept as named
+  conversion is the +/-1 in LspToPasTree/PasTreeToLsp - kept as named
   functions anyway so the one place encoding could ever go wrong is findable.
 }
 
@@ -35,7 +35,7 @@ const
 
 type
   // One incoming message. Root owns everything; callers free Root only.
-  // IdJson is the id rendered back to JSON verbatim ('' = notification) —
+  // IdJson is the id rendered back to JSON verbatim ('' = notification) -
   // embedding it verbatim in the response sidesteps ownership/clone games
   // and is correct for every id type the spec allows (number or string).
   TLspIncoming = record
@@ -48,11 +48,11 @@ type
 
 type
   { Cancelled request ids, shared between the READER thread (which notes a
-    $/cancelRequest the moment it arrives — that is the entire point of the
+    $/cancelRequest the moment it arrives - that is the entire point of the
     reader thread: the dispatcher may be busy inside an analysis wait) and
     the dispatcher (which polls while waiting and checks at request entry).
-    Ids are kept as their raw JSON rendering — the same form TLspIncoming
-    carries — so number vs string ids never need normalizing. }
+    Ids are kept as their raw JSON rendering - the same form TLspIncoming
+    carries - so number vs string ids never need normalizing. }
   TLspCancelSet = class
   private
     FLock: TObject;
@@ -62,7 +62,7 @@ type
     destructor Destroy; override;
     procedure NoteCancel(const AIdJson: string);
     function IsCancelled(const AIdJson: string): Boolean;
-    { Forget AIdJson (the request was answered — late cancels for it are
+    { Forget AIdJson (the request was answered - late cancels for it are
       meaningless and the set must not grow without bound). }
     procedure Retire(const AIdJson: string);
   end;
@@ -82,7 +82,7 @@ function JsonQuote(const S: string): string;
 function UriToPath(const AUri: string): string;
 function PathToUri(const APath: string): string;
 
-{ Position conversions — see the unit comment. }
+{ Position conversions - see the unit comment. }
 procedure LspToPasTree(ALine, ACharacter: Integer; out APasLine,
   APasCol: Integer);
 procedure PasTreeToLsp(APasLine, APasCol: Integer; out ALine,
@@ -235,7 +235,7 @@ begin
   if not AUri.StartsWith('file://', True) then
     Exit;
   LRest := Copy(AUri, Length('file://') + 1, MaxInt);
-  // Percent-decode into UTF-8 bytes, then decode the bytes once — a %-escape
+  // Percent-decode into UTF-8 bytes, then decode the bytes once - a %-escape
   // may be one byte of a multi-byte character.
   LBytes := nil;
   LIdx := 1;

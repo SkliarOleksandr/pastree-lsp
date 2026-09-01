@@ -99,6 +99,13 @@ var
   LText, LText2Read: string;
   LEnc: TPasSourceEncoding;
 const
+  { THE EM DASH IS THE FIXTURE, and it is the one place in this repository
+    exempt from the hyphens-only rule in CLAUDE.md - that rule is about prose,
+    and this is a test input. Everything TestSourceText checks needs a
+    character that is ONE codepoint and THREE UTF-8 bytes: that is what makes a
+    decode disagreement visible (a byte comparison against an ASCII-only file
+    would pass under any encoding, so the test would prove nothing). Replace it
+    with '-' and every check below still passes while testing nothing. }
   cText = 'unit A;'#13#10'// em dash — here'#13#10'end.'#13#10;
   LText2 = 'unit B;'#13#10'end.'#13#10;
 begin

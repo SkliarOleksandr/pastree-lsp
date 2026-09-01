@@ -126,7 +126,7 @@ var
       Result := tkEndOfFile;
   end;
 
-  { `= class(TParent);` — AN ANCESTOR AND NO BODY, which is a declaration, not
+  { `= class(TParent);` - AN ANCESTOR AND NO BODY, which is a declaration, not
     an opener. AVisIdx is the `class`/`interface` token.
 
     This was the one shape the rules above missed, and missing it is not a
