@@ -407,6 +407,7 @@ var
   LReadding: Boolean;
 begin
   LReadding := False;
+  LSettings := nil;   // the except block below reads it
   if Assigned(GRootItem) then
   begin
     { LIVE AND STILL POPULATED. The second half is not pedantry: the submenu
@@ -484,8 +485,20 @@ begin
       on the repair runs whenever the menu is opened, so the item is correct
       before the user ever opens a project - which is when the wipe used to
       leave it empty and unreachable. }
-    if not Assigned(GToolsMenu) and Assigned(GRootItem.Parent) then
+    { RE-RESOLVED, NOT SET ONCE. The guard used to be `if not
+      Assigned(GToolsMenu)`, which is exactly wrong on the path this unit
+      exists to handle: after the IDE rebuilds its main menu, the repair above
+      adds our items to the NEW tree while GToolsMenu still points at the item
+      of the OLD one. Both consequences are real - the hook sits on a discarded
+      item and never fires again, so the self-repair it exists for is dead from
+      that moment; and FinalizeSettings writes OnClick into that item at
+      unload, which is a write to freed memory if the IDE has released the old
+      tree. So the hook moves to whatever the live parent is, handing the old
+      item its own handler back first if it is still alive. }
+    if Assigned(GRootItem.Parent) and (GRootItem.Parent <> GToolsMenu) then
     begin
+      if Assigned(GToolsMenu) and MenuItemIsLive(GToolsMenu) then
+        GToolsMenu.OnClick := GPrevToolsClick;
       GToolsMenu := GRootItem.Parent;
       GPrevToolsClick := GToolsMenu.OnClick;
       GToolsMenu.OnClick := GHandler.ToolsMenuClick;
@@ -493,6 +506,13 @@ begin
   except
     on E: Exception do
     begin
+      // LSettings is owned by nothing until AddActionMenu parents it, so a
+      // throw from that call - the name collision the comment above predicts
+      // after a package reload - leaks it. Only while UNparented: once it is
+      // in the tree, freeing GRootItem below takes it, and freeing it here as
+      // well would be the double free.
+      if Assigned(LSettings) and not Assigned(LSettings.Parent) then
+        FreeAndNil(LSettings);
       FreeAndNil(GRootItem);   // GHandler survives - see the rebuild path
       LogDiagnostic(Format('could not add Tools > PasTree > Settings '
         + '(anchor menu "%s"): %s: %s',
@@ -508,7 +528,12 @@ begin
     that is the one handler here the IDE will definitely call again. }
   if Assigned(GToolsMenu) then
   begin
-    GToolsMenu.OnClick := GPrevToolsClick;
+    // Only if the item is still in the live tree: the hook is re-resolved on
+    // every menu rebuild (see InitializeSettings), so this pointer is normally
+    // current - but a rebuild that happened with no repair pass since would
+    // make this a write into a menu the IDE has released.
+    if MenuItemIsLive(GToolsMenu) then
+      GToolsMenu.OnClick := GPrevToolsClick;
     GToolsMenu := nil;
     GPrevToolsClick := nil;
   end;

@@ -60,8 +60,9 @@ var
   GNotifier: INTACodeEditorEvents;
   GNotifierIndex: Integer = -1;
 
-{ Severity -> underline color: LSP 1 error, 2 warning, 3 hint - the same
-  red/orange/gray family the IDE's own Error Insight draws. TColor is BGR. }
+{ Severity -> underline color: LSP 1 error, 2 warning, 3 information, 4 hint -
+  the same red/orange/gray family the IDE's own Error Insight draws, with the
+  bottom two sharing the gray. TColor is BGR. }
 function SeverityColor(ASeverity: Integer): TColor;
 begin
   case ASeverity of

@@ -71,6 +71,20 @@ var
   // of causing the AVs - see PasTreeIdePlugin.GotoDeclaration's own header
   // for that (unrelated) investigation.
   GMessageGroup: IOTAMessageGroup;
+  { THE TEARDOWN GATE EVERY OTHER ASYNC FEATURE HAS, and the one this unit was
+    missing (Rename, ClassComplete, CodeInsight, Outline, IdeInsight and
+    BlockClose all check it first thing in an LSP callback).
+
+    True from load, cleared by FinalizeFindReferencesMessageGroup - which the
+    wizard runs BEFORE FinalizeLspSession, and the session's teardown fails
+    every pending request synchronously. So a Find References in flight at
+    unload lands here with the group already dropped: without the gate,
+    ReportHits called GetOrCreateMessageGroup, which RECREATED the tab and
+    filled it with TResultRow objects whose INTACustomDrawMessage vtables live
+    in the BPL being unloaded. The next repaint of the Messages panel then
+    calls Draw in code that is no longer mapped - the dangling-code AV this
+    package has already been bitten by once. }
+  GAlive: Boolean = True;
 
 function GetOrCreateMessageGroup(const AMessageServices: IOTAMessageServices): IOTAMessageGroup;
 begin
@@ -108,6 +122,7 @@ procedure FinalizeFindReferencesMessageGroup;
 var
   LMessageServices: IOTAMessageServices;
 begin
+  GAlive := False;   // see the declaration: callbacks stop here, not later
   if Assigned(GMessageGroup) and not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     try
@@ -386,6 +401,8 @@ begin
         LName: string;
         LRefs: TArray<TLspHit>;
       begin
+        if not GAlive then
+          Exit;   // package unloading - nothing here may touch the IDE
         if not ASuccess then
         begin
           CloseWaitDialog;
@@ -410,9 +427,17 @@ begin
           procedure(ADeclOk: Boolean; const ADeclHits: TArray<TLspHit>;
             const ADeclError: string)
           begin
+            if not GAlive then
+              Exit;   // as above, and this is the path that reached a user
             CloseWaitDialog;
             // No declaration is a legitimate answer, not a failure: a compiler
-            // builtin has none anywhere. Report the references either way.
+            // builtin has none anywhere. The references are worth reporting
+            // either way - but a FAILED request is not the same statement as
+            // "there is none", so it says so in the Build tab rather than
+            // being folded into the report as an absent declaration.
+            if not ADeclOk then
+              LogDiagnostic('Find References: the declaration request failed: '
+                + ADeclError);
             if ADeclOk and (Length(ADeclHits) > 0) then
               ReportHits(LName, True, ADeclHits[0], LRefs)
             else

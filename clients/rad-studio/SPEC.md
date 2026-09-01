@@ -1,4 +1,4 @@
-# PasTree IDE Plugin — capability specification
+| Signature help | **DELIVERED** | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | shipped with completion, same manager || Completion | **DELIVERED 2026-08-21** | Code Insight (`PasTreeIdePlugin.CodeInsight`) | the position-in-invalid-text block is gone: PasTree answers it || Rename | **DELIVERED 2026-08-30** | `IOTAEditWriter` via# PasTree IDE Plugin — capability specification
 
 Status: draft, 2026-08-19. What this plugin COULD present, and what it would
 take. The README describes what it does today; this describes the space.
@@ -269,6 +269,12 @@ Pascal wholesale, not per-feature.
 What the migration buys and costs, worked out in advance so the future
 implementer does not re-derive it:
 
+> **The gate named above is OPEN.** Completion shipped 2026-08-21 (PasTree
+> answers position-in-invalid-text; the manager is `PasTreeIdePlugin.CodeInsight`
+> and is registered and live), and signature help with it. The paragraph above
+> is kept because the *reasoning* for the endgame still stands — what is stale
+> is only its claim about what is blocking.
+
 - **Superseded by the manager** — `GotoDefinition`/`AsyncGotoDefinitionEx` is
   the IDE's own Ctrl+Click: the mouse-notifier override in
   `PasTreeIdePlugin.GotoDeclaration` (down/up suppression, position mapping)
@@ -389,12 +395,12 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Rename | Server | `IOTAEditWriter` via `CreateUndoableWriter` (`2551`) | apply edits front-to-back — the writer cannot move backward (`1690`), and a plain writer flushes undo (`1693`) |
+| Rename | **DELIVERED 2026-08-30** | `IOTAEditWriter` via `CreateUndoableWriter` (`2551`) | apply edits front-to-back — the writer cannot move backward (`1690`), and a plain writer flushes undo (`1693`) |
 | Rename, in-place multi-caret | Server | `IOTASyncEditPoints` (`2158`) + `IOTAEditBlock.SyncEditBlock` (`2226`) | drives the editor's own sync-edit mode from positions we supply |
 | Rename, from the outline | Server | `IOTAEditableStructureNode` (`245`) | F2 on an outline node, `SetValue` comes back to us — a rename UI for free |
 | Quick fixes / code actions | Server | menu, plus `stSurroundsWith`/`stRefactoring` templates (`CodeTemplateAPI.pas:57`) | the IDE already stores surround-with templates we could expose as actions |
-| Completion | Server | Code Insight (see the fork) | server side blocked on position-in-invalid-text |
-| Signature help | Server | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | same block |
+| Completion | **DELIVERED 2026-08-21** | Code Insight (`PasTreeIdePlugin.CodeInsight`) | the position-in-invalid-text block below is gone — PasTree's completion engine answers it |
+| Signature help | **DELIVERED** | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | shipped with completion, same manager |
 | Semantic tokens | Server | `PaintText` with `AllowDefaultPainting := False` | `IOTAHighlighter` (`1801`) is the other route but is synchronous per line; either way it must paint from a cache. `INTACodeEditorOptions` (`881`) is read-only — a new named colour cannot be registered, only painted |
 
 ### Syntax highlighting: override the lexer, or repaint over it
@@ -447,7 +453,7 @@ properly and knows which branches are really dead.
 | Menu items on results | Ready | `INTAMessageNotifier.MessageViewMenuShown` (`6458`) | "rename this", "open all" |
 | A filterable results pane | Ready | `IOTAToDoManager` (`8330`) + `INTAToDoItem` (`8250`) | free filtering and navigation; **Professional/Enterprise only** (`10858`), so gate on `IOTAVersionSKUInfoService` (`10810`) |
 | Hierarchy views (call, type) | Server | `INTACustomEditorView` (`7882`) or `INTACustomDockableForm` (`7121`) | a whole frame as an editor tab or a dockable window; an editor view also gets a Structure pane via `IOTACustomEditorViewStructure` |
-| Progress for long operations | Ready | `IOTAIDEWaitDialogServices270` (`10597`) | `290` (`10626`) makes it cancellable; the natural home for the server's `$/progress` |
+| Progress for long operations | **Done 2026-08-31** | `IOTAIDEWaitDialogServices270` (`10597`) | `PasTreeIdePlugin.WaitDialog`, over Find References and Rename. `290` (`10626`) makes it cancellable — not used yet; still the natural home for the server's `$/progress` |
 
 ### Keyboard
 
@@ -561,7 +567,9 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    `completionItem.documentation` carries it per row, EAGERLY, because
    `IOTACodeInsightSymbolList80.GetSymbolDocumentation` is a synchronous
    UI-thread call and a `completionItem/resolve` round-trip is not
-   available there. `cMinPasTreeVersion` is pinned at 0.6.3.
+   available there. `cMinPasTreeVersion` has moved on since (0.13.2 today) - see
+   [PasLsp.Version](../../source/PasLsp.Version.pas) for the current value
+   rather than trusting a number written here.
    **The look, settled 2026-08-23 by reading the product.** The first live
    run said the text was right and the presentation wrong — the doc ran
    straight into the declaration line, blank lines and all. That symptom is
@@ -738,8 +746,26 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    overlay AST — decl vs impl diff is exactly what the model knows), apply
    through `CreateUndoableWriter` front-to-back, land the caret in the
    first generated body.
-4. **Block completion, ours — DELIVERED 2026-08-31 (first live run
-   pending).** Same verdict on the native one. Standard LSP, per the
+4. **Block completion, ours — DELIVERED AND VERIFIED LIVE 2026-08-31,
+   both IDEs, after five live iterations worth remembering:** the Enter
+   binding that killed the key (below), `end.` inserted mid-unit (the
+   module-head-as-stack-entry model - now `end.` closes the main `begin`
+   of a program/library and nothing in a unit, regression pinned in
+   `LspClientSmoke` 5h), a bare `try` completing to just `end;` (now the
+   full `finally`/`end;` skeleton), the caret (now: the plan's second
+   edit re-indents the caret line to body depth; VS Code's cursor
+   anchoring proved untrustable in three different ways, so the
+   extension places it explicitly - a middleware over
+   `provideOnTypeFormattingEdits` that waits for the edits to actually
+   land via a one-shot `onDidChangeTextDocument`; a plain setTimeout(0)
+   fired too early and the edits carried the premature selection past
+   the closer), and VS Code sending nothing at all until
+   `editor.formatOnType` is on (the extension now defaults it on for
+   `[objectpascal]` via `configurationDefaults`). A bare `while`/`for`
+   header is NOT this feature's gesture - that is a template; VS Code
+   snippets for the statement skeletons shipped in the extension
+   (0.15.7) and further template work is DEFERRED by the user's call
+   (2026-08-31). Same verdict on the native one. Standard LSP, per the
    standing rule (protocol first, the IDE stretched onto it):
    `textDocument/onTypeFormatting` with `\n` as the only trigger, declared
    at initialize, decided lexically in `PasLsp.BlockClose` (a token-stack
@@ -758,8 +784,19 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    switch in Settings (`EnableBlockCompletion`), checked at keystroke time.
    `LspClientSmoke` section 5h pins both the insertion (opener's
    indentation, caret line untouched) and the balanced-file `null`.
-5. **Rename refactoring, ours — DELIVERED 2026-08-30 (first live run
-   pending).** The built-in one existed and Embarcadero DISABLED it for being
+5. **Rename refactoring, ours — DELIVERED 2026-08-30, VERIFIED LIVE
+   2026-08-31** (a constant renamed across a 3759-unit project: 9 sites,
+   6 files, 5 of them rewritten on disk - the tab said so). The dialog
+   goes through `INTAIDEUIServices.InputQuery` since 0.21.10 (the VCL
+   one came up light inside the dark theme), and both this and Find
+   References run under the IDE wait dialog since 0.21.11
+   (`PasTreeIdePlugin.WaitDialog` over `IOTAIDEWaitDialogServices`;
+   texts kept short - the dialog does not grow for them; every terminal
+   path closes it FIRST because it disables input, and a message box
+   over disabled input is a stuck IDE. Synchronous-with-hourglass was
+   rejected: the answer arrives via TThread.Queue on the main thread,
+   so blocking it is a deadlock).
+   The built-in one existed and Embarcadero DISABLED it for being
    buggy (user, 2026-08-22) — the demand was proven and the field was empty.
    PasTree 0.12.0 landed `PlanRename`/`IsValidRenameName`, which is what made
    this a client-side job at all.
@@ -831,8 +868,19 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    the `feature/unit-rename` branch.
 
    Still queued: `IOTASyncEditPoints` as the cheap same-file variant.
-6. **Find References results upgrade — DELIVERED 2026-08-31 (first live run
-   pending).** Owner-drawn rows (`PasTreeIdePlugin.ResultRows`:
+6. **Find References results upgrade — DELIVERED AND VERIFIED LIVE
+   2026-08-31, settled over six styling iterations with the user; the
+   "PasTree Rename" tab runs on the same rows since 0.21.8.** The final
+   look: blue bold title line with the count in orange (a custom row -
+   `AddTitleMessage` is IDE-drawn and uncolorable), blue bold header
+   `<full path> [N]` with the N orange, hit rows
+   `Name.pas (line):` in blue/orange accents, the snippet
+   syntax-colored with indentation preserved, the match bold+underline
+   in clMaroon (theme-aware red on a dark panel). Header and title rows
+   REFUSE navigation (`CanGotoSource` false with default handling
+   suppressed), so double-click expands/collapses - the panel's own
+   behavior - instead of jumping to line 1, and F8 walks hits only.
+   Owner-drawn rows (`PasTreeIdePlugin.ResultRows`:
    `IOTACustomMessage100` + `INTACustomDrawMessage`, inserted via
    `AddCustomMessagePtr`/`AddCustomMessage(Parent)`): every snippet is
    painted in the user's LIVE editor syntax colors —

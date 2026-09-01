@@ -252,6 +252,21 @@ begin
         Continue;
       end;
     end;
+    // A SURROGATE PAIR IS ONE CHARACTER, and this loop walks UTF-16 code
+    // units. Unescaped non-ASCII in a URI is tolerated by the spec and some
+    // clients do send raw UTF-8, so an emoji or a CJK extension-B character
+    // in a path arrives here as two units; encoding each on its own hands
+    // TEncoding.UTF8 an invalid lone surrogate, which becomes U+FFFD bytes
+    // and a path that matches no file. Clients that percent-encode (VS Code)
+    // never reach this line.
+    if (LIdx < Length(LRest)) and
+       (Ord(LRest[LIdx]) >= $D800) and (Ord(LRest[LIdx]) <= $DBFF) and
+       (Ord(LRest[LIdx + 1]) >= $DC00) and (Ord(LRest[LIdx + 1]) <= $DFFF) then
+    begin
+      LBytes := LBytes + TEncoding.UTF8.GetBytes(Copy(LRest, LIdx, 2));
+      Inc(LIdx, 2);
+      Continue;
+    end;
     LBytes := LBytes + TEncoding.UTF8.GetBytes(LRest[LIdx]);
     Inc(LIdx);
   end;

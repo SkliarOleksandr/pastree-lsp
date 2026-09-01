@@ -1,7 +1,7 @@
 ﻿program pastree_server;
 
 {
-  PasTree LSP server — phase 1 (see SPEC.md). WIN64 ONLY, like every PasTree
+  PasTree LSP server (see SPEC.md). WIN64 ONLY, like every PasTree
   tool: a real project's closure does not fit a 32-bit address space.
 
   stdio carries the protocol; anything human-readable goes to stderr

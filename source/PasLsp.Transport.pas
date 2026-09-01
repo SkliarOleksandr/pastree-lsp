@@ -3,8 +3,15 @@ unit PasLsp.Transport;
 {
   LSP base-protocol framing over stdio: each message is
   `Content-Length: N\r\n\r\n<N bytes of UTF-8 JSON>`. Reads are buffered;
-  writes go out as one header+payload block. Single-threaded by design —
-  phase 1 handles one message at a time, so there is nothing to lock.
+  writes go out as one header+payload block.
+
+  TWO THREADS, NO LOCK, AND THE REASON IS THE DIRECTIONS. The reader thread
+  (TLspReader) owns the IN side - FIn and the decode state FBuf/FPos/FLen are
+  touched by nobody else - while the dispatcher owns the OUT side and does
+  every write. Nothing is shared, so there is nothing to guard; the one piece
+  of state that IS shared, the cancelled-id set, lives in PasLsp.Protocol
+  behind its own lock. (This said "single-threaded by design" until the reader
+  thread existed, which is a comment that reads as permission.)
 
   stdout carries ONLY framed messages: a stray Write(ln) anywhere in the
   server corrupts the stream for every client. Diagnostics go to stderr
@@ -195,15 +202,24 @@ begin
   inherited Create(False);
 end;
 
+{ DO NOT CALL THIS WHILE THE THREAD MAY BE IN A BLOCKING READ - it will hang
+  forever, and the previous version of this comment said the opposite.
+
+  TThread.Destroy calls ShutdownThread, which calls WaitFor for a thread that
+  has not finished (verified in the RTL, not assumed). A reader parked in
+  FIn.Read cannot be interrupted - stdin has no cancellable read here - so
+  `inherited` below waits for something that will never happen. The only
+  reason this is latent rather than a hang today is that
+  pastree-server.dpr deliberately never frees GReader and lets process exit
+  reap it; the comment claiming WaitFor was avoided would have handed the
+  deadlock to the first caller who believed it. }
 destructor TLspReader.Destroy;
 begin
   // The thread is normally already gone (EOF or exit) — Terminate covers the
-  // abnormal teardown path. A blocking FIn.Read cannot be interrupted, but
-  // process exit is what follows this destructor anyway.
+  // abnormal teardown path.
   Terminate;
   FQueue.DoShutDown;
-  inherited;   // WaitFor would hang on a live blocking read; thread is
-               // FreeOnTerminate=False and reaped by process exit
+  inherited;   // joins - see above
   FQueue.Free;
 end;
 
@@ -212,32 +228,46 @@ var
   LJson: string;
   LMsg: TLspIncoming;
 begin
-  while not Terminated do
-  begin
-    try
-      if not FTransport.ReadMessage(LJson) then
-        Break;
-    except
-      Break;   // framing is unrecoverable — treat like EOF
-    end;
-    if (Pos('"$/cancelRequest"', LJson) > 0) and
-       ParseIncoming(LJson, LMsg) then
+  { THE SENTINEL IS PUSHED WHATEVER HAPPENS. Without the try/finally, an
+    exception on this thread ends it silently (TThread parks it in
+    FatalException) with the loop's only exit path unexecuted: the dispatcher
+    then waits on a queue nothing will ever push to, and the server is deaf to
+    all input for the rest of its life - recoverable only by the client-pid
+    watchdog, and not even by that if `initialize` carried no processId. A
+    hang, from one malformed frame. }
+  try
+    while not Terminated do
     begin
       try
-        if LMsg.Method = '$/cancelRequest' then
-        begin
-          var LId := LMsg.Params.FindValue('id');
-          if LId <> nil then
-            FCancels.NoteCancel(LId.ToJSON);
-        end;
-      finally
-        LMsg.Root.Free;
+        if not FTransport.ReadMessage(LJson) then
+          Break;
+      except
+        Break;   // framing is unrecoverable — treat like EOF
       end;
+      if (Pos('"$/cancelRequest"', LJson) > 0) and
+         ParseIncoming(LJson, LMsg) then
+      begin
+        try
+          // Params MAY BE NIL and still parse: `{"jsonrpc":"2.0",
+          // "method":"$/cancelRequest"}` is well-formed JSON with the method
+          // we are looking for, and dereferencing it here is an AV on this
+          // thread - see the sentinel note above for what that costs.
+          if (LMsg.Method = '$/cancelRequest') and (LMsg.Params <> nil) then
+          begin
+            var LId := LMsg.Params.FindValue('id');
+            if LId <> nil then
+              FCancels.NoteCancel(LId.ToJSON);
+          end;
+        finally
+          LMsg.Root.Free;
+        end;
+      end;
+      if FQueue.PushItem(LJson) <> wrSignaled then
+        Break;
     end;
-    if FQueue.PushItem(LJson) <> wrSignaled then
-      Break;
+  finally
+    FQueue.PushItem('');   // EOF sentinel
   end;
-  FQueue.PushItem('');   // EOF sentinel
 end;
 
 function TLspReader.Pop(out AJson: string): TWaitResult;

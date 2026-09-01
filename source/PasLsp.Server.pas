@@ -162,7 +162,7 @@ type
       capabilities.workspace.workspaceEdit.resourceOperations at initialize.
       A unit rename is text edits AND a file rename, so a client without this
       is refused rather than handed the half that does not compile. }
-    FClientRenamesFiles: Boolean;     // client supports server-initiated progress
+    FClientRenamesFiles: Boolean;     // see the block comment above
     FProgressToken: string;       // '' = no progress stream open
     FProgressCreateId: Integer;   // id of the create request awaiting a reply
     FNextServerId: Integer;       // our own id space for server->client calls
@@ -232,7 +232,8 @@ type
     destructor Destroy; override;
     { The dispatcher's idle tick (no message for ~50ms): finalizes a finished
       background analysis so diagnostics go out without waiting for the next
-      request. }
+      request. Never raises, for the same reason Handle does not - see the
+      body. }
     procedure Idle;
     { Dispatches one raw JSON message; returns the response to send, or ''
       for notifications (and for client responses we ignore). Never raises:
@@ -587,7 +588,39 @@ var
 begin
   if FSession <> nil then
   begin
-    FSession.Cancel;
+    // A MODULE SESSION OWNS THE LAST-GOOD PROJECT (CreateForModule took it,
+    // TryStartModuleAnalysis set FProject to nil), so freeing it blind throws
+    // the entire analysis cache away - and silently: every answer afterwards
+    // is still correct, the rebuild below simply runs with no parse donor
+    // (SetParseDonor is gated on FProject <> nil) and repares the whole
+    // closure from scratch. Exactly the invisible "full rebuild on a
+    // one-file edit" CLAUDE.md warns about. Destroy would block in WaitFor
+    // anyway - AnalyzeModuleOnly ignores Cancel, it is one commit point - so
+    // waiting here costs nothing that was not already paid, and it buys the
+    // project back.
+    if FModuleMode then
+    begin
+      FSession.WaitFor;
+      FreeAndNil(FNav);
+      FProject := FSession.TakeProject;
+      if FProject <> nil then
+      begin
+        FNav := TPasNavigator.Create(FProject);
+        if FSession.ModuleAccepted then
+        begin
+          // The run committed: the project now IS the inputs that session
+          // started from, so that is what the next comparison must use.
+          FBuiltSignature := FStartedSignature;
+          FBuiltParts := FStartedParts;
+        end
+        else
+          // Refused. FinalizeAnalysisIfDone would have set this; the fast
+          // path must not be re-offered the change it just declined.
+          FNoModuleOnce := True;
+      end;
+    end
+    else
+      FSession.Cancel;
     FreeAndNil(FSession);
   end;
   FModuleMode := False;
@@ -648,8 +681,10 @@ begin
   FStartedSignature := string.Join(',', FStartedParts);
   FBuildStart := GetTickCount64;
   StartProgress('PasTree: analyzing');
-  // "full rebuild" spelled out on purpose: when incremental reanalysis
-  // lands, this line is where full vs incremental becomes visible.
+  // "full rebuild" spelled out on purpose: this is the line that tells a
+  // full rebuild from the incremental one TryStartModuleAnalysis logs, which
+  // is the first question a "the analysis got slow while typing" report asks
+  // (see CLAUDE.md).
   Log(Format('analysis started: full rebuild, %d roots, %d overlays',
     [Length(LRoots), FDocs.Count]));
   FSession.Start;
@@ -674,7 +709,19 @@ begin
     Exit;
   // Nothing to do if the inputs are back to what the current project was
   // built from - an edit typed and undone, or a file opened and closed.
-  if (FProject <> nil) and (OverlaySignature = FBuiltSignature) then
+  //
+  // ONLY WITH NOTHING IN FLIGHT. FBuiltSignature describes the last COMPLETED
+  // analysis; a session running right now was started from FStartedSignature,
+  // which the undo has just made obsolete. Dropping the plan then leaves the
+  // rebuild nobody will do: the in-flight result lands, FDirty is False, and
+  // the reverted document is skipped by the stamp loop in
+  // FinalizeAnalysisIfDone too (its text equals its file again, so Differs is
+  // False) - so both staleness branches stay silent and every answer after
+  // that is computed from text the editor no longer holds, until the next
+  // real edit. Type a character, start a build, Ctrl+Z: that is the whole
+  // repro, and it is silent.
+  if (FProject <> nil) and (FSession = nil) and
+     (OverlaySignature = FBuiltSignature) then
   begin
     Log('scheduled rebuild dropped: the analyzed inputs did not change');
     FPendingDue := 0;
@@ -785,9 +832,16 @@ begin
     FModuleMode := False;
     if FProject <> nil then
       FNav := TPasNavigator.Create(FProject);
+    // NOT IfThen: it is an ordinary function, so BOTH arms are evaluated
+    // before the call and FProject.StageTimings would dereference nil in the
+    // one case the expression exists to describe.
+    var LWhy: string;
+    if FProject = nil then
+      LWhy := 'no project returned'
+    else
+      LWhy := FProject.StageTimings;
     Log(Format('incremental refused for %s (%s) - full rebuild',
-      [FModuleFile, IfThen(FProject = nil, 'no project returned',
-        FProject.StageTimings)]));
+      [FModuleFile, LWhy]));
     FNoModuleOnce := True;
     StartAnalysis(FModuleFile);
     Exit;
@@ -888,24 +942,24 @@ end;
   1. the tolerant decode the analysis itself uses returns the same string;
   2. re-encoding the editor's text as UTF-8 reproduces the file's bytes.
 
-  (2) exists because the two sides decode a source with no BOM differently and
-  both are being reasonable: PasTree reads it as ANSI, which is dcc's own rule
-  and the whole point of its tolerant loader, while an editor reads it as
-  UTF-8. Every PasTree source with an em-dash in a comment therefore "differs"
-  from its own file under (1) alone - a 3-byte UTF-8 dash becomes three ANSI
-  characters - and that is not an edit, it is a disagreement about encoding.
+  (2) exists because a decode disagreement is not an edit, and the historical
+  one was exactly this: PasTree read a preamble-less source as ANSI (dcc's own
+  rule, and the point of its tolerant loader) while an editor read it as UTF-8,
+  so every PasTree source with an em-dash in a comment "differed" from its own
+  file under (1) alone - a 3-byte UTF-8 dash becoming three ANSI characters.
 
   What it cost before this test existed: peeking a declaration (VS Code opens
   the target file, then closes it) scheduled TWO full closure rebuilds, ~14
   seconds of the editor apparently reparsing a file nobody touched. The user
   saw it as a rebuild bug; it was this.
 
-  NB the remaining consequence is real and NOT fixed here: for a file the
-  editor does NOT have open, the analysis still reads it as ANSI, so a column
-  on a line that contains a non-ASCII character before the identifier is
-  shifted relative to the client's UTF-16 view. That is a decode decision for
-  the library (see the PasTree To-do), not something the server can paper
-  over. }
+  THE ANSI PART OF THAT STORY IS HISTORY, and this comment said otherwise for
+  long enough to be worth naming: PasTree since 0.2.3 (the pinned minimum is
+  far past it - see cMinPasTreeVersion) decodes a preamble-less source whose
+  bytes are valid UTF-8 AS UTF-8, which is the fix of 2026-08-20, so the
+  analysis and the editor read the same text for a closed file too. Bytes stay
+  the right question anyway: they are the one comparison no decoder gets to
+  answer differently. }
 function TLspServer.FileMatches(const APath, AText, ADiskText: string):
   Boolean;
 begin
@@ -930,6 +984,16 @@ var
 begin
   LParts := TStringList.Create;
   try
+    // ORDINAL, and it has to be: SingleChangedDoc merges this list against
+    // the previous build's with `<` on the strings, which is codepoint order.
+    // TStringList's default comparer is AnsiCompareText - a locale word sort
+    // that weighs punctuation differently - so with the two disagreeing (say
+    // `ab.pas` against `a-c.pas`) common entries fail to line up, count as an
+    // appearance plus a disappearance, and a genuine one-file edit loses the
+    // module fast path: a full closure rebuild per keystroke, silently, with
+    // every answer still correct.
+    LParts.UseLocale := False;
+    LParts.CaseSensitive := True;
     LParts.Sorted := True;   // dictionary order is not stable; this is
     for LDoc in FDocs.All do
       if LDoc.Differs then
@@ -1230,9 +1294,24 @@ begin
     FExitCode := 0;
     Exit;
   end;
-  if (FPendingDue <> 0) and (GetTickCount64 >= FPendingDue) then
-    FlushPending;
-  FinalizeAnalysisIfDone;
+  { THE SAME GUARANTEE Handle GIVES, for the same work on the background path.
+    Everything below walks the model exactly as a request handler does -
+    TPasNavigator.Create, IdentAt per diagnostic per open document,
+    StartAnalysis - so it can raise for exactly the same reasons (the nil-scope
+    AV that took out every documentSymbol on 2026-08-23 is the shape). Reached
+    through WaitAnalyzed inside a request, such a failure is a polite
+    InternalError; reached from the dispatcher's timeout it used to fly out of
+    the program's begin..end and kill the process with nothing in the log. Log
+    and keep serving: the next tick tries again, and if the fault is permanent
+    the log names it instead of a vanished exe. }
+  try
+    if (FPendingDue <> 0) and (GetTickCount64 >= FPendingDue) then
+      FlushPending;
+    FinalizeAnalysisIfDone;
+  except
+    on E: Exception do
+      Log('EXCEPTION in idle finalize: ' + E.ClassName + ': ' + E.Message);
+  end;
 end;
 
 function TLspServer.WaitAnalyzed(const APriorityFile,
@@ -1359,10 +1438,21 @@ begin
              JsonQuote(LModel.Diags[LIdx].Msg)]));
         end;
       end;
+      // THE VERSION THESE WERE COMPUTED FROM, not the one the document is on
+      // now. On the stale path (documents changed mid-build; we publish
+      // before restarting, deliberately) those are different, and stamping
+      // the current one tells the client the ranges are exact for text they
+      // were never measured against - which defeats the only thing the field
+      // is for. The project's own buffer stamp is that truth; -1 means this
+      // build carried no overlay for the document, and then the document's
+      // version is the best available answer.
+      var LVer := FProject.BufferVersion(LDoc.Path);
+      if LVer < 0 then
+        LVer := LDoc.Version;
       Notify(Format(
         '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",' +
         '"params":{"uri":%s,"version":%d,"diagnostics":[%s]}}',
-        [JsonQuote(PathToUri(LDoc.Path)), LDoc.Version, LSB.ToString]));
+        [JsonQuote(PathToUri(LDoc.Path)), LVer, LSB.ToString]));
     finally
       LSB.Free;
     end;
@@ -3523,6 +3613,20 @@ begin
         InvalidateAnalysis;
         Exit(BuildResponse(LMsg.IdJson, 'null'));
       end;
+      { AFTER shutdown, before exit: InvalidRequest, which the spec asks for
+        and this server needs for its own sake. `shutdown` freed the project
+        and the navigator on purpose, so a straggler request - editors do send
+        them while tearing a session down - would walk into WaitAnalyzed with
+        nothing analyzed, start a FULL rebuild of the project just
+        invalidated, block the dispatcher for its whole duration and delay
+        `exit` by that much. Everything it rebuilt is guaranteed garbage. }
+      if FShutdownSeen then
+      begin
+        if LMsg.IsRequest then
+          Exit(BuildError(LMsg.IdJson, LSP_INVALID_REQUEST,
+            'server is shutting down'));
+        Exit;   // notifications after shutdown are simply dropped
+      end;
       if LMsg.Method = 'textDocument/didOpen' then
       begin
         HandleDidOpen(LMsg.Params);
@@ -3593,9 +3697,27 @@ begin
           Log('host: ' + LMsg.Params.GetValue<string>('message', ''));
         Exit;
       end;
+      { THE CANCEL FRAME ITSELF, arriving in order behind the request it
+        cancels. The reader thread already noted it the moment it was read -
+        that is the whole reason the reader exists, since the dispatcher may
+        be sitting inside an analysis wait - so there is nothing left to do
+        here but FORGET the id. It matters: frames are dispatched in arrival
+        order, so by now the request is answered and retired, and a cancel
+        noted after that retire would otherwise sit in the set forever and
+        reject a legitimate reuse of the id (JSON-RPC allows reuse after a
+        response) with an instant, false -32800. }
+      if LMsg.Method = '$/cancelRequest' then
+      begin
+        if LMsg.Params <> nil then
+        begin
+          var LCancelled := LMsg.Params.FindValue('id');
+          if LCancelled <> nil then
+            FCancels.Retire(LCancelled.ToJSON);
+        end;
+        Exit;
+      end;
       if LMsg.Method.StartsWith('$/') then
-        Exit;   // optional protocol extensions ($/cancelRequest et al):
-                // droppable by spec until phase 2 makes cancel meaningful
+        Exit;   // optional protocol extensions: droppable by spec
 
       if LMsg.IsRequest then
         Result := BuildError(LMsg.IdJson, LSP_METHOD_NOT_FOUND,
@@ -3614,7 +3736,16 @@ begin
     end;
   finally
     // Answered (or never will be) — late cancels for this id are meaningless.
-    if LMsg.IsRequest then
+    //
+    // AND ONLY FOR A REQUEST WE HANDLED. IsRequest is just `IdJson <> ''`,
+    // which is equally true of a RESPONSE from the client (an id and no
+    // method) - our window/workDoneProgress/create being the one we send.
+    // Server ids and client ids are both small integers from the same-looking
+    // space, so retiring on a response would clear a genuine cancel for the
+    // client request that happens to carry the same number and is still
+    // queued behind us: that request then runs to completion, waiting out a
+    // whole analysis, instead of being cancelled. Work lost, not answers.
+    if LMsg.IsRequest and (LMsg.Method <> '') then
       FCancels.Retire(LMsg.IdJson);
     LMsg.Root.Free;
   end;

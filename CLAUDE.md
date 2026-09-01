@@ -50,7 +50,7 @@ the thing to remember is that skipping the bump defeats the mismatch check.
 build.bat
 ```
 
-builds the server, the package and all four harnesses, then runs the harnesses.
+builds the server, the package and all five harnesses, then runs the harnesses.
 Use it rather than building halves separately — the equality check above only
 means something if a normal build produces both from the same commit.
 
@@ -74,17 +74,19 @@ subdirectory: the same units compile both ways and the names collide.
 
 ## Expected test result
 
-**All four harnesses pass. `build.bat` ends with `all built, all harnesses
+**All five harnesses pass. `build.bat` ends with `all built, all harnesses
 passed`, and anything else is a real failure.**
 
 Until 2026-08-20 this section said the opposite: `LspClientSmoke` was expected to
 fail exactly two checks about a Cyrillic literal, the known ANSI-vs-UTF-8 decode
 split. That is now fixed at the root, in PasTree — a preamble-less source whose
 bytes are valid UTF-8 decodes as UTF-8, so the analysis and the editor finally
-read the same text (`cMinPasTreeVersion` is pinned at the PasTree version where
-that landed, so an older sibling checkout fails loudly instead of quietly
-shifting columns). If those two checks ever come back, the first thing to check
-is which PasTree the server was built against, not the resolver.
+read the same text (`cMinPasTreeVersion` is pinned at or past the PasTree
+version where that landed - 0.13.2 today, and `source/PasLsp.Version.pas` is
+the only authority for the number - so an older sibling checkout fails loudly
+instead of quietly shifting columns). If those two checks ever come back, the
+first thing to check is which PasTree the server was built against, not the
+resolver.
 
 ## Diagnosing "the analysis got slow"
 
@@ -131,9 +133,10 @@ carries no debug-only directives).
 
 ## Diagnosing "Ctrl+Click did nothing"
 
-The editor only ever says `no identifier/declaration resolved at cursor`. The
-real reason is in **`pastree-lsp.log`, in the same folder as the `.dproj` being
-analyzed** (stderr beside it). It carries the search paths, every diagnostic
+The editor tells you nothing useful — a click that resolves nothing simply does
+nothing. The real reason is in **`pastree-lsp.log`, in the same folder as the
+`.dproj` being analyzed** (the server's stderr is appended into that same file,
+not a sibling). It carries the search paths, every diagnostic
 with the unit it belongs to, and both ends of every navigation. Read it before
 suspecting the resolver — the last two failures of this kind were a
 search-path problem and a stale binary, neither of which was visible from the

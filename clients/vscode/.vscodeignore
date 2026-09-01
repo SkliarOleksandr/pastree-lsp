@@ -1,0 +1,22 @@
+# What must NOT go into the .vsix.
+#
+# vsce's own default is "everything in this directory except node_modules
+# devDependencies", which is wrong here in one specific way: `demo/` is a
+# Delphi project kept for driving the client BY HAND, and running it leaves a
+# `pastree-lsp.log` next to the .dproj (that is where the server writes its
+# log - see the repo's CLAUDE.md). So the packaged extension was carrying a
+# 180-200 KB log of somebody's last debugging session, growing with every run,
+# for no reason at all: an installed extension has nothing to do with a demo
+# project on the packager's disk.
+#
+# Not a blanket "ignore junk" list - each line says what would otherwise ship.
+
+# The manual-test project, and the server log it produces.
+demo/**
+
+# The lockfile pins what to INSTALL, not what to run; the resolved tree is
+# already in the package.
+package-lock.json
+
+# Previously built packages, when one is built in place.
+*.vsix

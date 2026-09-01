@@ -23,17 +23,15 @@ unit PasTreeIdePlugin.LspDocuments;
     cause of its package hot-reload trouble; not adding a second notifier of
     the same kind is a deliberate risk reduction.
 
-  The cost is that nothing reaches the server between requests, which is
-  invisible for navigation and unacceptable for diagnostics. When
-  publishDiagnostics arrives (server phase 3), THAT is when a push-based
-  didChange becomes necessary - and it should be added as a debounced notifier
-  next to this, not instead of it.
+  The cost was that nothing reached the server between requests, which is
+  invisible for navigation and unacceptable for diagnostics. Both halves of
+  that sentence have since happened: publishDiagnostics is implemented, and the
+  push side is PasTreeIdePlugin.IdleSync (2026-08-22), a debounced idle-timer
+  notifier that calls Sync BESIDE this pull path rather than instead of it -
+  exactly as planned here.
 
-  Reading the live buffer is the same IOTAEditorContent technique
-  PasTreeIdePlugin.Analysis uses, carried over here with its warnings intact
-  (see ReadBufferText). It is duplicated for now rather than shared, so that
-  Analysis - and all of PasTree with it - can be deleted from this package
-  without touching this unit.
+  Reading the live buffer goes through IOTAEditorContent, with the warnings
+  that technique carries intact (see ReadBufferText).
 
   POSITIONS. The IDE gives 1-based Row/Column; LSP wants 0-based line and
   0-based UTF-16 code units; the server turns an LSP character back into a
@@ -125,6 +123,24 @@ procedure LspToIde(ALine, ACharacter: Integer; out ARow, ACol: Integer);
 /// </summary>
 function IsPascalSourceFile(const AFileName: string): Boolean;
 
+/// <summary>
+/// The view's buffer length in bytes, or -1 if it cannot be read.
+///
+/// THE STALENESS MEASURE FOR ANY FEATURE THAT WRITES A SERVER'S ANSWER BACK.
+/// An answer's row/col describe the snapshot the server was given, and the
+/// edits are applied at absolute offsets resolved from them, so they remain
+/// valid exactly as long as the amount of text before each site is unchanged:
+/// a same-length replacement shifts nothing, anything that grows or shrinks
+/// the buffer shifts everything after it. So the length is very nearly the
+/// exact condition rather than an approximation of it, and it costs one
+/// integer at request time and one at answer time - the IDE hands the content
+/// out as a memory stream and only its size is touched, never its text.
+///
+/// Here rather than in each feature because two of them need it (class
+/// completion and block close) and a third eventually will.
+/// </summary>
+function BufferByteLength(const AView: IOTAEditView): Integer;
+
 implementation
 
 uses
@@ -134,6 +150,22 @@ uses
   Winapi.ActiveX,
   IStreams,
   PasLsp.SourceText;
+
+function BufferByteLength(const AView: IOTAEditView): Integer;
+var
+  LContent: IOTAEditorContent;
+  LStream: IStream;
+begin
+  Result := -1;
+  if not Assigned(AView) or not Assigned(AView.Buffer) then
+    Exit;
+  if not Supports(AView.Buffer, IOTAEditorContent, LContent) then
+    Exit;
+  LStream := LContent.Content;
+  if not Assigned(LStream) then
+    Exit;
+  Result := (LStream as TIMemoryStream).MemoryStream.Size;
+end;
 
 procedure IdeToLsp(ARow, ACol: Integer; out ALine, ACharacter: Integer);
 begin

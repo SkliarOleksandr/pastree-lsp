@@ -38,6 +38,7 @@ uses
   System.UITypes,
   System.Generics.Collections,
   Winapi.Windows,
+  Vcl.Forms,
   Vcl.Menus,
   Vcl.Graphics,
   Vcl.Controls,
@@ -67,6 +68,9 @@ var
   // answer (tab switched again before the outline arrived) can be told from
   // the current one by file path.
   GCurrentFile: string;
+  // Whether the pane is holding a context of OURS right now. Not cosmetic
+  // bookkeeping: it is what FinalizeOutline needs in order to take it back.
+  GContextInstalled: Boolean = False;
 
 type
   // Common IDispatch stub base: StructureViewAPI interfaces descend from
@@ -634,6 +638,7 @@ begin
   AddGroup(LContext, AFilePath, 'Properties', ASymbols, ['property']);
   AddGroup(LContext, AFilePath, 'Other', ASymbols, ['']);
   LView.SetStructureContext(LContext);
+  GContextInstalled := True;
 end;
 
 procedure RequestOutline(const AFilePath: string);
@@ -732,8 +737,34 @@ end;
 procedure FinalizeOutline;
 var
   LServices: IOTAEditorServices80;
+  LView: IOTAStructureView;
 begin
   GAlive := False;
+  { TAKE THE CONTEXT BACK BEFORE THE CODE BEHIND IT GOES AWAY. This was
+    missing, and it is the same dangling-code hazard the rest of the plugin
+    deregisters everything to avoid: TPasOutlineContext and every
+    TPasOutlineNode under it implement IOTAStructureContext /
+    IOTAStructureNode in THIS BPL. With a .pas tab active - so our outline
+    shown - and the package uninstalled from a running IDE, the Structure pane
+    goes on holding those interfaces; the next repaint, the next click on a
+    node, or merely the final _Release of them executes unloaded code.
+
+    Ahead of FreeAndNil(GImages) on purpose: while our context is still
+    installed the pane may repaint from that image list, which is what the
+    note below is about. }
+  if GContextInstalled then
+  begin
+    GContextInstalled := False;
+    if not Application.Terminated and
+       Supports(BorlandIDEServices, IOTAStructureView, LView) then
+      try
+        LView.SetStructureContext(nil);
+      except
+        // Silent by the same rule as FinalizeFindReferencesMessageGroup: this
+        // runs during unload, there is nowhere left to report to, and an
+        // exception escaping here would take the IDE down over a cleanup.
+      end;
+  end;
   // The image list handle was handed to the structure view; the view keeps
   // its own copy semantics unknown, so the list itself is freed last thing
   // at unload, after nothing can repaint with it.

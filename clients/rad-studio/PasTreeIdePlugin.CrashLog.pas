@@ -222,6 +222,11 @@ begin
   LRec := AInfo.ExceptionRecord;
   if (LRec = nil) or (LRec.ExceptionCode <> EXCEPTION_ACCESS_VIOLATION) then
     Exit;
+  // NIL-CHECKED like SetCrashLogPath, and for a harder reason: this runs on
+  // whatever thread faulted, and the fault can arrive while the package is
+  // being unloaded. See FinalizeCrashLog for why the lock outlives us.
+  if GLock = nil then
+    Exit;
   GLock.Enter;
   try
     if GInside or (GEntries >= cMaxEntries) then
@@ -256,7 +261,11 @@ procedure InitializeCrashLog;
 begin
   if GHandler <> nil then
     Exit;
-  GLock := TCriticalSection.Create;
+  // Reused across a package reload rather than recreated: FinalizeCrashLog
+  // deliberately does not free it (see there), so a second load must not
+  // abandon the first one's.
+  if GLock = nil then
+    GLock := TCriticalSection.Create;
   // Until a project is open there is no per-project log yet, and an AV during
   // package load is exactly the kind this must not miss.
   GPath := TPath.Combine(TPath.GetTempPath, cCrashLogName);
@@ -265,10 +274,24 @@ begin
   // record - and being first costs nothing when the answer is always
   // CONTINUE_SEARCH.
   GHandler := AddVectoredExceptionHandler(1, @VectoredHandler);
-  if GHandler = nil then
-    FreeAndNil(GLock);
 end;
 
+{ THE LOCK IS DELIBERATELY NEVER FREED - one critical section, once per
+  process, and the alternative is a use-after-free inside a crash handler.
+
+  RemoveVectoredExceptionHandler unregisters the handler; it does NOT wait for
+  executions already under way on other threads, and this handler runs on
+  whichever thread faulted - the transport's reader, an IDE worker, anything.
+  An AV on such a thread at the moment the package unloads can be past its
+  dispatch and about to call GLock.Enter while this line frees it. A secondary
+  fault INSIDE the vectored handler is the worst place to have one: at best a
+  second AV during unload, at worst recursion into the handler until the stack
+  is gone. Leaking a few dozen bytes of a design that only ever runs once is
+  the cheap side of that trade, and InitializeCrashLog reuses it on a reload.
+
+  It does not make the window zero and cannot: once the BPL itself is out of
+  memory, so is this code. What it removes is the part this unit controls -
+  a freed lock reached by a handler that had already passed the gate. }
 procedure FinalizeCrashLog;
 begin
   if GHandler <> nil then
@@ -276,7 +299,6 @@ begin
     RemoveVectoredExceptionHandler(GHandler);
     GHandler := nil;
   end;
-  FreeAndNil(GLock);
 end;
 
 end.

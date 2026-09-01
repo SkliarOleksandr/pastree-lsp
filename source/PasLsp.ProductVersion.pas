@@ -51,8 +51,14 @@ const
   /// deployed binary ("is the exe/BPL I am running the one I just built?").
   /// Bump the MINOR for a substantial change; that component keeps its ordinary
   /// semver meaning.
+  ///
+  /// ONE NUMBER FOR THE WHOLE PRODUCT INCLUDES clients\vscode\package.json,
+  /// which is the one place it is a literal rather than this constant - nothing
+  /// compiles that file, so nothing catches it drifting. It did: 0.15.7 against
+  /// this unit's 0.22.9, about forty commits behind, silently. Bump it in the
+  /// same edit as this line.
   /// </summary>
-  PasTreeLspVersion = '0.22.8';
+  PasTreeLspVersion = '0.23.0';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than

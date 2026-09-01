@@ -159,9 +159,12 @@ begin
   end;
 end;
 
-{ Back to HTML text: the four characters that would otherwise be markup. The
-  parser unescaped the source's entities so both emitters see real text; the
-  HTML one has to put them back. }
+{ Back to HTML text: the four characters that would otherwise be markup.
+
+  This is exact only because the parser really does unescape the source's
+  entities into real text (ParseXmlDoc's prose run), so both emitters hold
+  characters and the HTML one puts them back. It said so before that was true,
+  which is how the double-escape survived. }
 function HtmlEscape(const AText: string): string;
 begin
   Result := AText.Replace('&', '&amp;', [rfReplaceAll])
@@ -225,6 +228,85 @@ begin
     Result := Copy(Result, 3, MaxInt);
 end;
 
+{ Every tag name Delphi's own Help Insight documents, plus the inline
+  formatting ones a developer may reasonably have typed. Used only to decide
+  whether a `<...>` IS a tag - see LooksLikeTag. }
+function IsKnownDocTag(const AName: string): Boolean;
+const
+  KNOWN: array[0..25] of string = ('summary', 'remarks', 'returns', 'value',
+    'param', 'typeparam', 'exception', 'see', 'seealso', 'paramref',
+    'typeparamref', 'para', 'br', 'c', 'code', 'list', 'listheader', 'item',
+    'term', 'description', 'example', 'permission', 'include', 'member',
+    'b', 'i');
+var
+  LIdx: Integer;
+begin
+  for LIdx := Low(KNOWN) to High(KNOWN) do
+    if KNOWN[LIdx] = AName then
+      Exit(True);
+  Result := False;
+end;
+
+{ IS THIS `<...>` A TAG, OR IS IT PROSE?
+
+  The unit header promises that "a parse error must never cost the user the
+  text", and treating every `<` with a later `>` anywhere in the block as a tag
+  breaks that promise in the most ordinary sentence there is:
+
+    /// <summary>True when 0 < Count and Count > Max</summary>
+
+  Everything between the two comparisons became the body of an unknown tag
+  `count`, was dropped with it, and the summary read "True when 0 Max" - five
+  words the author wrote, gone silently.
+
+  Liberal, as the header intends, but not credulous: a tag is a known name, or
+  a well-formed XML name carrying an attribute, or a well-formed LOWERCASE name
+  on its own. `0 < Count and Count >` is none of those, and neither is the
+  `<Integer>` of `List<Integer>` - see the case note at the bottom. Entities
+  are still the only correct way to write a literal `<`, and they are honoured;
+  this is about what happens when the author did not use them. }
+function LooksLikeTag(const ATagBody: string): Boolean;
+var
+  LBody, LName: string;
+  LIdx: Integer;
+begin
+  LBody := Trim(ATagBody);
+  if LBody.EndsWith('/') then
+    LBody := Trim(Copy(LBody, 1, Length(LBody) - 1));
+  if LBody.StartsWith('/') then
+    LBody := Trim(Copy(LBody, 2, MaxInt));
+  if LBody = '' then
+    Exit(False);
+  LName := LBody;
+  if Pos(' ', LName) > 0 then
+    LName := Copy(LName, 1, Pos(' ', LName) - 1);
+  if IsKnownDocTag(LowerCase(LName)) then
+    Exit(True);
+  // An XML name: a letter or underscore, then name characters only.
+  if not CharInSet(LName[1], ['A'..'Z', 'a'..'z', '_']) then
+    Exit(False);
+  for LIdx := 2 to Length(LName) do
+    if not CharInSet(LName[LIdx],
+             ['A'..'Z', 'a'..'z', '0'..'9', '_', '-', '.', ':']) then
+      Exit(False);
+  { Unknown name, so it must at least be SHAPED like a tag. An attribute
+    (`=`) settles it whatever the name looks like. Without one, the only
+    remaining signal is CASE, and it is a real one in this corpus: XMLDoc tag
+    names are lowercase by convention, while the thing that most often appears
+    between angle brackets in Delphi prose is a TYPE - `List<Integer>`,
+    `TArray<T>`, `TDictionary<string, TFoo>` - and Delphi types are
+    capitalised. So a capitalised unknown name is read as prose.
+
+    A heuristic, and it is allowed to be: the cost of guessing wrong either way
+    is one line of a hint window reading slightly oddly, while the cost of the
+    old always-a-tag rule was silently deleting the middle of a sentence. }
+  if Pos('=', LBody) > 0 then
+    Exit(True);
+  if LName <> LBody then
+    Exit(False);   // a name followed by something that is not an attribute
+  Result := LName = LowerCase(LName);
+end;
+
 function ParseXmlDoc(const ARaw: string): TXmlDocParts;
 var
   LParts: TXmlDocParts;
@@ -261,10 +343,22 @@ begin
   LIdx := 1;
   while LIdx <= Length(ARaw) do
   begin
+    { PROSE, A RUN AT A TIME, AND UNESCAPED. Both matter.
+
+      The run, because entities are not characters: `&lt;` has to be seen
+      whole. Character-at-a-time was the old shape and it is why nothing
+      unescaped section text at all - so `A &lt; B` reached the plain hint
+      window with the entity still in it, and the HTML emitter escaped it a
+      second time into `A &amp;lt; B`, which Help Insight then rendered as the
+      literal text `A &lt; B`. Wrong in both windows, for every doc comment
+      that spells `<` or `&` the one correct way. }
     if ARaw[LIdx] <> '<' then
     begin
-      AddText(ARaw[LIdx]);
-      Inc(LIdx);
+      LClose := LIdx;
+      while (LClose <= Length(ARaw)) and (ARaw[LClose] <> '<') do
+        Inc(LClose);
+      AddText(Unescape(Copy(ARaw, LIdx, LClose - LIdx)));
+      LIdx := LClose;
       Continue;
     end;
     LClose := LIdx + 1;
@@ -273,10 +367,20 @@ begin
     // An unterminated '<' is prose (a comparison, a generic in running text).
     if LClose > Length(ARaw) then
     begin
-      AddText(Copy(ARaw, LIdx, MaxInt));
+      AddText(Unescape(Copy(ARaw, LIdx, MaxInt)));
       Break;
     end;
     LTagBody := Trim(Copy(ARaw, LIdx + 1, LClose - LIdx - 1));
+    // A TERMINATED '<' that is not a tag is prose too - the case the check
+    // above cannot see, and the expensive one, because everything up to the
+    // next '>' would be swallowed as an unknown tag's body. One character is
+    // consumed, not the span: the '>' later in the sentence is prose as well.
+    if not LooksLikeTag(LTagBody) then
+    begin
+      AddText('<');
+      Inc(LIdx);
+      Continue;
+    end;
     LIdx := LClose + 1;
     if LTagBody.EndsWith('/') then
       LTagBody := Trim(Copy(LTagBody, 1, Length(LTagBody) - 1));

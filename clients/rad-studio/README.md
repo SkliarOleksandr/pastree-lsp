@@ -89,7 +89,7 @@ items (since phase C, 2026-08-22, nothing native is replaced - the native
 through our Code Insight manager whenever "PasTree" is the selected
 Insight Provider). A miss is reported in the Messages panel tagged
 `[pastree]`, which is where the origin shows. See "Go to
-Declaration" below for how the native item got replaced.
+Declaration" below for how navigation is reached now.
 
 ### Rename
 
@@ -130,33 +130,45 @@ site and the plugin applies it - one undo step per file.
 
 - Results go to a dedicated "Find References" tab in the Messages panel
   (`IOTAMessageServices.AddMessageGroup`), grouped by file (one header row
-  per file via `AddToolMessage`'s own `Parent`/`LineRef` mechanism - same
-  tree structure "Find in Files" uses), each hit carrying file/line/column
-  so the IDE's own message navigation (double-click, Enter, F8/Shift+F8)
-  jumps straight to it.
+  per file, the same `Parent`/`LineRef` tree structure "Find in Files" uses),
+  each hit carrying file/line/column so the IDE's own message navigation
+  (double-click, Enter, F8/Shift+F8) jumps straight to it.
+- The rows are **owner-drawn**, not plain tool messages:
+  `AddCustomMessagePtr`/`AddCustomMessage` over `INTACustomDrawMessage`
+  implementations in `PasTreeIdePlugin.ResultRows`, which is what lets a hit
+  show its own source line with the identifier picked out. (It began as
+  `AddToolMessage`; that is what the earlier version of this paragraph
+  described.)
 
 ### Go to Declaration
 
-Two ways to trigger the same resolve+navigate logic
-(`PasTreeIdePlugin.GotoDeclaration.ResolveAndNavigate`), both **confirmed
-working** in the in-process version and unchanged as ToolsAPI plumbing by the
-LSP move - what changed underneath them is that the jump now happens in a
-callback rather than before the handler returns:
+The resolve+navigate logic itself
+(`PasTreeIdePlugin.GotoDeclaration.ResolveAndNavigate`) is still what does the
+work, and the jump happens in a callback rather than before the handler
+returns. How it is REACHED has changed twice, and the two mechanisms below are
+history:
 
-- **Native menu item replaced.** The built-in "Find Declaration" is removed
-  via `INTAEditorLocalMenu.UnregisterActionList(cEdMenuCatIdentifier)` and
+> **Both mechanisms below were REMOVED in phase C (2026-08-22)** and are
+> described here only because the reasoning behind them is worth keeping. The
+> native "Find Declaration" is no longer unregistered, and there is no
+> mouse-event interception: both the native menu item and Ctrl+Click route
+> through our Code Insight manager whenever "PasTree" is the selected Insight
+> Provider, which is the whole point of becoming the manager. See "Menu" above
+> for what the editor menu looks like today.
+
+- **Native menu item replaced** *(removed in phase C)*. The built-in "Find
+  Declaration" was removed via
+  `INTAEditorLocalMenu.UnregisterActionList(cEdMenuCatIdentifier)` and
   replaced with our own action registered under that same category string
-  (`PasTreeIdePlugin.Wizard.TMenuManager` - lands in the exact same, first,
-  menu position). **Caveat:** this is a one-way door within a running IDE
-  session - there's no handle to the native action list to restore it, so
-  uninstalling the package without restarting the IDE would leave "Find
-  Declaration" missing until restart (which the project's own workflow
-  already does after every rebuild - see "Known first-pass limitations").
-- **Ctrl+Click override.** Hooks `INTACodeEditorServices.AddEditorEventsNotifier`
-  (`ToolsAPI.Editor.pas`, the same mechanism the official "KeyboardMouse
-  Events Demo" sample uses) and intercepts
-  `OnEditorMouseDownEx`/`OnEditorMouseUpEx`: on Ctrl+Left-click it resolves
-  the identifier under the cursor and navigates there itself, setting
+  (lands in the exact same, first, menu position). **Its caveat is why it
+  went:** a one-way door within a running IDE session - there is no handle to
+  the native action list to restore it, so uninstalling the package without
+  restarting the IDE left "Find Declaration" missing until restart.
+- **Ctrl+Click override** *(removed in phase C)*. Hooked
+  `INTACodeEditorServices.AddEditorEventsNotifier` (`ToolsAPI.Editor.pas`, the
+  same mechanism the official "KeyboardMouse Events Demo" sample uses) and
+  intercepted `OnEditorMouseDownEx`/`OnEditorMouseUpEx`: on Ctrl+Left-click it
+  resolved the identifier under the cursor and navigated there itself, setting
   `Handled := True` to suppress RAD Studio's own default handling
   (documented as "prevent further processing" - `ToolsAPI.Editor.pas:804-806`).
 
@@ -351,7 +363,7 @@ naming which case it is, since the two need different fixes:
 ## Building and testing
 
 **`build.bat` at the repository root builds everything** - server, this
-package, all four harnesses - and runs the harnesses. That is the intended way,
+package, all five harnesses - and runs the harnesses. That is the intended way,
 and not merely a convenience: the package and the server share one version and
 check each other for equality at the handshake, which only means anything if a
 normal build produces both halves from the same commit. RAD Studio must be

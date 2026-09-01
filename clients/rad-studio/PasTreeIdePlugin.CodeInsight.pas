@@ -18,8 +18,8 @@ unit PasTreeIdePlugin.CodeInsight;
 
   WHAT IT ANSWERS TODAY, honestly and nothing more:
     - Code completion  -> textDocument/completion via LspCompletion (the
-      server's interim keyword provider; PasTree replaces that server-side,
-      this unit does not change).
+      server answers from PasTree itself since 2026-08-21; the interim
+      keyword provider is gone, and this unit did not have to change for it).
     - Browse (Ctrl+Click when WE are the provider) -> AsyncGotoDefinitionEx
       over the same LspDefinition path the current override uses - but
       returning the target to the IDE, which then navigates and keeps history
@@ -470,10 +470,17 @@ begin
   FSig := ASig;
   // The result type is the label's tail after the params' closing '): ' (or
   // after 'Name: ' for a parameterless function).
+  //
+  // THE FALLBACK ONLY APPLIES WITH NO PARAMETER LIST AT ALL, which is the case
+  // the sentence above describes and the condition the first version left out.
+  // A PROCEDURE with typed parameters has no '): ' either -
+  // `Foo(const S: string; Index: Integer)` - so the fallback found the first
+  // PARAMETER's ': ' inside the brackets and handed the IDE's parameter
+  // insight `string; Index: Integer)` as the routine's result type.
   LIdx := FSig.SigLabel.LastIndexOf('): ');
   if LIdx >= 0 then
     FRetVal := FSig.SigLabel.Substring(LIdx + 3)
-  else
+  else if FSig.SigLabel.IndexOf('(') < 0 then
   begin
     LIdx := FSig.SigLabel.IndexOf(': ');
     if LIdx >= 0 then
@@ -643,9 +650,10 @@ type
   private
     FEnabled: Boolean;
     FSymbols: IOTACodeInsightSymbolList;
-    // The same object as FSymbols, typed - Done and DrawLine need item
-    // fields the interface does not expose. The interface reference owns
-    // the lifetime; this one is only ever read alongside it.
+    // The same object as FSymbols, typed - the callers that need item fields
+    // the interface does not expose. The interface reference owns the
+    // lifetime; this one is only ever read alongside it. (Those callers all
+    // read the SHOWN pair below, not this one - see there.)
     FSymbolsObj: TPasSymbolList;
     // The list the VIEWER actually pulled (GetSymbolList) - a late async
     // answer may replace FSymbols while a popup built from the previous
@@ -801,7 +809,9 @@ begin
   // Deliberately not yet: real symbols DO have declarations now, but the
   // sync GotoDefinition below declines (async is the only resolve path), so
   // advertising browseability would offer a gesture that goes nowhere.
-  // Revisit with phase C, when GotoDefinition becomes the one navigation.
+  // Not a phase-C question any more (phase C shipped 2026-08-22): it stays
+  // False until the sync GotoDefinition can answer, which is a decision about
+  // this interface, not about the migration.
   Result := False;
 end;
 
@@ -1447,15 +1457,24 @@ var
   LUI: INTAIDEUIServices;
   LBase, LDim, LTypeColor, LValueColor: TColor;
 begin
-  if not Assigned(FSymbols) or (Index < 0) or (Index >= FSymbols.Count) then
+  // FShownSymbols, NOT FSymbols - the list the viewer is actually painting,
+  // for the same reason Done and GetHelpInsightHtml read it: a late async
+  // answer replaces FSymbols under a popup built from the previous list, and a
+  // failed re-invoke nils it outright. Indexing the newest list to draw rows
+  // of the displayed one paints the wrong text where the two happen to be the
+  // same length, and falls back to DefaultDraw for rows the viewer is still
+  // showing where they do not. The bounds checks kept it from crashing, which
+  // is why it read as cosmetic.
+  if not Assigned(FShownSymbols) or (Index < 0) or
+     (Index >= FShownSymbols.Count) then
   begin
     DefaultDraw := True;
     Exit;
   end;
   DefaultDraw := False;
-  LClass := FSymbols.SymbolClassText[Index];
-  LName := FSymbols.SymbolText[Index];
-  LDetail := FSymbols.SymbolTypeText[Index];
+  LClass := FShownSymbols.SymbolClassText[Index];
+  LName := FShownSymbols.SymbolText[Index];
+  LDetail := FShownSymbols.SymbolTypeText[Index];
 
   // The class column is fixed-width - rows must align down the list, and
   // 'constructor' is the widest word the column ever holds.

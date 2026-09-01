@@ -24,8 +24,12 @@ unit PasTreeIdePlugin.BlockClose;
 
   STALENESS IS HANDLED AT ANSWER TIME, the same way Rename verifies before
   writing: the answer is applied only if the caret is still on the row the
-  question was asked about, in the same file. The user typing on regardless
-  costs them nothing - the answer is dropped, not misapplied.
+  question was asked about, in the same file, AND the buffer is still the
+  length it was when the question was asked. Both halves are needed - the row
+  alone lets a user who keeps typing on that very row through the gate, and the
+  edits then land on columns that have moved (see HandleKeyUp). With both, the
+  user typing on regardless costs them nothing: the answer is dropped, not
+  misapplied.
 
   Switchable off in Tools > PasTree > Settings (BlockCompletionEnabled),
   checked at keystroke time so the change takes effect immediately. Off
@@ -182,7 +186,7 @@ procedure TPasBlockCloseNotifier.HandleKeyUp(const AEditor: TWinControl;
 var
   LView: IOTAEditView;
   LFileName: string;
-  LRow, LCol: Integer;
+  LRow, LCol, LLenAtRequest: Integer;
 begin
   // AHandled is never touched: this is an observer, and the key-up has
   // nothing left to handle anyway - the editor broke the line on key-down.
@@ -198,6 +202,8 @@ begin
     Exit;
   LRow := LView.Buffer.EditPosition.Row;
   LCol := LView.Buffer.EditPosition.Column;
+  // The snapshot this answer will be measured against - see the gate below.
+  LLenAtRequest := BufferByteLength(LView);
   LspOnTypeFormatting(LFileName, LRow, LCol,
     procedure(ASuccess: Boolean; const AEdits: TArray<TLspTextEdit>;
       const AError: string)
@@ -214,13 +220,29 @@ begin
       end;
       if Length(AEdits) = 0 then
         Exit;
-      // Verify, then write - the same discipline as Rename: the answer
-      // describes the buffer as it was asked; apply it only if the
-      // caret still sits where the question was asked from.
+      { Verify, then write - the same discipline as Rename: the answer
+        describes the buffer as it was asked, so apply it only if that buffer
+        has not moved.
+
+        THE ROW ALONE IS NOT THAT CHECK, and the unit header used to promise
+        more than it delivered ("the answer is dropped, not misapplied"). A
+        user who presses Enter and immediately types on the new line leaves the
+        caret on LRow, so the row gate passes - and the edits, whose columns
+        were computed against the line as it was BEFORE those characters, get
+        applied anyway: edit 1 replaces the caret line's leading whitespace
+        (a DeleteTo span), so it deletes or displaces what was just typed. The
+        exact "typing on regardless" case the header called free.
+
+        So the length is checked as well: any insertion or deletion since the
+        request changes it, and nothing that leaves it equal can move a
+        column. }
       LNowView := TopViewOf(LFileName);
       if not Assigned(LNowView) or
          (LNowView.Buffer.EditPosition.Row <> LRow) then
         Exit;
+      if (LLenAtRequest < 0) or
+         (BufferByteLength(LNowView) <> LLenAtRequest) then
+        Exit;   // quietly, like every other declined Enter
       ApplyEdits(LNowView, AEdits);
     end);
 end;

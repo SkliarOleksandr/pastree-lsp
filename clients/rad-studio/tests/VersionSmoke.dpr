@@ -96,7 +96,7 @@ end;
 procedure TestSourceText;
 var
   LDir, LPlain, LBom, LMissing, LAnsi, LUtf16: string;
-  LText: string;
+  LText, LText2Read: string;
   LEnc: TPasSourceEncoding;
 const
   cText = 'unit A;'#13#10'// em dash — here'#13#10'end.'#13#10;
@@ -179,6 +179,28 @@ begin
     TFile.WriteAllBytes(LUtf16, TBytes.Create($FF, $FE, Ord('a'), 0));
     Check(not TryReadSourceForEdit(LUtf16, LText, LEnc),
       'a UTF-16 source is declined, not silently rewritten as UTF-8');
+
+    { THE TWO READERS MUST AGREE, and until 0.23.0 they did not:
+      TryReadTextNoBom went through TFile.ReadAllText, which falls back to the
+      ANSI code page for a preamble-less file, while TryReadSourceForEdit
+      detects UTF-8 first - the rule PasTree itself follows since 0.2.3. The
+      server reads a file the editor does NOT have open through the former and
+      then computes positions in it, so a disagreement here shifts every column
+      after any non-ASCII character in a closed file. Same file, same string,
+      or this is broken. }
+    TFile.WriteAllBytes(LPlain, TEncoding.UTF8.GetBytes(cText));
+    TFile.WriteAllBytes(LAnsi, TBytes.Create(Ord('a'), $E4, Ord('b')));
+    Check(TryReadTextNoBom(LPlain, LText) and (LText = cText),
+      'the em-dash file reads as UTF-8, not as the ANSI code page');
+    Check(TryReadTextNoBom(LPlain, LText) and
+      TryReadSourceForEdit(LPlain, LText2Read, LEnc) and (LText = LText2Read),
+      'both readers return the same string for a preamble-less UTF-8 file');
+    Check(TryReadTextNoBom(LAnsi, LText) and (Length(LText) = 3),
+      'and the same one for bytes that are not UTF-8 (byte-for-byte, 3 chars)');
+    Check(TryReadTextNoBom(LBom, LText) and (LText = LText2),
+      'a BOM''d file still reads without its preamble');
+    Check(not TryReadTextNoBom(LUtf16, LText),
+      'and UTF-16 is declined here too, exactly as by the edit reader');
   finally
     try
       TDirectory.Delete(LDir, True);

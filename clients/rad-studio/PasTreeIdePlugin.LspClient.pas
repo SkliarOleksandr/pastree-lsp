@@ -15,8 +15,9 @@ unit PasTreeIdePlugin.LspClient;
   NOTHING BLOCKS THE MAIN THREAD WAITING FOR A REPLY. Requests are fire-and-
   callback; the reply arrives on a later main-thread turn. This is the rule the
   whole out-of-process design rests on - running analysis synchronously on the
-  UI thread is what made a deadlock possible in the in-process version (see
-  the SingleThreaded comment in PasTreeIdePlugin.Analysis). A caller cannot
+  UI thread is what made a deadlock possible in the in-process version, which
+  this package no longer contains (PasTreeIdePlugin.Analysis was deleted with
+  it - the design note lives in clients/rad-studio/SPEC.md now). A caller cannot
   have "the answer now"; it must accept the answer later, and must expect the
   editor to have moved on in between.
 
@@ -552,6 +553,8 @@ begin
 end;
 
 function TLspClient.Connect: Boolean;
+var
+  LConn: TLspConnection;
 begin
   // Never overwrite a live connection. Teardown and FailAllPending both invoke
   // callbacks, and a callback that issues a request can reach EnsureStarted and
@@ -561,13 +564,35 @@ begin
 
   Inc(FAttempts);
   FLastAttemptTick := GetTickCount64;
+  LConn := nil;
   try
-    // Both callbacks bracket themselves with FDispatchDepth so that anything
-    // they reach - a restart, a reconfigure - defers freeing this very
-    // connection until the dispatch has unwound. See RetireConnection.
-    FConn := TLspConnection.Create(FExePath, FWorkDir,
+    { EACH CLOSURE KNOWS WHICH CONNECTION IT SPEAKS FOR, and both refuse to
+      speak for a retired one. LConn is captured by reference, so it is the
+      connection created on this line by the time any queued closure runs.
+
+      Without the check, a RETIRED connection's queued notification poisons the
+      one that replaced it, and this is not theoretical: the server dies just
+      after answering, the main thread dispatches that answer (depth 1), a
+      feature callback issues the next request, EnsureStarted retires the dead
+      connection (disposal deferred by the depth, so its queued DispatchGone
+      survives) and connects a healthy new server. The dispatch unwinds, the
+      OLD connection's gone-notification finally fires, sees lcsStarting rather
+      than lcsStopped, and declares failure: outbox cleared (losing the
+      request just queued), FailAllPending sweeping away the NEW handshake's
+      pending initialize. The new server is orphaned, the user is told the
+      connection was lost, and the next click burns another restart attempt.
+      Frames are gated for the same reason - a retired connection's last
+      publishDiagnostics must not be cached as the live server's. The comment
+      in EnsureStarted covers only the DISCARD side of that queue. }
+    LConn := TLspConnection.Create(FExePath, FWorkDir,
       procedure(const AJson: string)
       begin
+        if LConn <> FConn then
+          Exit;
+        // Both callbacks bracket themselves with FDispatchDepth so that
+        // anything they reach - a restart, a reconfigure - defers freeing this
+        // very connection until the dispatch has unwound. See
+        // RetireConnection.
         Inc(FDispatchDepth);
         try
           HandleFrame(AJson);
@@ -577,6 +602,8 @@ begin
       end,
       procedure(const AReason: string)
       begin
+        if LConn <> FConn then
+          Exit;
         Inc(FDispatchDepth);
         try
           OnConnectionGone(AReason);
@@ -584,10 +611,11 @@ begin
           Dec(FDispatchDepth);
         end;
       end,
-      // The child's stderr goes next to the server log the caller chose (so
-      // both halves of a failed start are found in one place); with no log
-      // configured the transport falls back to its own %TEMP% file.
+      // The child's stderr goes INTO the server log the caller chose, so both
+      // halves of a failed start are in one file; '' means the transport
+      // discards it (see StdErrPathFor - there is no %TEMP% fallback any more).
       StdErrPathFor(FOptions.LogFile));
+    FConn := LConn;
   except
     on E: ELspTransport do
     begin

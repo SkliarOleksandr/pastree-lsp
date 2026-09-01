@@ -60,8 +60,12 @@ type
     Line: Integer;
     Col: Integer;
     Text: string;
-    // 'body' (into the implementation section), 'member' (into the type's
-    // declaration) or 'spec' (the read/write written into a property line).
+    { All FOUR the emitter produces, and the list has to be complete because a
+      consumer can key off it (the RAD spec documents the sort order by these
+      names): 'body' (into the implementation section), 'member' (into the
+      type's declaration), 'spec' (the read/write written into a property
+      line) and 'semi' (the semicolon that closes that property line once the
+      specifiers are in). See EditKindRank. }
     Kind: string;
     Name: string;   // 'TFoo.Bar' / 'Foo' - for the log and the IDE's message
   end;

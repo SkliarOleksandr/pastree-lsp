@@ -70,6 +70,12 @@ Phases 1 and 2 are complete and exercised live.
 | `textDocument/documentHighlight` | occurrences within the current file |
 | `textDocument/rename`, `textDocument/prepareRename` | rename a symbol or a UNIT across the project; a unit also renames its file, as a `rename` operation in `documentChanges` |
 | `pastree/renamePlan` | the same plan with each site's old and new text, the file a renamed unit must move to, and a preview of every line after the rename — what the RAD Studio client applies and shows |
+| `textDocument/completion` | PasTree's completion engine at the cursor, each item carrying its own `documentation` |
+| `textDocument/signatureHelp` | the call under the cursor, its overloads and the active parameter |
+| `workspace/symbol` | project-wide substring query over the prefetched index |
+| `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger, and Enter after an unclosed opener answers the closer |
+| `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C in the RAD Studio client) |
+| `$/pastree.hostEvent` | OURS, not LSP: a client-side event (the IDE opening or closing a project) written into the server's own log, so its timeline has the boundaries the server cannot see |
 
 **Behaviour** — analysis runs on a background session, debounced so a typing
 burst costs one build; a document event only schedules a rebuild when the text

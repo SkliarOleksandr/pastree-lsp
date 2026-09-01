@@ -67,17 +67,18 @@ rem       EXEs go to %TESTOUT% because each locates its own resources relative
 rem       to its exe: ..\fixtures and ..\.. for the package directory. DCUs go
 rem       to out\dcu\win32 with every other Win32 build's -- see DCUS, above.
 echo === test harnesses (Win32) ===
-for %%T in (VersionSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
+for %%T in (VersionSmoke LspTextSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
   dcc32 -B -Q -U"%PLUGIN%;source" -E"%TESTOUT%" -N0"%DCU32%" "%PLUGIN%\tests\%%T.dpr"
   if errorlevel 1 goto :fail
 )
 
-rem -- 4. run them. VersionSmoke needs nothing; the other three take the server
-rem       path as argv[1] -- passed explicitly rather than relying on their
-rem       relative default, so a broken default cannot silently pass here.
+rem -- 4. run them. VersionSmoke and LspTextSmoke need nothing; the other three
+rem       take the server path as argv[1] -- passed explicitly rather than
+rem       relying on their relative default, so a broken default cannot
+rem       silently pass here.
 echo === running harnesses ===
 set FAILED=
-for %%T in (VersionSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
+for %%T in (VersionSmoke LspTextSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
   echo --- %%T
   "%TESTOUT%\%%T.exe" "%CD%\out\pastree-server.exe"
   if errorlevel 1 set FAILED=!FAILED! %%T

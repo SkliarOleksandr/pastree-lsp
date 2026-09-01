@@ -3,15 +3,17 @@ unit PasTreeIdePlugin.LspSession;
 {
   The package-lifetime LSP session: one server for the active project, the
   document sync that feeds it, and the two questions the features actually ask
-  (declaration, references). This is what replaces
-  PasTreeIdePlugin.Analysis.BuildNavigator - same role, opposite shape.
+  (declaration, references). This is what replaced the in-process
+  BuildNavigator - same role, opposite shape. That unit
+  (PasTreeIdePlugin.Analysis) no longer exists in this package: linking PasTree
+  into a Win32 designtime BPL is the thing the whole out-of-process design was
+  built to stop.
 
   THE SHAPE CHANGE IS THE WHOLE POINT, AND CALLERS FEEL IT. BuildNavigator
   returned an answer; these take a callback. Nothing here blocks the IDE's main
   thread waiting for the server, because that is the failure the out-of-process
-  design exists to prevent (see the SingleThreaded comment in
-  PasTreeIdePlugin.Analysis for what the in-process version had to promise
-  instead). A feature must therefore be written to accept its answer on a later
+  design exists to prevent - the in-process version had to promise a
+  single-threaded analysis on the UI thread instead. A feature must therefore be written to accept its answer on a later
   main-thread turn, and to cope with the editor having moved on meanwhile.
 
   ONE SERVER PER PROJECT CONFIGURATION. Switching the active project, platform
@@ -34,10 +36,11 @@ unit PasTreeIdePlugin.LspSession;
   editor, from navigation being broken.
 
   WHERE THE SERVER LOG GOES. Next to the project being analyzed, as
-  pastree-lsp.log (LogPathFor), with the server's stderr beside it. The log is
-  the only place the real cause of a failed navigation appears - the editor only
-  ever says "nothing resolved" - so it is deliberately somewhere a person will
-  actually look, not a timestamped file in %TEMP%.
+  pastree-lsp.log (LogPathFor), with the server's stderr appended INTO that
+  same file (since 2026-08-24 - there is no sibling stderr file any more).
+  The log is the only place the real cause of a failed navigation appears -
+  the editor only ever says "nothing resolved" - so it is deliberately
+  somewhere a person will actually look, not a timestamped file in %TEMP%.
 }
 
 interface
@@ -415,11 +418,10 @@ procedure LspHover(const AFileName: string; ARow, ACol: Integer;
 
 /// <summary>
 /// Asks for completion items at an IDE position - the plumbing half of
-/// COMPLETION.md, ahead of any IDE surface that shows them (the Code Insight
-/// manager is that surface, and it is gated until the server answers well).
-/// Today the server's interim provider returns Delphi's reserved words
-/// filtered by the typed prefix; the call shape will not change when PasTree
-/// starts answering for real. A new request supersedes an unanswered one,
+/// COMPLETION.md. The IDE surface that shows them is the Code Insight manager
+/// (PasTreeIdePlugin.CodeInsight), registered and live. The server answers
+/// from PasTree itself as of 2026-08-21 - the interim reserved-word provider
+/// this used to describe is gone. A new request supersedes an unanswered one,
 /// same as every other feature here.
 /// </summary>
 procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
@@ -763,6 +765,29 @@ var
     end;
   end;
 
+  /// <summary>
+  /// TRegistry.ReadString RAISES for a value that is absent or is not a string
+  /// - it is not a returns-empty API - and every caller here wants '' for
+  /// "not configured". The surrounding code is already hardened against
+  /// hand-edited settings (see AddPathList); this is the same hazard one level
+  /// up. KeyExists/OpenKeyReadOnly answer for the KEY only, so a
+  /// `Library\&lt;platform&gt;` that exists without a 'Search Path' - a pruned
+  /// or half-written key - used to throw ERegistryException straight out of
+  /// BuildOptions, through EnsureSession, into the ToolsAPI action handler:
+  /// an IDE error dialog on every attempt to navigate, and no session.
+  /// </summary>
+  function ReadStringOrEmpty(AReg: TRegistry; const AName: string): string;
+  begin
+    try
+      if AReg.ValueExists(AName) then
+        Result := AReg.ReadString(AName)
+      else
+        Result := '';
+    except
+      Result := '';   // present but not a REG_SZ: unusable either way
+    end;
+  end;
+
   procedure AddPathList(const AValue: string);
   var
     LRaw, LPath: string;
@@ -820,7 +845,7 @@ begin
         try
           LReg.GetValueNames(LNames);
           for LSubDir in LNames do
-            LMacros.Values[LSubDir] := LReg.ReadString(LSubDir);
+            LMacros.Values[LSubDir] := ReadStringOrEmpty(LReg, LSubDir);
         finally
           LNames.Free;
         end;
@@ -841,8 +866,8 @@ begin
         // lookups will hit. Order is only a performance hint - the server
         // resolves a unit by the first path that has it, and a unit present on
         // both lists is the same file either way.
-        AddPathList(LReg.ReadString('Browsing Path'));
-        AddPathList(LReg.ReadString('Search Path'));
+        AddPathList(ReadStringOrEmpty(LReg, 'Browsing Path'));
+        AddPathList(ReadStringOrEmpty(LReg, 'Search Path'));
       end;
     finally
       LReg.Free;
@@ -1144,11 +1169,25 @@ begin
         + 'restarting the server.',
         [ExtractFileName(LOptions.ProjectFile), LPlatform, LConfig]));
     FDocs.Forget;   // the old server's documents die with it
-    if not FClient.Start(LOptions) then
-      Exit;
+    { RECORDED BEFORE THE START, NOT AFTER IT, and the difference is a whole
+      restart policy.
+
+      Start resets the client's attempt counter and backoff on purpose - a new
+      configuration deserves a fresh five tries. But when the spawn itself
+      fails (the exe is there and locked, or corrupt, or the wrong
+      architecture) Start returns False, and leaving these three unset meant
+      SameText never matched again: every Ctrl+Click, every outline activation,
+      every hover re-entered this branch, called Start, and zeroed the counter
+      it had just incremented. Five-attempts-and-give-up and the exponential
+      backoff never engaged for this whole class of failure, and the Build tab
+      collected one false 'project configuration changed - restarting' per
+      retry. Recording the target we ASKED for leaves the retry where it
+      belongs: TLspClient.EnsureStarted, which paces it. }
     FStartedProject := LOptions.ProjectFile;
     FStartedPlatform := LPlatform;
     FStartedConfig := LConfig;
+    if not FClient.Start(LOptions) then
+      Exit;
   end;
 
   Result := True;
@@ -1444,11 +1483,37 @@ begin
     end);
 end;
 
+{ The IDE's own Block Indent and Use Tab Character, for a request that has to
+  state them. Defaults 2 / spaces when the options cannot be read, which is
+  what this used to send unconditionally. }
+procedure ReadIndentOptions(out ATabSize: Integer; out AInsertSpaces: Boolean);
+var
+  LEditorServices: IOTAEditorServices;
+  LView: IOTAEditView;
+  LOptions: IOTAEditOptions;
+begin
+  ATabSize := 2;
+  AInsertSpaces := True;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
+    Exit;
+  LView := LEditorServices.TopView;
+  if not Assigned(LView) or not Assigned(LView.Buffer) then
+    Exit;
+  LOptions := LView.Buffer.EditOptions;
+  if not Assigned(LOptions) then
+    Exit;
+  if LOptions.BlockIndent > 0 then
+    ATabSize := LOptions.BlockIndent;
+  if Assigned(LOptions.BufferOptions) then
+    AInsertSpaces := not LOptions.BufferOptions.UseTabCharacter;
+end;
+
 procedure TLspSession.OnTypeFormatting(const AFileName: string;
   ARow, ACol: Integer; const AOnDone: TLspTextEditsProc);
 var
   LParams, LDoc, LPos, LOpts: TJSONObject;
-  LLine, LChar: Integer;
+  LLine, LChar, LTabSize: Integer;
+  LInsertSpaces: Boolean;
 begin
   if not EnsureSession then
   begin
@@ -1464,12 +1529,16 @@ begin
   LPos := TJSONObject.Create;
   LPos.AddPair('line', TJSONNumber.Create(LLine));
   LPos.AddPair('character', TJSONNumber.Create(LChar));
-  // Mandatory per the spec; the server copies the opener line's own
-  // indentation and ignores these, but a params shape another server would
-  // reject is a bug waiting for a client swap.
+  { THE SERVER READS THESE - it does not, as this comment used to claim, copy
+    the opener line's indentation and ignore them: PasLsp.BlockClose builds the
+    body indent from options.tabSize and options.insertSpaces. So hardcoding
+    2/spaces here was not a formality for spec compliance, it was every RAD
+    Studio user getting "opener indent + 2 spaces" no matter what their Block
+    Indent is set to. Asked of the IDE instead. }
+  ReadIndentOptions({out} LTabSize, {out} LInsertSpaces);
   LOpts := TJSONObject.Create;
-  LOpts.AddPair('tabSize', TJSONNumber.Create(2));
-  LOpts.AddPair('insertSpaces', TJSONBool.Create(True));
+  LOpts.AddPair('tabSize', TJSONNumber.Create(LTabSize));
+  LOpts.AddPair('insertSpaces', TJSONBool.Create(LInsertSpaces));
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   LParams.AddPair('position', LPos);

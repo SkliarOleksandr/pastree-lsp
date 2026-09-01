@@ -175,9 +175,10 @@ IDE plugin first, VS Code second), not by protocol order.
 | `workspace/symbol` | project-wide substring query over the prefetched index |
 | `textDocument/prepareRename` | the identifier's own span, and the earliest refusal |
 | `textDocument/rename` | symbol: `changes`; unit: `documentChanges` with a `rename` file operation |
-| `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers the closer as one TextEdit ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
+| `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers up to TWO TextEdits - the caret line re-indented to the body indent, then the closer ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
 | `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
+| `$/pastree.hostEvent` | OURS, not LSP: a NOTIFICATION carrying a line for the server's own log (`params.message`, prefixed `host:` on the way in so a line that did not come from the server says so). It exists because reopening the SAME project restarts nothing here — the configuration is identical — so without it one session's requests run straight into the next's with no boundary between them, which is exactly the confusion it was added for (2026-08-29). `$/`-prefixed so any other server drops it silently rather than treating it as a violation. |
 
 `textDocument/didSave` is accepted and ignored (we advertise no save interest).
 
@@ -273,8 +274,11 @@ order they were understood:
   for the library, and PasTree 0.2.3 makes it: a preamble-less file whose bytes
   are valid UTF-8 decodes as UTF-8, ANSI only when they are not. Both sides then
   read the same text out of the same bytes, which is what makes the byte-level
-  gate sound rather than merely cheap. `cMinPasTreeVersion` is pinned there, so
-  an older sibling checkout fails loudly instead of shifting columns quietly.
+  gate sound rather than merely cheap. `cMinPasTreeVersion` is pinned at or past
+  that release, so an older sibling checkout fails loudly instead of shifting
+  columns quietly. (0.13.2 today; the constant in
+  [PasLsp.Version](source/PasLsp.Version.pas) is the only authority, and it
+  moves forward as other library requirements land.)
 
 **The suite is fully green as of 0.5.4** — `build.bat` ends with `all built, all
 harnesses passed`. The two long-standing red checks in
@@ -296,8 +300,8 @@ The RAD Studio client already stripped a leading BOM before sending
 itself against a server-side flaw, and any other client still hit it. An editor
 is free to hand its buffer over with the BOM included, and a UTF-8-with-BOM
 `.pas` is completely ordinary in Delphi projects. So the strip now happens at
-the one place documents enter: `StripLeadingBom` in `PasLsp.Documents`, applied
-to `didOpen` text and to a rangeless (full-replacement) `didChange`, before the
+the one place documents enter: `StripLeadingBom` (in `PasLsp.SourceText`, called
+from `PasLsp.Server`), applied to `didOpen` text and to a rangeless (full-replacement) `didChange`, before the
 rebuild gate so a BOM'd file still compares equal to its own bytes on disk. The
 residual cost is one column on line 1 for a client that counts the BOM as a
 character — strictly smaller than a file where nothing resolves. Pinned by
@@ -346,10 +350,9 @@ All four shipped. Two notes worth keeping:
   Order: grammar first (small, immediate, fixes the hover fence), semantic
   tokens second (the real answer for the editor).
 
-- **`workspace/symbol` (+ `workspaceSymbol/resolve`).** Project-wide symbol
-  search: on a 3747-unit project this is the feature people reach for most
-  (the IDE's own Ctrl+T). Every model's unit and implementation scopes already
-  hold what it needs, keyed by `NameLower`.
+- **`workspace/symbol`. DELIVERED** (see the Implemented table) - project-wide
+  substring query over the prefetched index, which is the IDE's own Ctrl+T.
+  What remains here is `workspaceSymbol/resolve`, the lazy-detail split.
 - **`workspace/didChangeConfiguration` (+ `workspace/configuration`).**
   Reconfigure without a restart. Today a changed `.dproj` only prints a note
   from the watched-files handler, because search paths, defines and namespaces
@@ -371,14 +374,11 @@ All four shipped. Two notes worth keeping:
 
 ### Tier 3 — large, or blocked on library work
 
-- **`textDocument/completion` (+ `completionItem/resolve`).** The biggest
-  single feature: members after a dot, names in scope, unit names in a `uses`
-  clause. The scopes and member scopes are all there; what is missing is a
-  scope lookup AT A POSITION in text that usually does NOT parse — a buffer
-  mid-typing is invalid by definition, and that is a different requirement
-  from anything the analyzer does today. **The server/plugin half is planned
-  in [COMPLETION.md](COMPLETION.md)** — built against a seam so the PasTree
-  API (planned in that repository) drops into one unit when it lands.
+- **`textDocument/completion`. DELIVERED** (see the Implemented table). The
+  position-in-invalid-text lookup this entry called missing is what PasTree's
+  completion API answers, and it landed 2026-08-21; the seam described in
+  [COMPLETION.md](COMPLETION.md) is what it dropped into. `completionItem/resolve`
+  is still open - today every item carries its own `documentation`.
 - **`textDocument/semanticTokens/full|range|full/delta`.** Semantic
   highlighting is a strong fit — the model knows what every identifier
   resolved to, and the demo's own PasTree highlighter is the precedent — but
@@ -425,8 +425,11 @@ All four shipped. Two notes worth keeping:
 
 - **Position encoding.** LSP defaults to UTF-16 code units for columns; the
   Delphi editor and PasTree each count their own way. One conversion layer at
-  the protocol boundary, written once, tested on non-ASCII lines. Negotiate
-  `positionEncoding` in `initialize`; prefer `utf-16` for compatibility.
+  the protocol boundary, written once, tested on non-ASCII lines. The server
+  DECLARES `positionEncoding: utf-16` unconditionally rather than negotiating —
+  it does not read the client's `general.positionEncodings` — which is safe
+  because utf-16 is the one encoding LSP requires every client to support.
+  Reading the client's list would only matter in order to offer utf-8.
 - **Document truth.** Once a file is open (`didOpen`), the overlay is the
   truth and the server never reads that path from disk until `didClose`.
   Versions from `didChange` are echoed into results so stale async answers can

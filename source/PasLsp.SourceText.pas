@@ -58,18 +58,26 @@ function StripLeadingBom(const AText: string): string;
 { The file's text, decoded, with no BOM; False (and AText = '') if it cannot be
   read. Non-raising on purpose: every caller so far degrades gracefully — no
   snippet, or "treat the buffer as the truth" — and none of them wants an
-  exception from a file that was deleted between two IDE events. }
+  exception from a file that was deleted between two IDE events.
+
+  DECODED THE WAY THE ANALYSIS DECODES IT — same detection as
+  TryReadSourceForEdit, which is the point (see the body). One consequence
+  worth naming: a UTF-16 source is "cannot be read", exactly as it is there,
+  because no answer this unit gives can describe it. A .pas the Delphi IDE
+  wrote is never UTF-16. }
 function TryReadTextNoBom(const APath: string; out AText: string): Boolean;
 
 { Whether the file at APath holds exactly AText, encoded as UTF-8 — a leading
   UTF-8 BOM in the file being not-content, as above.
 
-  This is a BYTE comparison rather than a text one, and that is the point. The
-  analysis decodes a source with no BOM as ANSI (dcc's rule) while an editor
-  decodes it as UTF-8, so comparing the two decoded strings reports every file
-  containing an em-dash as "modified" — which made the rebuild gate rebuild the
-  whole closure twice for a peek that touched nothing. A decode disagreement is
-  not an edit. False if the file cannot be read: unknown, so assume different. }
+  This is a BYTE comparison rather than a text one, and that is the point. Any
+  decode disagreement between what wrote the file and what read it — the
+  historical one was the analysis reading a preamble-less source as ANSI while
+  an editor read it as UTF-8 — reports every file containing an em-dash as
+  "modified", which made the rebuild gate rebuild the whole closure twice for a
+  peek that touched nothing. A decode disagreement is not an edit, and bytes
+  are the one question no decoder gets to answer differently. False if the file
+  cannot be read: unknown, so assume different. }
 function FileHoldsText(const APath, AText: string): Boolean;
 
 { How a source file on disk is encoded - only ever three answers in a Delphi
@@ -154,19 +162,27 @@ begin
 end;
 
 function TryReadTextNoBom(const APath: string; out AText: string): Boolean;
+var
+  LEncoding: TPasSourceEncoding;
 begin
+  { ONE DETECTION FOR THE WHOLE UNIT, and it is TryReadSourceForEdit's.
+    TFile.ReadAllText - which this used to call - falls back to
+    TEncoding.Default (the ANSI code page) for a file with no preamble, while
+    PasTree since 0.2.3 decodes preamble-less valid UTF-8 AS UTF-8. That
+    disagreement is the bug fixed at the root on 2026-08-20, and reading it
+    back in here reintroduced it for every file the editor does NOT have open:
+    a .pas with a Cyrillic comment or literal decoded into a DIFFERENT string
+    than the analysis holds, so every column after the non-ASCII text was
+    shifted and the text itself was mojibake. The encoding is of no interest
+    to a reader; the agreement is. }
   AText := '';
-  try
-    if not TFile.Exists(APath) then
-      Exit(False);
-    // ReadAllText detects and drops a preamble itself; the strip below covers
-    // the case it cannot see - a second BOM, or a decode that kept the first.
-    AText := StripLeadingBom(TFile.ReadAllText(APath));
-    Result := True;
-  except
+  Result := TryReadSourceForEdit(APath, AText, LEncoding);
+  if Result then
+    // Belt and braces: the read above already drops a preamble, this covers
+    // what it cannot see - a second BOM, or a decode that kept the first.
+    AText := StripLeadingBom(AText)
+  else
     AText := '';
-    Result := False;
-  end;
 end;
 
 function FileHoldsText(const APath, AText: string): Boolean;

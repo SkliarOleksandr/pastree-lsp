@@ -62,6 +62,9 @@ var
   GGone: string;
   GFrameCount: Integer;
   GFailures: Integer;
+  // Set by OnFrame for the two protocol-robustness sections below.
+  GPingAcked: Boolean;
+  GLateRejected: Boolean;
 
 procedure ResetState;
 begin
@@ -69,6 +72,8 @@ begin
   GShutdownAcked := False;
   GGone := '';
   GFrameCount := 0;
+  GPingAcked := False;
+  GLateRejected := False;
 end;
 
 procedure Check(ACondition: Boolean; const AWhat: string);
@@ -99,6 +104,12 @@ begin
     GInitialized := True;
   if AJson.Contains('"id":2') then
     GShutdownAcked := True;
+  // id 77 is the "are you still listening" probe of section 4; id 78 the
+  // post-shutdown request of section 5, which must come back as InvalidRequest.
+  if AJson.Contains('"id":77') then
+    GPingAcked := True;
+  if AJson.Contains('"id":78') and AJson.Contains('-32600') then
+    GLateRejected := True;
 end;
 
 procedure OnGone(const AReason: string);
@@ -262,6 +273,92 @@ begin
   end;
 end;
 
+{ 4. A MALFORMED $/cancelRequest MUST NOT DEAFEN THE SERVER.
+
+  A cancel frame with a method and NO params member is well-formed JSON
+  carrying the one method the server's READER THREAD inspects before queueing -
+  so the reader used to dereference nil params and die. The cost was
+  out of all proportion to the frame: the thread died without pushing its EOF
+  sentinel, the dispatcher waited forever on a queue nothing would ever push
+  to, and the server was deaf to every subsequent message for the rest of its
+  life (only the client-pid watchdog could end it, and not even that if
+  `initialize` carried no processId).
+
+  So the check is not "no crash" but "still answering": a cancel for an id that
+  never existed, then a real request, then an answer. }
+procedure TestMalformedCancel(const AExe: string);
+begin
+  Writeln;
+  Writeln('=== 4. a $/cancelRequest with no params leaves the server alive ===');
+  GConn := Connect(AExe);
+  try
+    Check(GConn.Send(cInitialize), 'Send(initialize) accepted');
+    Check(PumpUntil(function: Boolean begin Result := GInitialized end,
+      cTimeoutMs), 'initialize response received');
+
+    Check(GConn.Send('{"jsonrpc":"2.0","method":"$/cancelRequest"}'),
+      'a params-less $/cancelRequest was sent');
+    // And the other shapes the same code path has to survive.
+    Check(GConn.Send('{"jsonrpc":"2.0","method":"$/cancelRequest",'
+      + '"params":{}}'), 'and one whose params carry no id');
+    Check(GConn.Send('{"jsonrpc":"2.0","method":"$/cancelRequest",'
+      + '"params":{"id":999999}}'), 'and one for an id that never existed');
+
+    Check(GConn.Send('{"jsonrpc":"2.0","id":77,'
+      + '"method":"textDocument/documentSymbol","params":'
+      + '{"textDocument":{"uri":"file:///c%3A/nosuch.pas"}}}'),
+      'a real request was sent afterwards');
+    Check(PumpUntil(function: Boolean begin Result := GPingAcked end,
+      cTimeoutMs),
+      'the server answered it - the reader thread is still running');
+  finally
+    FreeAndNil(GConn);
+  end;
+end;
+
+{ 5. AFTER shutdown, EVERYTHING BUT exit IS InvalidRequest.
+
+  The spec asks for it, and this server needs it for itself: `shutdown` frees
+  the project and the navigator on purpose, so a straggler request - editors do
+  send them while tearing a session down - would walk into the analysis wait
+  with nothing analyzed and start a FULL rebuild of the project just
+  invalidated, blocking the dispatcher and delaying `exit` by however long that
+  takes. Everything it rebuilt is guaranteed garbage. }
+procedure TestRequestAfterShutdown(const AExe: string);
+var
+  LPid: DWORD;
+begin
+  Writeln;
+  Writeln('=== 5. a request between shutdown and exit is refused ===');
+  GConn := Connect(AExe);
+  try
+    LPid := GConn.ProcessId;
+    Check(GConn.Send(cInitialize), 'Send(initialize) accepted');
+    Check(PumpUntil(function: Boolean begin Result := GInitialized end,
+      cTimeoutMs), 'initialize response received');
+
+    Check(GConn.Send('{"jsonrpc":"2.0","id":2,"method":"shutdown"}'),
+      'Send(shutdown) accepted');
+    Check(PumpUntil(function: Boolean begin Result := GShutdownAcked end,
+      cTimeoutMs), 'shutdown response received');
+
+    Check(GConn.Send('{"jsonrpc":"2.0","id":78,'
+      + '"method":"textDocument/documentSymbol","params":'
+      + '{"textDocument":{"uri":"file:///c%3A/nosuch.pas"}}}'),
+      'a straggler request was sent after shutdown');
+    Check(PumpUntil(function: Boolean begin Result := GLateRejected end,
+      cTimeoutMs),
+      'it came back as InvalidRequest (-32600) rather than being served');
+
+    GConn.Send('{"jsonrpc":"2.0","method":"exit"}');
+    Check(GConn.WaitForExit(5000),
+      'and exit still works, promptly - nothing was rebuilt in between');
+  finally
+    FreeAndNil(GConn);
+  end;
+  Check(not ProcessAlive(LPid), 'no server process left behind');
+end;
+
 procedure DumpStdErr;
 var
   LPath, LLine: string;
@@ -294,6 +391,8 @@ begin
     TestGraceful(GExe);
     TestAbruptTeardown(GExe);
     TestServerDies(GExe);
+    TestMalformedCancel(GExe);
+    TestRequestAfterShutdown(GExe);
     DumpStdErr;
 
     Writeln;

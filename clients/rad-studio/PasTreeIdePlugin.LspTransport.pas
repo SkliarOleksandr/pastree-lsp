@@ -648,9 +648,10 @@ end;
      must be gone before we return.
   3. If it will not leave in time, kill the child: that breaks the pipe and
      forces the read to complete even if CancelIoEx somehow did not.
-  4. RemoveQueuedEvents AFTER the thread is joined - nothing can queue any
-     more by then, and any closure still pending would call into a freed
-     TLspConnection.
+  4. Drop every queued closure - any still pending would call into a freed
+     TLspConnection. The call here is the ordinary case; the one that makes it
+     airtight is inside FReader.Free, which sweeps again AFTER joining (see
+     there).
   5. Only now close the handles the thread was using. }
 destructor TLspConnection.Destroy;
 begin
@@ -668,8 +669,22 @@ begin
     if WaitForSingleObject(FReader.Handle, cReaderExitMs) <> WAIT_OBJECT_0 then
       if (FProcess <> 0) and IsRunning then
         TerminateProcess(FProcess, 1);
+    { THE SWEEP THAT COUNTS IS THE ONE INSIDE Free, and this one is the
+      belt to its braces. On the normal path the reader has already left and
+      this call empties the queue; on the ESCALATION path above it has not -
+      the thread missed its deadline and is still running when
+      TerminateProcess breaks the pipe, and breaking a pipe can COMPLETE a
+      pending read with the bytes already buffered (GetOverlappedResult hands
+      back real data). The reader then parses those and queues frames AFTER
+      this line, holding FOwner - this connection, freed a moment later.
+
+      What closes that window is TThread.Destroy: it calls WaitFor and then
+      RemoveQueuedEvents(Self) itself, in that order, so anything queued
+      during the escalation is swept by the join. Verified in the RTL rather
+      than assumed, because the whole hazard lives in the order of those two
+      steps. }
     TThread.RemoveQueuedEvents(FReader);
-    FReader.Free;   // joins
+    FReader.Free;   // joins, and sweeps the queue again after joining
     FReader := nil;
   end;
 

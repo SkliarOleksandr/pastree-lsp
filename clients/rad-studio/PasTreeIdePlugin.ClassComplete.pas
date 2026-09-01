@@ -42,6 +42,7 @@ uses
   Winapi.Windows,
   Vcl.Menus,
   ToolsAPI,
+  PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession;
 
 type
@@ -167,6 +168,7 @@ procedure TPasClassCompleteBinding.ClassCompleteProc(
 var
   LView: IOTAEditView;
   LFileName: string;
+  LLenAtRequest: Integer;
 begin
   ABindingResult := krHandled;   // see the unit header
   if not GAlive or not Assigned(AContext) or
@@ -176,6 +178,9 @@ begin
   if not Assigned(LView) then
     Exit;
   LFileName := AContext.EditBuffer.FileName;
+  // THE SNAPSHOT THIS ANSWER WILL DESCRIBE, measured now - see the gate in the
+  // callback and BufferByteLength for why one integer is the right measure.
+  LLenAtRequest := BufferByteLength(LView);
   LspClassComplete(LFileName,
     procedure(ASuccess: Boolean; const AAnswer: TLspClassComplete;
       const AError: string)
@@ -193,6 +198,28 @@ begin
         // because a keystroke that does nothing silently reads as broken.
         LogDiagnostic('class completion: nothing to implement (' +
           AAnswer.Provider + ')');
+        Exit;
+      end;
+      { THE BUFFER MUST STILL BE THE ONE THE SERVER ANSWERED ABOUT. Rename
+        verifies every site before it writes; BlockClose at least checks the
+        caret row; this applied its answer with no check at all, and that is
+        not a theoretical gap on a cold project: pastree/classComplete waits
+        out the whole analysis (seconds - the wait Find References got a
+        progress dialog for), Ctrl+Shift+C shows nothing while it does, and the
+        natural thing to do is keep typing. Every row/col the server sent then
+        gets resolved against a buffer that has moved, and the bodies land at
+        shifted offsets - the same "outside the unit entirely" failure
+        ApplyClassComplete's own comment dates to 2026-08-23, which the
+        precomputed offsets fixed only for the shifts this code causes itself,
+        not for the user's.
+
+        Said out loud rather than dropped silently: a keystroke that does
+        nothing reads as broken, which is the rule the empty-answer case above
+        already follows. }
+      if (LLenAtRequest < 0) or (BufferByteLength(LView) <> LLenAtRequest) then
+      begin
+        LogDiagnostic('class completion: the buffer changed while the server'
+          + ' was answering - nothing was inserted. Press Ctrl+Shift+C again.');
         Exit;
       end;
       ApplyClassComplete(LView, AAnswer);
