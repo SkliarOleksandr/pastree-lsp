@@ -7,6 +7,14 @@ unit PasTreeIdePlugin.SettingsForm;
   should be adjustable by dragging things around rather than by editing
   coordinates in code.
 
+  ONE SWITCH IS DELIBERATELY ABSENT: the Structure pane outline, withdrawn on
+  2026-09-01 until it is finished (PasTreeIdePlugin.Settings.
+  OverrideStructureView says why, and is where it comes back from). Its stored
+  value is untouched - the dialog simply neither reads nor writes it - so a
+  user who had it on still has it on when the checkbox returns. Do not
+  "tidy up" the field or the registry name on the strength of it being absent
+  here.
+
   IF YOU ARE EDITING THE .dfm: the only names the code depends on are the ones
   bound below (the checkboxes, their hint labels, the readout labels and the
   link). Move them, resize them, restyle them freely; renaming or deleting one breaks the
@@ -45,8 +53,6 @@ type
     lnkHome: TLinkLabel;
     bvlHeader: TBevel;
     gbOverrides: TGroupBox;
-    chkStructureView: TCheckBox;
-    lblStructureViewHint: TLabel;
     chkCtrlClick: TCheckBox;
     lblCtrlClickHint: TLabel;
     chkDeclImplToggle: TCheckBox;
@@ -157,7 +163,6 @@ begin
     LForm.lblBuilt.Caption := 'Built ' + BinaryBuiltOn(ThisBinaryPath);
 
     LSettings := LoadSettings;
-    LForm.chkStructureView.Checked := LSettings.OverrideStructureView;
     LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
     LForm.chkRename.Checked := LSettings.EnableRename;
@@ -172,7 +177,6 @@ begin
     if LForm.ShowModal <> mrOk then
       Exit;
 
-    LSettings.OverrideStructureView := LForm.chkStructureView.Checked;
     LSettings.CtrlClickNavigation := LForm.chkCtrlClick.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;

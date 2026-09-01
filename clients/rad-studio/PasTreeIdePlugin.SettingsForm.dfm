@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 742
+  ClientHeight = 677
   ClientWidth = 462
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -75,22 +75,12 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 16
     Top = 108
     Width = 430
-    Height = 417
+    Height = 352
     Caption = ' Overrides '
     TabOrder = 1
-    object lblStructureViewHint: TLabel
-      Left = 35
-      Top = 45
-      Width = 377
-      Height = 30
-      Caption =
-        'Fills the Structure pane from the analysis. Off leaves the pane t' +
-        'o the IDE'#39's own provider.'
-      WordWrap = True
-    end
     object lblCtrlClickHint: TLabel
       Left = 35
-      Top = 110
+      Top = 45
       Width = 377
       Height = 30
       Caption =
@@ -100,17 +90,17 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object chkCtrlClick: TCheckBox
       Left = 16
-      Top = 89
+      Top = 24
       Width = 396
       Height = 17
       Caption = 'Find Declaration (Ctrl+Click and the editor menu)'
       Checked = True
       State = cbChecked
-      TabOrder = 1
+      TabOrder = 0
     end
     object lblDeclImplToggleHint: TLabel
       Left = 35
-      Top = 175
+      Top = 110
       Width = 377
       Height = 30
       Caption =
@@ -120,7 +110,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object lblRenameHint: TLabel
       Left = 35
-      Top = 240
+      Top = 175
       Width = 377
       Height = 30
       Caption =
@@ -130,7 +120,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object lblBlockCompletionHint: TLabel
       Left = 35
-      Top = 305
+      Top = 240
       Width = 377
       Height = 30
       Caption =
@@ -138,49 +128,39 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         'ressed right after an unclosed block opener.'
       WordWrap = True
     end
-    object chkStructureView: TCheckBox
-      Left = 16
-      Top = 24
-      Width = 396
-      Height = 17
-      Caption = 'Structure pane outline'
-      Checked = True
-      State = cbChecked
-      TabOrder = 0
-    end
     object chkDeclImplToggle: TCheckBox
       Left = 16
-      Top = 154
+      Top = 89
       Width = 396
       Height = 17
       Caption = 'Ctrl+Shift+Up / Ctrl+Shift+Down declaration'#8596'implementation jump'
       Checked = True
       State = cbChecked
-      TabOrder = 2
+      TabOrder = 1
     end
     object chkRename: TCheckBox
       Left = 16
-      Top = 219
+      Top = 154
       Width = 396
       Height = 17
       Caption = 'Rename (Ctrl+Shift+E)'
       Checked = True
       State = cbChecked
-      TabOrder = 3
+      TabOrder = 2
     end
     object chkBlockCompletion: TCheckBox
       Left = 16
-      Top = 284
+      Top = 219
       Width = 396
       Height = 17
       Caption = 'Block completion (Enter after begin/try/case/repeat)'
       Checked = True
       State = cbChecked
-      TabOrder = 4
+      TabOrder = 3
     end
     object lblClassCompleteHint: TLabel
       Left = 35
-      Top = 370
+      Top = 305
       Width = 377
       Height = 30
       Caption =
@@ -190,18 +170,18 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object chkClassComplete: TCheckBox
       Left = 16
-      Top = 349
+      Top = 284
       Width = 396
       Height = 17
       Caption = 'Complete Class At Cursor (Ctrl+Shift+C)'
       Checked = True
       State = cbChecked
-      TabOrder = 5
+      TabOrder = 4
     end
   end
   object gbLogging: TGroupBox
     Left = 16
-    Top = 533
+    Top = 468
     Width = 430
     Height = 150
     Caption = ' Logging '
@@ -249,7 +229,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnOK: TButton
     Left = 270
-    Top = 702
+    Top = 637
     Width = 85
     Height = 27
     Caption = 'OK'
@@ -259,7 +239,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnCancel: TButton
     Left = 361
-    Top = 702
+    Top = 637
     Width = 85
     Height = 27
     Cancel = True

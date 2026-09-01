@@ -35,6 +35,17 @@ interface
 /// Whether we replace the IDE's Structure pane content for Pascal sources
 /// (PasTreeIdePlugin.Outline). False leaves the pane to the IDE's own
 /// provider - our outline simply stops pushing, which is all it takes.
+///
+/// WITHDRAWN, TEMPORARILY, ON 2026-09-01: this always answers False and the
+/// dialog no longer shows the checkbox. The outline is not finished, and a
+/// half-finished pane is worse than the IDE's own - it looks like the
+/// feature, so what it gets wrong reads as what PasTree gets wrong.
+///
+/// The stored value, the record field and the registry name are all left
+/// alone deliberately: withdrawing a feature must not throw away the choice
+/// of anyone who had it on, so switching it back on is deleting the two
+/// lines below and putting the checkbox back in the .dfm - not recovering a
+/// setting nobody wrote down.
 /// </summary>
 function OverrideStructureView: Boolean;
 
@@ -367,7 +378,10 @@ end;
 
 function OverrideStructureView: Boolean;
 begin
-  Result := CurrentSettings.OverrideStructureView;
+  // WITHDRAWN - see the declaration. To bring the feature back, this becomes
+  //   Result := CurrentSettings.OverrideStructureView;
+  // again; CurrentSettings still holds the user's real choice throughout.
+  Result := False;
 end;
 
 function CtrlClickNavigation: Boolean;

@@ -390,7 +390,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Outline | **Have** (2026-08-22, first live run pending) | Structure pane, private `StructureType` 'PasTree.Outline' | refreshed on EditorViewActivated; two recorded unknowns: is `IOTAStructureView` a BorlandIDEServices service (logged once if not), and do the IDE's providers re-take the pane |
+| Outline | **Withdrawn 2026-09-01, code intact** | Structure pane, private `StructureType` 'PasTree.Outline' | not finished, and a half-finished pane reads as PasTree getting it wrong: `Settings.OverrideStructureView` is hard-coded False and the dialog's checkbox is gone. The stored value is untouched. Everything below still describes the code as written - refreshed on EditorViewActivated; two recorded unknowns: is `IOTAStructureView` a BorlandIDEServices service (logged once if not), and do the IDE's providers re-take the pane |
 | Outline follows the caret | Ready | `IOTAStructureView370.SelectNodeEx` (`105`) + `EditorSetCaretPos` (`ToolsAPI.Editor.pas:878`) | scroll-into-view select, driven by a real caret event instead of polling |
 | Outline survives a refresh | Ready | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
 | Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
