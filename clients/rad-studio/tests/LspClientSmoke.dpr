@@ -1363,6 +1363,69 @@ begin
     'while..do begin answered');
   Check(GOk and GResultJson.Contains('"newText":"\r\n  end;"'),
     'and closes it at the WHILE line''s indentation');
+
+  { THE REGRESSION OF 2026-09-01 (AVIMain.pas), and it is the worst kind: a
+    unit is permanently unbalanced by a shape the scan does not recognise, so
+    the cascade guard - "the file is missing a closer, therefore the opener you
+    just typed is the missing one" - is satisfied for the whole session, and
+    Enter on ANY blank line under an opener inserts a closer. The user sees one
+    Enter apparently producing two `end;`: the first from the Enter that opened
+    the block, the second from the next Enter inside the block that was already
+    complete. It reproduced in VS Code too, which is what ruled out the IDE's
+    own block completion.
+
+    The shape was `= class(TParent);` - an ancestor and no body. Not exotic:
+    `EMyError = class(Exception);` is how most Delphi units declare an
+    exception. AVIMain had three of them, at lines 98-100 of 22 000, and that
+    was the entire cause.
+
+    The check is the balanced-file one made specific: a declaration like that
+    ABOVE a completed block must leave the file balanced, so Enter inside that
+    block stays silent. }
+  SendDidOpenText(LFile,
+    'unit DemoBlockClose;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  EMyError = class(Exception);'#13#10 +      // an ancestor, no body
+    '  THackPanel = class(TPanel);'#13#10 +
+    '  IFoo = interface(IUnknown);'#13#10 +
+    '  TWithBody = class(TObject)'#13#10 +        // and one that DOES open
+    '    procedure Q;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure P;'#13#10 +
+    'begin'#13#10 +
+    '  if X then'#13#10 +
+    '  begin'#13#10 +
+    '    '#13#10 +                               // caret line 14, block CLOSED
+    '  end;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(14, 4)),
+    'the file with bodyless class declarations answered');
+  Check(GOk and (GResultJson = ''),
+    'and stays silent: `= class(Ancestor);` declares, it does not open');
+
+  // The same file, one Enter earlier: the begin WAS just typed, so the closer
+  // is still owed. Proves the fix above did not simply switch the feature off.
+  SendDidOpenText(LFile,
+    'unit DemoBlockClose;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  EMyError = class(Exception);'#13#10 +
+    '  THackPanel = class(TPanel);'#13#10 +
+    'implementation'#13#10 +
+    'procedure P;'#13#10 +
+    'begin'#13#10 +
+    '  if X then'#13#10 +
+    '  begin'#13#10 +
+    '    '#13#10 +                               // caret line 10, unclosed
+    'end;'#13#10 +
+    'end.'#13#10);
+  Check(Ask('textDocument/onTypeFormatting', TypingParams(10, 4)),
+    'and the unclosed case in the same file answered');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n  end;"'),
+    'with exactly one closer, at the begin''s own indentation');
 end;
 
 { 6. Cancellation hygiene.

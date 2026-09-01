@@ -42,9 +42,16 @@ unit PasLsp.BlockClose;
   OPENER LINE'S OWN indentation plus the closer - `until ;` for repeat,
   the `finally`/`end;` skeleton for try, `end;` for everything else
   (NEVER `end.` - see the closer selection for the cascade that killed
-  that special case). The edit never touches the caret line, so the caret
-  stays exactly where Enter left it, in every client, without any cursor
-  protocol.
+  that special case).
+
+  TWO EDITS, and the CARET LINE IS ONE OF THEM: the answer re-indents the
+  caret's line to the body indent first and appends the closer second (see
+  BuildEdits, and the interface comment on the order). The caret then ends up
+  at the body indent rather than wherever Enter happened to leave it, which is
+  the point of that edit - but it does mean the answer is only safe to apply to
+  the buffer it was computed from, which is what the clients' staleness gates
+  are for. The final paragraph here used to claim the opposite; it predated the
+  caret re-indent.
 }
 
 interface
@@ -117,6 +124,53 @@ var
       Result := LTokens[LVisible[AVisIdx]].Kind
     else
       Result := tkEndOfFile;
+  end;
+
+  { `= class(TParent);` — AN ANCESTOR AND NO BODY, which is a declaration, not
+    an opener. AVisIdx is the `class`/`interface` token.
+
+    This was the one shape the rules above missed, and missing it is not a
+    corner case: `EMyError = class(Exception);` is how most Delphi units
+    declare an exception, and the hack-class idiom
+    (`THackPanel = class(TPanel);`) is another. Each one pushed an opener that
+    nothing ever popped, so a unit was PERMANENTLY unbalanced by however many
+    it had - and the whole-file condition that is supposed to mean "the file is
+    missing a closer because you just typed an opener" was then true for the
+    rest of the session.
+
+    What that costs is invisible until it is explained: the cascade guard stops
+    guarding, so Enter on ANY blank line under an opener inserts a closer -
+    including the blank line inside a block that was just completed, which is
+    how one Enter appeared to insert two `end;` (user, 2026-09-01, AVIMain.pas
+    - three such declarations at lines 98-100 of a 22 000-line unit was the
+    whole story).
+
+    Skips one balanced parenthesis group, so a multi-token ancestor list
+    (`class(TFoo, IBar)`) is handled, and then asks for `;`. Anything else
+    after the parens - members, a GUID literal on an interface, `end` - means a
+    body. }
+  function AncestorOnly(AVisIdx: Integer): Boolean;
+  var
+    LAt, LDepth: Integer;
+  begin
+    Result := False;
+    LAt := AVisIdx + 1;
+    if VisKind(LAt) <> tkLParen then
+      Exit;
+    LDepth := 0;
+    while LAt < LCount do
+    begin
+      case VisKind(LAt) of
+        tkLParen: Inc(LDepth);
+        tkRParen:
+          begin
+            Dec(LDepth);
+            if LDepth = 0 then
+              Exit(VisKind(LAt + 1) = tkSemicolon);
+          end;
+      end;
+      Inc(LAt);
+    end;
   end;
 
   // 0-based line of a source offset.
@@ -209,10 +263,10 @@ begin
         LPushIt := LPrevKind <> tkOf;
       tkClass:
         begin
-          // A body opens unless this is `class of`, a forward declaration
-          // (`= class;`) or a member prefix (`class function` ... `class
-          // operator` - the last spelled as an identifier, `operator` not
-          // being a reserved word).
+          // A body opens unless this is `class of`, a bodyless declaration
+          // (`= class;` and `= class(TParent);` - see AncestorOnly) or a
+          // member prefix (`class function` ... `class operator` - the last
+          // spelled as an identifier, `operator` not being a reserved word).
           LNextKind := VisKind(LIdx + 1);
           LPushIt := not (LNextKind in [tkOf, tkSemicolon, tkFunction,
             tkProcedure, tkConstructor, tkDestructor, tkProperty, tkVar,
@@ -221,12 +275,14 @@ begin
              LStream.TokenTextEquals(LTokens[LVisible[LIdx + 1]],
                'operator') then
             LPushIt := False;
+          if LPushIt and AncestorOnly(LIdx) then
+            LPushIt := False;
         end;
       tkInterface, tkDispinterface:
-        // The TYPE, not the unit section: only after `=`, and not a forward
-        // declaration (`IFoo = interface;`).
+        // The TYPE, not the unit section: only after `=`, and not a bodyless
+        // declaration - `IFoo = interface;` or `IFoo = interface(IBar);`.
         LPushIt := (LPrevKind = tkEqual) and
-          (VisKind(LIdx + 1) <> tkSemicolon);
+          (VisKind(LIdx + 1) <> tkSemicolon) and not AncestorOnly(LIdx);
       tkEnd:
         // `end` followed by `.` is the MODULE terminator and closes no
         // ordinary block - with one carve-out: in a program/library the
