@@ -1173,6 +1173,105 @@ begin
     'but an interface gets no bodies - its implementors write those');
 end;
 
+{ 5h. pastree/syncPrototypes: a signature edited on one side, mirrored.
+
+  Every check names a POSITION as well as an expectation, because the caret is
+  half of the question this feature answers - the side it is on is the side
+  that wins. The fixture's pairs all disagree on purpose; see its header. }
+procedure TestSyncPrototypes;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  { Ask about the caret on the line containing ALineHint, at AToken. }
+  function AskAt(const ALineHint, AToken: string): Boolean;
+  var
+    LParams, LDoc, LPos: TJSONObject;
+  begin
+    FindPos(LFile, ALineHint, AToken, LLine, LChar);
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LFile));
+    LParams.AddPair('textDocument', LDoc);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+    Result := Ask('pastree/syncPrototypes', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5h. syncPrototypes mirrors the side under the caret ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoSyncPrototypes.pas');
+
+  Check(AskAt('procedure Grew(A: Integer; const B: string);', 'Grew'),
+    'syncPrototypes answered for a declaration');
+  Check(GOk and GResultJson.Contains('"count":1'),
+    'one edit: the other half, and nothing else in the unit');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"procedure TBase.Grew(A: Integer; const B: string)"'),
+    'the body takes the declaration''s parameters and keeps its OWN name');
+  Check(GOk and GResultJson.Contains('"name":"TBase.Grew"'),
+    'and the answer says which half it rewrote');
+
+  Check(AskAt('procedure TBase.Shrank(A: Integer);', 'Shrank'),
+    'answered for an implementation');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"procedure Shrank(A: Integer)"'),
+    'the DECLARATION follows the body when the caret is in the body - '
+    + 'unqualified, as a member declaration must be');
+
+  Check(AskAt('function Became(A: Integer): string;', 'Became'),
+    'answered for a procedure that became a function');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"function TBase.Became(A: Integer): string"'),
+    'the routine WORD is mirrored too, not just the parameters');
+
+  Check(AskAt('procedure Defaults(A: Integer = 7; const B: string = '''');',
+    'Defaults'), 'answered for a defaulted parameter');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"procedure TBase.Defaults(A: Integer; const B: string)"'),
+    'a default value does not travel into the implementation - E2226');
+
+  Check(AskAt('procedure Steady(A: Integer = 3);', 'Steady'),
+    'answered for a pair that differs only by a default');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('already in step'),
+    'and that pair is left alone - stripping the default makes them equal');
+
+  Check(AskAt('class procedure ClassGone(A: Integer);', 'ClassGone'),
+    'answered for a class method');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"class procedure TBase.ClassGone(A: Integer)"'),
+    '`class` is re-emitted - the parser keeps it outside the routine node');
+
+  Check(AskAt('procedure FreeOne(A: Integer; const B: string);', 'FreeOne'),
+    'answered for a free routine''s implementation');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"procedure FreeOne(A: Integer; const B: string)"'),
+    'a free routine of the interface section syncs like a method');
+
+  // The two refusals, both of which must say WHY rather than answering empty.
+  Check(AskAt('function Twin(A: Integer): Integer; overload;', 'Twin'),
+    'answered for an overload');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('overloads named Twin'),
+    'overloads are refused by name, not paired by guesswork');
+
+  Check(AskAt('procedure Lonely(A: Integer);', 'Lonely'),
+    'answered for a declaration with no body');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('Ctrl+Shift+C'),
+    'an unimplemented declaration is class completion''s job, and says so');
+
+  Check(AskAt('interface', 'interface'),
+    'answered for a caret outside every routine');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('not in a routine'),
+    'and a caret in no routine is a refusal that names itself');
+end;
+
 { 5g. classComplete on a buffer that does not parse: repair the ONE break it
   knows (a missing `;`), refuse everything else.
 
@@ -1649,6 +1748,7 @@ begin
       TestRename;
       TestClassComplete;
       TestClassCompleteBrokenBuffer;
+      TestSyncPrototypes;
       TestWorkspaceSymbol;
       TestOnTypeFormatting;
       TestCancelHygiene;

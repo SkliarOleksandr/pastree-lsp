@@ -87,6 +87,59 @@ type
   file with nothing to do answers with no edits and a Provider that says so. }
 function ClassCompleteFor(const ATree: TPasTree): TLspClassCompleteAnswer;
 
+{ ---- shared with PasLsp.SyncPrototypes ------------------------------------
+
+  Exported rather than copied. Prototype sync asks the same questions this
+  unit already answers - which node is a routine, what is its name, which type
+  is it a member of, what does its parameter list amount to - and each of
+  these has a hard-won detail in it (the dot walk in RoutineName, the text-not-
+  kinds reading in ParamsKey, E2226 in StripDefaults). A second copy is a
+  second place for those to be got wrong, and they would drift silently: both
+  features would keep answering, just differently. }
+
+/// <summary>First child of ANode with kind AKind, NIL_NODE if none.</summary>
+function ChildOfKind(const ATree: TPasTree; ANode: Integer;
+  AKind: TPasNodeKind): Integer;
+
+/// <summary>
+/// Raw source text between two VISIBLE token indices, inclusive - what the
+/// user actually wrote, comments and line breaks included. '' when the span
+/// is degenerate or crosses a file boundary (an $I include).
+/// </summary>
+function RawSpan(const ATree: TPasTree; AFromVis, AToVis: Integer): string;
+
+/// <summary>Whitespace runs collapsed to one space.</summary>
+function Flatten(const AText: string): string;
+
+/// <summary>
+/// A parameter list as the IMPLEMENTATION must write it: every default value
+/// removed, because Delphi allows them in the declaration only (E2226).
+/// </summary>
+function StripDefaults(const AText: string): string;
+
+/// <summary>
+/// The routine's name as the parser builds it - a chain of segments
+/// (`TFoo` `.` `Bar`), generic parameters included. AFirstVis/ALastVis span
+/// the whole name, so a caller can slice both it and everything after it.
+/// </summary>
+function RoutineName(const ATree: TPasTree; ARoutine: Integer;
+  out AFirstVis, ALastVis: Integer;
+  out ASegments: TArray<string>): Boolean;
+
+/// <summary>
+/// The enclosing type's name as an implementation must qualify it
+/// (`TDemoStack&lt;T&gt;`), '' for a free routine. ASkip marks the one
+/// container with nothing to implement - an interface type.
+/// </summary>
+function TypeChain(const ATree: TPasTree; ARoutine: Integer;
+  out ASkip: Boolean): string;
+
+/// <summary>
+/// The parameter list as an IDENTITY: the argument TYPES, lowercased, one
+/// entry per declared name. Parameter names are deliberately not in it.
+/// </summary>
+function ParamsKey(const ATree: TPasTree; ARoutine: Integer): string;
+
 { THE ONE REPAIR THIS FEATURE MAKES to a buffer it cannot parse: a missing
   semicolon. `property XX: Integer` with the `;` not yet typed is the shape
   the key gets pressed on, and refusing it would be refusing the common case -
@@ -165,11 +218,6 @@ begin
     Result := ATree.Nodes[Result].NextSibling;
   end;
 end;
-
-{ Raw source text between two VISIBLE token indices, inclusive - declared
-  early because the name walk below needs it to look at one token. }
-function RawSpan(const ATree: TPasTree; AFromVis, AToVis: Integer): string;
-  forward;
 
 { The routine's NAME, as the parser actually builds it: a chain of nkIdent
   SEGMENTS (`TFoo` `.` `Bar`), each optionally followed by its own

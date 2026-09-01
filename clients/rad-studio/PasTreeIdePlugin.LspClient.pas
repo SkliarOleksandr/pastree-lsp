@@ -82,7 +82,15 @@ type
     Config: string;           // build configuration name, .dproj only
     SearchPaths: TArray<string>;
     Defines: TArray<string>;
-    LogFile: string;
+    LogFile: string;          // empty = the server writes no log at all
+    /// <summary>
+    /// Sent as logDetail=false, which suppresses the configuration inventory
+    /// (every search path, define, namespace and alias) in the server's log.
+    /// A NEGATIVE flag on purpose: Default(TLspInitOptions) must mean "log as
+    /// this server always has", so the harnesses and any caller that predates
+    /// the switch keep the full record without naming it.
+    /// </summary>
+    SuppressLogDetail: Boolean;
     /// <summary>Caller owns the returned object.</summary>
     function ToJson: TJSONObject;
   end;
@@ -430,6 +438,10 @@ begin
     LResult.AddPair('config', Config);
   if LogFile <> '' then
     LResult.AddPair('logFile', LogFile);
+  // Only when suppressing: the server's default is True, so sending the
+  // default would be noise in a handshake that is read by hand.
+  if SuppressLogDetail then
+    LResult.AddPair('logDetail', TJSONBool.Create(False));
   // Real JSON arrays: the server logs a warning and ignores any other shape,
   // which already cost this project a debugging round once.
   AddStrings('searchPaths', SearchPaths);

@@ -60,6 +60,11 @@
           "default": false,
           "description": "Log one line per unit in the analysis closure (which file won for each unit name). Verbose - hundreds of lines per rebuild - so it is off unless you are chasing a search-path problem."
         },
+        "pastree.logDetail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log the configuration inventory - every search path, define, namespace and unit alias handed to the analysis. Off keeps the one-line summary with the counts."
+        },
         "pastree.moduleRedoLimit": {
           "type": "integer",
           "default": 0,

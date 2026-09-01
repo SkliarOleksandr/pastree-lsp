@@ -21,6 +21,11 @@ unit PasLsp.Server;
     "searchPaths", "defines" - string arrays, appended after the project's
     "logFile", "logUnits" - where the log goes, and whether it inventories
                   every unit of the closure
+    "logDetail"   - False drops the configuration inventory (every search
+                  path, define, namespace and alias) from the log; the
+                  one-line "configured: ..." summary stays either way.
+                  Defaults to True - this record predates the switch and is
+                  what most log-reading starts from
     "moduleRedoLimit" - the incremental fast path's blast-radius ceiling;
                   0 keeps PasTree's measured default
   A .dproj brings its own MainSource/search paths/defines/namespaces/aliases
@@ -52,6 +57,7 @@ uses
   PasLsp.Documents,
   PasLsp.Completion,
   PasLsp.ClassComplete,
+  PasLsp.SyncPrototypes,
   PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
@@ -90,6 +96,10 @@ type
     // Log one line per unit in the closure? Off by default - see
     // LogParseRecord's header for what stays on regardless.
     FLogUnits: Boolean;
+    // Log the configuration inventory - the paths, defines, namespaces and
+    // aliases behind the "configured:" summary? On by default; a client that
+    // does not want hundreds of lines per configuration sends logDetail=false.
+    FLogDetail: Boolean;
     FLogPath: string;
     FLogStarted: Boolean;
     FDocs: TLspDocumentStore;
@@ -211,6 +221,7 @@ type
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
     function HandleClassComplete(const AMsg: TLspIncoming): string;
+    function HandleSyncPrototypes(const AMsg: TLspIncoming): string;
     function HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
@@ -260,6 +271,7 @@ begin
   FPlatform := pfWin64;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
   FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
+  FLogDetail := True;
   FLogPath := GetEnvironmentVariable('PASTREE_LSP_LOG');
 end;
 
@@ -454,6 +466,10 @@ begin
     // no-client escape hatch).
     if AOptions.GetValue<Boolean>('logUnits', False) then
       FLogUnits := True;
+    // Absent or malformed reads as True: see the header - the inventory is
+    // what this log was built around, and only a client that says otherwise
+    // loses it.
+    FLogDetail := AOptions.GetValue<Boolean>('logDetail', True);
     // The incremental fast path's blast-radius ceiling: over this many
     // affected units an interface edit rebuilds instead. PasTree's default
     // (128) is measured rather than guessed - about 300 ms fixed plus ~57 ms
@@ -560,7 +576,12 @@ begin
   // the failure this actually has: a plausible-looking number of paths that
   // happen to be the wrong directories (the IDE plugin sent three that did not
   // contain the RTL for months) reads as a healthy configuration right up until
-  // every F1027 in the parse record.
+  // every F1027 in the parse record. Which is exactly why the summary line
+  // above is NOT part of what logDetail can switch off: turning the detail off
+  // must cost you the list, never the counts that say the list is worth
+  // asking for.
+  if not FLogDetail then
+    Exit;
   var LLines: TArray<string> := nil;
   for LItem in FSearchPaths do
     LLines := LLines + ['  path ' + LItem];
@@ -1549,9 +1570,9 @@ end;
 
 procedure TLspServer.HandleDidOpen(AParams: TJSONValue);
 var
-  LPath, LText, LDisk: string;
+  LPath, LText, LDisk, LShownNote: string;
   LVersion: Integer;
-  LDiffers: Boolean;
+  LDiffers, LShown: Boolean;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
@@ -1579,11 +1600,23 @@ begin
     LDisk := LText;
   LDiffers := LText <> LDisk;
   FDocs.Open(LPath, LText, LVersion, LDisk, LDiffers);
+  { "background" = the client says this document is loaded but not on screen.
+    A RAD Studio session is full of them - opening one form pulls in its
+    visual-inheritance ancestors and the datamodules its .dfm references - and
+    without the word the log reads as though the user opened five files when
+    they opened one. Non-standard and OPTIONAL: a client that does not send
+    pastreeShown (VS Code opens what the user opened) says nothing here rather
+    than being described as showing everything. }
+  LShownNote := '';
+  if AParams.TryGetValue<Boolean>('textDocument.pastreeShown', LShown)
+     and not LShown then
+    LShownNote := ' (background)';
   if LDiffers then
-    Log(Format('textDocument/didOpen %s v%d (unsaved: %d chars here, %d on disk)',
-      [LPath, LVersion, Length(LText), Length(LDisk)]))
+    Log(Format('textDocument/didOpen %s v%d%s (unsaved: %d chars here, %d on disk)',
+      [LPath, LVersion, LShownNote, Length(LText), Length(LDisk)]))
   else
-    Log(Format('textDocument/didOpen %s v%d', [LPath, LVersion]));
+    Log(Format('textDocument/didOpen %s v%d%s',
+      [LPath, LVersion, LShownNote]));
   // Schedule when this buffer is unsaved work the analysis has not seen, OR
   // when nothing has been analyzed yet - the first file opened is what starts
   // the initial build, and without this clause a workspace whose files all
@@ -3050,6 +3083,72 @@ begin
      Length(LAnswer.Edits), JsonQuote(LAnswer.Provider)]));
 end;
 
+{ pastree/syncPrototypes - OUR request, the server half of Sync Prototypes.
+
+  Same shape and same reasoning as classComplete above: a named custom request
+  rather than a codeAction, and NO WaitAnalyzed - the signature it is asked
+  about was edited a keystroke ago, so the only text that can answer is the
+  live buffer, parsed on the spot.
+
+  The one structural difference is in the answer: these edits REPLACE. Each
+  carries a real end position, so a client must not treat the range as the
+  zero-length insertion point classComplete's edits are. }
+function TLspServer.HandleSyncPrototypes(const AMsg: TLspIncoming): string;
+var
+  LPath, LText, LEdits: string;
+  LDoc: TLspDocument;
+  LAnswer: TLspSyncAnswer;
+  LIdx, LLine, LChar, LPasLine, LPasCol: Integer;
+  LStartLine, LStartChar, LEndLine, LEndChar: Integer;
+  LStart: UInt64;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'syncPrototypes: textDocument.uri required'));
+  LLine := AMsg.Params.GetValue<Integer>('position.line', -1);
+  LChar := AMsg.Params.GetValue<Integer>('position.character', -1);
+  if (LLine < 0) or (LChar < 0) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'syncPrototypes: position required'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  LStart := GetTickCount64;
+  if FDocs.TryGet(LPath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(LPath, LText) then
+    LText := '';
+  if LText = '' then
+    Exit(BuildResponse(AMsg.IdJson,
+      '{"edits":[],"count":0,"provider":"no text"}'));
+  if FCompletion = nil then
+    FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+      FDefines);
+  SyncCompletionOverlays;
+  LAnswer := FCompletion.SyncPrototypeAt(LPath, LText, LPasLine, LPasCol);
+
+  LEdits := '';
+  for LIdx := 0 to High(LAnswer.Edits) do
+  begin
+    if LEdits <> '' then
+      LEdits := LEdits + ',';
+    PasTreeToLsp(LAnswer.Edits[LIdx].Line, LAnswer.Edits[LIdx].Col,
+      LStartLine, LStartChar);
+    PasTreeToLsp(LAnswer.Edits[LIdx].EndLine, LAnswer.Edits[LIdx].EndCol,
+      LEndLine, LEndChar);
+    LEdits := LEdits + Format(
+      '{"range":{"start":{"line":%d,"character":%d},'
+      + '"end":{"line":%d,"character":%d}},"newText":%s,"name":%s}',
+      [LStartLine, LStartChar, LEndLine, LEndChar,
+       JsonQuote(LAnswer.Edits[LIdx].Text), JsonQuote(LAnswer.Edits[LIdx].Name)]);
+  end;
+  Log(Format('syncPrototypes: %s(%d,%d) -> %d edit(s) in %d ms (%s)',
+    [TPath.GetFileName(LPath), LPasLine, LPasCol, Length(LAnswer.Edits),
+     GetTickCount64 - LStart, LAnswer.Provider]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"edits":[%s],"count":%d,"provider":%s}',
+    [LEdits, Length(LAnswer.Edits), JsonQuote(LAnswer.Provider)]));
+end;
+
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
 var
   LPath, LItems, LParts: string;
@@ -3605,8 +3704,33 @@ begin
         Exit;   // pre-initialize notifications are dropped by spec
       end;
 
+      { THE PROJECT IS THE ROOT, SO START ON IT - do not wait to be asked.
+
+        Until now the first build was kicked off by whichever came first: a
+        didOpen (HandleDidOpen's "nothing analyzed yet" clause) or a request
+        reaching WaitAnalyzed. Both are the wrong moment for a client that
+        opens a PROJECT rather than a folder of files: RAD Studio hands us the
+        .dproj at project-open time and may send no didOpen at all until the
+        user activates a tab, so the whole closure was parsed on the first
+        Ctrl+Click - the one gesture that is then slow, and slow for a reason
+        the user cannot see. The inputs are complete the moment initialize
+        answered; `initialized` is the first point the spec allows us to act
+        on them.
+
+        SCHEDULED, NOT STARTED: the debounce window is what lets the didOpen
+        burst most clients send right after `initialized` fold into this same
+        build instead of superseding it with a second one. Only with a project
+        configured - a document-roots session has nothing to analyze yet, and
+        its first didOpen still starts the build as before. }
       if LMsg.Method = 'initialized' then
+      begin
+        if (FMainSource <> '') and (FProject = nil) and (FSession = nil) then
+        begin
+          Log('project configured - starting the initial analysis');
+          ScheduleAnalysis('');
+        end;
         Exit;
+      end;
       if LMsg.Method = 'shutdown' then
       begin
         FShutdownSeen := True;
@@ -3669,6 +3793,8 @@ begin
         Exit(HandleWorkspaceSymbol(LMsg));
       if LMsg.Method = 'pastree/classComplete' then
         Exit(HandleClassComplete(LMsg));
+      if LMsg.Method = 'pastree/syncPrototypes' then
+        Exit(HandleSyncPrototypes(LMsg));
       if LMsg.Method = 'textDocument/onTypeFormatting' then
         Exit(HandleOnTypeFormatting(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then

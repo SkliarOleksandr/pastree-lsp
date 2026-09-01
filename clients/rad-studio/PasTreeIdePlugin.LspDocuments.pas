@@ -63,12 +63,18 @@ type
       Path: string;
       Text: string;
       Version: Integer;
+      // Has an editor view of its own - see ModuleIsShown. Meaningful only on
+      // the way out of CollectOpenDocuments; what is REMEMBERED per document
+      // is its text, and a module gaining or losing a tab changes nothing
+      // about that.
+      Shown: Boolean;
     end;
   private
     FClient: TLspClient;
     FSent: TObjectDictionary<string, TSentDocument>;   // key: lowercase path
     function CollectOpenDocuments: TArray<TSentDocument>;
-    procedure SendDidOpen(const APath, AText: string; AVersion: Integer);
+    procedure SendDidOpen(const APath, AText: string; AVersion: Integer;
+      AShown: Boolean);
     procedure SendDidChange(const APath, AText: string; AVersion: Integer);
     procedure SendDidClose(const APath: string);
   public
@@ -205,6 +211,34 @@ end;
 /// open makes the IDE instantiate a form or data module's design surface,
 /// which flickers every such designer open and shut.
 /// </summary>
+{ Is this module ON SCREEN, or merely loaded?
+
+  The IDE's module list is not the list of tabs, and the difference surprises
+  everyone who reads the log once: opening one form pulls in its visual-
+  inheritance ancestors and every datamodule its .dfm references, and each of
+  those arrives as a didOpen the user did not ask for. They belong in the sync
+  - an unsaved edit in a form with no tab is still the truth about that unit -
+  but a log that cannot tell them apart from the file the user is looking at
+  reads like a bug.
+
+  A view, not a tab: EditViewCount is what the IDE actually gives us, and a
+  module loaded behind the scenes has none. A module with no file editor at
+  all (a .dfm-only or a form the IDE has not materialised) is likewise not
+  shown. }
+function ModuleIsShown(const AModule: IOTAModule): Boolean;
+var
+  LEditor: IOTASourceEditor;
+begin
+  Result := False;
+  try
+    if Supports(AModule.GetModuleFileEditor(0), IOTASourceEditor, LEditor) then
+      Result := LEditor.EditViewCount > 0;
+  except
+    // Same degradation as ReadBufferText's: a module we cannot ask about is
+    // reported as not shown rather than taking the sync down with it.
+  end;
+end;
+
 function ReadBufferText(const AModule: IOTAModule): string;
 var
   LBuffer: IOTAEditBuffer;
@@ -277,6 +311,7 @@ begin
         try
           LDoc.Path := LModule.FileName;
           LDoc.Text := ReadBufferText(LModule);
+          LDoc.Shown := ModuleIsShown(LModule);
           LList.Add(LDoc);
         except
           LDoc.Free;
@@ -313,7 +348,7 @@ begin
 end;
 
 procedure TLspDocumentSync.SendDidOpen(const APath, AText: string;
-  AVersion: Integer);
+  AVersion: Integer; AShown: Boolean);
 var
   LParams, LDoc: TJSONObject;
 begin
@@ -322,6 +357,12 @@ begin
   LDoc.AddPair('languageId', 'pascal');
   LDoc.AddPair('version', TJSONNumber.Create(AVersion));
   LDoc.AddPair('text', AText);
+  // OURS, on a standard TextDocumentItem: the spec says unknown members are
+  // ignored, so this costs a client that does not know it nothing, and it is
+  // only ever read to write one word in the server's log. Sent ALWAYS rather
+  // than only when False - absent has to keep meaning "a client that does not
+  // report this" (VS Code), which is not the same as "not shown".
+  LDoc.AddPair('pastreeShown', TJSONBool.Create(AShown));
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   FClient.Notify('textDocument/didOpen', LParams);
@@ -404,11 +445,15 @@ begin
       begin
         LDoc.Version := 1;
         if LReady then
-          SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version);
+          SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version, LDoc.Shown);
         FSent.Add(LKey, LDoc);       // FSent owns it from here
         Continue;
       end;
 
+      // Kept current even though nothing is sent for it: a module that has
+      // since been given a tab must not be described as background by the
+      // ResendAll after the next server restart.
+      LKnown.Shown := LDoc.Shown;
       if LKnown.Text <> LDoc.Text then
       begin
         Inc(LKnown.Version);
@@ -451,7 +496,7 @@ begin
   for LDoc in FSent.Values do
   begin
     LDoc.Version := 1;
-    SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version);
+    SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version, LDoc.Shown);
   end;
 end;
 

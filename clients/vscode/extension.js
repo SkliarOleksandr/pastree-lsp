@@ -50,6 +50,9 @@ function activate(context) {
       config: cfg.get('config') || '',
       logFile: cfg.get('logFile') || '',
       logUnits: cfg.get('logUnits') || false,
+      // Default TRUE, unlike logUnits: the configuration block is what most
+      // log-reading starts from, so it goes away only when asked.
+      logDetail: cfg.get('logDetail') !== false,
       moduleRedoLimit: cfg.get('moduleRedoLimit') || 0,
       searchPaths: cfg.get('searchPaths') || [],
       defines: cfg.get('defines') || [],

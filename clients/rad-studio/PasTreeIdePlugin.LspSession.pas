@@ -173,6 +173,22 @@ type
     const AEdits: TArray<TLspTextEdit>; const AError: string);
 
   /// <summary>
+  /// The answer to pastree/syncPrototypes: at most one REPLACEMENT (the other
+  /// half of the routine under the caret) reusing TLspTextEdit, because a
+  /// range with a real end is exactly what that record already is. No edits
+  /// with Success is the ordinary outcome - already in step, an overload set,
+  /// a declaration with no body yet - and Provider says which.
+  /// </summary>
+  TLspSyncPrototypes = record
+    Edits: TArray<TLspTextEdit>;
+    Name: string;      // 'TFoo.Bar' - the half that was rewritten
+    Provider: string;
+  end;
+
+  TLspSyncPrototypesProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspSyncPrototypes; const AError: string);
+
+  /// <summary>
   /// One replacement from a rename plan (pastree/renamePlan), already in IDE
   /// coordinates - and note that these arrive that way: unlike every other
   /// answer here, our own rename method reports PasTree's own 1-based
@@ -438,6 +454,16 @@ procedure LspClassComplete(const AFileName: string;
   const AOnDone: TLspClassCompleteProc);
 
 /// <summary>
+/// Prototype sync at a caret: the routine there, mirrored onto its other
+/// half. One request, one answer, one edit at most - see PasLsp.SyncPrototypes
+/// for what is mirrored and what is deliberately refused. The document is
+/// synced first, for a sharper version of class completion's reason: the
+/// signature it asks about was edited a keystroke ago.
+/// </summary>
+procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspSyncPrototypesProc);
+
+/// <summary>
 /// textDocument/onTypeFormatting after Enter (the one trigger character the
 /// server registers): the caret's NEW position goes in, zero or more
 /// insertions come back - in practice zero or one, the missing block closer.
@@ -563,7 +589,8 @@ uses
   PasLsp.ProductVersion,
   PasLsp.SourceText,
   PasTreeIdePlugin.CrashLog,
-  PasTreeIdePlugin.LspDocuments;
+  PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.Settings;
 
 const
   // Persistent, so it can be left open in a tail across server restarts.
@@ -595,6 +622,12 @@ type
     FStartedProject: string;
     FStartedPlatform: string;
     FStartedConfig: string;
+    // The two log switches the running server was started with. They are part
+    // of that configuration for the same reason the platform is: the server
+    // fixes both at initialize, so changing one in the dialog only means
+    // anything if it restarts - which is what including them here does.
+    FStartedLogFile: string;
+    FStartedLogDetail: Boolean;
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingReferences: Int64;
@@ -642,6 +675,8 @@ type
       const AOnDone: TLspSignatureHelpProc);
     procedure ClassComplete(const AFileName: string;
       const AOnDone: TLspClassCompleteProc);
+    procedure SyncPrototypes(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspSyncPrototypesProc);
     procedure OnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspTextEditsProc);
     procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
@@ -1042,6 +1077,8 @@ end;
 
 function TLspSession.BuildOptions(const AProject: IOTAProject;
   out APlatform, AConfig: string): TLspInitOptions;
+var
+  LLogPath: string;
 begin
   Result := Default(TLspInitOptions);
   APlatform := NormalizePlatformName(AProject.CurrentPlatform);
@@ -1065,11 +1102,20 @@ begin
   // server appends with a separator per run rather than truncating, so history
   // survives too. Falls back to %TEMP% only for a project with no directory,
   // which in practice means an unsaved one.
-  Result.LogFile := LogPathFor(Result.ProjectFile);
+  LLogPath := LogPathFor(Result.ProjectFile);
+  // "Enable logging" off means the server is told nothing about a log file,
+  // which is how it already understands "no log" - no file is created, and
+  // nothing is written and thrown away. The path is still computed, because
+  // the crash log below needs the folder either way.
+  if LoggingEnabled then
+    Result.LogFile := LLogPath;
+  Result.SuppressLogDetail := not AdvancedLoggingEnabled;
   // The IDE-side crash log goes to the same folder (its own file - see
   // PasTreeIdePlugin.CrashLog): the two are read together, and this is the
-  // one place that already knows where "beside this project" is.
-  SetCrashLogPath(Result.LogFile);
+  // one place that already knows where "beside this project" is. NOT gated on
+  // the logging switch - a fault in the IDE is not diagnostic chatter, and a
+  // user who turned the log off did not ask to lose the record of a crash.
+  SetCrashLogPath(LLogPath);
 end;
 
 function TLspSession.EnsureSession: Boolean;
@@ -1162,7 +1208,9 @@ begin
   if (FClient.State = lcsStopped) or
      not SameText(FStartedProject, LOptions.ProjectFile) or
      not SameText(FStartedPlatform, LPlatform) or
-     not SameText(FStartedConfig, LConfig) then
+     not SameText(FStartedConfig, LConfig) or
+     not SameText(FStartedLogFile, LOptions.LogFile) or
+     (FStartedLogDetail <> not LOptions.SuppressLogDetail) then
   begin
     if FClient.State <> lcsStopped then
       LogDiagnostic(Format('project configuration changed (%s %s %s) - '
@@ -1186,6 +1234,8 @@ begin
     FStartedProject := LOptions.ProjectFile;
     FStartedPlatform := LPlatform;
     FStartedConfig := LConfig;
+    FStartedLogFile := LOptions.LogFile;
+    FStartedLogDetail := not LOptions.SuppressLogDetail;
     if not FClient.Start(LOptions) then
       Exit;
   end;
@@ -1480,6 +1530,79 @@ begin
         AOnDone(True, ParseClassComplete(AResult), '')
       else
         AOnDone(False, Default(TLspClassComplete), AError);
+    end);
+end;
+
+{ The answer to pastree/syncPrototypes. One shape, parsed once - the edit's
+  END matters here in a way class completion's never did: this request
+  REPLACES a header, so an answer whose range end was dropped would delete
+  nothing and insert a second copy of the signature. }
+function ParseSyncPrototypes(AResult: TJSONValue): TLspSyncPrototypes;
+var
+  LEdits: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LEdit: TLspTextEdit;
+  LLine, LChar: Integer;
+begin
+  Result := Default(TLspSyncPrototypes);
+  if not (AResult is TJSONObject) then
+    Exit;
+  Result.Provider := AResult.GetValue<string>('provider', '');
+  if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
+    Exit;
+  for LValue in LEdits do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LLine := LObj.GetValue<Integer>('range.start.line', -1);
+    LChar := LObj.GetValue<Integer>('range.start.character', -1);
+    LEdit.Text := LObj.GetValue<string>('newText', '');
+    if (LLine < 0) or (LChar < 0) or (LEdit.Text = '') then
+      Continue;
+    LspToIde(LLine, LChar, LEdit.Row, LEdit.Col);
+    LLine := LObj.GetValue<Integer>('range.end.line', LLine);
+    LChar := LObj.GetValue<Integer>('range.end.character', LChar);
+    LspToIde(LLine, LChar, LEdit.EndRow, LEdit.EndCol);
+    Result.Edits := Result.Edits + [LEdit];
+    if Result.Name = '' then
+      Result.Name := LObj.GetValue<string>('name', '');
+  end;
+end;
+
+procedure TLspSession.SyncPrototypes(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspSyncPrototypesProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspSyncPrototypes), 'no LSP server available');
+    Exit;
+  end;
+  // Sync FIRST and unconditionally, for ClassComplete's reason and more
+  // sharply: the signature this asks about was edited a keystroke ago, and an
+  // answer computed from the previous text would mirror the OLD one back over
+  // the user's change.
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  FClient.Request('pastree/syncPrototypes', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseSyncPrototypes(AResult), '')
+      else
+        AOnDone(False, Default(TLspSyncPrototypes), AError);
     end);
 end;
 
@@ -2358,6 +2481,18 @@ begin
     Exit;
   end;
   GSession.ClassComplete(AFileName, AOnDone);
+end;
+
+procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspSyncPrototypesProc);
+begin
+  if not Assigned(GSession) then
+  begin
+    AOnDone(False, Default(TLspSyncPrototypes),
+      'LSP session not initialized');
+    Exit;
+  end;
+  GSession.SyncPrototypes(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;

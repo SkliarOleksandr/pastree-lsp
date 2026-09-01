@@ -37,6 +37,7 @@ uses
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ClassComplete,
+  PasTreeIdePlugin.SyncPrototypes,
   PasTreeIdePlugin.BlockClose,
   PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.CrashLog,
@@ -179,6 +180,11 @@ begin
   LAction.OnExecute := OnRenameExecute;
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
+
+  // NO MENU ITEM FOR PROTOTYPE SYNC, and no command of its own: it is a step
+  // inside class completion now (Ctrl+Shift+C - see
+  // PasTreeIdePlugin.SyncPrototypes for why the IDE's own broken "Sync
+  // Prototypes" item cannot be fixed or replaced safely).
 end;
 
 constructor TMenuManager.Create;
@@ -381,6 +387,7 @@ begin
   // binding (it is not gated by the Insight Provider selection, so this is
   // the only way to take it over).
   InitializeClassComplete;
+  InitializeSyncPrototypes;
   // Enter after an unclosed block opener: the server (standard LSP
   // onTypeFormatting) answers with the closer - see
   // PasTreeIdePlugin.BlockClose. An editor-events OBSERVER, not a key
@@ -436,6 +443,7 @@ begin
   // manager and the Insight notifier already unregistered (and their
   // closures gated off - see the GAlive flags in each unit).
   FinalizeClassComplete;
+  FinalizeSyncPrototypes;
   FinalizeBlockClose;
   FinalizeOutline;
   FinalizeIdeInsight;

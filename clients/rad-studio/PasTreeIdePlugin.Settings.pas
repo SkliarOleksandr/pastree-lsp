@@ -13,10 +13,13 @@ unit PasTreeIdePlugin.Settings;
   the behaviour anyone with two installations expects; a key of our own under
   HKCU would have quietly shared one set between them.
 
-  DEFAULT IS ON, FOR ALL OF THEM. Every switch here turns OFF something this
-  plugin already does, so a missing value - a fresh installation, a user who never
-  opened the dialog - must read as "behave as before". Written only by the
-  dialog: nothing else in the package writes to the registry.
+  DEFAULT IS ON, FOR EVERY SWITCH THAT TURNS SOMETHING OFF. Those switches
+  disable something this plugin already does, so a missing value - a fresh
+  installation, a user who never opened the dialog - must read as "behave as
+  before". "Advanced logging" is the one exception and the rule is the same
+  one seen from the other side: it turns a diagnostic ON, and its default is
+  therefore OFF. Written only by the dialog: nothing else in the package
+  writes to the registry.
 
   READ AT THE POINT OF USE, NOT CACHED AT STARTUP. Every switch is read on
   each gesture (an editor tab activating, a key being pressed), which is what
@@ -51,11 +54,47 @@ function OverrideDeclImplToggle: Boolean;
 function RenameEnabled: Boolean;
 
 /// <summary>
+/// Whether Ctrl+Shift+C is ours - class completion AND the prototype sync
+/// that now runs in front of it (PasTreeIdePlugin.SyncPrototypes), which is
+/// one keystroke and therefore one switch. False hands the keystroke back to
+/// the IDE, which then runs its own class completion: the same off-switch
+/// shape as the decl/impl toggle, and for the same reason - what is being
+/// switched off is a REPLACEMENT of a native command, so off has to mean
+/// "the native one".
+/// </summary>
+function ClassCompleteEnabled: Boolean;
+
+/// <summary>
 /// Whether Enter after an unclosed block opener inserts the closer (block
 /// completion - PasTreeIdePlugin.BlockClose). False stops the plugin from
 /// even asking the server, and Enter is never swallowed either way.
 /// </summary>
 function BlockCompletionEnabled: Boolean;
+
+/// <summary>
+/// Whether the server writes pastree-lsp.log beside the project at all.
+/// False sends no logFile to the server, which is what "no log" means on its
+/// side - nothing is written rather than written and discarded, so a
+/// read-only source tree stays untouched. The IDE-side crash record
+/// (PasTreeIdePlugin.CrashLog) is a different file and is NOT gated: a fault
+/// nobody recorded is the one thing worse than a log nobody reads.
+/// </summary>
+function LoggingEnabled: Boolean;
+
+/// <summary>
+/// Whether that log carries the configuration inventory - every search path,
+/// define, namespace and unit alias the analysis was handed. Meaningful only
+/// while LoggingEnabled; the dialog greys it out otherwise.
+///
+/// OFF BY DEFAULT, unlike every other switch here, and deliberately: this one
+/// does not turn a FEATURE off, it turns a diagnostic on. The inventory is
+/// hundreds of lines per configuration on a real project and it answers one
+/// question - "which directories did it actually search?" - which is a
+/// question you go looking for rather than one you want answered every time.
+/// The one-line summary (`configured: platform=... paths=N defines=N`) is
+/// logged either way, so the counts never disappear.
+/// </summary>
+function AdvancedLoggingEnabled: Boolean;
 
 /// <summary>Registers Tools > PasTree > Settings.</summary>
 procedure InitializeSettings;
@@ -85,6 +124,9 @@ type
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
     EnableBlockCompletion: Boolean;
+    EnableClassComplete: Boolean;
+    EnableLogging: Boolean;
+    AdvancedLogging: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -111,6 +153,9 @@ const
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
   cValueBlockCompletion = 'EnableBlockCompletion';
+  cValueClassComplete = 'EnableClassComplete';
+  cValueLogging = 'EnableLogging';
+  cValueAdvancedLogging = 'AdvancedLogging';
 
 var
   // The in-memory copy. Loaded on first read, replaced on every save, so a
@@ -199,6 +244,10 @@ begin
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
   Result.EnableBlockCompletion := True;
+  Result.EnableClassComplete := True;
+  Result.EnableLogging := True;
+  // See AdvancedLoggingEnabled: the one default that is False.
+  Result.AdvancedLogging := False;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -218,6 +267,12 @@ begin
         ReadFlag(LReg, cValueRename, Result.EnableRename);
       Result.EnableBlockCompletion :=
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
+      Result.EnableClassComplete :=
+        ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
+      Result.EnableLogging :=
+        ReadFlag(LReg, cValueLogging, Result.EnableLogging);
+      Result.AdvancedLogging :=
+        ReadFlag(LReg, cValueAdvancedLogging, Result.AdvancedLogging);
     finally
       LReg.CloseKey;
     end;
@@ -255,6 +310,11 @@ begin
         LReg.WriteInteger(cValueRename, Ord(ASettings.EnableRename));
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
+        LReg.WriteInteger(cValueClassComplete,
+          Ord(ASettings.EnableClassComplete));
+        LReg.WriteInteger(cValueLogging, Ord(ASettings.EnableLogging));
+        LReg.WriteInteger(cValueAdvancedLogging,
+          Ord(ASettings.AdvancedLogging));
       finally
         LReg.CloseKey;
       end;
@@ -296,6 +356,25 @@ end;
 function BlockCompletionEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableBlockCompletion;
+end;
+
+function ClassCompleteEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableClassComplete;
+end;
+
+function LoggingEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableLogging;
+end;
+
+function AdvancedLoggingEnabled: Boolean;
+begin
+  // The dependency is enforced HERE as well as in the dialog: the stored pair
+  // can legally be (logging off, advanced on) - the dialog leaves the value
+  // it was given alone when it greys the box out - and a caller asking "should
+  // I log the inventory?" must get False for that, not the stale tick.
+  Result := CurrentSettings.EnableLogging and CurrentSettings.AdvancedLogging;
 end;
 
 procedure ShowSettingsDialog;
@@ -404,9 +483,7 @@ procedure InitializeSettings;
 var
   LServices: INTAServices;
   LSettings: TMenuItem;
-  LReadding: Boolean;
 begin
-  LReadding := False;
   LSettings := nil;   // the except block below reads it
   if Assigned(GRootItem) then
   begin
@@ -423,7 +500,6 @@ begin
       a method pointer into it, and freeing it here would leave that hook
       dangling - a crash the next time the menu is opened. It is stateless
       and process-lifetime; only FinalizeSettings frees it, after unhooking. }
-    LReadding := True;
   end;
   if not Supports(BorlandIDEServices, INTAServices, LServices) then
   begin
@@ -473,14 +549,6 @@ begin
     LSettings.OnClick := GHandler.SettingsClick;
     // Anchored to OUR root, as its only child.
     LServices.AddActionMenu(cRootItemName, nil, LSettings, True, True);
-    { A RE-ADD is a real finding, not a step: it means the IDE discarded the
-      menu our first attempt went onto, which is precisely the failure that
-      was invisible before. Logged so it stays visible if it ever becomes
-      chronic; a plain first-time success stays silent, as everything else
-      in this package does. }
-    if LReadding then
-      LogDiagnostic('the IDE rebuilt its main menu - '
-        + 'Tools > PasTree > Settings re-added.');
     { Hook the Tools menu ONCE, now that we know which item it is. From here
       on the repair runs whenever the menu is opened, so the item is correct
       before the user ever opens a project - which is when the wipe used to

@@ -91,6 +91,40 @@ Insight Provider). A miss is reported in the Messages panel tagged
 `[pastree]`, which is where the origin shows. See "Go to
 Declaration" below for how navigation is reached now.
 
+### Prototype sync (part of Ctrl+Shift+C)
+
+**Ctrl+Shift+C does two things**, in this order: first it mirrors the
+signature under the caret onto the routine's other half, then it runs class
+completion proper (bodies for declarations that have none). Change a
+signature in the class - or in the implementation - press Ctrl+Shift+C, and
+the other half is rewritten to match, in its own undo step.
+
+- **The side under the caret wins**, and that is the whole conflict policy:
+  the caret is where you just typed, and the other half is by definition the
+  stale copy.
+- **Mirrored:** the parameter list, the result type, the routine word
+  (`procedure` <-> `function`) and `class`. **Not mirrored:** the NAME (the
+  pair is found by it - use Rename), the directives after the header's
+  semicolon (`virtual`, `overload`, a calling convention - those belong to
+  the side that declares them), and default values into an implementation
+  (E2226 keeps those in the interface).
+- **Overloads are refused, not guessed at** - two declarations of one name
+  make the pairing ambiguous exactly when a signature differs, and the
+  Messages panel says so. The ordinary outcomes - a pair already in step, a
+  caret in no routine, what was actually mirrored, class completion's own
+  "nothing to implement" - go to `pastree-lsp.log` instead: this key is
+  pressed constantly, and a line per press does not belong in a panel read
+  for compiler errors.
+- **No menu item and no switch of its own** - it belongs to Ctrl+Shift+C, and
+  so does its off switch: **Complete Class At Cursor** in
+  **Tools > PasTree > Settings** turns off the whole keystroke, both halves,
+  and hands Ctrl+Shift+C back to the IDE's own class completion. The
+  IDE's own "Sync Prototypes" command is still there and still broken; it
+  cannot be fixed or hidden from a package, and
+  `PasTreeIdePlugin.SyncPrototypes.pas` records the three attempts and the
+  line in `ToolsAPI.pas` that explains why ("The local menu will be created
+  each time it is used" - the item is a different object at every click).
+
 ### Rename
 
 Ctrl+Shift+E, or "Rename..." in the editor's right-click menu. A dialog
@@ -489,6 +523,10 @@ log anything leaves its last words.
   `..\..\source\PasLsp.ProductVersion.pas` and
   `..\..\source\PasLsp.SourceText.pas` - no PasTree, ever (see the top of
   this file).
+- `PasTreeIdePlugin.SyncPrototypes.pas` - prototype sync, the first step of
+  Ctrl+Shift+C: the replacement edit (CopyTo / DeleteTo / Insert through one
+  undoable writer - the first edit in this package that deletes rather than
+  inserts), and the record of why the IDE's own menu item cannot be fixed.
 - `PasTreeIdePlugin.Wizard.pas` - `TIDEWizard` (`IOTAWizard`): owns the
   single editor-menu action list (Find Declaration + Find References,
   both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP

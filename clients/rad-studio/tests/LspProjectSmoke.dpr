@@ -47,6 +47,7 @@ const
 var
   GClient: TLspClient;
   GRepoDir: string;
+  GLogPath: string;
   GFailures: Integer;
   GAnswered: Boolean;
   GOk: Boolean;
@@ -76,6 +77,32 @@ begin
       Exit(True);
   until GetTickCount64 >= LDeadline;
   Result := False;
+end;
+
+{ The server's own log, read while it is being written to - hence the
+  share-everything open: the server holds an append handle on this file, and
+  a plain ReadAllText would lose the race as a sharing violation. }
+function LogContains(const AText: string): Boolean;
+var
+  LStream: TFileStream;
+  LBytes: TBytes;
+begin
+  Result := False;
+  if not TFile.Exists(GLogPath) then
+    Exit;
+  try
+    LStream := TFileStream.Create(GLogPath, fmOpenRead or fmShareDenyNone);
+  except
+    Exit;   // being written to this instant; the caller polls again
+  end;
+  try
+    SetLength(LBytes, LStream.Size);
+    if Length(LBytes) > 0 then
+      LStream.ReadBuffer(LBytes[0], Length(LBytes));
+  finally
+    LStream.Free;
+  end;
+  Result := TEncoding.UTF8.GetString(LBytes).Contains(AText);
 end;
 
 function Ask(const AMethod: string; AParams: TJSONObject): Boolean;
@@ -175,16 +202,41 @@ begin
     LSource + 'ToolsAPI'];
   Result.LogFile := TPath.Combine(TPath.GetTempPath,
     'pastree-lsp-projectsmoke.log');
+  GLogPath := Result.LogFile;
 end;
 
 procedure Run(const AExe, AIdeRoot: string);
 var
   LWizard: string;
   LLine, LChar: Integer;
+  LOptions: TLspInitOptions;
 begin
   LWizard := TPath.Combine(GRepoDir, 'PasTreeIdePlugin.Wizard.pas');
 
-  Check(GClient.Start(BuildOptions(AIdeRoot)), 'server started');
+  LOptions := BuildOptions(AIdeRoot);
+  // Emptied rather than appended to: every check below asks whether THIS run
+  // wrote a line, and the server's own run separator is not something a
+  // Contains() can tell one side of.
+  try
+    TFile.WriteAllText(LOptions.LogFile, '');
+  except
+    // Held open by a previous run's server; the checks below still work,
+    // they simply cannot distinguish this run's lines from that one's.
+  end;
+  Check(GClient.Start(LOptions), 'server started');
+
+  Writeln;
+  Writeln('=== the project alone starts the analysis ===');
+  { NOTHING IS SENT HERE - no didOpen, no request. That is the whole check:
+    the client hands over a projectFile at initialize and the closure is
+    parsed on the strength of that, so the user's first Ctrl+Click is fast
+    rather than being the thing that pays for the build. Before this, the
+    first request (or the first didOpen) was what started it, and in RAD
+    Studio neither happens until the user does something. }
+  Check(PumpUntil(function: Boolean
+      begin Result := LogContains('analysis done') end, cAnswerTimeoutMs),
+    'the analysis ran with no request and no document open');
+
   DidOpen(LWizard);
 
   Writeln;

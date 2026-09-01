@@ -75,6 +75,7 @@ Phases 1 and 2 are complete and exercised live.
 | `workspace/symbol` | project-wide substring query over the prefetched index |
 | `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger, and Enter after an unclosed opener answers the closer |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C in the RAD Studio client) |
+| `pastree/syncPrototypes` | OURS, not LSP: a signature changed on one side, mirrored onto the other (part of Ctrl+Shift+C in the RAD Studio client) |
 | `$/pastree.hostEvent` | OURS, not LSP: a client-side event (the IDE opening or closing a project) written into the server's own log, so its timeline has the boundaries the server cannot see |
 
 **Behaviour** - analysis runs on a background session, debounced so a typing
@@ -169,7 +170,9 @@ open documents' (those are what `publishDiagnostics` sends, which is the right
 scope for squiggles and the wrong one for debugging: an `F1027` on a unit
 nobody has open is exactly what breaks navigation in the file they do have
 open). The configuration block lists the search paths themselves, not just how
-many.
+many - it is on by default, and `logDetail: false` (`pastree.logDetail` in
+VS Code, the "Advanced logging" box in the RAD Studio dialog) drops it to the
+one-line `configured: platform=... paths=N defines=N` summary.
 
 The full **unit inventory** - one `unit x <- path` line per unit, which answers
 "which of several copies on the search path won for this name?" - is off by

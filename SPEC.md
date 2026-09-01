@@ -156,8 +156,8 @@ IDE plugin first, VS Code second), not by protocol order.
 
 | | |
 |---|---|
-| `initialize`, `initialized`, `shutdown`, `exit` | project config via `initializationOptions` |
-| `textDocument/didOpen`, `didChange`, `didClose` | incremental sync, versioned overlays |
+| `initialize`, `initialized`, `shutdown`, `exit` | project config via `initializationOptions`; `initialized` starts the first analysis when a project was configured |
+| `textDocument/didOpen`, `didChange`, `didClose` | incremental sync, versioned overlays; `pastreeShown: false` on the TextDocumentItem marks a document the IDE loaded but is not showing (logged as `(background)`) |
 | `textDocument/definition` | |
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
 | `textDocument/references` | symbol / unit / builtin identities |
@@ -177,6 +177,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/rename` | symbol: `changes`; unit: `documentChanges` with a `rename` file operation |
 | `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers up to TWO TextEdits - the caret line re-indented to the body indent, then the closer ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
+| `pastree/syncPrototypes` | OURS, not LSP: the routine at a position, its signature mirrored onto its other half (the first half of Ctrl+Shift+C in the RAD Studio client). At most one edit, and unlike classComplete's it REPLACES - the range has a real end ([PasLsp.SyncPrototypes](source/PasLsp.SyncPrototypes.pas)) |
 | `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
 | `$/pastree.hostEvent` | OURS, not LSP: a NOTIFICATION carrying a line for the server's own log (`params.message`, prefixed `host:` on the way in so a line that did not come from the server says so). It exists because reopening the SAME project restarts nothing here - the configuration is identical - so without it one session's requests run straight into the next's with no boundary between them, which is exactly the confusion it was added for (2026-08-29). `$/`-prefixed so any other server drops it silently rather than treating it as a violation. |
 

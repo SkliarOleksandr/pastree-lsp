@@ -659,7 +659,11 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    Bodies land at the end of the implementation section in declaration
    order, caret on the first empty body line. `PasTreeIdePlugin.ClassComplete`
    is the binding; `krHandled` unconditionally, so a decline can never fall
-   through to the native one behind the user's back.
+   through to the native one behind the user's back. **Switchable off** since
+   2026-09-01 as **Complete Class At Cursor** in the Overrides group, which
+   is the one path that answers `krUnhandled` - that is what makes "off" mean
+   the IDE's own class completion, with no keymap to unbind. It gates the
+   prototype sync below with it: one keystroke, one switch.
    **Property accessors - DELIVERED 2026-08-23**, the part the user called
    the one that is really missing. A `read`/`write` specifier naming
    something the type does not declare becomes a member edit into the type's
@@ -729,6 +733,58 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
       member of its section anchors all three there), and an unstable sort
       then wrote `procedure SetXX(const Value: Integer); read GetXX write
       SetXX;`. `CompareClassEdits` fixes the order: spec, semi, member, body.
+
+   **PROTOTYPE SYNC, the second half of the key - DELIVERED AND VERIFIED
+   LIVE 2026-09-01 (v0.25.0 → v0.26.2).** Ctrl+Shift+C now does two things:
+   first `pastree/syncPrototypes` mirrors the signature under the caret onto
+   the routine's other half, then class completion proper runs. The two are
+   the same thought from either end - class completion writes the body a
+   declaration is missing, this keeps an existing pair in step - and they
+   never collide over one routine, because sync only touches a pair that HAS
+   both halves. Sequenced, not fired together: the sync's callback starts
+   the class-completion request, so the second is built from the text the
+   first left (fire them together and the second's positions describe a
+   buffer that has moved - lesson 6 above, again).
+
+   The rules are in `PasLsp.SyncPrototypes`, and the ones worth naming here:
+   **the side under the caret wins** (it is where the user just typed; there
+   is nothing in a buffer that says which of two signatures is newer);
+   mirrored are the parameter list, the result type, the routine word
+   (`procedure` <-> `function`) and `class`; NOT mirrored are the name (the
+   pair is found BY it - a rename has no counterpart to find, and that is
+   Rename's job), the directives past the header's `;` (`virtual`,
+   `overload`, a calling convention - they belong to the side that declares
+   them), and a default value into an implementation (E2226, again). An
+   overload set whose signatures differ is REFUSED rather than paired by
+   guesswork. The answer is a REPLACEMENT - the first edit in this package
+   with a real range end - applied CopyTo/DeleteTo/Insert through one
+   undoable writer. `LspClientSmoke` section 5h pins all of it over
+   `DemoSyncPrototypes.pas`, whose pairs deliberately disagree.
+
+   **IT IS NOT THE IDE'S OWN "Sync Prototypes" MENU ITEM, and cannot be.**
+   The user asked for that command to be fixed or replaced; three attempts,
+   each verified live, each a dead end:
+   1. Hide the native command and put ours beside it - it is not in
+      `INTAServices.ActionList` at all (that list is what the ToolsAPI hands
+      out for THIRD-PARTY items), so there was nothing to hide.
+   2. Find the `TMenuItem` by walking the component tree / VCL's `PopupList`
+      and hide it - worked, and took the IDE down: a heap-corrupting AV in
+      `vcl370.bpl`, surfacing later in unrelated frames (`clr.dll`, and
+      `TThread.CheckSynchronize` failing with "No synchronizable method
+      found" in the LSP transport's reader thread).
+   3. Repoint that item's `OnClick`, re-applying it from the parent
+      `TPopupMenu`'s `OnPopup` so it could not be undone - same crash.
+
+   The answer is one line in `ToolsAPI.pas`, on
+   `INTAEditorLocalMenu.RegisterActionList`: **"The local menu will be
+   created each time it is used"**. The editor's local menu is rebuilt from
+   scratch on every open, so a `TMenuItem` found by walking components
+   belongs to ONE showing of it and a pointer held across the next is a
+   use-after-free. No ToolsAPI call enumerates or replaces another package's
+   registered actions. So the feature lives on Ctrl+Shift+C, with no menu
+   item and no switch of its own, and the IDE's own command stays broken -
+   which it always was, independently of this package (the user confirmed
+   "No synchronizable method found" long predates it).
 
    **Still open on this feature:** implementing an INTERFACE a class declares
    (`TFoo = class(TObject, IBar)` → stubs for every `IBar` method - the one
@@ -930,6 +986,56 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    The reason a diagnosis would want is not lost, it just moved out of the
    user's face: the server logs `nothing to toggle to at that position` into
    `pastree-lsp.log` for exactly this answer.
+8. **The Build tab is for what the user must ACT on - DELIVERED 2026-09-01,
+   and it is item 7's rule applied to the rest.** Class completion wrote
+   `nothing to implement` on most presses of Ctrl+Shift+C and prototype sync
+   wrote a line on every one; both are ordinary outcomes of a key pressed
+   constantly, and a panel read for compiler errors is the wrong place for
+   them (user). They now go to `pastree-lsp.log` through `LspLogToServer`
+   (a `LogTrace` beside each unit's `LogDiagnostic`, so the split is visible
+   at every call site). What still reaches the Build tab: a request that
+   FAILED, an answer dropped because the buffer moved under it, and an
+   overload set too ambiguous to mirror - each of which means the keystroke
+   did not do what it looked like it did.
+9. **Logging, and the settings that gate it - DELIVERED 2026-09-01
+   (v0.24.0).** Two switches in a new Logging group of the dialog.
+   **Enable logging** (default on) decides whether `pastree-lsp.log` exists
+   at all: off sends the server no `logFile`, which is how it already
+   understands "no log" - nothing is written rather than written and
+   discarded. The IDE-side crash record is deliberately NOT gated by it: a
+   fault nobody recorded is worse than a log nobody reads.
+   **Advanced logging** (default OFF, the one switch here that is) maps to a
+   new `logDetail` initialization option and controls the configuration
+   inventory - every search path, define, namespace and alias. The one-line
+   `configured: platform=... paths=N defines=N` summary is logged either way,
+   deliberately: turning the detail off must cost the list, never the counts
+   that say the list is worth asking for. Both are part of the server's
+   configuration for restart purposes (like platform and build config), so
+   changing either takes effect on the next gesture rather than at the next
+   IDE start. `pastree.logDetail` is the VS Code equivalent.
+10. **The analysis starts when the project opens - DELIVERED 2026-09-01
+   (v0.24.1).** It used to start on whichever came first: a `didOpen` or a
+   request reaching `WaitAnalyzed`. Both are the wrong moment for a client
+   that opens a PROJECT rather than a folder - RAD Studio hands over the
+   `.dproj` at project-open time and may send no `didOpen` until the user
+   activates a tab, so the whole closure was parsed on the first Ctrl+Click,
+   the one gesture that is then slow for a reason the user cannot see. The
+   server now schedules the first analysis on the `initialized` notification
+   when a project was configured (scheduled, not started, so the didOpen
+   burst that follows folds into the same build). `LspProjectSmoke` pins it:
+   after the handshake, with no request sent and no document open, the log
+   must show `analysis done`.
+11. **`didOpen` says whether the IDE is SHOWING the document - DELIVERED
+   2026-09-01 (v0.24.2).** Opening one form in RAD Studio pulls in its
+   visual-inheritance ancestors and every datamodule its `.dfm` references,
+   and each arrives as a `didOpen` the user did not ask for - so the log read
+   as though five files had been opened when one was. The plugin now asks the
+   module for `EditViewCount` and sends `pastreeShown` on the
+   `TextDocumentItem` (a non-standard member on a standard object; the spec
+   says unknown members are ignored, so it costs other clients nothing), and
+   the server writes `(background)` for a document that is loaded but not on
+   screen. Absent means "a client that does not report this", which is not
+   the same as "not shown", so VS Code says nothing either way.
 
 ## Non-goals
 

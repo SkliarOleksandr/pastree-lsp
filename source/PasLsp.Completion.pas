@@ -38,7 +38,8 @@ uses
   PasTree.SourceManager,
   PasTree.Preprocessor,
   PasTree.Sema.Project,
-  PasLsp.ClassComplete;
+  PasLsp.ClassComplete,
+  PasLsp.SyncPrototypes;
 
 type
   TLspCompletionEntry = record
@@ -133,6 +134,12 @@ type
       the user pressed the key because they just typed one. }
     function ClassCompleteAt(const AFileName, AText: string):
       TLspClassCompleteAnswer;
+    { Prototype sync at a position: the routine under the caret, mirrored onto
+      its other half (PasLsp.SyncPrototypes). Same live-buffer, parse-only
+      reading as class completion - and for the sharper version of the same
+      reason: the signature it is asked about was edited a keystroke ago. }
+    function SyncPrototypeAt(const AFileName, AText: string;
+      APasLine, APasCol: Integer): TLspSyncAnswer;
   end;
 
 implementation
@@ -812,6 +819,32 @@ begin
   // The answer's positions are in the REPAIRED text; the client edits the
   // original. MergeSemicolonRepairs maps them back and adds the semicolons.
   MergeSemicolonRepairs(Result, LRepairs);
+end;
+
+function TLspCompletionEngine.SyncPrototypeAt(const AFileName, AText: string;
+  APasLine, APasCol: Integer): TLspSyncAnswer;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  { NO SEMICOLON REPAIR, unlike class completion, and no tolerance for a
+    broken parse either. The two features fail differently: class completion
+    ADDS code and can be talked into adding it in the wrong place, which the
+    repair pass exists to prevent; this one REPLACES an existing header, and a
+    tree the parser had to guess at is a tree whose header spans are guesses -
+    a replacement range off by a token eats the code next to it. A refusal
+    that names the parse error is the only safe answer. }
+  if Length(LDiags) > 0 then
+  begin
+    Result := Default(TLspSyncAnswer);
+    Result.Provider := Format('pastree/syncPrototypes: refused - %d parse '
+      + 'error(s) in this file, first: %s', [Length(LDiags), LDiags[0].Msg]);
+    Exit;
+  end;
+  Result := PasLsp.SyncPrototypes.SyncPrototypeAt(LTree, APasLine, APasCol);
 end;
 
 end.

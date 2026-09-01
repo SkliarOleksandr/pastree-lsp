@@ -13,13 +13,25 @@ unit PasTreeIdePlugin.ClassComplete;
   the decl/impl toggle in PasTreeIdePlugin.Wizard - see the reasoning there
   about krHandled.
 
+  TWO STEPS PER PRESS. Prototype sync runs FIRST - the signature under the
+  caret mirrored onto the routine's other half (PasTreeIdePlugin.SyncPrototypes,
+  which also records why it is not the menu command it started as) - and then
+  class completion proper. One keystroke, one settings switch, and the order
+  matters: see ClassCompleteProc.
+
   WHY krHandled EVEN WHEN NOTHING IS GENERATED. Returning krUnhandled would
   hand Ctrl+Shift+C back to the IDE, which would then run ITS class
   completion - so a file ours declines (an unsaved buffer with no
   implementation section, a server that is not up) would silently get the
   native behaviour instead, and a user comparing the two would be unable to
-  tell which one just ran. The answer always comes back through the Build tab
-  instead, including "nothing to implement".
+  tell which one just ran. The outcome is reported instead: a failure in the
+  Build tab, the routine answers ("nothing to implement", what was mirrored)
+  in pastree-lsp.log, because this key is pressed too often for its ordinary
+  outcomes to belong in a panel read for compiler errors.
+
+  THE ONE EXCEPTION is the OFF SWITCH (ClassCompleteEnabled), which answers
+  krUnhandled deliberately: that is what makes "off" mean the IDE's own class
+  completion, with no keymap to unbind.
 
   APPLYING THE EDITS goes through an UNDOABLE EDIT WRITER, in ascending
   position order - see ApplyClassComplete for why the editor's own InsertText
@@ -43,7 +55,9 @@ uses
   Vcl.Menus,
   ToolsAPI,
   PasTreeIdePlugin.LspDocuments,
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.SyncPrototypes;
 
 type
   TPasClassCompleteBinding = class(TNotifierObject, IOTAKeyboardBinding)
@@ -65,12 +79,22 @@ var
   // is safe to touch.
   GAlive: Boolean = False;
 
+{ THE BUILD TAB IS FOR WHAT THE USER MUST ACT ON - see the same split in
+  PasTreeIdePlugin.SyncPrototypes. "Nothing to implement" is the answer to
+  most presses of Ctrl+Shift+C and belongs in the log, not in the panel the
+  user reads for compiler errors (user, 2026-09-01). }
 procedure LogDiagnostic(const AMessage: string);
 var
   LMessageServices: IOTAMessageServices;
 begin
   if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
+end;
+
+{ The routine outcomes: into the server's pastree-lsp.log, never the panel. }
+procedure LogTrace(const AMessage: string);
+begin
+  LspLogToServer(AMessage);
 end;
 
 { The answer, applied to the buffer. One place, so the ordering rule and the
@@ -162,26 +186,20 @@ begin
     ClassCompleteProc, nil);
 end;
 
-procedure TPasClassCompleteBinding.ClassCompleteProc(
-  const AContext: IOTAKeyContext; AKeyCode: TShortCut;
-  var ABindingResult: TKeyBindingResult);
+{ Class completion proper - everything after the prototype sync that now runs
+  in front of it. Split out of the key handler so the chaining below reads as
+  the two steps it is. }
+procedure RunClassComplete(const AView: IOTAEditView;
+  const AFileName: string);
 var
-  LView: IOTAEditView;
-  LFileName: string;
   LLenAtRequest: Integer;
 begin
-  ABindingResult := krHandled;   // see the unit header
-  if not GAlive or not Assigned(AContext) or
-     not Assigned(AContext.EditBuffer) then
-    Exit;
-  LView := AContext.EditBuffer.TopView;
-  if not Assigned(LView) then
-    Exit;
-  LFileName := AContext.EditBuffer.FileName;
   // THE SNAPSHOT THIS ANSWER WILL DESCRIBE, measured now - see the gate in the
   // callback and BufferByteLength for why one integer is the right measure.
-  LLenAtRequest := BufferByteLength(LView);
-  LspClassComplete(LFileName,
+  // Measured HERE rather than before the sync step: if the sync rewrote a
+  // header, the buffer it left behind is the one this answer describes.
+  LLenAtRequest := BufferByteLength(AView);
+  LspClassComplete(AFileName,
     procedure(ASuccess: Boolean; const AAnswer: TLspClassComplete;
       const AError: string)
     begin
@@ -196,7 +214,7 @@ begin
       begin
         // Not a failure: everything declared is implemented. Said out loud,
         // because a keystroke that does nothing silently reads as broken.
-        LogDiagnostic('class completion: nothing to implement (' +
+        LogTrace('class completion: nothing to implement (' +
           AAnswer.Provider + ')');
         Exit;
       end;
@@ -216,14 +234,63 @@ begin
         Said out loud rather than dropped silently: a keystroke that does
         nothing reads as broken, which is the rule the empty-answer case above
         already follows. }
-      if (LLenAtRequest < 0) or (BufferByteLength(LView) <> LLenAtRequest) then
+      if (LLenAtRequest < 0) or (BufferByteLength(AView) <> LLenAtRequest) then
       begin
         LogDiagnostic('class completion: the buffer changed while the server'
           + ' was answering - nothing was inserted. Press Ctrl+Shift+C again.');
         Exit;
       end;
-      ApplyClassComplete(LView, AAnswer);
-      LogDiagnostic('class completion: implemented ' + AAnswer.Names);
+      ApplyClassComplete(AView, AAnswer);
+      LogTrace('class completion: implemented ' + AAnswer.Names);
+    end);
+end;
+
+procedure TPasClassCompleteBinding.ClassCompleteProc(
+  const AContext: IOTAKeyContext; AKeyCode: TShortCut;
+  var ABindingResult: TKeyBindingResult);
+var
+  LView: IOTAEditView;
+  LFileName: string;
+begin
+  { THE OFF SWITCH, and the ONE path here that answers krUnhandled - which is
+    precisely what makes "off" mean "the IDE's own class completion", with no
+    keymap to unbind and nothing to restore. It has to come before the
+    unconditional krHandled below, whose whole point (see the unit header) is
+    that a case OURS declines must not silently fall through to the native
+    implementation this replaces. Gating the whole keystroke also gates the
+    prototype sync in front of it: one key, one switch. }
+  if not ClassCompleteEnabled then
+  begin
+    ABindingResult := krUnhandled;
+    Exit;
+  end;
+  ABindingResult := krHandled;   // see the unit header
+  if not GAlive or not Assigned(AContext) or
+     not Assigned(AContext.EditBuffer) then
+    Exit;
+  LView := AContext.EditBuffer.TopView;
+  if not Assigned(LView) then
+    Exit;
+  LFileName := AContext.EditBuffer.FileName;
+  { TWO STEPS, IN THIS ORDER, and the order is the point.
+
+    Prototype sync first: it REWRITES an existing header, and doing that after
+    class completion had inserted bodies would mean applying a range computed
+    against the buffer as it was before those insertions - the same stale-
+    offset failure ApplyClassComplete's own comment dates to 2026-08-23.
+    Sequenced rather than fired together for exactly that reason: the sync's
+    callback is what starts class completion, so the second request is built
+    from the text the first one left.
+
+    The two never collide over the same routine, either: sync only ever
+    touches a pair that HAS both halves, and class completion only ever writes
+    a body for a declaration that has none. }
+  SyncPrototypesAtCaret(LView,
+    procedure
+    begin
+      if not GAlive then
+        Exit;
+      RunClassComplete(LView, LFileName);
     end);
 end;
 

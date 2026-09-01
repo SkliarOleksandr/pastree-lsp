@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 451
+  ClientHeight = 677
   ClientWidth = 462
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -75,7 +75,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 16
     Top = 108
     Width = 430
-    Height = 287
+    Height = 352
     Caption = ' Overrides '
     TabOrder = 1
     object lblStructureViewHint: TLabel
@@ -158,25 +158,93 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       State = cbChecked
       TabOrder = 3
     end
+    object lblClassCompleteHint: TLabel
+      Left = 35
+      Top = 305
+      Width = 377
+      Height = 30
+      Caption =
+        'Implements what is declared, and first mirrors a changed signatur' +
+        'e onto the routine'#39's other half. Off leaves the key to the IDE.'
+      WordWrap = True
+    end
+    object chkClassComplete: TCheckBox
+      Left = 16
+      Top = 284
+      Width = 396
+      Height = 17
+      Caption = 'Complete Class At Cursor (Ctrl+Shift+C)'
+      Checked = True
+      State = cbChecked
+      TabOrder = 4
+    end
+  end
+  object gbLogging: TGroupBox
+    Left = 16
+    Top = 468
+    Width = 430
+    Height = 150
+    Caption = ' Logging '
+    TabOrder = 2
+    object lblLoggingHint: TLabel
+      Left = 35
+      Top = 45
+      Width = 377
+      Height = 30
+      Caption =
+        'Writes pastree-lsp.log next to the project file - the handshake, ' +
+        'the analysis timings and every failed navigation. Off writes noth' +
+        'ing.'
+      WordWrap = True
+    end
+    object lblAdvancedLoggingHint: TLabel
+      Left = 35
+      Top = 110
+      Width = 377
+      Height = 30
+      Caption =
+        'Adds every search path, define, namespace and unit alias to the l' +
+        'og. Off keeps the one-line summary with the counts.'
+      WordWrap = True
+    end
+    object chkLogging: TCheckBox
+      Left = 16
+      Top = 24
+      Width = 396
+      Height = 17
+      Caption = 'Enable logging'
+      Checked = True
+      State = cbChecked
+      TabOrder = 0
+      OnClick = chkLoggingClick
+    end
+    object chkAdvancedLogging: TCheckBox
+      Left = 16
+      Top = 89
+      Width = 396
+      Height = 17
+      Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
+      TabOrder = 1
+    end
   end
   object btnOK: TButton
     Left = 270
-    Top = 411
+    Top = 637
     Width = 85
     Height = 27
     Caption = 'OK'
     Default = True
     ModalResult = 1
-    TabOrder = 2
+    TabOrder = 3
   end
   object btnCancel: TButton
     Left = 361
-    Top = 411
+    Top = 637
     Width = 85
     Height = 27
     Cancel = True
     Caption = 'Cancel'
     ModalResult = 2
-    TabOrder = 3
+    TabOrder = 4
   end
 end

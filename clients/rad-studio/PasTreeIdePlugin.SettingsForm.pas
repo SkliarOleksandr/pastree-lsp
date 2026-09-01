@@ -53,10 +53,18 @@ type
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
     lblBlockCompletionHint: TLabel;
+    chkClassComplete: TCheckBox;
+    lblClassCompleteHint: TLabel;
+    gbLogging: TGroupBox;
+    chkLogging: TCheckBox;
+    lblLoggingHint: TLabel;
+    chkAdvancedLogging: TCheckBox;
+    lblAdvancedLoggingHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string;
       LinkType: TSysLinkType);
+    procedure chkLoggingClick(Sender: TObject);
   end;
 
 var
@@ -103,6 +111,17 @@ begin
     ShellExecute(0, 'open', PChar(Link), nil, nil, SW_SHOWNORMAL);
 end;
 
+{ "Advanced logging" is meaningless with nothing to write it to, and a tickable
+  box that does nothing is worse than a greyed one - it reads as a setting that
+  was ignored. Its VALUE is deliberately left alone while it is greyed: turning
+  the log off and on again gets the detail choice back rather than silently
+  resetting it. }
+procedure TPasTreeSettingsForm.chkLoggingClick(Sender: TObject);
+begin
+  chkAdvancedLogging.Enabled := chkLogging.Checked;
+  lblAdvancedLoggingHint.Enabled := chkLogging.Checked;
+end;
+
 function ExecuteSettingsDialog: Boolean;
 var
   LForm: TPasTreeSettingsForm;
@@ -140,6 +159,12 @@ begin
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
+    LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
+    LForm.chkLogging.Checked := LSettings.EnableLogging;
+    LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
+    // Assigning Checked only fires OnClick when the value CHANGES, so the
+    // dependent state is set here rather than relied upon above.
+    LForm.chkLoggingClick(nil);
 
     if LForm.ShowModal <> mrOk then
       Exit;
@@ -148,6 +173,9 @@ begin
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
+    LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;
+    LSettings.EnableLogging := LForm.chkLogging.Checked;
+    LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally
