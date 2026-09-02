@@ -1075,6 +1075,46 @@ begin
     FDiagnostics.TryGetValue(LowerCase(APath), ADiags);
 end;
 
+{ WHICH RAD STUDIO IS RUNNING THIS, to the update - "13.0" and "13.1" are one
+  installation directory (Studio\37.0) and one $(BDS), so nothing already in
+  the server log tells them apart. The file version of the host executable
+  does, and the host executable is bds.exe: this code runs inside it, so
+  ParamStr(0) names it without a registry lookup or a ToolsAPI call.
+
+  It exists because of the 2026-09-02 report: an access violation on someone
+  else's machine, same product version, and the first hour went to
+  establishing what was different about the host. The answer belongs in the
+  log the user already sends, not in a round of questions.
+
+  Every failure here returns what it has rather than raising. This decorates
+  a log line - a session must not fail to start because a version resource
+  could not be read. }
+function HostDescription: string;
+var
+  LExe: string;
+  LSize, LHandle: DWORD;
+  LBuf: TBytes;
+  LInfo: PVSFixedFileInfo;
+  LLen: UINT;
+begin
+  LExe := ParamStr(0);
+  Result := ExtractFileName(LExe);
+  LSize := GetFileVersionInfoSize(PChar(LExe), LHandle);
+  if LSize = 0 then
+    Exit;
+  SetLength(LBuf, LSize);
+  if not GetFileVersionInfo(PChar(LExe), LHandle, LSize, LBuf) then
+    Exit;
+  if not VerQueryValue(LBuf, '\', Pointer(LInfo), LLen) then
+    Exit;
+  if (LInfo = nil) or (LLen < SizeOf(TVSFixedFileInfo)) then
+    Exit;
+  Result := Format('%s %d.%d.%d.%d',
+    [Result,
+     HiWord(LInfo.dwFileVersionMS), LoWord(LInfo.dwFileVersionMS),
+     HiWord(LInfo.dwFileVersionLS), LoWord(LInfo.dwFileVersionLS)]);
+end;
+
 function TLspSession.BuildOptions(const AProject: IOTAProject;
   out APlatform, AConfig: string): TLspInitOptions;
 var
@@ -1090,6 +1130,7 @@ begin
   Result.ProjectFile := AProject.FileName;
   Result.Platform := APlatform;
   Result.Config := AConfig;
+  Result.Host := HostDescription;
   // The IDE's own platform id, NOT the normalized one: the registry key and
   // the $(Platform) macro are named after what the IDE calls the platform
   // (Win64x has its own Library key), while APlatform has already been folded

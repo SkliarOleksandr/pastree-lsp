@@ -47,8 +47,15 @@ if not exist "%TESTOUT%" mkdir "%TESTOUT%"
 
 rem -- 1. the server (Win64: a real project's closure needs more than a 32-bit
 rem       address space, the rule every PasTree tool follows) ----------------
+rem       -GD writes a DETAILED map next to the exe, and it is not optional
+rem       tooling. An EAccessViolation reaching a user's pastree-lsp.log says
+rem       only "offset 27F109" - a unit, a routine and a line only come back
+rem       from a map, and only from the map built from the SAME sources, which
+rem       is why it is produced by the ordinary build rather than by a
+rem       reproduction attempt days later. The 2026-09-02 report was diagnosed
+rem       this way and could not have been diagnosed any other way.
 echo === server (Win64) ===
-dcc64 -B -Q ^
+dcc64 -B -Q -GD ^
  -U"%BDS%\lib\win64\release" ^
  -U"..\object-pascal-tree\source" ^
  -I"..\object-pascal-tree\source" ^

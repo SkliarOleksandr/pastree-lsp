@@ -84,6 +84,13 @@ type
     Defines: TArray<string>;
     LogFile: string;          // empty = the server writes no log at all
     /// <summary>
+    /// Which IDE is running us, to the update - sent as "host" and written to
+    /// the server log next to the build banner. The server cannot work this
+    /// out: it is a separate process, and its other client is VS Code, which
+    /// has no IDE at all. Empty is legal and simply logs nothing.
+    /// </summary>
+    Host: string;
+    /// <summary>
     /// Sent as logDetail=false, which suppresses the configuration inventory
     /// (every search path, define, namespace and alias) in the server's log.
     /// A NEGATIVE flag on purpose: Default(TLspInitOptions) must mean "log as
@@ -438,6 +445,8 @@ begin
     LResult.AddPair('config', Config);
   if LogFile <> '' then
     LResult.AddPair('logFile', LogFile);
+  if Host <> '' then
+    LResult.AddPair('host', Host);
   // Only when suppressing: the server's default is True, so sending the
   // default would be noise in a handshake that is read by hand.
   if SuppressLogDetail then

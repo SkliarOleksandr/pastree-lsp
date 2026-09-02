@@ -130,6 +130,17 @@ type
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
     FBuildStart: UInt64;            // for the analysis-done log line
+    // THE IDLE FAULT THAT REPEATS. A permanent failure inside the idle path
+    // fires on every 50ms tick and never clears, so it writes the same line
+    // some fifteen times a second for as long as the session lives - 295
+    // identical lines in the 2026-09-02 report, which is what "the log is
+    // solid errors" meant. The fault is worth one line, not a flood: the
+    // flood buries the configuration record above it, which is where the
+    // cause of a host-specific failure actually lives. First occurrence in
+    // full, repeats counted, the count published when the message changes or
+    // the run ends.
+    FIdleFault: string;
+    FIdleFaultRepeats: Integer;
     // The overlay signature the LAST COMPLETED analysis was built from - the
     // backstop that keeps a scheduled rebuild from running when the inputs
     // came back to what is already analyzed (an edit typed and undone).
@@ -200,6 +211,15 @@ type
     procedure ScheduleAnalysis(const APriorityFile: string);
     procedure FlushPending;
     procedure FinalizeAnalysisIfDone;
+    { The analysis state in one line, for an exception log. An
+      EAccessViolation carries an address and nothing else; which phase the
+      server was in when it faulted is the difference between "the analysis
+      never started" and "an answer walked a broken model", and the two have
+      nothing in common. Cheap and side-effect-free, so both handlers can
+      call it unconditionally. }
+    function StateLine: string;
+    procedure NoteIdleFault(const AMsg: string);
+    procedure FlushIdleFault;
     { Blocks until an up-to-date analysis is available, staying responsive
       to $/cancelRequest for ARequestIdJson. False = that request was
       cancelled while waiting (the caller answers -32800). }
@@ -277,6 +297,9 @@ end;
 
 destructor TLspServer.Destroy;
 begin
+  // FIRST, while logging still works: a run that faulted every tick until the
+  // client vanished has its count nowhere else.
+  FlushIdleFault;
   if FClientHandle <> 0 then
     CloseHandle(FClientHandle);
   FCompletion.Free;
@@ -443,7 +466,7 @@ end;
 
 procedure TLspServer.ApplyInitOptions(AOptions: TJSONValue);
 var
-  LProjectFile, LPlatformStr, LConfigStr, LItem: string;
+  LProjectFile, LPlatformStr, LConfigStr, LItem, LHost: string;
   LArr: TJSONArray;
   LVal: TJSONValue;
   LDProj: TPasDProj;
@@ -453,9 +476,19 @@ begin
   LProjectFile := '';
   LPlatformStr := '';
   LConfigStr := '';
+  LHost := '';
   if AOptions is TJSONObject then
   begin
     LProjectFile := AOptions.GetValue<string>('projectFile', '');
+    // WHICH IDE, to the update. Free-form and unvalidated on purpose: the
+    // server cannot know it (it is a separate process, and the VS Code client
+    // has no IDE at all), so whoever launched us is the only authority and
+    // this is a passthrough to the log. It exists because a fault reported
+    // from another machine starts with "same product, different host" - the
+    // 2026-09-02 report was against RAD Studio 13.1 where the analysis was
+    // developed on 13.0, and the search paths alone say only "37.0", which
+    // both updates share.
+    LHost := AOptions.GetValue<string>('host', '');
     LPlatformStr := AOptions.GetValue<string>('platform', '');
     LConfigStr := AOptions.GetValue<string>('config', '');
     LItem := AOptions.GetValue<string>('logFile', '');
@@ -486,6 +519,11 @@ begin
   // one that does - especially across a rebuild, where "did my fix even get
   // into the exe the IDE is running" is the first question worth asking.
   Log(PasLspVersionBanner);
+  // SECOND line, next to the build that produced the log: the pair "which exe"
+  // and "which IDE ran it" is what a report from someone else's machine has to
+  // answer before anything else is worth reading.
+  if LHost <> '' then
+    Log('host: ' + LHost);
 
   if not ((LPlatformStr = '') or
     TryParsePlatformName(LPlatformStr, FPlatform)) then
@@ -676,6 +714,18 @@ begin
   else
     LPriority := nil;
 
+  // BEFORE the first call into PasTree, and it is not redundant with the
+  // "analysis started" line below. Everything between here and there can
+  // raise - constructing the project builds the source manager, the platform
+  // defines and the seeded System scope - and a failure there used to leave
+  // the log saying only "starting the initial analysis" followed by an
+  // exception per idle tick forever, since FPendingDue is cleared further
+  // down and every tick retries. That is exactly the shape of the 2026-09-02
+  // report, and the hour it cost was spent deciding whether StartAnalysis had
+  // even been reached. This line answers that; the pair of lines brackets the
+  // setup, and only "analysis started" means the session is running.
+  Log(Format('building the analysis session: %d roots, %d paths, %d overlays',
+    [Length(LRoots), Length(FSearchPaths), FDocs.Count]));
   FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
     LRoots, LPriority);
   FSession.SetNamespaces(FNamespaces);
@@ -1302,6 +1352,28 @@ begin
   Result := WaitForSingleObject(FClientHandle, 0) = WAIT_OBJECT_0;
 end;
 
+function TLspServer.StateLine: string;
+var
+  LSession, LProject: string;
+begin
+  if FSession = nil then
+    LSession := 'none'
+  else if FModuleMode then
+    LSession := 'module(' + FModuleFile + ')'
+  else
+    LSession := 'full';
+  // ModelCount only through a non-nil project, and NOTHING ELSE about it:
+  // this runs while unwinding a fault whose cause is unknown, so it must not
+  // become the second place that crashes.
+  if FProject = nil then
+    LProject := 'none'
+  else
+    LProject := Format('%d units', [FProject.ModelCount]);
+  Result := Format('session=%s project=%s docs=%d dirty=%s pending=%s',
+    [LSession, LProject, FDocs.Count, BoolToStr(FDirty, True),
+     BoolToStr(FPendingDue <> 0, True)]);
+end;
+
 procedure TLspServer.Idle;
 begin
   ReportProgress;
@@ -1331,8 +1403,36 @@ begin
     FinalizeAnalysisIfDone;
   except
     on E: Exception do
-      Log('EXCEPTION in idle finalize: ' + E.ClassName + ': ' + E.Message);
+      NoteIdleFault('EXCEPTION in idle finalize: ' + E.ClassName + ': '
+        + E.Message + ' [' + StateLine + ']');
   end;
+end;
+
+{ One line per distinct idle fault - see FIdleFault for why that matters. }
+procedure TLspServer.NoteIdleFault(const AMsg: string);
+begin
+  if AMsg = FIdleFault then
+  begin
+    Inc(FIdleFaultRepeats);
+    Exit;
+  end;
+  FlushIdleFault;
+  FIdleFault := AMsg;
+  FIdleFaultRepeats := 0;
+  Log(AMsg);
+end;
+
+{ The repeat count, written when the fault changes or the run ends. Called
+  from the exit path too, so a session that faulted until the IDE closed still
+  says HOW MANY times - "once" and "every tick for eighteen seconds" are
+  different failures, and without this they would read identically. }
+procedure TLspServer.FlushIdleFault;
+begin
+  if (FIdleFault = '') or (FIdleFaultRepeats = 0) then
+    Exit;
+  Log(Format('  (the line above repeated %d more times)',
+    [FIdleFaultRepeats]));
+  FIdleFaultRepeats := 0;
 end;
 
 function TLspServer.WaitAnalyzed(const APriorityFile,
@@ -3851,8 +3951,12 @@ begin
     except
       on E: Exception do
       begin
+        // The pending idle-fault count first, so the two are not interleaved
+        // out of order - a request fault arriving mid-flood is a different
+        // event from the flood, and the log has to keep them apart.
+        FlushIdleFault;
         Log('EXCEPTION in ' + LMsg.Method + ': ' + E.ClassName + ': ' +
-          E.Message);
+          E.Message + ' [' + StateLine + ']');
         if LMsg.IsRequest then
           Result := BuildError(LMsg.IdJson, LSP_INTERNAL_ERROR,
             E.ClassName + ': ' + E.Message)
