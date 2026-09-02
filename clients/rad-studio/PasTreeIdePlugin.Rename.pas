@@ -118,6 +118,18 @@ procedure InitializeRename;
 /// </summary>
 procedure FinalizeRename;
 
+/// <summary>
+/// Drops the results tab because the project it describes is closing. The
+/// binding and the rest of the feature stay - this is only the tab.
+///
+/// A rename tab outliving its project is worse than a stale search: it says
+/// sites were changed, and closing the project without saving is exactly how
+/// those changes get discarded. What is then left on screen is a list of
+/// edits that no longer exist, with rows that navigate into whatever file
+/// takes those lines in the next project opened.
+/// </summary>
+procedure CloseRenameResults;
+
 implementation
 
 uses
@@ -1035,6 +1047,29 @@ begin
       LMessageServices.RemoveMessageGroup(GMessageGroup);
     except
       // Deliberately silent: this runs while the package is unloading.
+    end;
+  GMessageGroup := nil;
+end;
+
+{ The same removal for a project close, leaving GAlive and the key binding
+  alone - the package lives on and the next rename must work.
+
+  WORSE HERE THAN FOR A SEARCH, which is why it is worth its own note: this
+  tab claims sites were CHANGED. Close the project without saving and every
+  one of those changes is gone, but the tab still stands, still lists them,
+  and its rows still navigate - into whatever file now occupies those lines
+  in the next project opened. A record of edits that were undone is not a
+  stale result, it is a false one. }
+procedure CloseRenameResults;
+var
+  LMessageServices: IOTAMessageServices;
+begin
+  if Assigned(GMessageGroup) and not Application.Terminated and
+     Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    try
+      LMessageServices.RemoveMessageGroup(GMessageGroup);
+    except
+      // Cosmetic cleanup on a path the user did not ask anything of.
     end;
   GMessageGroup := nil;
 end;

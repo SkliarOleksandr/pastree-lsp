@@ -52,6 +52,17 @@ procedure ExecuteFindReferences(const AView: IOTAEditView);
 /// </summary>
 procedure FinalizeFindReferencesMessageGroup;
 
+/// <summary>
+/// Drops the results tab because the project they describe is closing.
+///
+/// Results OUTLIVE THEIR SUBJECT otherwise, and silently: the group is an IDE
+/// panel, not ours, so it survives a project close and is still there when the
+/// next project opens - a list of file/line hits into a project that is no
+/// longer loaded, indistinguishable from a fresh search. Every row is
+/// navigable and every one of them now points somewhere else.
+/// </summary>
+procedure CloseFindReferencesResults;
+
 implementation
 
 uses
@@ -129,6 +140,26 @@ begin
       LMessageServices.RemoveMessageGroup(GMessageGroup);
     except
       // See above. The group is released either way by the line below.
+    end;
+  GMessageGroup := nil;
+end;
+
+{ The same removal, for a project close rather than a package unload - so it
+  does NOT touch GAlive: the package goes on living and the next search must
+  work. GetOrCreateMessageGroup makes the group again when there is something
+  to put in it, which is also why removing beats clearing: an empty "Find
+  References" tab left standing is a tab that says a search found nothing. }
+procedure CloseFindReferencesResults;
+var
+  LMessageServices: IOTAMessageServices;
+begin
+  if Assigned(GMessageGroup) and not Application.Terminated and
+     Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    try
+      LMessageServices.RemoveMessageGroup(GMessageGroup);
+    except
+      // Cosmetic cleanup on a path the user did not ask anything of: a
+      // failure here must not become an error over a closing project.
     end;
   GMessageGroup := nil;
 end;

@@ -436,7 +436,18 @@ begin
   // the line could not name it - and naming which project went away is the
   // entire value of logging a close.
   else if ANotifyCode = ofnBeginProjectGroupClose then
+  begin
     LspProjectClosed;
+    // THE RESULT TABS GO WITH THE PROJECT THEY DESCRIBE. Both are IDE message
+    // groups, so nothing removes them on their own: they sit through the
+    // close and are still on screen when the next project opens, listing
+    // file/line rows into a project that is no longer loaded. The rename tab
+    // is the worse of the two - it claims sites were CHANGED, and closing
+    // without saving is precisely how those changes are thrown away, so what
+    // stands there afterwards is a record of edits that never happened.
+    CloseRenameResults;
+    CloseFindReferencesResults;
+  end;
 end;
 
 procedure TProjectOpenNotifier.BeforeCompile(const AProject: IOTAProject;
