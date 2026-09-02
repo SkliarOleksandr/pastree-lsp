@@ -89,7 +89,18 @@ const
   /// carries a FILE obligation (ARequiredFileName), so a version without it
   /// would not merely lack a feature - the server would have to guess the
   /// file name, which is the one thing it must never do.
-  cMinPasTreeVersion = '0.13.2';
+  /// Raised to 0.15.1 on 2026-09-02, and this one is not about a missing API
+  /// at all - it is the second time the gate has been used the way the
+  /// UTF-8 pin was. Before 0.15.1 PasTree's three FNV hashes inherited the
+  /// compiling project's overflow check, so a server built from the IDE (whose
+  /// stock Debug configuration sets $Q+) raised EIntOverflow inside
+  /// TPasSemaProject.Create, and the half-built object's destructor faulted on
+  /// top of it and hid the cause. The symptom is an EAccessViolation before
+  /// the first analysis and every request failing afterwards - total, silent
+  /// about its origin, and indistinguishable from a resolver defect. It cost
+  /// two rounds of diagnosis, so an older sibling checkout has to fail here
+  /// rather than at the user's first Ctrl+Click.
+  cMinPasTreeVersion = '0.15.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
