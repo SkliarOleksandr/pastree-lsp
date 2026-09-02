@@ -81,6 +81,19 @@ type
     Platform: string;         // "Win64", "Win32", ... - a RAD Studio id
     Config: string;           // build configuration name, .dproj only
     SearchPaths: TArray<string>;
+    /// <summary>
+    /// The subset of SearchPaths that is somebody else's source - the IDE's
+    /// own Library/Browsing paths, which is RTL, VCL, ToolsAPI and every
+    /// third-party library registered with the IDE. Sent as "libraryPaths".
+    ///
+    /// A SEPARATE FIELD RATHER THAN A FLAG ON EACH PATH, because the server
+    /// receives the project's own directories from the .dproj and these from
+    /// here, and by the time both are merged into one analysis search path
+    /// nothing distinguishes them. Rename refuses to rewrite any file under
+    /// one of these; leaving it empty does not fail, it just stops that
+    /// refusal from happening.
+    /// </summary>
+    LibraryPaths: TArray<string>;
     Defines: TArray<string>;
     LogFile: string;          // empty = the server writes no log at all
     /// <summary>
@@ -454,6 +467,7 @@ begin
   // Real JSON arrays: the server logs a warning and ignores any other shape,
   // which already cost this project a debugging round once.
   AddStrings('searchPaths', SearchPaths);
+  AddStrings('libraryPaths', LibraryPaths);
   AddStrings('defines', Defines);
   Result := LResult;
 end;

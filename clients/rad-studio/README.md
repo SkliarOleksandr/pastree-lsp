@@ -135,16 +135,24 @@ the other half is rewritten to match, in its own undo step.
 
 Ctrl+Shift+E, or "Rename..." in the editor's right-click menu. A dialog
 prefilled with the identifier under the caret, then the server plans every
-site and the plugin applies it - one undo step per file.
+site and the plugin applies it through the editor - one undo step per file.
 
+- **Nothing is ever written to disk.** Every file a rename touches is opened
+  in the editor and changed through its buffer, so the change is an ordinary
+  IDE undo step: Ctrl+Z in a tab undoes it, and closing the tabs without
+  saving throws the whole rename away. The cost is the tabs themselves - a
+  rename with a dozen references opens a dozen of them, all unsaved, so the
+  IDE asks about each at the next close. The results tab says how many were
+  opened.
 - **Nothing is written unless everything can be.** Every site is checked
-  first - against the live buffer for a file you have open, against the text
-  on disk for one you do not; if any has moved since the analysis the whole
-  rename is refused, naming the file and line, with nothing changed.
-- **Files you do not have open are not opened.** They are rewritten on disk,
-  in the encoding they were stored in. That keeps a rename of something with
-  a dozen references from burying you in a dozen new editor tabs - the cost
-  is that those files have no undo step, which the results tab says.
+  against the buffer that is about to be rewritten; if any has moved since
+  the analysis the whole rename is refused, naming the file and line, with
+  nothing changed. Files opened for a refused rename stay open with their
+  buffers untouched.
+- **RTL, VCL and third-party sources are refused.** Anything under one of the
+  IDE's own Library or Browsing paths is not yours to rewrite, and neither is
+  a read-only file; one such file among the references refuses the whole
+  rename rather than applying it in part.
 - **Results go to a "PasTree Rename" tab** shaped like Find References -
   grouped by file, navigable, the declaration labelled - where every line is
   the source AS IT NOW READS. A rename you cannot see is a rename you cannot

@@ -52,23 +52,35 @@ unit PasTreeIdePlugin.Rename;
   extend LooksLikeName into keyword knowledge - a copy of that list
   here would be a second answer able to disagree with the first.
 
-  APPLYING IS TWO PASSES OVER THE WHOLE PLAN, NOT PER FILE. Pass one takes
-  hold of every touched file - the buffer if it is open, the text on disk if
-  it is not - and checks that each site still reads the old name; pass two
-  writes. A single mismatch aborts everything before anything has been
+  NOTHING IS EVER WRITTEN TO DISK. Every file the plan touches is OPENED in
+  the editor and changed through its buffer, which is the whole point: a
+  buffer edit is an IDE undo step and a disk write is not. The user keeps
+  Ctrl+Z over a rename, sees every change before deciding to keep it, and can
+  close the lot without saving to reject it - which is the only "undo" a
+  fourteen-site rename across five files can honestly offer.
+
+  The price is paid up front and is not hidden: a rename with a dozen
+  references opens a dozen tabs, and every one of them is a MODIFIED buffer,
+  so the IDE asks about each at the next close. That was tried and withdrawn
+  once for exactly those reasons (2026-08-31), and is now chosen for a reason
+  that outranks them - the alternative was files rewritten under the user
+  with no way back. Nothing here should quietly reintroduce a disk path to
+  keep the tab count down; the tabs ARE the feature.
+
+  APPLYING IS TWO PASSES OVER THE WHOLE PLAN, NOT PER FILE. Pass one opens
+  every touched file and checks that each site still reads the old name; pass
+  two writes. A single mismatch aborts everything before anything has been
   written, because a half-applied rename across five files is far worse than
   one that did not happen - and it is a real case, not a theoretical one: the
   plan describes the sources as the server last saw them, and the user may
-  have typed since.
+  have typed since. Opening in pass one and writing in pass two also means an
+  aborted rename leaves tabs open but every buffer untouched.
 
-  A FILE NOBODY HAS OPEN IS NOT OPENED. It is rewritten on disk instead. The
-  first live run opened one editor tab per touched file - a dozen tabs the
-  user never asked for, every one of them a modified buffer, so the IDE then
-  asked what to do with each at the next close, which read as "something told
-  it to close everything" (2026-08-31). The cost is real and is stated where
-  it belongs, in the results tab: those files have no undo step. The server
-  is told about them too - a disk write is invisible to the analysis
-  otherwise (LspFilesChangedOnDisk).
+  THE SERVER IS NOT TOLD ANYTHING SPECIAL any more. It used to be told which
+  files had been rewritten on disk, because a disk write is invisible to the
+  analysis; a buffer edit is not - opening a file makes it a document the
+  session syncs, and the edit reaches the server as an ordinary didChange
+  like any typing would.
 
   Within a file the edits are applied ASCENDING through one undoable writer -
   the same rule (and the same reason) as PasTreeIdePlugin.ClassComplete: a
@@ -113,7 +125,10 @@ uses
   System.Generics.Collections,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
   System.IOUtils,
-  ToolsAPI.UI, PasLsp.SourceText,
+  // PasLsp.SourceText is gone with the disk path that needed it: reading a
+  // file and writing it back in its own encoding was the whole reason this
+  // unit ever touched a file directly. It does not any more.
+  ToolsAPI.UI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.WaitDialog;
 
@@ -240,8 +255,7 @@ end;
   snippet) span exactly it. See PasTreeIdePlugin.FindReferences for why the
   removal below is conditional on the IDE not terminating - it is the same
   group mechanism and the same 2026-08-22 access violation. }
-procedure ReportRename(const APlan: TLspRenamePlan;
-  const ADiskFiles: TArray<string>);
+procedure ReportRename(const APlan: TLspRenamePlan; AOpenedCount: Integer);
 var
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
@@ -265,15 +279,18 @@ begin
   LMessageServices.AddCustomMessagePtr(
     NewTitleRow(LTitleHead + LTitleCount + ' site(s) changed',
       Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
-  { The one thing about this rename the editor cannot show: files nobody had
-    open were rewritten ON DISK, and those changes have no undo step. Said
-    here rather than in a dialog because it is a fact about the result, and
-    this tab IS the result. Deliberately a plain IDE-drawn title message:
-    a warning styled like the decor around it stops being one. }
-  if Length(ADiskFiles) > 0 then
+  { The one thing about this rename the editor cannot show on its own: tabs
+    appeared that the user did not open. Saying so is not an apology for the
+    clutter, it is the instruction for undoing the rename - every one of them
+    is an unsaved buffer, so Ctrl+Z works in each and closing without saving
+    throws the whole change away. A user who does not know they are there
+    cannot use either. Said here rather than in a dialog because it is a fact
+    about the result, and this tab IS the result. }
+  if AOpenedCount > 0 then
     LMessageServices.AddTitleMessage(
-      Format('%d file(s) were not open and were changed on disk - no undo ' +
-        'step for those.', [Length(ADiskFiles)]), LGroup);
+      Format('%d file(s) were opened to make this change - nothing was ' +
+        'saved, so Ctrl+Z in a tab undoes it and closing without saving ' +
+        'discards it.', [AOpenedCount]), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
@@ -311,34 +328,21 @@ begin
 end;
 
 /// <summary>
-{ One touched FILE, and how it is going to be written.
+{ One touched FILE. ONE KIND, and that is the design: every file a rename
+  touches is open in the editor by the time anything is written to it, so
+  Editor is never nil past CollectFiles.
 
-  TWO KINDS, AND THE DISTINCTION IS THE WHOLE REASON THIS RECORD EXISTS. A
-  file somebody has open is edited through its buffer, so the change is
-  undoable and the editor shows it immediately. A file nobody has open is
-  edited ON DISK - and, crucially, is NOT OPENED to do it.
-
-  Opening it would be easier and it is what this did first (2026-08-31): a
-  rename of anything with a dozen references buried the user in a dozen new
-  editor tabs they never asked for, which is how the first live run reported
-  it. Worse than the clutter, every one of those tabs is a MODIFIED buffer -
-  so the IDE then asks what to do with each of them at the next close, which
-  is the "it wants to save everything" symptom from the same run.
-
-  The cost of the disk half is honest and stated to the user: those files
-  have no undo step. Everything else about the rename stays the same, checks
-  included - a site is verified against the text that will be rewritten,
-  whichever kind it is. }
+  This record used to carry a second kind - a file nobody had open, patched
+  on disk with its text and encoding held here. That is gone with the disk
+  path itself (see the unit header): a disk write has no undo step, and a
+  rename the user cannot take back is the one thing this feature must not
+  be. The encoding field went with it, because reading and rewriting a file
+  is exactly what no longer happens - the buffer is the IDE's problem now,
+  and it is better at it than we were. }
 type
   TRenameFile = record
     Path: string;
-    // nil for a file nobody has open - see above.
     Editor: IOTASourceEditor;
-    // Only for the disk kind: the text as read, and the encoding to put it
-    // back in (a .pas is UTF-8-with-BOM, bare UTF-8 or ANSI, and rewriting
-    // it as a different one of those moves every non-ASCII column in it).
-    Text: string;
-    Encoding: TPasSourceEncoding;
   end;
 
   TRenameFiles = TDictionary<string, TRenameFile>;
@@ -367,15 +371,17 @@ begin
   end;
 end;
 
-{ The editor holding AFileName, or nil if nobody has it open. Deliberately
-  never OPENS one - see TRenameFile.
+{ The ALREADY-OPEN module for APath, spelling-tolerantly. Never opens one -
+  that is EnsureOpenEditorOf's job, and keeping the two apart is what lets
+  CollectFiles log "already open" and "opened for this rename" as the
+  different events they are.
 
   FindModule FIRST, then the module list by hand: FindModule matches on the
   name it is given, and "the same file, spelled differently" is a case it
-  answers nil to (see SameFile). Getting that wrong is not a missed
-  optimisation - it silently turns an open file into a disk write. }
-{ The open module for APath, spelling-tolerantly - the half of OpenEditorOf
-  the file rename needs on its own. }
+  answers nil to (see SameFile). Getting that wrong used to silently turn an
+  open file into a disk write; today it merely re-opens something already
+  open, which the IDE tolerates - but the log would then lie about what
+  happened, so the care is still worth its keep. }
 function ModuleOf(const APath: string): IOTAModule;
 var
   LModuleServices: IOTAModuleServices;
@@ -415,50 +421,77 @@ begin
   Result := nil;
 end;
 
-{ The 1-based character offset of (ARow, ACol) in AText, or 0 when the text is
-  too short for it.
+{ The editor for AFileName, OPENING the file if nobody has it open. AOpened
+  says which of the two happened - the caller logs it, and only a file this
+  rename opened is one the user did not choose to have on screen.
 
-  Line ends are counted as they are FOUND rather than assumed: a file may hold
-  CRLF, LF or a mixture, and a rename that guessed two characters where there
-  was one would land its edit somewhere else entirely. }
-function OffsetOf(const AText: string; ARow, ACol: Integer): Integer;
+  OpenModule rather than IOTAActionServices.OpenFile: it hands back the module
+  it opened, so the editor comes from the same object instead of a second
+  lookup that could answer about something else. Either way the IDE gives the
+  file a tab, which is the intent - see the unit header.
+
+  nil, not an exception, when the file cannot be opened at all: the caller
+  turns that into a refusal of the WHOLE rename, because a plan that cannot
+  reach one of its files must not apply the rest. }
+function EnsureOpenEditorOf(const AFileName: string;
+  out AOpened: Boolean): IOTASourceEditor;
 var
-  LIdx, LRow: Integer;
+  LModuleServices: IOTAModuleServices;
+  LModule: IOTAModule;
+  LIdx: Integer;
 begin
-  Result := 0;
-  if (ARow < 1) or (ACol < 1) then
+  AOpened := False;
+  Result := OpenEditorOf(AFileName);
+  if Assigned(Result) then
     Exit;
-  LIdx := 1;
-  LRow := 1;
-  while (LRow < ARow) and (LIdx <= Length(AText)) do
-  begin
-    if AText[LIdx] = #13 then
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+    Exit;
+  try
+    LModule := LModuleServices.OpenModule(AFileName);
+  except
+    // A file the IDE will not open - gone, locked, or not something it has a
+    // module for. Refused by the caller with the file named; an exception
+    // escaping here would abort the rename with no explanation instead.
+    on E: Exception do
     begin
-      Inc(LRow);
-      if (LIdx < Length(AText)) and (AText[LIdx + 1] = #10) then
-        Inc(LIdx);
-    end
-    else if AText[LIdx] = #10 then
-      Inc(LRow);
-    Inc(LIdx);
+      TraceFmt('  %s: OpenModule raised %s: %s',
+        [ExtractFileName(AFileName), E.ClassName, E.Message]);
+      Exit(nil);
+    end;
   end;
-  if LRow <> ARow then
-    Exit;
-  Result := LIdx + ACol - 1;
+  if not Assigned(LModule) then
+    Exit(nil);
+  AOpened := True;
+  for LIdx := 0 to LModule.GetModuleFileCount - 1 do
+    if Supports(LModule.GetModuleFileEditor(LIdx), IOTASourceEditor,
+      Result) then
+      Exit;
+  Result := nil;
 end;
 
-{ Every file the plan touches, each one told apart into the two kinds. False
-  (with AError set) only for a file that can be neither: not open AND not
-  readable, which aborts the whole rename rather than skipping a site. }
+{ Every file the plan touches, OPENED. AOpenedCount comes back with how many
+  of them this rename had to open, which is what the results tab tells the
+  user about afterwards.
+
+  False (with AError set) for any file that cannot be opened, and that
+  refuses the WHOLE rename rather than skipping a site - the same
+  all-or-nothing rule every other check here follows.
+
+  ALL THE OPENING HAPPENS HERE, before a single edit is written. An abort
+  after this point would leave tabs open, but every buffer untouched, which
+  is a state the user can simply close; opening as we write would leave a
+  half-renamed set of files instead. }
 function CollectFiles(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
-  out AError: string): Boolean;
+  out AOpenedCount: Integer; out AError: string): Boolean;
 var
   LEdit: TLspRenameEdit;
   LFile: TRenameFile;
   LKey: string;
+  LOpened: Boolean;
 begin
   Result := False;
   AError := '';
+  AOpenedCount := 0;
   for LEdit in APlan.Edits do
   begin
     LKey := LowerCase(LEdit.FilePath);
@@ -466,34 +499,32 @@ begin
       Continue;
     LFile := Default(TRenameFile);
     LFile.Path := LEdit.FilePath;
-    LFile.Editor := OpenEditorOf(LEdit.FilePath);
-    if Assigned(LFile.Editor) then
-      TraceFmt('  %s: open in the editor (modified=%s)',
-        [ExtractFileName(LEdit.FilePath),
-         BoolToStr(LFile.Editor.Modified, True)])
-    else
-      if not TryReadSourceForEdit(LEdit.FilePath, LFile.Text,
-        LFile.Encoding) then
-      begin
-        TraceFmt('  %s: NOT open and NOT readable - refusing',
-          [ExtractFileName(LEdit.FilePath)]);
-        AError := Format('%s is not open and could not be read.'#13#10#13#10 +
-          'Nothing was renamed.', [LEdit.FilePath]);
-        Exit;
-      end
-      else
-        TraceFmt('  %s: not open, will be patched on disk (encoding=%d)',
-          [ExtractFileName(LEdit.FilePath), Ord(LFile.Encoding)]);
+    LFile.Editor := EnsureOpenEditorOf(LEdit.FilePath, {out} LOpened);
+    if not Assigned(LFile.Editor) then
+    begin
+      TraceFmt('  %s: could not be opened - refusing',
+        [ExtractFileName(LEdit.FilePath)]);
+      AError := Format('%s could not be opened in the editor.'#13#10#13#10 +
+        'Nothing was renamed.', [LEdit.FilePath]);
+      Exit;
+    end;
+    if LOpened then
+      Inc(AOpenedCount);
+    TraceFmt('  %s: %s (modified=%s)',
+      [ExtractFileName(LEdit.FilePath),
+       IfThen(LOpened, 'opened for this rename', 'already open'),
+       BoolToStr(LFile.Editor.Modified, True)]);
     AFiles.Add(LKey, LFile);
   end;
   Result := True;
 end;
 
-{ Pass one of two: every site is checked against the text that is about to be
-  rewritten - the live buffer for an open file, the text just read for a
-  closed one. The plan's coordinates describe what the server last saw, and
-  the user may have typed since; a mismatch refuses the WHOLE rename, naming
-  the file and line, rather than writing over whatever now sits there.
+{ Pass one of two: every site is checked against the live buffer that is about
+  to be rewritten - one source now that every file is open, where this used to
+  read a closed file's text instead. The plan's coordinates describe what the
+  server last saw, and the user may have typed since; a mismatch refuses the
+  WHOLE rename, naming the file and line, rather than writing over whatever
+  now sits there.
 
   Per EDIT rather than per rename, deliberately: a peer routine header's own
   parameter is a separate symbol and could, in already-broken code, be spelled
@@ -515,38 +546,29 @@ begin
     if not AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) then
       Exit;   // CollectFiles succeeded, so this cannot happen
     LFound := '';
-    if Assigned(LFile.Editor) then
+    if LFile.Editor.GetEditViewCount = 0 then
     begin
-      if LFile.Editor.GetEditViewCount = 0 then
-      begin
-        AError := Format('%s is open but has no view.',
-          [ExtractFileName(LEdit.FilePath)]);
-        Exit;
-      end;
-      LView := LFile.Editor.GetEditView(0);
-      LPos := LView.Buffer.EditPosition;
-      if not Assigned(LPos) then
-      begin
-        AError := Format('%s has no editable buffer.',
-          [ExtractFileName(LEdit.FilePath)]);
-        Exit;
-      end;
-      // The caret is a side effect of reading; put it back, or a cancelled
-      // rename would still have moved the user's cursor.
-      LRow := LPos.Row;
-      LCol := LPos.Column;
-      try
-        LPos.Move(LEdit.Row, LEdit.Col);
-        LFound := LPos.Read(LEdit.Len);
-      finally
-        LPos.Move(LRow, LCol);
-      end;
-    end
-    else
+      AError := Format('%s is open but has no view.',
+        [ExtractFileName(LEdit.FilePath)]);
+      Exit;
+    end;
+    LView := LFile.Editor.GetEditView(0);
+    LPos := LView.Buffer.EditPosition;
+    if not Assigned(LPos) then
     begin
-      LOffset := OffsetOf(LFile.Text, LEdit.Row, LEdit.Col);
-      if LOffset > 0 then
-        LFound := Copy(LFile.Text, LOffset, LEdit.Len);
+      AError := Format('%s has no editable buffer.',
+        [ExtractFileName(LEdit.FilePath)]);
+      Exit;
+    end;
+    // The caret is a side effect of reading; put it back, or a cancelled
+    // rename would still have moved the user's cursor.
+    LRow := LPos.Row;
+    LCol := LPos.Column;
+    try
+      LPos.Move(LEdit.Row, LEdit.Col);
+      LFound := LPos.Read(LEdit.Len);
+    finally
+      LPos.Move(LRow, LCol);
     end;
     if not SameText(LFound, LEdit.OldText) then
     begin
@@ -607,53 +629,26 @@ begin
   LView.Paint;
 end;
 
-{ Pass two, the disk half: the same edits into the text already in hand,
-  walked BACKWARDS so an earlier replacement cannot move a later one's offset,
-  then written back in the encoding the file came in.
+{ Open every touched file, verify EVERYTHING, then write - the two passes the
+  unit header describes.
 
-  The opposite direction from the buffer half, and both are right: a writer
-  streams forward through the original text, while string surgery mutates what
-  the next offset is measured against. }
-function WriteDisk(var AFile: TRenameFile; const APlan: TLspRenamePlan;
-  AFrom, ATo: Integer): Boolean;
-var
-  LIdx, LOffset: Integer;
-begin
-  for LIdx := ATo downto AFrom do
-  begin
-    LOffset := OffsetOf(AFile.Text, APlan.Edits[LIdx].Row,
-      APlan.Edits[LIdx].Col);
-    if LOffset <= 0 then
-      Exit(False);   // verified above, so this is a bug rather than a race
-    Delete(AFile.Text, LOffset, APlan.Edits[LIdx].Len);
-    Insert(APlan.Edits[LIdx].NewText, AFile.Text, LOffset);
-  end;
-  Result := TryWriteSource(AFile.Path, AFile.Text, AFile.Encoding);
-end;
-
-{ Open everything that is already open, read the rest, verify EVERYTHING, then
-  write - the two passes the unit header describes.
-
-  ADiskFiles comes back holding every file that was changed on disk rather
-  than in a buffer: the caller owes those two things the buffer half gets for
-  free - telling the server they moved, and telling the USER they have no undo
-  step. }
+  AOpenedCount comes back with how many files this rename had to open, which
+  the caller passes on to the user: those tabs are the undo the feature is
+  built around, and a user who does not know they appeared cannot use them. }
 function ApplyPlan(const APlan: TLspRenamePlan;
-  out ADiskFiles: TArray<string>): Boolean;
+  out AOpenedCount: Integer): Boolean;
 var
   LFiles: TRenameFiles;
   LFile: TRenameFile;
   LError: string;
   LIdx, LRun: Integer;
-  LDisk: TList<string>;
 begin
   Result := False;
-  ADiskFiles := nil;
+  AOpenedCount := 0;
   LFiles := TRenameFiles.Create;
-  LDisk := TList<string>.Create;
   try
-    TraceFmt('applying %d edit(s) - collecting files', [Length(APlan.Edits)]);
-    if not CollectFiles(APlan, LFiles, {out} LError) then
+    TraceFmt('applying %d edit(s) - opening files', [Length(APlan.Edits)]);
+    if not CollectFiles(APlan, LFiles, {out} AOpenedCount, {out} LError) then
     begin
       TellUser(LError, mtError);
       Exit;
@@ -677,32 +672,14 @@ begin
         Inc(LRun);
       if LFiles.TryGetValue(LowerCase(APlan.Edits[LIdx].FilePath), LFile) then
       begin
-        if Assigned(LFile.Editor) then
-        begin
-          WriteBuffer(LFile.Editor, APlan, LIdx, LRun);
-          TraceFmt('  %s: %d edit(s) written to the buffer',
-            [ExtractFileName(LFile.Path), LRun - LIdx + 1]);
-        end
-        else if WriteDisk(LFile, APlan, LIdx, LRun) then
-        begin
-          LDisk.Add(LFile.Path);
-          TraceFmt('  %s: %d edit(s) written to disk',
-            [ExtractFileName(LFile.Path), LRun - LIdx + 1]);
-        end
-        else
-          // One file of several failed to write. Said out loud rather than
-          // silently: the rename is now partial, and only the user can decide
-          // what to do about it.
-          TellUser(Format('%s could not be written - it may be read-only. ' +
-            'The rename is INCOMPLETE: everything else was changed.',
-            [LFile.Path]), mtError);
+        WriteBuffer(LFile.Editor, APlan, LIdx, LRun);
+        TraceFmt('  %s: %d edit(s) written to the buffer',
+          [ExtractFileName(LFile.Path), LRun - LIdx + 1]);
       end;
       LIdx := LRun + 1;
     end;
-    ADiskFiles := LDisk.ToArray;
     Result := True;
   finally
-    LDisk.Free;
     LFiles.Free;
   end;
 end;
@@ -756,7 +733,7 @@ begin
     procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
       const AError: string)
     var
-      LDiskFiles: TArray<string>;
+      LOpenedCount: Integer;
     begin
       // Before anything else, the GAlive check included: the wait dialog
       // disables input, and every path below (TellUser, ApplyPlan's own
@@ -810,24 +787,23 @@ begin
         end;
         TraceFmt('plan: old=%s new=%s edits=%d',
           [APlan.OldName, APlan.NewName, Length(APlan.Edits)]);
-        if not ApplyPlan(APlan, {out} LDiskFiles) then
+        if not ApplyPlan(APlan, {out} LOpenedCount) then
         begin
           Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
         end;
-        ReportRename(APlan, LDiskFiles);
+        ReportRename(APlan, LOpenedCount);
         LogDiagnostic(Format('rename: %s -> %s, %d site(s)%s',
           [APlan.OldName, APlan.NewName, Length(APlan.Edits),
-           IfThen(Length(LDiskFiles) > 0,
-             Format(', %d on disk', [Length(LDiskFiles)]), '')]));
-        if Length(LDiskFiles) > 0 then
-        begin
-          // A file written on disk is invisible to the analysis until it is
-          // told - no editor event ever happens for one.
-          TraceFmt('done - telling the server about %d disk file(s)',
-            [Length(LDiskFiles)]);
-          LspFilesChangedOnDisk(LDiskFiles);
-        end;
+           IfThen(LOpenedCount > 0,
+             Format(', %d file(s) opened', [LOpenedCount]), '')]));
+        // The buffers the IDE now holds are ahead of what the server was
+        // given, and nothing else here would say so until the user's next
+        // navigation happened to sync. Pushed immediately so the analysis
+        // describes the renamed code from this moment, not from whenever
+        // somebody next clicks something.
+        Trace('done - syncing the changed buffers to the server');
+        LspSyncDocuments;
       except
         on E: Exception do
           LogDiagnostic(Format('Rename: unhandled %s: %s',

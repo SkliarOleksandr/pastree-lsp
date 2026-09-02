@@ -541,16 +541,16 @@ procedure LspProjectOpened;
 procedure LspProjectClosed;
 
 /// <summary>
-/// Tells the server that these files changed ON DISK, outside any editor -
-/// which is exactly what a rename does to a unit nobody has open. Sent as
-/// workspace/didChangeWatchedFiles, whose whole purpose is this: the client
-/// says what moved, the server decides whether a rebuild is due (a file it
-/// holds an overlay for is left alone; anything else schedules one).
+/// Pushes the current editor buffers to the server now, instead of waiting for
+/// the next request to do it on the way past.
 ///
-/// Without it a disk edit is INVISIBLE to the analysis - every later answer
-/// about that file describes text that is no longer there.
+/// Every feature here syncs before it asks a question, so this exists for the
+/// one thing that CHANGES buffers rather than reading them: after a rename the
+/// server's picture is stale and nothing would correct it until the user
+/// happened to navigate. Harmless to call at any time - the sync sends only
+/// what actually moved.
 /// </summary>
-procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
+procedure LspSyncDocuments;
 
 
 /// <summary>
@@ -657,7 +657,7 @@ type
     procedure Prewarm;
     procedure ProjectOpened;
     procedure ProjectClosed;
-    procedure FilesChangedOnDisk(const APaths: TArray<string>);
+    procedure SyncDocuments;
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
@@ -1136,6 +1136,13 @@ begin
   // (Win64x has its own Library key), while APlatform has already been folded
   // onto the nearest name PasTree can parse.
   Result.SearchPaths := GetIDELibraryPaths(AProject.CurrentPlatform, APlatform);
+  // THE SAME LIST, sent again under its other meaning, and that is not
+  // redundancy. As searchPaths it says "look here to resolve a unit"; as
+  // libraryPaths it says "these files are not the user's to rewrite". The
+  // project's own directories reach the server from the .dproj instead and
+  // are deliberately absent here - they are exactly the files a rename is
+  // FOR. Keeping the two in step is the point of assigning them together.
+  Result.LibraryPaths := Result.SearchPaths;
   // NEXT TO THE PROJECT, under a fixed name - not %TEMP%. The log only earns
   // its keep if it is where someone looks: the same folder as the .dproj being
   // analyzed, so "which project was this" needs no timestamp archaeology, and
@@ -2288,6 +2295,11 @@ begin
   FPendingWorkspace := LIssuedId;
 end;
 
+procedure TLspSession.SyncDocuments;
+begin
+  FDocs.Sync;
+end;
+
 procedure TLspSession.Prewarm;
 var
   LProject: IOTAProject;
@@ -2355,34 +2367,6 @@ end;
 { The server is deliberately LEFT RUNNING - see LspProjectClosed. This only
   records the boundary, on both sides, while there is still a project to
   name. }
-{ A notification, so there is nothing to wait for and nothing to fail: if the
-  server is not up, the files will be read from disk by the analysis that
-  starts it anyway. FileChangeType 2 is `Changed`, which is what a rewritten
-  file is - even a renamed one, from the point of view of the two paths
-  involved (the old one is gone, the new one is new, and both are covered by
-  reporting them as changed; the server re-reads either way). }
-procedure TLspSession.FilesChangedOnDisk(const APaths: TArray<string>);
-var
-  LParams: TJSONObject;
-  LChanges: TJSONArray;
-  LChange: TJSONObject;
-  LPath: string;
-begin
-  if not Assigned(FClient) or not FClient.IsReady or (Length(APaths) = 0) then
-    Exit;
-  LChanges := TJSONArray.Create;
-  for LPath in APaths do
-  begin
-    LChange := TJSONObject.Create;
-    LChange.AddPair('uri', PathToLspUri(LPath));
-    LChange.AddPair('type', TJSONNumber.Create(2));
-    LChanges.AddElement(LChange);
-  end;
-  LParams := TJSONObject.Create;
-  LParams.AddPair('changes', LChanges);
-  FClient.Notify('workspace/didChangeWatchedFiles', LParams);
-end;
-
 
 procedure TLspSession.ProjectClosed;
 begin
@@ -2465,16 +2449,19 @@ begin
     GSession.ProjectOpened;
 end;
 
+procedure LspSyncDocuments;
+begin
+  // No session means nothing has been told anything yet, and the didOpen
+  // catch-up on the next handshake will describe the buffers as they are by
+  // then - so there is nothing to do and nothing to report.
+  if Assigned(GSession) then
+    GSession.SyncDocuments;
+end;
+
 procedure LspProjectClosed;
 begin
   if Assigned(GSession) then
     GSession.ProjectClosed;
-end;
-
-procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
-begin
-  if Assigned(GSession) then
-    GSession.FilesChangedOnDisk(APaths);
 end;
 
 

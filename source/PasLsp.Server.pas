@@ -19,6 +19,13 @@ unit PasLsp.Server;
     "platform"    - e.g. "Win64", overrides the project's own
     "config"      - build configuration name, .dproj only
     "searchPaths", "defines" - string arrays, appended after the project's
+    "libraryPaths" - the INSTALLED library trees (RTL/VCL, third-party), as
+                  a string array. Not a search path and not appended to one:
+                  rename refuses to rewrite any file under one of these, and
+                  the server has no way to work out which of its search paths
+                  they are. Absent = no such refusal
+    "host"        - free text naming the client and its version, logged next
+                  to the build banner; the server cannot know it
     "logFile", "logUnits" - where the log goes, and whether it inventories
                   every unit of the closure
     "logDetail"   - False drops the configuration inventory (every search
@@ -111,6 +118,17 @@ type
     FDefines: TArray<string>;
     FNamespaces: TArray<string>;
     FAliases: TArray<TPasUnitAlias>;
+    // THE INSTALLED LIBRARY TREES, and only those: RTL/VCL/ToolsAPI and the
+    // third-party sources the IDE knows about, never the project's own
+    // directories. A rename may not rewrite a file under one of them, which
+    // is a question only the CLIENT can answer - FSearchPaths above is the
+    // two kinds already merged into one flat list, and by the time the server
+    // sees it there is nothing left to tell them apart by. So this arrives
+    // separately, as its own initializationOption, and PasTree refuses the
+    // rename with the file named (TPasNavigator.LibraryPaths). Empty means no
+    // file-level refusal at all, which is the right default for a client that
+    // says nothing: the symbol-level gates still stand.
+    FLibraryPaths: TArray<string>;
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
     // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
@@ -217,6 +235,12 @@ type
       never started" and "an answer walked a broken model", and the two have
       nothing in common. Cheap and side-effect-free, so both handlers can
       call it unconditionally. }
+    { THE ONLY PLACE A NAVIGATOR IS CONSTRUCTED, so the configuration that has
+      to ride along with it cannot be forgotten at one of the three sites that
+      used to do this by hand. Today that is LibraryPaths, whose absence is
+      SILENT in the worst way: rename simply stops refusing RTL/VCL sources
+      and rewrites somebody else's files instead. }
+    function NewNavigator: TPasNavigator;
     function StateLine: string;
     procedure NoteIdleFault(const AMsg: string);
     procedure FlushIdleFault;
@@ -606,10 +630,30 @@ begin
     else if TJSONObject(AOptions).GetValue('defines') <> nil then
       Tell(2, 'PasTree: the defines setting is not a list of strings'
         + ' - ignored', True);
+    // NOT appended to searchPaths, and not derived from them: this is the
+    // same question asked of a different list - "which of these directories
+    // hold sources the user does not own". See FLibraryPaths.
+    if AOptions.TryGetValue<TJSONArray>('libraryPaths', LArr) then
+    begin
+      for LVal in LArr do
+        if LVal.TryGetValue<string>(LItem) then
+          FLibraryPaths := FLibraryPaths + [LItem];
+    end
+    else if TJSONObject(AOptions).GetValue('libraryPaths') <> nil then
+      Tell(2, 'PasTree: the libraryPaths setting is not a list of strings'
+        + ' - ignored, so rename will not refuse library sources', True);
   end;
-  Log(Format('configured: platform=%s main=%s paths=%d defines=%d',
+  Log(Format('configured: platform=%s main=%s paths=%d defines=%d'
+    + ' libraryPaths=%d',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
-     Length(FDefines)]));
+     Length(FDefines), Length(FLibraryPaths)]));
+  // A ZERO HERE IS A REAL CONDITION, not a quiet default, so it says so on
+  // the summary line rather than only in the detail block: with no library
+  // trees declared, a rename that reaches into the RTL is planned and applied
+  // instead of refused, and nothing else in the log would hint at why.
+  if Length(FLibraryPaths) = 0 then
+    Log('  no libraryPaths declared - rename will not refuse RTL/VCL or'
+      + ' third-party sources on the grounds of where they live');
   // THE PATHS THEMSELVES, not just how many. A count tells you nothing about
   // the failure this actually has: a plausible-looking number of paths that
   // happen to be the wrong directories (the IDE plugin sent three that did not
@@ -623,6 +667,12 @@ begin
   var LLines: TArray<string> := nil;
   for LItem in FSearchPaths do
     LLines := LLines + ['  path ' + LItem];
+  // Listed separately from `path`, even though every entry here is normally
+  // also a search path: the question "why did rename refuse this file" is
+  // answered by THIS list and no other, and finding it by eye inside a
+  // hundred-and-forty-line path block is not answering it.
+  for LItem in FLibraryPaths do
+    LLines := LLines + ['  library path ' + LItem];
   for LItem in FDefines do
     LLines := LLines + ['  define ' + LItem];
   for LItem in FNamespaces do
@@ -664,7 +714,7 @@ begin
       FProject := FSession.TakeProject;
       if FProject <> nil then
       begin
-        FNav := TPasNavigator.Create(FProject);
+        FNav := NewNavigator;
         if FSession.ModuleAccepted then
         begin
           // The run committed: the project now IS the inputs that session
@@ -902,7 +952,7 @@ begin
     FreeAndNil(FSession);
     FModuleMode := False;
     if FProject <> nil then
-      FNav := TPasNavigator.Create(FProject);
+      FNav := NewNavigator;
     // NOT IfThen: it is an ordinary function, so BOTH arms are evaluated
     // before the call and FProject.StageTimings would dereference nil in the
     // one case the expression exists to describe.
@@ -923,7 +973,7 @@ begin
   FreeAndNil(FSession);
   if FProject = nil then
     Exit;
-  FNav := TPasNavigator.Create(FProject);
+  FNav := NewNavigator;
   FBuiltSignature := FStartedSignature;
   FBuiltParts := FStartedParts;
   LWasModule := FModuleMode;
@@ -1350,6 +1400,12 @@ begin
   // the analysis wait loop, so both an idle server and one in the middle of a
   // long build notice within a tick.
   Result := WaitForSingleObject(FClientHandle, 0) = WAIT_OBJECT_0;
+end;
+
+function TLspServer.NewNavigator: TPasNavigator;
+begin
+  Result := TPasNavigator.Create(FProject);
+  Result.LibraryPaths := FLibraryPaths;
 end;
 
 function TLspServer.StateLine: string;
