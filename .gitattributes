@@ -28,6 +28,20 @@
 # and every diff viewer expect.
 *.md    text eol=lf
 *.json  text eol=lf
+
+# Shell scripts, and the hooks that ARE shell scripts without an extension -
+# LF, or /bin/sh chokes on the CR: `#!/bin/sh\r` is not an interpreter. The
+# irony is deliberate to record: without these two lines the `* text=auto`
+# above hands a CRLF working copy to the very hook that exists to keep CRLF
+# where it belongs, and it stops running.
+*.sh          text eol=lf
+.githooks/*   text eol=lf
+
+# Git's own configuration, LF like the rest of the tooling - and not left to
+# `text=auto`, which is how this file came to be the one exception to the rule
+# it declares.
+.gitattributes text eol=lf
+.gitignore     text eol=lf
 *.js    text eol=lf
 *.ts    text eol=lf
 LICENSE text eol=lf

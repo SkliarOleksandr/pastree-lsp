@@ -1,86 +1,92 @@
 # Working in this repository
 
-`README.md` is what the product does, `SPEC.md` is the protocol-side
-specification, `clients/rad-studio/SPEC.md` the ToolsAPI-side one. This file is
-the short list of things that are easy to get wrong and expensive to rediscover.
+`README.md` is what the product does, `SPEC.md` the protocol side,
+`clients/rad-studio/SPEC.md` the ToolsAPI side, `docs/diagnosing.md` the
+procedures for symptoms that have already cost an investigation. This file is
+the rules that apply to every change.
 
-## Writing: English, hyphens, and where a working document goes
+Every rule here is here because breaking it was silent. Keep the reasons when
+editing this file - a rule with no reason gets "fixed" back.
+
+## Do not commit until Alex has tested it
+
+**Build, report, stop.** The commit waits for Alex to run it in a real IDE.
+Exception: an explicitly autonomous session ("work autonomously", a scheduled
+run), where committing is part of finishing.
+
+Green builds do not cover the half of this product that lives inside RAD
+Studio. On 2026-09-02 three defects passed a full build and were found by Alex
+opening a project and clicking - and each had already been committed as fixed.
+
+## English, plain hyphens, `local/` for working papers
 
 **Everything written into this repository is in English** - specs, READMEs,
-audits, review notes, commit messages, code comments, log lines, the lot.
-Conversation happens in whatever language suits; artifacts do not. The reason is
-the artifacts outlive the conversation: this is a public repository whose reader
-may be a stranger, a future session with no memory of the discussion, or a
-diff-viewer, and a document half the readers cannot read is a document that gets
-rewritten instead of corrected. PasTree (`../object-pascal-tree`) follows the
-same rule.
+commit messages, comments, log lines. Conversation is in whatever language
+suits; artifacts are not, because they outlive it and the next reader may be a
+stranger or a future session.
 
-**Only the plain hyphen `-`. Never an em dash (U+2014) or an en dash
-(U+2013)**, anywhere: prose, comments, commit messages. Same rule as in PasTree,
-and the same reason as the line endings above - it is a rule for tools as much
-as for people. A dash typed by a model or pasted from a rendered page is a
-non-ASCII character that a `dcc32` reading a legacy code page, a `cmd.exe`
-console and half the diff tools each render differently, and the difference is
-silent. This file names the two codepoints rather than printing them, so that
-the sweep below finds nothing in it either:
+**Only the plain hyphen `-`. Never an em dash (U+2014) or en dash (U+2013)**,
+anywhere. They are non-ASCII, and `dcc32` on a legacy code page, `cmd.exe` and
+the diff tools each render them differently. Sweep before committing:
 
 ```bash
 git ls-files | xargs grep -l -e "$(printf '\342\200\224')" -e "$(printf '\342\200\223')"
 ```
 
-(The bytes come from `printf` rather than being typed in, both so this file
-stays ASCII and because `grep -P` refuses to run in the C locale Git Bash
-starts in here - a plain pattern always works.)
+Exactly one file must come back: `clients/rad-studio/tests/VersionSmoke.dpr`,
+where the em dash is a test INPUT - the multi-byte character the encoding
+checks are built on. (The bytes come from `printf` so this file stays ASCII;
+`grep -P` refuses to run in Git Bash's C locale here.)
 
-That must come back with exactly one file, and it is deliberate: the em dash in
-`clients/rad-studio/tests/VersionSmoke.dpr` is a test INPUT, not prose - it is
-the multi-byte character the encoding checks are built on, and replacing it
-leaves every check passing while testing nothing. The comment there says so.
-
-**Working documents go in `local/`, which is ignored** - audits, plans, in-flight
-notes, anything addressed to us rather than to a reader of the product. Same
-convention and same directory name as PasTree. A finished conclusion belongs in
-a tracked document; the working paper that produced it does not.
+**Working documents go in `local/`, which is ignored** - audits, plans,
+in-flight notes, logs sent in by users. A finished conclusion belongs in a
+tracked document; the working paper that produced it does not. Same convention
+in PasTree.
 
 ## Line endings: CRLF for everything Delphi and cmd.exe read
 
-**A `.pas`, `.dpr`, `.dpk`, `.inc`, `.dproj`, `.dfm` or `.bat` in a working copy
-is CRLF. Docs (`.md`, `LICENSE`) and the VS Code client (`.json`, `.js`, `.ts`)
-are LF.** Declared in `.gitattributes`, in this repo and identically in PasTree
-(`../object-pascal-tree`) - keep the two files in step.
+**`.pas`, `.dpr`, `.dpk`, `.inc`, `.dproj`, `.dfm`, `.bat` are CRLF. Docs
+(`.md`, `LICENSE`) and the VS Code client (`.json`, `.js`, `.ts`) are LF.**
+Declared in `.gitattributes`, identically in PasTree - keep the two in step.
 
-This is a rule for **tools and scripts, not just people**: a `sed -i`, a
-heredoc, or any editor writing "just a newline" produces LF, and nothing
-complains at the time. RAD Studio then re-saves the file its own way on the
-first edit, and the next diff is the whole file instead of the three lines that
-changed - which is how real changes get lost in review. `cmd.exe` is worse than
-cosmetic: it is the one interpreter here that can genuinely misparse an LF-only
-`.bat`, and every build goes through one.
+A rule for **tools, not just people**: in Git Bash, `sed -i` and `perl -0pi`
+READ through the crlf layer and WRITE without it, so an in-place edit converts
+a whole Delphi source to LF even when the substitution touches no line ending -
+and the index is LF for everything, so no diff ever shows it. RAD Studio then
+re-saves its way and the next diff is the entire file instead of three lines.
+`cmd.exe` can genuinely misparse an LF-only `.bat`, and every build goes
+through one.
 
-Both repositories were renormalized on 2026-08-20, and the drift was *not*
-confined to recently-touched files - `PasTree.Parser.pas`, the whole `demo/`
-directory and several harnesses had been LF for a while. To check a repository:
+Two hooks catch it, both copied from PasTree:
+
+- `.claude/hooks/eol-crlf.sh` restores CRLF after every Bash/Write/Edit
+  (wired in `.claude/settings.json`).
+- `.githooks/pre-commit` refuses a commit carrying such a file. Enable per
+  clone: `git config core.hooksPath .githooks`.
+
+Neither replaces looking - every `eol=crlf` row must read `w/crlf`:
 
 ```bash
-git ls-files --eol
+git ls-files --eol | awk -F'\t' '$1 ~ /w[/]lf/ && $1 ~ /eol=crlf/ { print $2 }'
 ```
-
-Every line's `w/` must match its `attr/`; `i/` is LF for everything, which is
-correct - normalization happens in the repository, `eol=` decides the working
-copy.
 
 ## One product, two halves, one version
 
-The server (`pastree-server.exe`, Win64) and the RAD Studio package
-(`clients/rad-studio`, Win32 designtime BPL) are one deliverable. They share
-`PasTreeLspVersion` in `source/PasLsp.ProductVersion.pas`, and the package
-checks at the LSP handshake that the server reports the *same* version - any
-difference means one binary on disk was not rebuilt.
+The server (`pastree-server.exe`, Win64) and the package (`clients/rad-studio`,
+Win32 designtime BPL) are one deliverable sharing `PasTreeLspVersion` in
+`source/PasLsp.ProductVersion.pas`. The package checks at the handshake that
+the server reports the *same* version; a difference means one binary was not
+rebuilt.
 
-**Bump the PATCH of `PasTreeLspVersion` in every commit**, mechanically. Minor
-for a substantial change. PasTree (`../object-pascal-tree`) follows the same
-rule for its own independent `PasTreeVersion`. The reasoning is in `SPEC.md`;
-the thing to remember is that skipping the bump defeats the mismatch check.
+**Bump the PATCH in every commit**, mechanically - MINOR for a substantial
+change - and `clients/vscode/package.json` in the same edit, since nothing
+compiles that file and it has drifted forty commits behind before. PasTree
+follows the same rule for its own `PasTreeVersion`. Skipping the bump defeats
+the mismatch check.
+
+`cMinPasTreeVersion` in `source/PasLsp.Version.pas` is the floor for the
+sibling PasTree. Raise it when a change depends on a library fix whose absence
+would be silent rather than a compile error.
 
 ## Building
 
@@ -88,141 +94,55 @@ the thing to remember is that skipping the bump defeats the mismatch check.
 build.bat
 ```
 
-builds the server, the package and all five harnesses, then runs the harnesses.
-Use it rather than building halves separately - the equality check above only
-means something if a normal build produces both from the same commit.
+Builds the server, the package and all five harnesses, then runs them. **It
+must end with `all built, all harnesses passed`; anything else is a real
+failure.** Use it rather than building halves separately - the version check
+only means something if one build produces both.
 
-**Every `.dcu` goes to `out\dcu\win32` or `out\dcu\win64`, never next to a
-source.** Same in the PasTree repo (`tests\build.bat` there builds and runs all
-13 suites). It is intermediate output nothing reads between runs, so that one
-directory is safe to delete and the one thing to leave out of a backup - and
-keeping it out of `source\` means a stray `.dcu` next to a `.pas` is a signal
-that something was built outside the scripts. Add a new compilation? Give it
-`-N0` (or `DCC_DcuOutput` in a `.dproj`) pointing there, with the platform
-subdirectory: the same units compile both ways and the names collide.
-
-- **RAD Studio must be closed.** A running IDE holds the `.bpl`; its live LSP
-  session holds `pastree-server.exe`. Either one produces a confusing
-  "could not create output file".
-- Requires `../object-pascal-tree` checked out as a sibling (the server links
-  PasTree; the package must never).
-- After a rebuild, **restart the IDE** rather than Uninstall/Install - see
-  `clients/rad-studio/README.md`; hot-reload of this package is not reliable and
-  the symptom is a change that appears not to work.
-
-## Expected test result
-
-**All five harnesses pass. `build.bat` ends with `all built, all harnesses
-passed`, and anything else is a real failure.**
-
-Until 2026-08-20 this section said the opposite: `LspClientSmoke` was expected to
-fail exactly two checks about a Cyrillic literal, the known ANSI-vs-UTF-8 decode
-split. That is now fixed at the root, in PasTree - a preamble-less source whose
-bytes are valid UTF-8 decodes as UTF-8, so the analysis and the editor finally
-read the same text (`cMinPasTreeVersion` is pinned at or past the PasTree
-version where that landed - 0.13.2 today, and `source/PasLsp.Version.pas` is
-the only authority for the number - so an older sibling checkout fails loudly
-instead of quietly shifting columns). If those two checks ever come back, the
-first thing to check is which PasTree the server was built against, not the
-resolver.
-
-## Diagnosing "the analysis got slow"
-
-**If it got slow WHILE TYPING, the question is not how fast a rebuild is - it
-is why there was a rebuild at all.** Since 0.17.0 an ordinary edit re-analyzes
-one module (tens of ms to ~1.5 s); a closure rebuild per keystroke is the fast
-path not firing, and it is silent - every answer stays correct. Grep
-`pastree-lsp.log` for `analysis started:`:
-
-- `incremental, one module (...)` - fired. If it is then followed by
-  `incremental refused ... (module=refused:<reason>)`, PasTree declined and the
-  reason names itself; `too-many-consumers(N>L)` is tunable with the
-  `moduleRedoLimit` initializationOption, the rest are library decisions.
-- `full rebuild` on a single-file edit - the server never offered it the fast
-  path. That decision is `SingleChangedDoc`, and the cause is always the same
-  shape: something made the inputs look like more than one changed document.
-
-Everything below is about a slow REBUILD, which is a different question.
-
-**First suspect: `System.NeverSleepOnMMThreadContention := True` is missing.** It
-is the first statement in `pastree-server.dpr` and it must stay there - PasTree
-parses across cores, and without it Delphi's memory manager sleeps on allocation
-contention, so the workers wait instead of working. Dropping it cost 4.5x on a
-3757-unit project (70 s vs 15 s). The fingerprint, and the reason this is worth
-a section rather than a comment:
-
-- **CPU time goes DOWN while wall time goes up** - threads waiting, not
-  computing. Check with `Get-Process pastree-server` (`TotalProcessorTime` vs
-  elapsed); one running thread among thirty asleep is the tell.
-- **`intf` and `full` inflate, `cross` does not** - the `stages` field of the
-  `analysis done` line in `pastree-lsp.log`. The damage lands on the
-  allocation-heavy stages.
-
-To compare against the library directly, run the same closure in-process:
-`tools\out64\PasTreeSemaProject.exe <project>.dproj -dproj -p:<platform>
--studio:<bds>` plus one `-L<path>` per search path from the log's own `path`
-lines. Matching stage numbers mean the server is fine and the analysis is simply
-that expensive; a server 3x worse than in-process means the host, not PasTree.
-The reasoning is in `SPEC.md`; do not re-derive it.
-
-Ruled out by measurement, so do not start there: out-of-process overhead (nil -
-in-process is the same 15 s) and Debug-vs-Release (~2%, inside noise; the server
-carries no debug-only directives).
-
-## Diagnosing "Ctrl+Click did nothing"
-
-The editor tells you nothing useful - a click that resolves nothing simply does
-nothing. The real reason is in **`pastree-lsp.log`, in the same folder as the
-`.dproj` being analyzed** (the server's stderr is appended into that same file,
-not a sibling). It carries the search paths, every diagnostic
-with the unit it belongs to, and both ends of every navigation. Read it before
-suspecting the resolver - the last two failures of this kind were a
-search-path problem and a stale binary, neither of which was visible from the
-editor.
-
-**For a search-path problem specifically, turn the unit inventory on** -
-`logUnits` in the initializationOptions (`pastree.logUnits` in VS Code) or
-`PASTREE_LSP_LOG_UNITS=1`. It logs one `unit x <- path` line per unit, which is
-the only thing that answers "which of several copies on the search path won?",
-and it is off by default because it is hundreds of lines per rebuild.
+- **RAD Studio must be closed.** A running IDE holds the `.bpl`, its LSP
+  session holds `pastree-server.exe`; either gives a confusing "could not
+  create output file".
+- Requires `../object-pascal-tree` as a sibling. That checkout may be under
+  edit by another session - check `git status` there before touching it, and
+  never `git add -A`.
+- After a rebuild, **restart the IDE** rather than Uninstall/Install; hot
+  reload is unreliable and the symptom is a change that appears not to work.
+- **Every `.dcu` goes to `out\dcu\win32` or `out\dcu\win64`**, never next to a
+  source: the same units compile for both platforms and the names collide. A
+  new compilation needs `-N0` (or `DCC_DcuOutput`) pointing there. A stray
+  `.dcu` beside a `.pas` means something was built outside the scripts.
+- The IDE builds this server differently from `build.bat` - see
+  `docs/diagnosing.md` if it works one way and not the other.
 
 ## The package's one hard invariant
 
 `clients/rad-studio` links `rtl, vcl, designide` and exactly two units from
 outside its directory - `PasLsp.ProductVersion` and `PasLsp.SourceText`, both
-dependency-free by construction. **It must never link PasTree** - it is a
-32-bit designtime package and PasTree is Win64-only, which is the entire reason
-the analysis runs out of process. `tests/VersionSmoke` is the tripwire: a Win32
-program over both shared units, so it stops compiling if either one ever gains
-a dependency. Adding a third shared unit is a real decision, not a convenience:
-each one is a way for PasTree to get in.
+dependency-free by construction. **It must never link PasTree**: it is a
+32-bit designtime package and PasTree is Win64-only, which is the whole reason
+the analysis runs out of process. `tests/VersionSmoke` is the tripwire - a
+Win32 program over both shared units, so it stops compiling if either gains a
+dependency. A third shared unit is a real decision, not a convenience.
 
-## Reading the analysis model: an empty scope has no lists
+## Two traps in code that look like other bugs
 
-**`TSemaScope.Symbols` and `.Names` are created lazily and are legally `nil`**
-- the model builds them when the first symbol is declared into the scope, so a
-scope that never got one has neither. `LScope.Symbols.Count` on such a scope is
-an access violation, not an empty loop, and the symptom is remote from the
-cause: on 2026-08-23 every `textDocument/documentSymbol` in a session came back
-as `EAccessViolation` (the editor showed "Request failed", the outline was
-simply gone). Check for `nil` before iterating any scope container, and cover a
-new model-walking handler with at least one harness request - that crash
-reached a user because `documentSymbol` had no coverage at all
-(`LspClientSmoke` section 5d-bis now exists for exactly this).
+**An empty scope has no lists.** `TSemaScope.Symbols` and `.Names` are lazy and
+legally `nil`, so `LScope.Symbols.Count` is an access violation rather than an
+empty loop. Check for `nil` before iterating any scope container, and cover a
+new model-walking handler with a harness request - an uncovered
+`documentSymbol` shipped this crash to a user on 2026-08-23.
 
-## Reading source text: assume a BOM
+**Assume a BOM.** Delphi writes UTF-8-with-BOM by default, so a leading BOM is
+the common case and never content. Never hand-roll it: go through
+`source/PasLsp.SourceText.pas` (`StripLeadingBom`, `TryReadTextNoBom`,
+`FileHoldsText`), and put new rules about incoming text in that unit rather
+than in a caller. Its header has the full story - one BOM made `IdentAt`
+resolve nothing anywhere in a file while the log said only `no identifier at`.
 
-**Any `.pas`/`.dpr` may start with a BOM, and a BOM is never content.** Delphi
-writes UTF-8-with-BOM by default, so this is the common case, not an edge one.
-Never hand-roll the handling: go through `source/PasLsp.SourceText.pas` -
-`StripLeadingBom` for text arriving from a client, `TryReadTextNoBom` for a file
-on disk, `FileHoldsText` to ask whether a file holds a buffer's text. New rules
-about incoming text belong in that unit, not in the caller.
+## Where the answers are
 
-Both halves link it, so a fix lands once. The reason it exists is that the same
-BOM bug was fixed locally in three separate layers before it was fixed once, and
-the symptom is silent and total: one leading U+FEFF in `didOpen` text made
-`IdentAt` resolve nothing anywhere in the file - not just line 1 - while the log
-said only `no identifier at ...`, which reads exactly like a resolver bug. The
-unit header has the full story; `tests/VersionSmoke` pins the behaviour and
-`LspClientSmoke` section 4b pins the server end of it.
+- A failure a user reports: `pastree-lsp.log`, beside the `.dproj`. Then
+  `docs/diagnosing.md`.
+- Why the analysis is shaped as it is: `SPEC.md`. Do not re-derive it.
+- Why the IDE half is shaped as it is: `clients/rad-studio/SPEC.md` and its
+  `README.md`, which record the experiments that failed.
