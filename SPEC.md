@@ -65,6 +65,51 @@ one remaining compatibility constant readable:
   what it needed from a separately versioned server; with one repository and one
   number, equality replaces it.
 
+Both numbers are reported everywhere on purpose - "the server is 0.5.0" does
+not say whether the resolver fix being chased is in it, and that fix lives in
+PasTree:
+
+```
+pastree-server --version          -> pastree-lsp-server 0.5.0 (PasTree 0.2.1, built 2026-08-20 13:15)
+initialize response, serverInfo   -> {"name":"pastree-lsp-server","version":"0.5.0","pastreeVersion":"0.2.1"}
+first line of the log             -> the --version banner
+IDE Build tab                     -> server ready: pastree-lsp-server 0.5.0 (PasTree 0.2.1) for MyApp.dproj
+```
+
+## Repository layout
+
+```
+pastree-server.dpr, .dproj, source/  the server (Win64)
+source/PasLsp.ProductVersion.pas  one version for the server and both clients
+source/PasLsp.SourceText.pas      BOM and buffer-vs-file rules, shared likewise
+clients/rad-studio/               the RAD Studio designtime package + its tests
+clients/vscode/                   the VS Code extension (also a .vsix)
+build.bat                         builds everything and runs the harnesses
+out/                              build output; out/dcu/{win32,win64} is throwaway
+SPEC.md                           this document
+clients/rad-studio/SPEC.md        the ToolsAPI-side specification
+clients/vscode/SPEC.md            the VS Code extension's own specification
+```
+
+The RAD Studio package lived in its own repository (`pastree-ide-plugin`) until
+2026-08-20 and was merged here with its history. The reason is the dependency
+shape: the server is useful without that package, the package is useless
+without the server, and they are always deployed as a pair. Two repositories
+gave the pair two version numbers and therefore a way for them to disagree -
+which they did, silently, until a human read a version string out of the IDE's
+Build tab. One repository makes that an equality check. `clients/vscode` was
+already here, so the layout is unchanged in kind: a server and its clients.
+
+**One invariant to protect.** The RAD Studio package must keep linking nothing
+but `rtl, vcl, designide` and the two dependency-free shared units,
+`PasLsp.ProductVersion` and `PasLsp.SourceText`. It is a 32-bit designtime BPL;
+PasTree is Win64-only, and that constraint is the whole reason the analysis runs
+out of process. Now that the package sits in the same repository as
+PasTree-dependent code, adding "just one" PasTree unit to it is an easy mistake
+to make and would undo the move. `VersionSmoke` fails to build if either shared
+unit ever grows a dependency, which is the alarm for the most likely version of
+that mistake.
+
 ## Why out-of-process at all
 
 - **Address space.** The large client project needs ~3.5 GB and analyzes clean
@@ -531,6 +576,39 @@ then `analysis done (incremental)`, and on a refusal `incremental refused for
 `LspClientSmoke` section 5c is the gate: it reads the server's log back and
 requires the module path for the first edit to a file, an edit on top of an
 edit, and a revert.
+
+## What the log contains
+
+`PASTREE_LSP_LOG`, or the `logFile` initializationOption (which wins). Per
+completed analysis it writes the **parse record**: the closure's unit count and
+every diagnostic with the full path of the unit it belongs to - not only the
+open documents' (those are what `publishDiagnostics` sends, which is the right
+scope for squiggles and the wrong one for debugging: an `F1027` on a unit
+nobody has open is exactly what breaks navigation in the file they do have
+open). The configuration block lists the search paths themselves, not just how
+many - it is on by default, and `logDetail: false` (`pastree.logDetail` in
+VS Code, the "Advanced logging" box in the RAD Studio dialog) drops it to the
+one-line `configured: platform=... paths=N defines=N` summary.
+
+The full **unit inventory** - one `unit x <- path` line per unit, which answers
+"which of several copies on the search path won for this name?" - is off by
+default: it is a few hundred lines per rebuild (3757 on the reference project)
+and it buries everything else. Turn it on with `logUnits` in the
+initializationOptions (`pastree.logUnits` in the VS Code client) or
+`PASTREE_LSP_LOG_UNITS=1` in the environment, for the one question it answers.
+
+Every navigation line names **both ends**, prefixed by the LSP method exactly as
+it arrived on the wire:
+
+```
+textDocument/definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3)
+```
+
+A line that gave only the target could not be checked - `TArray` resolving into
+`System.Generics.Collections` looks reasonable until you know the click was on
+`TArray<T>`, which belongs in `System.pas`. And the full method name rather than
+a label of our own means one grep answers "what did the client actually ask
+for", and that the prefix cannot drift from the request it describes.
 
 ## Open questions
 
