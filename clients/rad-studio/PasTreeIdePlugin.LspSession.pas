@@ -622,6 +622,18 @@ type
     FStartedProject: string;
     FStartedPlatform: string;
     FStartedConfig: string;
+    // WHICH PROJECT THE "server ready" LINE HAS ALREADY BEEN PRINTED FOR.
+    //
+    // Not the same question as FStartedProject, which is about the SERVER: one
+    // project open is one line, but the IDE announces an open more than once.
+    // ofnEndProjectGroupOpen and ofnActiveProjectChanged both mean "a project
+    // came up" and both have to be acted on - the second is the only signal
+    // for switching projects inside a group - so the notifier cannot tell them
+    // apart, and the IDE sends several on one reopen. Three identical lines in
+    // the Build tab is what that looked like (2026-09-02), and only on the
+    // SECOND open of a session: the first found the server not yet ready, so
+    // every duplicate suppressed itself through LWasReady by accident.
+    FAnnouncedProject: string;
     // The two log switches the running server was started with. They are part
     // of that configuration for the same reason the platform is: the server
     // fixes both at initialize, so changing one in the dialog only means
@@ -2347,7 +2359,20 @@ begin
   if not EnsureSession then
     Exit;
   if not LWasReady then
-    Exit;   // the handshake logged it, and logging it twice is worse than not
+  begin
+    // The handshake logs the line itself when it answers, so this open is
+    // already accounted for - claim it here, or the next notification for the
+    // same open finds a ready server and prints a second copy.
+    FAnnouncedProject := FStartedProject;
+    Exit;
+  end;
+  // ONE LINE PER PROJECT OPEN, not one per notification - see
+  // FAnnouncedProject. Reopening the same project after a close does print
+  // again: ProjectClosed clears this, and it is the close that makes the
+  // second line meaningful rather than repetitive.
+  if SameText(FAnnouncedProject, FStartedProject) then
+    Exit;
+  FAnnouncedProject := FStartedProject;
   // LWasReady was sampled BEFORE EnsureSession: if it just restarted the
   // server for a changed project/configuration, the client is mid-handshake
   // again and ReadyLine is '' - that restart already announced itself, and
@@ -2370,6 +2395,12 @@ end;
 
 procedure TLspSession.ProjectClosed;
 begin
+  // FIRST, and unconditionally: the next open of this project is entitled to
+  // its own "server ready" line, and the early exits below are about whether
+  // there is a SERVER to tell - a different question from whether the line has
+  // been printed. Leaving it set behind one of those exits would silence the
+  // reopen.
+  FAnnouncedProject := '';
   if not Assigned(FClient) or (FClient.State <> lcsReady) or
      (FStartedProject = '') then
     Exit;
