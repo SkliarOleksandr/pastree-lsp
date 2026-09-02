@@ -421,6 +421,40 @@ begin
   Result := nil;
 end;
 
+{ A source editor with an actual VIEW behind it, materialising one if the
+  editor has none.
+
+  A LOADED MODULE IS NOT A VISIBLE ONE, and that distinction is what broke the
+  first live run of this on a real project: "AVImark.Integration.REST.pas is
+  open but has no view". The IDE loads modules the user never opened - a form
+  pulls in its visual-inheritance ancestors and every datamodule its .dfm
+  names - and those have no edit view at all (PasTreeIdePlugin.LspDocuments'
+  ModuleIsShown is the same fact, seen from the other side). OpenModule on a
+  file already loaded that way hands back exactly such a module, so the file
+  is "open", every check that reads through a view fails, and the rename
+  refuses having changed nothing.
+
+  Show is what materialises it. It also brings that editor to the front, so a
+  rename visibly walks its files - the caller puts the user back where they
+  started when it is done.
+
+  False, not an exception, when even that produces no view: the caller refuses
+  the whole rename with the file named. }
+function EnsureViewOf(const AEditor: IOTASourceEditor): Boolean;
+begin
+  Result := AEditor.GetEditViewCount > 0;
+  if Result then
+    Exit;
+  try
+    AEditor.Show;
+  except
+    on E: Exception do
+      TraceFmt('  %s: Show raised %s: %s',
+        [ExtractFileName(AEditor.FileName), E.ClassName, E.Message]);
+  end;
+  Result := AEditor.GetEditViewCount > 0;
+end;
+
 { The editor for AFileName, OPENING the file if nobody has it open. AOpened
   says which of the two happened - the caller logs it, and only a file this
   rename opened is one the user did not choose to have on screen.
@@ -505,6 +539,20 @@ begin
       TraceFmt('  %s: could not be opened - refusing',
         [ExtractFileName(LEdit.FilePath)]);
       AError := Format('%s could not be opened in the editor.'#13#10#13#10 +
+        'Nothing was renamed.', [LEdit.FilePath]);
+      Exit;
+    end;
+    // A module can be LOADED without being shown, and a rename cannot be
+    // written through an editor with no view - see EnsureViewOf for how a
+    // file nobody opened comes to be in that state. Such a file counts as
+    // one this rename opened even though OpenModule was never called for it:
+    // what the user is being told about is TABS THAT APPEARED, and one did.
+    LOpened := LOpened or (LFile.Editor.GetEditViewCount = 0);
+    if not EnsureViewOf(LFile.Editor) then
+    begin
+      TraceFmt('  %s: no edit view even after Show - refusing',
+        [ExtractFileName(LEdit.FilePath)]);
+      AError := Format('%s could not be shown in an editor window.'#13#10#13#10 +
         'Nothing was renamed.', [LEdit.FilePath]);
       Exit;
     end;
@@ -634,19 +682,29 @@ end;
 
   AOpenedCount comes back with how many files this rename had to open, which
   the caller passes on to the user: those tabs are the undo the feature is
-  built around, and a user who does not know they appeared cannot use them. }
+  built around, and a user who does not know they appeared cannot use them.
+
+  APriorityFile is the file the caret was in - the front tab to return to
+  once the opening is done. }
 function ApplyPlan(const APlan: TLspRenamePlan;
-  out AOpenedCount: Integer): Boolean;
+  const APriorityFile: string; out AOpenedCount: Integer): Boolean;
 var
   LFiles: TRenameFiles;
   LFile: TRenameFile;
   LError: string;
   LIdx, LRun: Integer;
+  LReturnTo: IOTASourceEditor;
 begin
   Result := False;
   AOpenedCount := 0;
   LFiles := TRenameFiles.Create;
   try
+    // WHERE THE USER WAS, taken before the first Show. Opening and
+    // materialising a dozen files walks the front tab through all of them,
+    // so without this a rename ends with the user looking at whichever file
+    // happened to sort last - a place they never asked to be, and after a
+    // command whose whole promise is that they can inspect what changed.
+    LReturnTo := OpenEditorOf(APriorityFile);
     TraceFmt('applying %d edit(s) - opening files', [Length(APlan.Edits)]);
     if not CollectFiles(APlan, LFiles, {out} AOpenedCount, {out} LError) then
     begin
@@ -680,6 +738,20 @@ begin
     end;
     Result := True;
   finally
+    // In the FINALLY, so a refused rename puts the user back too: the tabs it
+    // opened are still there either way, and being dropped into a stranger's
+    // file by a command that then said "nothing was renamed" is the worse
+    // half of that experience.
+    if Assigned(LReturnTo) then
+      try
+        LReturnTo.Show;
+      except
+        // Cosmetic to the last: whatever else happened, failing to restore
+        // the front tab must not become the error the user is shown.
+        on E: Exception do
+          TraceFmt('could not return to %s: %s',
+            [ExtractFileName(APriorityFile), E.Message]);
+      end;
     LFiles.Free;
   end;
 end;
@@ -787,7 +859,7 @@ begin
         end;
         TraceFmt('plan: old=%s new=%s edits=%d',
           [APlan.OldName, APlan.NewName, Length(APlan.Edits)]);
-        if not ApplyPlan(APlan, {out} LOpenedCount) then
+        if not ApplyPlan(APlan, AFileName, {out} LOpenedCount) then
         begin
           Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
