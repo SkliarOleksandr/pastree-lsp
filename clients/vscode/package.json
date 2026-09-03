@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.28.6",
+  "version": "0.28.8",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -23,8 +23,16 @@
     "languages": [
       {
         "id": "objectpascal",
-        "aliases": ["Object Pascal", "Delphi"],
-        "extensions": [".pas", ".dpr", ".dpk", ".inc"]
+        "aliases": ["Object Pascal", "Delphi", "pascal", "delphi", "objectpascal"],
+        "extensions": [".pas", ".dpr", ".dpk", ".inc"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "objectpascal",
+        "scopeName": "source.pascal",
+        "path": "./syntaxes/objectpascal.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -38,7 +46,17 @@
         "pastree.projectFile": {
           "type": "string",
           "default": "",
-          "description": "The .dproj or .dpr the analysis closure starts from"
+          "description": "The .dproj or .dpr the analysis closure starts from. Relative paths are resolved against the first workspace folder. Without it only the open files are analyzed and their uses clauses do not resolve."
+        },
+        "pastree.ideLibraryPaths": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read the IDE's Browsing Path and Search Path (Tools > Options > Library) and its Environment Variables from the registry, and hand them to the server as extra search paths - the way the RAD Studio package does. This is where the RTL/VCL source and IDE-registered third-party libraries come from; off leaves only pastree.searchPaths."
+        },
+        "pastree.ideVersion": {
+          "type": "string",
+          "default": "",
+          "description": "Registry version of the RAD Studio installation to read library paths from (e.g. \"37.0\" for 13.0). Empty = the highest installed."
         },
         "pastree.platform": {
           "type": "string",

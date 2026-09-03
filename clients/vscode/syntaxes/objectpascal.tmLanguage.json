@@ -1,0 +1,377 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Object Pascal",
+  "scopeName": "source.pascal",
+  "fileTypes": [
+    "pas",
+    "dpr",
+    "dpk",
+    "inc"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#asm-block"
+    },
+    {
+      "include": "#routine-header"
+    },
+    {
+      "include": "#type-declaration"
+    },
+    {
+      "include": "#property-declaration"
+    },
+    {
+      "include": "#visibility"
+    },
+    {
+      "include": "#routine-directives"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.pascal",
+          "begin": "///",
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#xmldoc"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.pascal",
+          "match": "//.*$"
+        },
+        {
+          "name": "meta.preprocessor.pascal",
+          "begin": "\\{\\$",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.directive.pascal"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.directive.pascal"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\G([A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.control.directive.pascal"
+                }
+              }
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            }
+          ]
+        },
+        {
+          "name": "meta.preprocessor.pascal",
+          "begin": "\\(\\*\\$",
+          "end": "\\*\\)",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.directive.pascal"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.directive.pascal"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\G([A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.control.directive.pascal"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "comment.block.brace.pascal",
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [
+            {
+              "include": "#xmldoc"
+            }
+          ]
+        },
+        {
+          "name": "comment.block.parenthesis.pascal",
+          "begin": "\\(\\*",
+          "end": "\\*\\)"
+        }
+      ]
+    },
+    "xmldoc": {
+      "comment": "XMLDoc tags: inside /// lines (the documentation rule) and inside brace comments.",
+      "match": "</?[A-Za-z][A-Za-z0-9]*[^>]*>",
+      "name": "entity.name.tag.xmldoc.pascal"
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.pascal",
+          "begin": "'''",
+          "end": "'''"
+        },
+        {
+          "name": "string.quoted.single.pascal",
+          "begin": "'",
+          "end": "'(?!')|$",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pascal",
+              "match": "''"
+            }
+          ]
+        },
+        {
+          "name": "constant.character.pascal",
+          "match": "#(\\$[0-9A-Fa-f]+|[0-9]+)"
+        },
+        {
+          "name": "constant.character.control.pascal",
+          "match": "\\^[A-Za-z@\\[\\]\\\\^_]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.pascal",
+          "match": "\\$[0-9A-Fa-f_]+"
+        },
+        {
+          "name": "constant.numeric.binary.pascal",
+          "match": "%[01_]+"
+        },
+        {
+          "name": "constant.numeric.float.pascal",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.pascal",
+          "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.pascal",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "asm-block": {
+      "name": "meta.embedded.block.asm.pascal",
+      "begin": "(?i)\\b(asm)\\b",
+      "end": "(?i)\\b(end)\\b",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.asm.pascal"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "keyword.control.asm.pascal"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        }
+      ]
+    },
+    "routine-header": {
+      "comment": "The name after a routine keyword, dotted for a method body (TFoo.Bar) or a generic (TFoo<T>.Bar).",
+      "match": "(?i)\\b(procedure|function|constructor|destructor|operator)\\s+([A-Za-z_][A-Za-z0-9_]*(?:\\s*<[^>]*>)?(?:\\s*\\.\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\s*<[^>]*>)?)*)",
+      "captures": {
+        "1": {
+          "name": "storage.type.function.pascal"
+        },
+        "2": {
+          "name": "entity.name.function.pascal"
+        }
+      }
+    },
+    "type-declaration": {
+      "comment": "Name = <structural type start>. A plain alias (TA = TB) is left to semantic tokens so a const line CName = OtherConst is not mis-coloured.",
+      "match": "(?i)^\\s*([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^=]*>)?\\s*(=)\\s*(?=(packed\\s+)?(class|record|interface|dispinterface|object|set\\b|array|type\\b|procedure|function|reference|\\(|\\^))",
+      "captures": {
+        "1": {
+          "name": "entity.name.type.pascal"
+        },
+        "3": {
+          "name": "keyword.operator.assignment.type.pascal"
+        }
+      }
+    },
+    "property-declaration": {
+      "comment": "Property specifiers mean something only between `property` and its `;`.",
+      "begin": "(?i)\\b(property)\\b",
+      "end": ";",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.property.pascal"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "name": "storage.modifier.property.pascal",
+          "match": "(?i)\\b(read|write|stored|default|nodefault|index|implements|dispid|readonly|writeonly)\\b"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#operators"
+        }
+      ]
+    },
+    "visibility": {
+      "comment": "Visibility words are directives only at the start of a line inside a class body; `var public: Integer;` stays an identifier.",
+      "match": "(?i)^\\s*(strict\\s+)?(private|protected|public|published|automated)\\b(?!\\s*[:=,(])",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.visibility.pascal"
+        },
+        "2": {
+          "name": "storage.modifier.visibility.pascal"
+        }
+      }
+    },
+    "routine-directives": {
+      "patterns": [
+        {
+          "comment": "PasTree.Types.ROUTINE_DIRECTIVE_WORDS, only after `;` or `)` - the position the parser gives them meaning at. `var dynamic: Integer;` does not match.",
+          "match": "(?i)(?<=;|\\))\\s*\\b(overload|virtual|dynamic|override|abstract|final|reintroduce|static|assembler|cdecl|stdcall|register|pascal|safecall|winapi|export|local|near|far|varargs|unsafe|noreturn|deprecated|platform|experimental|forward|delayed|message|dispid|external|inline)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.directive.pascal"
+            }
+          }
+        },
+        {
+          "comment": "`property X ...; default;` - the second statement is outside the property rule's span.",
+          "match": "(?i)(?<=;)\\s*\\b(default)\\b(?=\\s*;)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.directive.pascal"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "comment": "PasTree.Types.KEYWORDS - the 64 reserved words of spec B.4.1 - plus exit, out, package, contains, requires: not reserved, but never anything else in practice.",
+      "patterns": [
+        {
+          "name": "keyword.control.pascal",
+          "match": "(?i)\\b(begin|end|if|then|else|case|of|for|to|downto|do|while|repeat|until|with|goto|try|except|finally|raise|inherited|exit)\\b"
+        },
+        {
+          "name": "keyword.other.section.pascal",
+          "match": "(?i)\\b(unit|program|library|package|interface|implementation|initialization|finalization|uses|exports|contains|requires)\\b"
+        },
+        {
+          "name": "storage.type.pascal",
+          "match": "(?i)\\b(type|var|const|threadvar|resourcestring|label|class|record|object|set|array|file|packed|procedure|function|constructor|destructor|property|dispinterface|string|inline|out)\\b"
+        },
+        {
+          "name": "keyword.operator.word.pascal",
+          "match": "(?i)\\b(and|or|not|xor|div|mod|shl|shr|in|is|as)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.nil.pascal",
+          "match": "(?i)\\bnil\\b"
+        },
+        {
+          "name": "constant.language.boolean.pascal",
+          "match": "(?i)\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.pascal",
+          "match": "(?i)\\b(self|result)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.pascal",
+          "match": ":=|\\+=|-=|\\*=|/="
+        },
+        {
+          "name": "keyword.operator.comparison.pascal",
+          "match": "<>|<=|>=|=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.pascal",
+          "match": "[-+*/]"
+        },
+        {
+          "name": "keyword.operator.pointer.pascal",
+          "match": "[@^]"
+        },
+        {
+          "name": "punctuation.separator.pascal",
+          "match": "[;,.:]"
+        },
+        {
+          "name": "punctuation.section.brackets.pascal",
+          "match": "[()\\[\\]]"
+        }
+      ]
+    }
+  }
+}

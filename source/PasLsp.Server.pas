@@ -55,6 +55,8 @@ uses
   PasTree.Platforms,
   PasTree.DProj,
   PasTree.SourceManager,
+  PasTree.Types,
+  PasTree.Preprocessor,
   PasTree.Ast,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
@@ -261,6 +263,7 @@ type
     function HandleHover(const AMsg: TLspIncoming): string;
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
+    function HandleSemanticTokens(const AMsg: TLspIncoming): string;
     function HandleCompletion(const AMsg: TLspIncoming): string;
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
@@ -305,6 +308,88 @@ type
   end;
 
 implementation
+
+{ Semantic tokens legend - the indices the ST_/SM_ constants encode MUST match
+  the array positions advertised in HandleInitialize, which is why both live
+  here as one constant. Every name is from the protocol's standard set, so a
+  theme colours them without a semanticTokenScopes map on the client.
+
+  Delphi has no "field" token type in the standard set; fields go out as
+  `variable`, which is what they are to the eye. A const is `variable` +
+  `readonly` (the spec's own idiom). `defaultLibrary` marks the compiler's
+  builtins (sfBuiltin / skBuiltinType) - a unit under a library path would be
+  the natural extension, but the navigator keeps that test private today. }
+const
+  ST_NAMESPACE = 0;
+  ST_TYPE = 1;
+  ST_CLASS = 2;
+  ST_ENUM = 3;
+  ST_INTERFACE = 4;
+  ST_STRUCT = 5;
+  ST_TYPE_PARAMETER = 6;
+  ST_PARAMETER = 7;
+  ST_VARIABLE = 8;
+  ST_PROPERTY = 9;
+  ST_ENUM_MEMBER = 10;
+  ST_FUNCTION = 11;
+  ST_METHOD = 12;
+  ST_COMMENT = 13;
+  SM_DECLARATION = 1;
+  SM_READONLY = 2;
+  SM_DEFAULT_LIBRARY = 4;
+  SEMANTIC_TOKENS_LEGEND =
+    '"legend":{"tokenTypes":["namespace","type","class","enum","interface",' +
+    '"struct","typeParameter","parameter","variable","property","enumMember",' +
+    '"function","method","comment"],' +
+    '"tokenModifiers":["declaration","readonly","defaultLibrary"]}';
+
+type
+  TSemanticToken = record
+    Line, Col, Len: Integer;      // PasTree 1-based line/col, UTF-16 units
+    TokenType, Modifiers: Integer;
+  end;
+
+// The legend type and modifiers for a resolved symbol. False for the kinds
+// no editor colours (labels, and the completion-only skKeyword).
+function SemanticTypeOf(const ASym: TSemaSymbol;
+  out AType, AMods: Integer): Boolean;
+begin
+  Result := True;
+  AType := ST_TYPE;
+  AMods := 0;
+  case ASym.Kind of
+    skType:
+      case ASym.TypeCat of
+        tcClass, tcClassOf: AType := ST_CLASS;
+        tcInterface: AType := ST_INTERFACE;
+        tcRecord: AType := ST_STRUCT;
+        tcEnum: AType := ST_ENUM;
+      else
+        AType := ST_TYPE;
+      end;
+    skBuiltinType: AType := ST_TYPE;
+    skVar, skField: AType := ST_VARIABLE;
+    skConst:
+      begin
+        AType := ST_VARIABLE;
+        AMods := SM_READONLY;
+      end;
+    skRoutine:
+      if sfClassMember in ASym.Flags then
+        AType := ST_METHOD
+      else
+        AType := ST_FUNCTION;
+    skParam: AType := ST_PARAMETER;
+    skProperty: AType := ST_PROPERTY;
+    skEnumValue: AType := ST_ENUM_MEMBER;
+    skGenericParam: AType := ST_TYPE_PARAMETER;
+    skUnitRef: AType := ST_NAMESPACE;
+  else
+    Result := False;
+  end;
+  if Result and ((sfBuiltin in ASym.Flags) or (ASym.Kind = skBuiltinType)) then
+    AMods := AMods or SM_DEFAULT_LIBRARY;
+end;
 
 constructor TLspServer.Create(ACancels: TLspCancelSet);
 begin
@@ -1696,6 +1781,10 @@ begin
       '"hoverProvider":true,' +
       '"typeDefinitionProvider":true,' +
       '"documentHighlightProvider":true,' +
+      // Semantic colouring: full and range, no delta - see
+      // HandleSemanticTokens for why the delta form is not offered.
+      '"semanticTokensProvider":{' + SEMANTIC_TOKENS_LEGEND +
+        ',"full":true,"range":true},' +
       '"completionProvider":{"triggerCharacters":["."]},' +
       '"signatureHelpProvider":{"triggerCharacters":["(",","]},' +
       '"workspaceSymbolProvider":true,' +
@@ -3728,6 +3817,275 @@ begin
 end;
 
 
+{ textDocument/semanticTokens/full and /range - what every identifier in the
+  document RESOLVED to, so the editor can colour a field, a local, a type and
+  a unit name differently. This is the half of syntax colouring a grammar
+  cannot do: a regex sees the same word in `FCount`, `Count` and `TCount`,
+  the model knows which is a field, a property and a type. Keywords, strings,
+  comments and numbers are NOT emitted - the client's TextMate grammar paints
+  those before any answer arrives, and re-sending them would only make the
+  answer heavier.
+
+  Two passes over the model, both O(nodes), no resolution at request time:
+  1. Every symbol declared in this model whose DeclNode names it in THIS file
+     (an $I include's declarations belong to that document) - marked
+     `declaration`. The name token is verified to spell the symbol's name, so
+     a declaration node whose first token is a keyword (an anonymous
+     `record ... end` in a type slot) emits nothing rather than colouring the
+     keyword.
+  2. Every nkIdent node, classified through RefMap (this unit) or ExtRefMap
+     (another unit) - the same two maps TPasNavigator.ResolveSymbolAt reads.
+     An unresolved name emits nothing and keeps the grammar's colour, which
+     is the honest answer: the resolver does not know what it is either.
+  A position both passes hit (the declaring nkIdent) is emitted once, the
+  declaration winning - the sort key puts it first.
+
+  Plus the $IFDEF'd-out regions of the file as `comment` tokens, one per line
+  they cover (a token cannot span lines without multilineTokenSupport). That
+  is the IDE's flat grey for dead code and the demo highlighter's precedent;
+  nothing inside a skipped region is a visible token, so nothing there
+  competes.
+
+  No `full/delta`: it needs the previous answer kept per document and
+  resultId, and VS Code already debounces and keeps the last colouring until
+  a full answer arrives. Measured cost first, then decide; the range form is
+  offered so a client that wants the viewport quickly can have it.
+
+  Columns: token offsets are UTF-16 code units in PasTree (Start/Len into a
+  Delphi string), which is exactly LSP's utf-16 positionEncoding, so no
+  conversion beyond 1-based -> 0-based. }
+function TLspServer.HandleSemanticTokens(const AMsg: TLspIncoming): string;
+var
+  LPath: string;
+  LMid, LFileId, LIdx, LNode, LSymIdx, LFromLine, LToLine, LCount,
+    LLspLine, LLspChar, LPrevLine, LPrevChar: Integer;
+  LModel: TPasSemaModel;
+  LExt: TPasExtRef;
+  LTokens: TList<TSemanticToken>;
+  LTok: TSemanticToken;
+  LSB: TStringBuilder;
+  LStart: UInt64;
+  LIsRange: Boolean;
+
+  // The model's stream for the document's own file - the node token
+  // positions are offsets into THIS text.
+  function Stream: TPasTokenStream;
+  begin
+    Result := LModel.Tree.Source.Files[LFileId];
+  end;
+
+  // One identifier token for ANode, if it lies in this file and its symbol
+  // (declared in model ASymMid) has a legend type. ADeclaration additionally
+  // requires the token to spell the symbol's name (see the header).
+  procedure AddIdent(ANode, ASymMid, ASymIdx: Integer; ADeclaration: Boolean);
+  var
+    LVisIdx, LType, LMods: Integer;
+    LVis: TPasVisibleToken;
+    LT: TPasToken;
+    LSymModel: TPasSemaModel;
+    LOne: TSemanticToken;
+  begin
+    if (ANode < 0) or (ANode > High(LModel.Tree.Nodes)) then
+      Exit;
+    LVisIdx := LModel.Tree.Nodes[ANode].FirstToken;
+    if (LVisIdx < 0) or (LVisIdx > High(LModel.Tree.Source.Visible)) then
+      Exit;
+    LVis := LModel.Tree.Source.Visible[LVisIdx];
+    if LVis.FileId <> LFileId then
+      Exit;
+    LSymModel := FProject.Model(ASymMid);
+    if (LSymModel = nil) or (ASymIdx < 0) or
+       (ASymIdx >= LSymModel.SymCount) then
+      Exit;
+    if not SemanticTypeOf(LSymModel.Symbols[ASymIdx], LType, LMods) then
+      Exit;
+    if (LVis.TokenIndex < 0) or (LVis.TokenIndex > High(Stream.Tokens)) then
+      Exit;
+    LT := Stream.Tokens[LVis.TokenIndex];
+    if ADeclaration then
+    begin
+      if not Stream.TokenTextEquals(LT, LSymModel.Symbols[ASymIdx].Name) then
+        Exit;
+      LMods := LMods or SM_DECLARATION;
+    end;
+    Stream.OffsetToLineCol(LT.Start, LOne.Line, LOne.Col);
+    LOne.Len := LT.Len;
+    LOne.TokenType := LType;
+    LOne.Modifiers := LMods;
+    LTokens.Add(LOne);
+  end;
+
+  // A skipped ($IFDEF'd-out) region as comment tokens, one per covered line,
+  // each clipped to its line's text (the break excluded).
+  procedure AddInactive(const ARegion: TPasSkippedRegion);
+  var
+    LFirstLine, LFirstCol, LLastLine, LLastCol, LLine, LLineStart, LLineEnd,
+      LFrom, LToExcl: Integer;
+    LOne: TSemanticToken;
+  begin
+    if ARegion.EndPos <= ARegion.Start then
+      Exit;
+    Stream.OffsetToLineCol(ARegion.Start, LFirstLine, LFirstCol);
+    Stream.OffsetToLineCol(ARegion.EndPos - 1, LLastLine, LLastCol);
+    for LLine := LFirstLine to LLastLine do
+    begin
+      if (LLine < 1) or (LLine > Length(Stream.LineStarts)) then
+        Break;
+      LLineStart := Stream.LineStarts[LLine - 1];
+      if LLine < Length(Stream.LineStarts) then
+        LLineEnd := Stream.LineStarts[LLine]
+      else
+        LLineEnd := Length(Stream.Source);
+      // Offset o is Source[o + 1]; LLineEnd is exclusive, so Source[LLineEnd]
+      // is the last character of the line - a break character to drop.
+      while (LLineEnd > LLineStart) and
+            CharInSet(Stream.Source[LLineEnd], [#10, #13]) do
+        Dec(LLineEnd);
+      if LLine = LFirstLine then
+        LFrom := LFirstCol
+      else
+        LFrom := 1;
+      LToExcl := LLineEnd - LLineStart + 1;          // 1-based, exclusive
+      if (LLine = LLastLine) and (LLastCol + 1 < LToExcl) then
+        LToExcl := LLastCol + 1;
+      if LToExcl <= LFrom then
+        Continue;
+      LOne.Line := LLine;
+      LOne.Col := LFrom;
+      LOne.Len := LToExcl - LFrom;
+      LOne.TokenType := ST_COMMENT;
+      LOne.Modifiers := 0;
+      LTokens.Add(LOne);
+    end;
+  end;
+
+begin
+  LStart := GetTickCount64;
+  LIsRange := AMsg.Method.EndsWith('/range');
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'semanticTokens: textDocument.uri required'));
+  LFromLine := 0;
+  LToLine := MaxInt;
+  if LIsRange then
+  begin
+    LFromLine := AMsg.Params.GetValue<Integer>('range.start.line', 0);
+    LToLine := AMsg.Params.GetValue<Integer>('range.end.line', MaxInt);
+  end;
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+  begin
+    Log('semanticTokens: file not in the analyzed closure: ' + LPath);
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LModel := FProject.Model(LMid);
+  if LModel = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  // An open document is never demoted, but the request is legal for any
+  // file in the closure - and a demoted model has no token layer to
+  // position anything in.
+  if LModel.Demoted then
+    FProject.EnsureHydrated(LMid);
+  if (Length(LModel.Tree.Source.Files) = 0) or
+     (Length(LModel.Tree.Source.Visible) = 0) then
+    Exit(BuildResponse(AMsg.IdJson, '{"data":[]}'));
+
+  // Which of the model's files IS this document - normally [0], the main
+  // file, but a request for an $I include is a legal request too.
+  LPath := TPath.GetFullPath(LPath);
+  LFileId := 0;
+  for LIdx := 0 to High(LModel.Tree.Source.FileNames) do
+    if SameText(TPath.GetFullPath(LModel.Tree.Source.FileNames[LIdx]), LPath)
+    then
+    begin
+      LFileId := LIdx;
+      Break;
+    end;
+
+  LTokens := TList<TSemanticToken>.Create;
+  LSB := TStringBuilder.Create;
+  try
+    // 1. declarations
+    for LSymIdx := 0 to LModel.SymCount - 1 do
+      if (LModel.Symbols[LSymIdx].DeclNode <> NIL_NODE) and
+         (LModel.Symbols[LSymIdx].Name <> '') then
+        AddIdent(LModel.Symbols[LSymIdx].DeclNode, LMid, LSymIdx, True);
+    // 2. references
+    for LNode := 0 to High(LModel.Tree.Nodes) do
+    begin
+      if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
+        Continue;
+      LSymIdx := NIL_SYM;
+      if LNode <= High(LModel.RefMap) then
+        LSymIdx := LModel.RefMap[LNode];
+      if LSymIdx <> NIL_SYM then
+        AddIdent(LNode, LMid, LSymIdx, False)
+      else if (LModel.ExtRefMap <> nil) and
+              LModel.ExtRefMap.TryGetValue(LNode, LExt) then
+        AddIdent(LNode, LExt.UnitId, LExt.Sym, False);
+    end;
+    // 3. inactive code
+    if LFileId <= High(LModel.Tree.Source.Skipped) then
+      for LIdx := 0 to High(LModel.Tree.Source.Skipped[LFileId]) do
+        AddInactive(LModel.Tree.Source.Skipped[LFileId][LIdx]);
+
+    // The protocol wants source order; the declaration pass is symbol order
+    // and the skipped regions come last, so sort - declarations first at a
+    // shared position, which is what the duplicate filter below keeps.
+    LTokens.Sort(TComparer<TSemanticToken>.Construct(
+      function(const A, B: TSemanticToken): Integer
+      begin
+        Result := A.Line - B.Line;
+        if Result = 0 then
+          Result := A.Col - B.Col;
+        if Result = 0 then
+          Result := (B.Modifiers and SM_DECLARATION) -
+            (A.Modifiers and SM_DECLARATION);
+      end));
+
+    LSB.Append('{"data":[');
+    LCount := 0;
+    LPrevLine := 0;
+    LPrevChar := 0;
+    LTok.Line := -1;
+    LTok.Col := -1;
+    for LIdx := 0 to LTokens.Count - 1 do
+    begin
+      if (LTokens[LIdx].Line = LTok.Line) and (LTokens[LIdx].Col = LTok.Col)
+      then
+        Continue;                                    // the duplicate filter
+      LTok := LTokens[LIdx];
+      PasTreeToLsp(LTok.Line, LTok.Col, LLspLine, LLspChar);
+      if (LLspLine < LFromLine) or (LLspLine > LToLine) then
+        Continue;
+      if LCount > 0 then
+        LSB.Append(',');
+      if LLspLine = LPrevLine then
+        LSB.AppendFormat('0,%d,%d,%d,%d',
+          [LLspChar - LPrevChar, LTok.Len, LTok.TokenType, LTok.Modifiers])
+      else
+        LSB.AppendFormat('%d,%d,%d,%d,%d',
+          [LLspLine - LPrevLine, LLspChar, LTok.Len, LTok.TokenType,
+           LTok.Modifiers]);
+      LPrevLine := LLspLine;
+      LPrevChar := LLspChar;
+      Inc(LCount);
+    end;
+    LSB.Append(']}');
+    Log(Format(AMsg.Method + ': %s -> %d tokens, %d ms',
+      [TPath.GetFileName(LPath), LCount, GetTickCount64 - LStart]));
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+    LTokens.Free;
+  end;
+end;
+
 { textDocument/documentHighlight - every occurrence of the symbol under the
   cursor WITHIN this document, which is what an editor paints when the caret
   rests on a name.
@@ -3957,6 +4315,9 @@ begin
         Exit(HandleTypeDefinition(LMsg));
       if LMsg.Method = 'textDocument/documentHighlight' then
         Exit(HandleDocumentHighlight(LMsg));
+      if (LMsg.Method = 'textDocument/semanticTokens/full') or
+         (LMsg.Method = 'textDocument/semanticTokens/range') then
+        Exit(HandleSemanticTokens(LMsg));
       if LMsg.Method = 'textDocument/prepareRename' then
         Exit(HandlePrepareRename(LMsg));
       if LMsg.Method = 'textDocument/rename' then

@@ -84,8 +84,10 @@ does today, file by file, is in
 
 Verified live against the demo project's 197-unit closure: go-to-definition,
 find-all-references, outline, hover and diagnostics all work. Syntax
-colouring (no TextMate grammar or `semanticTokens` yet) is the known gap.
-Extension-specific notes are in [clients/vscode/SPEC.md](clients/vscode/SPEC.md).
+colouring comes in two layers: a TextMate grammar shipped with the extension
+for what a lexer can know, and `textDocument/semanticTokens` from the server
+for what each identifier resolved to. Extension-specific notes are in
+[clients/vscode/SPEC.md](clients/vscode/SPEC.md).
 
 ## Requirements at a glance
 

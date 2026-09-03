@@ -215,6 +215,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
 | `textDocument/typeDefinition` | via the declared type expression, so it crosses units |
 | `textDocument/documentHighlight` | occurrences in the current file |
+| `textDocument/semanticTokens/full`, `/range` | what every identifier resolved to, as standard token types (`class`, `struct`, `enum`, `interface`, `type`, `typeParameter`, `parameter`, `variable`, `property`, `enumMember`, `function`, `method`, `namespace`) with `declaration`/`readonly`/`defaultLibrary`; `$IFDEF`'d-out lines as `comment`. Keywords, strings and comments are NOT sent - the client grammar owns them. No `full/delta` (see Tier 3) |
 | `textDocument/completion` | PasTree's engine through the seam; `documentation` per item; [COMPLETION.md](COMPLETION.md) owns the story |
 | `textDocument/signatureHelp` | the engine's `CallAt`; call anchor rides as `pastreeCall` |
 | `workspace/symbol` | project-wide substring query over the prefetched index |
@@ -380,21 +381,21 @@ All four shipped. Two notes worth keeping:
 
 ### Tier 2 - real features, bounded work
 
-- **Syntax colouring in VS Code - asked for 2026-08-23**, on seeing XMLDoc
-  render there in grey. Two mechanisms, and we ship neither:
-  1. **A TextMate grammar** (`contributes.grammars` + a `.tmLanguage.json`)
-     for `objectpascal`, with `pascal` as an alias. Nothing to do with LSP,
-     but it is the only thing that colours a fenced code block - including
-     the ```pascal declaration line inside our own hover card - and it is
-     what paints while the user types, before any server answer.
-  2. **`textDocument/semanticTokens`** (full + range + delta). This is the
-     LSP half, and it is where we should be better than any grammar: a
-     regex cannot tell a field from a local from a type, and we resolve
-     every one of them. Maps our symbol kinds onto the standard token types
-     (`type`, `class`, `property`, `parameter`, `variable`, `function`,
-     `enumMember`, `namespace`) with `declaration`/`readonly` modifiers.
-  Order: grammar first (small, immediate, fixes the hover fence), semantic
-  tokens second (the real answer for the editor).
+- **Syntax colouring in VS Code - asked for 2026-08-23, DELIVERED
+  2026-09-03** in the two halves it was planned as:
+  1. **A TextMate grammar** (`clients/vscode/syntaxes/objectpascal.tmLanguage.json`,
+     with `pascal` and `delphi` as language aliases so the ```pascal fence in
+     our own hover card resolves to it). It paints keywords, strings,
+     comments, directives and numbers while the user types, before any
+     server answer, and deliberately leaves identifiers unscoped. The
+     client's [SPEC.md](clients/vscode/SPEC.md) records its contextual
+     rules for the directive words.
+  2. **`textDocument/semanticTokens/full` + `/range`** (see the Implemented
+     table). Two passes over the model - declared symbols, then every
+     `nkIdent` through `RefMap`/`ExtRefMap` - so a field, a local and a type
+     spelled alike come back as what they resolved to. What stays open is
+     the delta form (Tier 3) and `defaultLibrary` for units under a library
+     path, which needs the navigator's private path test made public.
 
 - **`workspace/symbol`. DELIVERED** (see the Implemented table) - project-wide
   substring query over the prefetched index, which is the IDE's own Ctrl+T.
@@ -425,11 +426,14 @@ All four shipped. Two notes worth keeping:
   completion API answers, and it landed 2026-08-21; the seam described in
   [COMPLETION.md](COMPLETION.md) is what it dropped into. `completionItem/resolve`
   is still open - today every item carries its own `documentation`.
-- **`textDocument/semanticTokens/full|range|full/delta`.** Semantic
-  highlighting is a strong fit - the model knows what every identifier
-  resolved to, and the demo's own PasTree highlighter is the precedent - but
-  it means emitting every token of a file, plus the delta protocol to keep it
-  affordable while typing.
+- **`textDocument/semanticTokens/full/delta`.** `full` and `range` are
+  DELIVERED (see the Implemented table); the delta form is not, on purpose:
+  it needs the previous answer kept per document and `resultId`, and VS Code
+  already debounces the full request and keeps the last colouring until the
+  new one arrives. The handler emits identifiers only - keywords, strings
+  and comments stay with the grammar - so a full answer is a few integers
+  per identifier. Measure on a large unit first; add delta if that measures
+  slow, not before.
 - **`textDocument/signatureHelp`.** DELIVERED 2026-08-22 alongside
   completion (see [COMPLETION.md](COMPLETION.md)): PasTree's `CallAt`
   answers through the same seam, active argument counted per request.

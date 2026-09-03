@@ -5,16 +5,25 @@
 // answerable by reading it. Server stderr shows up in the "PasTree LSP"
 // Output channel; the server's own file log is the deeper channel
 // (pastree.logFile / PASTREE_LSP_TRACE=1).
+//
+// The one thing this client adds beyond wiring is what the RAD Studio package
+// gets from ToolsAPI and an editor has to fetch itself: the IDE's library
+// paths and $(BDS) environment, read from the registry by ide.js. Without
+// them the RTL is a wall of F1027 - see that file's header.
 
 const path = require('path');
 const fs = require('fs');
 const vscode = require('vscode');
 const { LanguageClient } = require('vscode-languageclient/node');
+const ide = require('./ide');
 
 let client;
 
 function activate(context) {
   const cfg = vscode.workspace.getConfiguration('pastree');
+  const output = vscode.window.createOutputChannel('PasTree LSP');
+  context.subscriptions.push(output);
+  const ownVersion = (context.extension && context.extension.packageJSON.version) || '';
 
   let serverPath = cfg.get('serverPath') || '';
   if (!serverPath) {
@@ -28,14 +37,72 @@ function activate(context) {
     return;
   }
 
+  const folders = vscode.workspace.workspaceFolders || [];
+  const rootFolder = folders.length ? folders[0].uri.fsPath : '';
+
+  // A relative projectFile is relative to the first workspace folder, so a
+  // workspace's own .vscode/settings.json can name it portably.
+  let projectFile = cfg.get('projectFile') || '';
+  if (projectFile && !path.isAbsolute(projectFile) && rootFolder) {
+    projectFile = path.join(rootFolder, projectFile);
+  }
+  if (!projectFile) {
+    // Without a project the open documents are the analysis roots and their
+    // uses clauses do not resolve - every unit an F1027. When the workspace
+    // plainly has a project, say so rather than let the diagnostics say it.
+    vscode.workspace.findFiles('**/*.dproj', '**/{node_modules,__history,__recovery}/**', 20)
+      .then(files => {
+        if (!files.length) { return; }
+        const names = files.slice(0, 3).map(f => path.basename(f.fsPath)).join(', ');
+        vscode.window.showWarningMessage(
+          'PasTree: pastree.projectFile is not set, so only the open files are ' +
+          'analyzed and their uses clauses will not resolve. The workspace has ' +
+          files.length + ' project file(s): ' + names + (files.length > 3 ? ', ...' : ''),
+          'Open Settings').then(choice => {
+            if (choice) {
+              vscode.commands.executeCommand('workbench.action.openSettings', 'pastree.projectFile');
+            }
+          });
+      });
+  }
+
+  const platform = cfg.get('platform') || 'Win64';
+  let ideInfo = null;
+  if (cfg.get('ideLibraryPaths') !== false) {
+    try {
+      ideInfo = ide.discover({
+        platform, version: cfg.get('ideVersion') || '',
+        log: line => output.appendLine(line),
+      });
+    } catch (e) {
+      output.appendLine('RAD Studio discovery failed: ' + (e && e.message));
+    }
+    if (!ideInfo) {
+      vscode.window.showWarningMessage(
+        'PasTree: no RAD Studio installation found in the registry. RTL/VCL ' +
+        'units will report F1027 unless pastree.searchPaths covers their source.');
+    }
+  }
+
+  // rsvars.bat's variables for the server process, so a .dproj's own
+  // $(BDS)-relative paths expand - without overriding a shell that set them.
+  const env = { ...process.env, PASTREE_LSP_TRACE: '1' };
+  if (ideInfo) {
+    for (const [name, value] of Object.entries(ideInfo.env)) {
+      if (!env[name]) { env[name] = value; }
+    }
+  }
+  const idePaths = ideInfo ? ideInfo.paths : [];
+
   const serverOptions = {
     command: serverPath,
     args: [],
-    options: { env: { ...process.env, PASTREE_LSP_TRACE: '1' } },
+    options: { env },
   };
 
   const clientOptions = {
     documentSelector: [{ scheme: 'file', language: 'objectpascal' }],
+    outputChannel: output,
     // The server does not watch the file system itself (see its
     // HandleDidChangeWatchedFiles): an editor already knows about these
     // events, so the client forwards them as workspace/didChangeWatchedFiles
@@ -45,8 +112,8 @@ function activate(context) {
         '**/*.{pas,dpr,dpk,inc,dproj}'),
     },
     initializationOptions: {
-      projectFile: cfg.get('projectFile') || '',
-      platform: cfg.get('platform') || 'Win64',
+      projectFile,
+      platform,
       config: cfg.get('config') || '',
       logFile: cfg.get('logFile') || '',
       logUnits: cfg.get('logUnits') || false,
@@ -54,8 +121,14 @@ function activate(context) {
       // log-reading starts from, so it goes away only when asked.
       logDetail: cfg.get('logDetail') !== false,
       moduleRedoLimit: cfg.get('moduleRedoLimit') || 0,
-      searchPaths: cfg.get('searchPaths') || [],
+      // The user's own extra paths first, the IDE's after - same order the
+      // RAD Studio package sends, and the same double role for the IDE's:
+      // as searchPaths "look here", as libraryPaths "not the user's to
+      // rewrite" (rename refuses to touch them).
+      searchPaths: (cfg.get('searchPaths') || []).concat(idePaths),
+      libraryPaths: idePaths,
       defines: cfg.get('defines') || [],
+      host: 'VS Code ' + vscode.version + ', pastree-vscode ' + ownVersion,
     },
     middleware: {
       // Block completion (onTypeFormatting after Enter): the server's plan

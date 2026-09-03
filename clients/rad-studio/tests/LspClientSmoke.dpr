@@ -22,6 +22,7 @@ uses
   System.Classes,
   System.IOUtils,
   System.JSON,
+  System.Generics.Collections,   // TJSONArray.GetValue<T> inlines through it
   PasTreeIdePlugin.LspClient;
 
 const
@@ -913,6 +914,153 @@ begin
     'with its field as a child - types report their members');
 end;
 
+{ 5i. semanticTokens: the resolver-backed half of syntax colouring.
+
+  The answer is the protocol's delta-encoded integer array, so the checks
+  decode it back to absolute positions and look up a handful of tokens whose
+  place in DemoUnit.pas is known: a record type, a builtin type, a constant,
+  a routine and its parameter at the declaration and at a use. The legend
+  indices asserted here are the server's ST_/SM_ constants - a renumbering
+  there is a wire-format change, and this is where it shows. The range form
+  is asked for one line to see that it filters rather than ignores the range. }
+procedure TestSemanticTokens;
+const
+  // Legend indices, as advertised in the server's initialize answer.
+  cType = 1; cStruct = 5; cParameter = 7; cVariable = 8; cFunction = 11;
+  cDeclaration = 1; cReadonly = 2; cDefaultLibrary = 4;
+var
+  LUnitFile: string;
+  LParams, LDoc, LRange, LPos: TJSONObject;
+  LLines, LChars, LLens, LTypes, LMods: TArray<Integer>;
+  LCount: Integer;
+
+  // Decodes GResultJson's data array into the parallel arrays above;
+  // False when the answer is not the expected shape.
+  function Decode: Boolean;
+  var
+    LVal: TJSONValue;
+    LArr: TJSONArray;
+    LI, LLine, LChar: Integer;
+  begin
+    Result := False;
+    LCount := 0;
+    LVal := TJSONObject.ParseJSONValue(GResultJson);
+    try
+      if not (LVal is TJSONObject) then
+        Exit;
+      LArr := TJSONObject(LVal).GetValue('data') as TJSONArray;
+      if (LArr = nil) or (LArr.Count mod 5 <> 0) then
+        Exit;
+      LCount := LArr.Count div 5;
+      SetLength(LLines, LCount);
+      SetLength(LChars, LCount);
+      SetLength(LLens, LCount);
+      SetLength(LTypes, LCount);
+      SetLength(LMods, LCount);
+      LLine := 0;
+      LChar := 0;
+      for LI := 0 to LCount - 1 do
+      begin
+        if LArr.Items[LI * 5].AsType<Integer> > 0 then
+          LChar := 0;
+        LLine := LLine + LArr.Items[LI * 5].AsType<Integer>;
+        LChar := LChar + LArr.Items[LI * 5 + 1].AsType<Integer>;
+        LLines[LI] := LLine;
+        LChars[LI] := LChar;
+        LLens[LI] := LArr.Items[LI * 5 + 2].AsType<Integer>;
+        LTypes[LI] := LArr.Items[LI * 5 + 3].AsType<Integer>;
+        LMods[LI] := LArr.Items[LI * 5 + 4].AsType<Integer>;
+      end;
+      Result := True;
+    finally
+      LVal.Free;
+    end;
+  end;
+
+  // The token starting at (ALine, AChar), 0-based LSP positions; -1 if none.
+  function TokenAt(ALine, AChar: Integer): Integer;
+  var
+    LI: Integer;
+  begin
+    for LI := 0 to LCount - 1 do
+      if (LLines[LI] = ALine) and (LChars[LI] = AChar) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  procedure CheckToken(ALine, AChar, ALen, AType, AMods: Integer;
+    const AWhat: string);
+  var
+    LI: Integer;
+  begin
+    LI := TokenAt(ALine, AChar);
+    Check(LI >= 0, AWhat + ': a token starts there');
+    if LI < 0 then
+      Exit;
+    Check((LLens[LI] = ALen) and (LTypes[LI] = AType) and (LMods[LI] = AMods),
+      Format('%s: len %d type %d mods %d (got len %d type %d mods %d)',
+        [AWhat, ALen, AType, AMods, LLens[LI], LTypes[LI], LMods[LI]]));
+  end;
+
+  function DocParams: TJSONObject;
+  begin
+    Result := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LUnitFile));
+    Result.AddPair('textDocument', LDoc);
+  end;
+
+var
+  LI, LOnLine: Integer;
+  LDecoded: Boolean;
+begin
+  Writeln;
+  Writeln('=== 5i. semanticTokens classifies what each name resolved to ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  Check(Ask('textDocument/semanticTokens/full', DocParams),
+    'semanticTokens/full answered');
+  Check(GOk, 'and did not fail the request');
+  // Decode BEFORE the Check whose message quotes LCount: the compiler is free
+  // to build the message first, and did (the first run printed 0).
+  LDecoded := GOk and Decode;
+  Check(LDecoded and (LCount > 0),
+    Format('the data array decodes into %d tokens', [LCount]));
+  if LCount = 0 then
+    Exit;
+  // 0-based positions in fixtures\DemoUnit.pas.
+  CheckToken(7, 2, 4, cStruct, cDeclaration, 'TBox = record');
+  CheckToken(8, 4, 5, cVariable, cDeclaration, 'Value: - the field');
+  CheckToken(8, 11, 6, cType, cDefaultLibrary, 'string - a builtin type');
+  CheckToken(12, 2, 7, cVariable, cReadonly or cDeclaration, 'CAnswer = 42');
+  CheckToken(20, 9, 5, cFunction, cDeclaration, 'function Greet (interface)');
+  CheckToken(20, 21, 5, cParameter, cDeclaration, 'const AName (declared)');
+  CheckToken(26, 24, 5, cParameter, 0, 'AName (used in the body)');
+  Check(TokenAt(0, 0) < 0, 'the `unit` keyword is not a token - the grammar owns keywords');
+
+  // The range form: one line, and only that line's tokens come back.
+  LParams := DocParams;
+  LRange := TJSONObject.Create;
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(20));
+  LPos.AddPair('character', TJSONNumber.Create(0));
+  LRange.AddPair('start', LPos);
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(20));
+  LPos.AddPair('character', TJSONNumber.Create(60));
+  LRange.AddPair('end', LPos);
+  LParams.AddPair('range', LRange);
+  Check(Ask('textDocument/semanticTokens/range', LParams),
+    'semanticTokens/range answered');
+  LDecoded := GOk and Decode;
+  Check(LDecoded and (LCount >= 2),
+    Format('with %d tokens for the routine header line', [LCount]));
+  LOnLine := 0;
+  for LI := 0 to LCount - 1 do
+    if LLines[LI] = 20 then
+      Inc(LOnLine);
+  Check(LOnLine = LCount, 'every one of them on the requested line');
+end;
+
 { 5d-ter. rename: prepareRename, textDocument/rename and pastree/renamePlan.
 
   Nothing here APPLIES anything - the server plans, a host edits - so the
@@ -1745,6 +1893,7 @@ begin
       TestHover;
       TestSignatureHelp;
       TestDocumentSymbol;
+      TestSemanticTokens;
       TestRename;
       TestClassComplete;
       TestClassCompleteBrokenBuffer;
