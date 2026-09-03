@@ -51,6 +51,7 @@ type
     lblVersion: TLabel;
     lblBuilt: TLabel;
     lnkHome: TLinkLabel;
+    lnkHomePasTree: TLinkLabel;
     bvlHeader: TBevel;
     gbOverrides: TGroupBox;
     chkCtrlClick: TCheckBox;
@@ -70,8 +71,7 @@ type
     lblAdvancedLoggingHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
-    procedure lnkHomeLinkClick(Sender: TObject; const Link: string;
-      LinkType: TSysLinkType);
+    procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
     procedure chkLoggingClick(Sender: TObject);
   end;
 

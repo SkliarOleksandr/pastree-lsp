@@ -58,7 +58,7 @@ const
   /// this unit's 0.22.9, about forty commits behind, silently. Bump it in the
   /// same edit as this line.
   /// </summary>
-  PasTreeLspVersion = '0.28.5';
+  PasTreeLspVersion = '0.28.6';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than
@@ -155,8 +155,7 @@ begin
   Result := '';
   try
     if TFile.Exists(APath) then
-      Result := FormatDateTime('yyyy-mm-dd hh:nn',
-        TFile.GetLastWriteTime(APath));
+      Result := FormatDateTime('yyyy-mm-dd', TFile.GetLastWriteTime(APath));
   except
     Result := '';   // a build stamp is never worth an exception
   end;
