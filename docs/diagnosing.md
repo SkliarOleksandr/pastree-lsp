@@ -21,6 +21,24 @@ in the initializationOptions (`pastree.logUnits` in VS Code) or
 thing that answers "which of several copies on the search path won?". Off by
 default because it is hundreds of lines per rebuild.
 
+## "Back does nothing after Ctrl+Click" - but only sometimes
+
+The IDE's Backward/Forward stack (`IOTAHistoryServices`) is opaque from the
+editor, so first make it visible: temporarily log `GetBackwardCount`,
+`GetForwardCount` and every `GetBackwardItem`/`GetForwardItem` caption before
+and after `AddHistoryItem` and after the navigation, in
+`PushHistoryAndNavigate`. The dump answers the two questions that matter:
+where the stack pointer is (the current item appears in neither list) and
+whether the IDE's own `[ide]` entries are interleaved with ours.
+
+The 2026-09-03 case: Back failed exactly when the jump target had already
+been visited in the session. `IOTAHistoryServices.Execute(AItem)` finds
+"this position" by an `IsEqual` scan from the bottom of the stack and takes
+the first match, and our `IsEqual` compares positions - so the pointer landed
+on the old entry, everything newer turned into forward history, and Back was
+disabled. `AddHistoryItem` already positions the pointer on `NewItem`; the
+fix was to run `NewItem.Execute` ourselves instead of asking the service to.
+
 ## "The analysis got slow"
 
 **If it got slow WHILE TYPING, the question is not how fast a rebuild is - it

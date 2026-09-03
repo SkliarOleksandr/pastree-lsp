@@ -319,11 +319,23 @@ end;
 /// <summary>
 /// Registers the jump with the IDE's Backward/Forward history (so
 /// Alt+Left/Alt+Right work across it, same as the IDE's own navigation),
-/// then performs it via IOTAHistoryServices.Execute - which both sets the
-/// stack pointer to the new position AND calls NewItem.Execute for us, so
-/// this does not also call NavigateToPosition itself. Falls back to a
-/// direct NavigateToPosition call only if the history service is
-/// unavailable (defensive - it's a core IDE service, expected to always be
+/// then performs it by calling NewItem.Execute directly.
+///
+/// NOT IOTAHistoryServices.Execute(NewItem) - that was the code until
+/// 2026-09-03 and it is what made "Back does nothing after Ctrl+Click"
+/// depend on where you had already been. A stack dump showed two things:
+/// AddHistoryItem alone already leaves the stack pointer on NewItem (it
+/// appears in neither the backward nor the forward list afterwards), and
+/// Execute(AItem) then re-finds "this position" by scanning the stack with
+/// IsEqual and taking the FIRST match. Our IsEqual compares positions, so a
+/// jump to a declaration already visited earlier in the session matched the
+/// old entry near the bottom, the pointer moved there, everything newer
+/// became "forward", and Back was disabled (back=0, fwd=3 in the dump).
+/// Calling the item's own Execute performs the navigation and leaves the
+/// pointer where AddHistoryItem put it.
+///
+/// Falls back to a direct NavigateToPosition call only if the history service
+/// is unavailable (defensive - it's a core IDE service, expected to always be
 /// there).
 /// </summary>
 procedure PushHistoryAndNavigate(const AFromFile: string; AFromRow, AFromCol: Integer;
@@ -339,7 +351,7 @@ begin
     LHistoryServices.AddHistoryItem(LCurItem, LNewItem);
     TrackHistoryItem(LCurItem);
     TrackHistoryItem(LNewItem);
-    LHistoryServices.Execute(LNewItem);
+    LNewItem.Execute;
   end
   else
     NavigateToPosition(AToFile, AToRow, AToCol);
