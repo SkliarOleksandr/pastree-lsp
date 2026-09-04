@@ -1965,7 +1965,7 @@ var
   LPath: string;
   LLine, LChar, LPasLine, LPasCol, LMid: Integer;
   LIdent: TPasNavIdent;
-  LTarget: TPasNavTarget;
+  LTarget, LImplTarget: TPasNavTarget;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -2000,6 +2000,18 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LIdent.Name]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
+  // A routine name resolves to its FORWARD declaration (ResolveDecl always
+  // answers DeclNode, set once at first declaration - see PasTree.Sema.Nav's
+  // header). For F12/Ctrl+Click a reader wants the BODY, same as clicking a
+  // non-Pascal symbol lands on where it is defined - so when the resolved
+  // target is itself a routine header with a separate implementation,
+  // redirect through the same decl<->impl toggle HandleToggle uses below.
+  // Silent fallback to the header on a miss (plain routine with only one
+  // half, or an unresolved position): that is not an error, just nothing to
+  // redirect to.
+  if FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
+    LImplTarget) then
+    LTarget := LImplTarget;
   Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));

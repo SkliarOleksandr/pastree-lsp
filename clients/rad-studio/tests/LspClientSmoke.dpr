@@ -468,21 +468,25 @@ begin
   DidOpen(LFile);
 
   // Where Wrap is CALLED - the line whose leading Cyrillic literal is the point
-  // of the fixture - and where it is DECLARED, both read from the file so
-  // editing the fixture cannot make this assert the wrong place.
+  // of the fixture - and where it is IMPLEMENTED, both read from the file so
+  // editing the fixture cannot make this assert the wrong place. Definition
+  // redirects a routine name to its body when there is one (see
+  // PasLsp.Server.HandleDefinition, via GotoImplementation), and that lands
+  // on the body's first STATEMENT, same as the decl<->impl toggle - not on
+  // the "function Wrap(" header line.
   FindPos(LFile, 'Wrap(AText)', 'Wrap(AText)', LLine, LChar);
-  FindPos(LFile, 'function Wrap(', 'Wrap', LDeclLine, LDeclChar);
+  FindPos(LFile, '''['' + AText', 'Result', LDeclLine, LDeclChar);
 
   Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
     'definition answered');
   Check(GOk and GResultJson.Contains('DemoUnicode.pas'),
     'Wrap resolves despite the Cyrillic literal earlier on the line');
   // Landing in the right FILE is not enough: a column error could still hit
-  // some other identifier. Only the exact declaration position proves the
+  // some other identifier. Only the exact implementation position proves the
   // request was aimed where we meant.
   Check(GOk and GResultJson.Contains(
     Format('"line":%d,"character":%d', [LDeclLine, LDeclChar])),
-    Format('and lands exactly on Wrap''s declaration (%d,%d)',
+    Format('and lands exactly on Wrap''s implementation (%d,%d)',
       [LDeclLine, LDeclChar]));
 end;
 
