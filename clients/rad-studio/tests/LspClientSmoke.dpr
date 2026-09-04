@@ -490,6 +490,80 @@ begin
       [LDeclLine, LDeclChar]));
 end;
 
+{ 4c. A BARE `inherited;` (no name following) resolves to the ancestor's
+  override of the SAME method, same as Delphi's own Ctrl+Click - see
+  PasTree.Sema.Nav.GotoBareInherited's header for why it needs a path of its
+  own: the keyword has no identifier token for IdentAt to land on at all,
+  unlike a NAMED `inherited Greet(...)`, which is an ordinary nkIdent already
+  resolved by CrossResolveInherited - checked here too, so a regression in
+  either form shows up against the other. }
+procedure TestBareInherited;
+var
+  LLine, LChar, LTargetLine, LTargetChar: Integer;
+  LFile: string;
+begin
+  Writeln;
+  Writeln('=== 4c. bare `inherited;` resolves to the ancestor override ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoInherited.pas');
+  DidOpen(LFile);
+
+  // TBase.Greet's implementation is where BOTH forms below must land -
+  // GotoImplementation's own body-first-statement rule (see 4 above), not
+  // the "function TBase.Greet(" header line.
+  FindPos(LFile, '''Hello, '' + AName', 'Result', LTargetLine, LTargetChar);
+
+  FindPos(LFile, 'inherited;', 'inherited', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for the bare inherited');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTargetLine, LTargetChar])),
+    Format('and a bare inherited lands on TBase.Greet''s implementation (%d,%d)',
+      [LTargetLine, LTargetChar]));
+
+  FindPos(LFile, 'inherited Greet(AName)', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for the named inherited');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTargetLine, LTargetChar])),
+    Format('and a named inherited lands there too (%d,%d)',
+      [LTargetLine, LTargetChar]));
+
+  // The KEYWORD of that same named call - the IDE lets you click it, and it
+  // must mean the name, not "the ancestor's Greet by arity" (same answer
+  // here, but a different path - see GotoBareInherited).
+  FindPos(LFile, 'inherited Greet(AName)', 'inherited', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for the keyword of a named inherited');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTargetLine, LTargetChar])),
+    Format('and the keyword lands where the name does (%d,%d)',
+      [LTargetLine, LTargetChar]));
+
+  // Overloads: TBase.Init(A) heads the chain, TDerived.Init(A, B)'s bare
+  // inherited must reach Init(A, B) - the one with ITS arity.
+  FindPos(LFile, 'Assert(A + B >= 0)', 'Assert', LTargetLine, LTargetChar);
+  FindPos(LFile, 'inherited;   //', 'inherited', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for a bare inherited among overloads');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTargetLine, LTargetChar])),
+    Format('and it picks the overload of the same arity (%d,%d)',
+      [LTargetLine, LTargetChar]));
+
+  // The routine's OWN name in its implementation header goes the other way -
+  // to the declaration - instead of being redirected back into the body the
+  // caret is already in (the IDE's own behaviour; see HandleDefinition).
+  FindPos(LFile, 'function Greet(const AName: string): string; override;',
+    'Greet', LTargetLine, LTargetChar);
+  FindPos(LFile, 'function TDerived.Greet(', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for an implementation''s own name');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTargetLine, LTargetChar])),
+    Format('and it goes to the DECLARATION, not back into the body (%d,%d)',
+      [LTargetLine, LTargetChar]));
+end;
+
 { 4b. A leading BOM in didOpen text is not content.
 
   This one goes through the raw notification rather than the plugin's document
@@ -1890,6 +1964,7 @@ begin
       TestQueuedBeforeReady(GExe);
       TestNavigation;
       TestNonAsciiPositions;
+      TestBareInherited;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
       TestIncrementalPath;

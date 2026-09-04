@@ -1965,7 +1965,8 @@ var
   LPath: string;
   LLine, LChar, LPasLine, LPasCol, LMid: Integer;
   LIdent: TPasNavIdent;
-  LTarget, LImplTarget: TPasNavTarget;
+  LTarget, LImplTarget, LDeclTarget: TPasNavTarget;
+  LResolved, LOwnHeader: Boolean;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -1987,13 +1988,41 @@ begin
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   // Failures answer null to the client (per protocol) but SAY WHY in the
   // log - "F12 did nothing" is otherwise undebuggable from the outside.
-  if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+  if FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+    LResolved := FNav.ResolveDecl(LMid, LIdent.Node, LTarget)
+  else
   begin
-    Log(Format(AMsg.Method + ': %s no identifier at that position',
-      [PosTag(LPath, LPasLine, LPasCol)]));
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
+    // Not an identifier - but the `inherited` KEYWORD isn't one either, and
+    // Delphi's own Ctrl+Click resolves it (bare `inherited;` to the ancestor
+    // method of the same name; on a named call, same as clicking the name).
+    // Anything else that is not an identifier is a genuine miss.
+    if not FNav.GotoBareInherited(LMid, LPasLine, LPasCol, LTarget) then
+    begin
+      Log(Format(AMsg.Method + ': %s no identifier at that position',
+        [PosTag(LPath, LPasLine, LPasCol)]));
+      Exit(BuildResponse(AMsg.IdJson, 'null'));
+    end;
+    LIdent.Name := 'inherited';
+    LResolved := True;
   end;
-  if not FNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
+  // The routine's OWN name in its `procedure TFoo.Bar` implementation header
+  // goes the other way - to the declaration - as the IDE does: redirecting
+  // into the body would put the caret right back where it already is. A
+  // qualified implementation's name has no binding of its own (the resolver
+  // links the class member, not the header that completes it), so this is
+  // the toggle's declaration lookup for the cursor position - which answers
+  // for ANY position inside an implementation, hence the name check: only
+  // the header's own name (or a recursive self-call) spells the routine.
+  LOwnHeader := FNav.GotoDeclaration(LMid, LPasLine, LPasCol, LDeclTarget) and
+    SameText(LDeclTarget.Name, LIdent.Name) and
+    (not LResolved or ((LDeclTarget.UnitId = LTarget.UnitId) and
+      (LDeclTarget.Line = LTarget.Line) and (LDeclTarget.Col = LTarget.Col)));
+  if LOwnHeader then
+  begin
+    LTarget := LDeclTarget;
+    LResolved := True;
+  end;
+  if not LResolved then
   begin
     Log(Format(AMsg.Method + ': %s ''%s'' did not resolve to a source'
       + ' declaration (unresolved name, or a builtin with none)',
@@ -2008,9 +2037,11 @@ begin
   // redirect through the same decl<->impl toggle HandleToggle uses below.
   // Silent fallback to the header on a miss (plain routine with only one
   // half, or an unresolved position): that is not an error, just nothing to
-  // redirect to.
-  if FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
-    LImplTarget) then
+  // redirect to. Not from the implementation's own header (LOwnHeader
+  // above): there the declaration IS the answer.
+  if not LOwnHeader and
+     FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
+       LImplTarget) then
     LTarget := LImplTarget;
   Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,

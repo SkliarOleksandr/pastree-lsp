@@ -11,11 +11,18 @@ program DemoApp;
 uses
   DemoUnit in 'DemoUnit.pas',
   DemoUnicode in 'DemoUnicode.pas',
-  Demo.Dotted in 'Demo.Dotted.pas';
+  Demo.Dotted in 'Demo.Dotted.pas',
+  DemoInherited in 'DemoInherited.pas';
+
+var
+  LDerived: TDerived;
 
 begin
   Writeln(Greet('world'));
   Writeln(Greet('again'));
   Writeln(Shout('quiet'));
   Writeln(DottedAnswer);
+  LDerived := TDerived.Create;
+  Writeln(LDerived.Greet('bare inherited'));
+  LDerived.Free;
 end.
