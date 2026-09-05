@@ -182,6 +182,11 @@ type
   TLspSyncPrototypes = record
     Edits: TArray<TLspTextEdit>;
     Name: string;      // 'TFoo.Bar' - the half that was rewritten
+    // Where the caret goes once the edit is in: the rewritten half's
+    // identifier, IDE coordinates. 0 = no edit, stay put. Same field pair
+    // TLspClassComplete carries, read by the same rule.
+    CaretRow: Integer;
+    CaretCol: Integer;
     Provider: string;
   end;
 
@@ -1609,6 +1614,10 @@ begin
   if not (AResult is TJSONObject) then
     Exit;
   Result.Provider := AResult.GetValue<string>('provider', '');
+  LLine := AResult.GetValue<Integer>('caret.line', -1);
+  LChar := AResult.GetValue<Integer>('caret.character', -1);
+  if (LLine >= 0) and (LChar >= 0) then
+    LspToIde(LLine, LChar, Result.CaretRow, Result.CaretCol);
   if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
     Exit;
   for LValue in LEdits do

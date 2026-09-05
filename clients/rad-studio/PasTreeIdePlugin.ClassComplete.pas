@@ -54,6 +54,7 @@ uses
   Winapi.Windows,
   Vcl.Menus,
   ToolsAPI,
+  PasTreeIdePlugin.GotoDeclaration,   // MoveCaretCentred
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.Settings,
@@ -106,7 +107,6 @@ var
   LWriter: IOTAEditWriter;
   LCharPos: TOTACharPos;
   LOffsets: TArray<Integer>;
-  LPos: IOTAEditPosition;
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) then
     Exit;
@@ -149,22 +149,10 @@ begin
   finally
     LWriter := nil;   // the writer commits on release
   end;
+  // Centred, the way Go To Declaration lands - not a bare Move, which leaves
+  // the new line on the view's first row (Alex, 2026-09-05).
   if AAnswer.CaretRow > 0 then
-  begin
-    // The same three calls Go To Declaration makes (NavigateToPosition in
-    // PasTreeIdePlugin.GotoDeclaration), for parity: a plain Move scrolls
-    // only as far as it must, which puts the new line on the view's FIRST
-    // row; GotoLine is the ToolsAPI call that CENTRES a line, and
-    // MoveViewToCursor is what makes the view actually follow (Alex,
-    // 2026-09-05 - "Go To Definition shows it in the middle, this at the top").
-    LPos := AView.Position;
-    if Assigned(LPos) then
-    begin
-      LPos.GotoLine(AAnswer.CaretRow);
-      LPos.Move(AAnswer.CaretRow, AAnswer.CaretCol);
-      AView.MoveViewToCursor;
-    end;
-  end;
+    MoveCaretCentred(AView, AAnswer.CaretRow, AAnswer.CaretCol);
   // The insertion came from a keystroke with no visible cause; repaint now
   // rather than at the next natural refresh.
   AView.Paint;

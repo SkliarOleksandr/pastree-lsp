@@ -1495,6 +1495,12 @@ begin
     'the body takes the declaration''s parameters and keeps its OWN name');
   Check(GOk and GResultJson.Contains('"name":"TBase.Grew"'),
     'and the answer says which half it rewrote');
+  // The caret follows the edit onto the rewritten half's IDENTIFIER - past
+  // `procedure ` (10) and past `TBase.` (6) on the implementation's line -
+  // the same spot class completion lands an orphan's declaration on and Go
+  // To Declaration lands everything on (Alex, 2026-09-05: "the same scheme").
+  Check(GOk and GResultJson.Contains('"caret":{"line":50,"character":16}'),
+    'the caret goes to the rewritten implementation, on `Grew` not `TBase`');
 
   Check(AskAt('procedure TBase.Shrank(A: Integer);', 'Shrank'),
     'answered for an implementation');
@@ -1502,6 +1508,8 @@ begin
     '"newText":"procedure Shrank(A: Integer)"'),
     'the DECLARATION follows the body when the caret is in the body - '
     + 'unqualified, as a member declaration must be');
+  Check(GOk and GResultJson.Contains('"caret":{"line":36,"character":14}'),
+    'and the caret goes to the rewritten declaration, on its identifier');
 
   Check(AskAt('function Became(A: Integer): string;', 'Became'),
     'answered for a procedure that became a function');
@@ -1520,12 +1528,16 @@ begin
   Check(GOk and GResultJson.Contains('"count":0')
     and GResultJson.Contains('already in step'),
     'and that pair is left alone - stripping the default makes them equal');
+  Check(GOk and GResultJson.Contains('"caret":{"line":0,"character":0}'),
+    'no edit, no caret move - 0/0 is the "stay put" a client reads');
 
   Check(AskAt('class procedure ClassGone(A: Integer);', 'ClassGone'),
     'answered for a class method');
   Check(GOk and GResultJson.Contains(
     '"newText":"class procedure TBase.ClassGone(A: Integer)"'),
     '`class` is re-emitted - the parser keeps it outside the routine node');
+  Check(GOk and GResultJson.Contains('"caret":{"line":70,"character":22}'),
+    'and the caret skips the re-emitted `class ` too - on `ClassGone`');
 
   Check(AskAt('procedure FreeOne(A: Integer; const B: string);', 'FreeOne'),
     'answered for a free routine''s implementation');

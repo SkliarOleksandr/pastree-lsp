@@ -86,6 +86,14 @@ type
       because that is what the client already knows how to apply and because
       "one" is a property of the gesture, not of the protocol. }
     Edits: TArray<TLspSyncEdit>;
+    { Where to leave the caret once the edit is applied: ON the rewritten
+      half's IDENTIFIER - `Bar`, past the `TFoo.` when the half is the
+      implementation - the spot Go To Declaration lands on, and the rule class
+      completion follows for an orphan's declaration (Alex, 2026-09-05: "the
+      same scheme"). 1-based PasTree coordinates in the buffer AS IT WILL READ
+      after the replacement; 0 = no edit, stay put. }
+    CaretLine: Integer;
+    CaretCol: Integer;
     { Names the outcome, and a refusal says WHY: "nothing happened" is the one
       answer a user cannot debug. }
     Provider: string;
@@ -282,14 +290,18 @@ begin
 end;
 
 { The header text the TARGET should now read, built from the SOURCE's tail and
-  the target's own head. }
+  the target's own head. ANameOffset is where the target's NAME starts in the
+  result, 0-based - the caret's column, from the same code that wrote the
+  text so the two cannot drift (class completion's BuildHeader makes the same
+  promise for the same reason). }
 function MirroredHeader(const ATree: TPasTree; const ASource,
-  ATarget: TRoutineSide): string;
+  ATarget: TRoutineSide; out ANameOffset: Integer): string;
 var
   LWord, LName, LTail: string;
-  LWordFirst: Integer;
+  LWordFirst, LIdx, LDepth: Integer;
 begin
   Result := '';
+  ANameOffset := 0;
   // The routine word as the SOURCE spells it - this is what mirrors a
   // procedure that became a function. Sliced from the source's node start
   // (which excludes `class`, see IsClassRoutine) up to its name.
@@ -309,6 +321,18 @@ begin
     LTail := Flatten(RawSpan(ATree, ASource.NameLast + 1, ASource.TailEnd));
   if ATarget.IsImpl then
     LTail := StripDefaults(LTail);
+  // The IDENTIFIER, not the qualification: in `procedure TStack<T>.Push(...)`
+  // the caret belongs on `Push`, so skip past the last dot that is not inside
+  // the chain's generic parameters.
+  ANameOffset := Length(LWord) + 1;
+  LDepth := 0;
+  for LIdx := 1 to Length(LName) do
+    case LName[LIdx] of
+      '<': Inc(LDepth);
+      '>': Dec(LDepth);
+      '.': if LDepth = 0 then
+             ANameOffset := Length(LWord) + 1 + LIdx;
+    end;
   Result := LWord + ' ' + LName + LTail;
 end;
 
@@ -321,6 +345,7 @@ var
   LFound, LHaveSource: Boolean;
   LCandidates, LInSync: Integer;
   LSourceKey, LNewText, LOldText: string;
+  LNameOffset: Integer;
   LEdit: TLspSyncEdit;
 begin
   Result := Default(TLspSyncAnswer);
@@ -429,7 +454,7 @@ begin
     Exit;
   end;
 
-  LNewText := MirroredHeader(ATree, LSource, LTarget);
+  LNewText := MirroredHeader(ATree, LSource, LTarget, LNameOffset);
   if LNewText = '' then
   begin
     Result.Provider := 'pastree/syncPrototypes: could not read the signature '
@@ -459,6 +484,11 @@ begin
   else
     LEdit.Name := LTarget.Name;
   Result.Edits := [LEdit];
+  // The replacement starts at the head and is ONE line (Flatten), so the
+  // name's line is the head's line and its column is the head's plus the
+  // offset - no other edit exists to shift either.
+  Result.CaretLine := LStartLine;
+  Result.CaretCol := LStartCol + LNameOffset;
   if LTarget.IsImpl then
     Result.Provider := Format('pastree/syncPrototypes: %s implementation '
       + 'updated from its declaration', [LEdit.Name])

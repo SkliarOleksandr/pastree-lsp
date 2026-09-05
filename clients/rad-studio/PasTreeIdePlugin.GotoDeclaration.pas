@@ -119,6 +119,18 @@ procedure ExecuteToggle(const AView: IOTAEditView; AToImpl: Boolean);
 /// </summary>
 procedure NavigateHistoryAware(const AFileName: string; ARow, ACol: Integer);
 
+/// <summary>
+/// Puts the caret at (ARow, ACol) in AView with the line CENTRED in the view -
+/// the three ToolsAPI calls every navigation here makes, exported so that a
+/// feature which moves the caret AFTER an edit (class completion's stub or
+/// orphan declaration, prototype sync's rewritten half) lands the way Go To
+/// Declaration does. A bare IOTAEditPosition.Move scrolls only as far as it
+/// must and leaves the line on the view's first row (Alex, 2026-09-05);
+/// GotoLine is the call that centres, and MoveViewToCursor makes the view
+/// follow. No history entry: an edit is not a jump to come back from.
+/// </summary>
+procedure MoveCaretCentred(const AView: IOTAEditView; ARow, ACol: Integer);
+
 implementation
 
 uses
@@ -197,10 +209,21 @@ begin
     Exit;
   end;
 
-  LView := LSourceEditor.EditViews[0];
-  LView.Position.GotoLine(ARow);
-  LView.Position.Move(ARow, ACol);
-  LView.MoveViewToCursor;
+  MoveCaretCentred(LSourceEditor.EditViews[0], ARow, ACol);
+end;
+
+procedure MoveCaretCentred(const AView: IOTAEditView; ARow, ACol: Integer);
+var
+  LPos: IOTAEditPosition;
+begin
+  if not Assigned(AView) then
+    Exit;
+  LPos := AView.Position;
+  if not Assigned(LPos) then
+    Exit;
+  LPos.GotoLine(ARow);
+  LPos.Move(ARow, ACol);
+  AView.MoveViewToCursor;
 end;
 
 type

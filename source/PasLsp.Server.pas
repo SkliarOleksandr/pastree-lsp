@@ -3388,6 +3388,7 @@ var
   LAnswer: TLspSyncAnswer;
   LIdx, LLine, LChar, LPasLine, LPasCol: Integer;
   LStartLine, LStartChar, LEndLine, LEndChar: Integer;
+  LCaretLine, LCaretChar: Integer;
   LStart: UInt64;
 begin
   LPath := DocPathOf(AMsg.Params);
@@ -3432,9 +3433,17 @@ begin
   Log(Format('syncPrototypes: %s(%d,%d) -> %d edit(s) in %d ms (%s)',
     [TPath.GetFileName(LPath), LPasLine, LPasCol, Length(LAnswer.Edits),
      GetTickCount64 - LStart, LAnswer.Provider]));
+  // `caret` exactly as classComplete reports it: LSP coordinates, 0/0 when
+  // there is nothing to move to, so one client-side rule reads both.
+  LCaretLine := 0;
+  LCaretChar := 0;
+  if LAnswer.CaretLine > 0 then
+    PasTreeToLsp(LAnswer.CaretLine, LAnswer.CaretCol, LCaretLine, LCaretChar);
   Result := BuildResponse(AMsg.IdJson, Format(
-    '{"edits":[%s],"count":%d,"provider":%s}',
-    [LEdits, Length(LAnswer.Edits), JsonQuote(LAnswer.Provider)]));
+    '{"edits":[%s],"caret":{"line":%d,"character":%d},"count":%d,'
+    + '"provider":%s}',
+    [LEdits, LCaretLine, LCaretChar, Length(LAnswer.Edits),
+     JsonQuote(LAnswer.Provider)]));
 end;
 
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;

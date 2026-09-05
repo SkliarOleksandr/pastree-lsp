@@ -68,6 +68,7 @@ procedure FinalizeSyncPrototypes;
 implementation
 
 uses
+  PasTreeIdePlugin.GotoDeclaration,   // MoveCaretCentred
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession;
 
@@ -146,9 +147,14 @@ begin
   finally
     LWriter := nil;   // the writer commits on release
   end;
-  // The change is elsewhere in the file than the caret - often off screen -
-  // so a repaint now rather than at the next natural refresh is the only way
-  // the user sees that anything happened.
+  // The change is elsewhere in the file than the caret - often off screen.
+  // So the caret GOES there: onto the rewritten half's identifier, centred,
+  // exactly as Go To Declaration / class completion land (Alex, 2026-09-05 -
+  // "the same scheme"). The server names the spot, from the same code that
+  // wrote the header. A repaint on top, for the same reason class completion
+  // does one: the keystroke had no visible cause of its own.
+  if AAnswer.CaretRow > 0 then
+    MoveCaretCentred(AView, AAnswer.CaretRow, AAnswer.CaretCol);
   AView.Paint;
 end;
 
