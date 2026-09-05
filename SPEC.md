@@ -242,10 +242,38 @@ typed.
 ### Class completion scenarios
 
 `pastree/classComplete` (`source/PasLsp.ClassComplete.pas`) answers two mirror
-questions over the whole unit, both by the name "what does not match": "what
-did I declare and not implement" (the ordinary case) and "what did I implement
-and not declare" (the orphan case, added 2026-09-05 for parity with native
-Delphi's Ctrl+Shift+C, which handles both directions).
+questions, both by the name "what does not match": "what did I declare and not
+implement" (the ordinary case) and "what did I implement and not declare" (the
+orphan case, added 2026-09-05 for parity with native Delphi's Ctrl+Shift+C,
+which handles both directions).
+
+**Scope: the type at the caret, whole - or the one free routine at the
+caret.** The request carries the caret (`position`, optional); the answer
+covers every member of the type the caret is in - in its declaration or in
+the body of one of its methods - and nothing else in the unit. A caret in a
+free routine, declaration or body, covers that routine alone (it belongs to no
+type). A caret in neither is a refusal that says so. Until 2026-09-05 the
+answer was the whole unit, on the argument that "what did I declare and not
+implement" has one answer per file; it does, but one press on an empty line of
+a 13000-line unit then rewrote eight classes the user had not looked at, with
+nothing to review against. One type per press is what the native command
+does and what a user can read before saving. A client that sends no
+`position` still gets the whole unit - the shape the request had, kept for
+clients with no caret to offer.
+
+**What it must not invent - inherited members.** `read FX` on a class whose
+PARENT declares FX names nothing missing. Ancestors declared in this unit are
+walked (`WalkAncestors`) and their members count as present. An ancestor from
+another unit cannot be seen, so there the rule is conservative: a FIELD-shaped
+name is left alone (it is the parent's field until proven otherwise - the
+eight `Code: string` fields written into `TLabNameObject`'s descendants in
+uaviTypes.pas were exactly that), a Get/Set-shaped name still gets its method
+(pointing a new property at a foreign base's accessor is not how anyone writes
+Delphi), a bare property is still completed, and an interface with a foreign
+base gets nothing (its specifiers are methods, and the base declaring the
+getter is the common case). No resolver: a parse of the live buffer cannot
+have one, and the honest answer without it is "I cannot see, so I do not
+write".
 
 **Handled:**
 
@@ -271,9 +299,10 @@ Delphi's Ctrl+Shift+C, which handles both directions).
   DECLARED IN THIS UNIT, with no matching declaration in `TFoo`, gets the
   declaration written back into `TFoo` - same directives, same parameter list,
   the class's own name dropped (a member does not repeat its type). Computed
-  the same way missing bodies are (a key match over the whole unit, so a
-  declaration appearing anywhere else in the file - including after the
-  implementation in source order - still cancels the candidate) and folded
+  the same way missing bodies are (a key match against every declaration in
+  the unit, so a declaration appearing anywhere else in the file - including
+  after the implementation in source order - still cancels the candidate;
+  only the caret's own type gets its orphans written back) and folded
   into the SAME per-type member edit a property's synthesized accessors use,
   so a type with both gets one touch to its body, not two. A free routine
   implementation with no forward declaration is NOT this case - that is a
@@ -297,12 +326,12 @@ empty type - right before the type's `end`. See `MemberInsertPos` in
 rust-analyzer both offer the orphan-implementation direction as a quick-fix
 keyed off the "unresolved/no such member" diagnostic at the implementation
 itself - "Create method `Bar`", "Generate function" - rather than a
-whole-unit command. We fold it into the existing whole-unit
-`pastree/classComplete` instead, because that request is already bound to
-Ctrl+Shift+C as the one-key answer to "make this compile", and a second,
-per-site mechanism (a `textDocument/codeAction` on a new diagnostic) would
-mean deciding, for every unmatched implementation, which of two keys catches
-it - exactly the kind of ambiguity a single unit-wide pass avoids. A future
+type-wide command. We fold it into the existing `pastree/classComplete`
+instead, because that request is already bound to Ctrl+Shift+C as the one-key
+answer to "make this compile", and a second, per-site mechanism (a
+`textDocument/codeAction` on a new diagnostic) would mean deciding, for every
+unmatched implementation, which of two keys catches it - exactly the kind of
+ambiguity one type-wide pass avoids. A future
 per-site quick-fix, if one is ever added for editors without the Ctrl+Shift+C
 binding, should still answer through the same `ClassCompleteFor` machinery
 rather than a second copy of the matching rules.

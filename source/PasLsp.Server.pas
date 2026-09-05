@@ -3318,13 +3318,23 @@ var
   LPath, LText, LEdits, LNames: string;
   LDoc: TLspDocument;
   LAnswer: TLspClassCompleteAnswer;
-  LIdx, LCaretLine, LCaretChar: Integer;
+  LIdx, LCaretLine, LCaretChar, LLine, LChar, LPasLine, LPasCol: Integer;
   LStart: UInt64;
 begin
   LPath := DocPathOf(AMsg.Params);
   if LPath = '' then
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'classComplete: textDocument.uri required'));
+  // `position` scopes the answer to the type or free routine the caret is in
+  // (2026-09-05; see PasLsp.ClassComplete). OPTIONAL, unlike syncPrototypes':
+  // a client with no caret to offer - or one written against the earlier
+  // shape of this request - still gets the whole unit, which (0, 0) means.
+  LLine := AMsg.Params.GetValue<Integer>('position.line', -1);
+  LChar := AMsg.Params.GetValue<Integer>('position.character', -1);
+  LPasLine := 0;
+  LPasCol := 0;
+  if (LLine >= 0) and (LChar >= 0) then
+    LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   LStart := GetTickCount64;
   // Document truth, exactly as completion reads it: the open buffer if we
   // hold one, the file on disk otherwise.
@@ -3339,7 +3349,7 @@ begin
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
       FDefines);
   SyncCompletionOverlays;
-  LAnswer := FCompletion.ClassCompleteAt(LPath, LText);
+  LAnswer := FCompletion.ClassCompleteAt(LPath, LText, LPasLine, LPasCol);
 
   LEdits := '';
   for LIdx := 0 to High(LAnswer.Edits) do
@@ -3361,8 +3371,8 @@ begin
   LCaretChar := 0;
   if LAnswer.CaretLine > 0 then
     PasTreeToLsp(LAnswer.CaretLine, LAnswer.CaretCol, LCaretLine, LCaretChar);
-  Log(Format('classComplete: %s -> %d edit(s) in %d ms (%s)',
-    [TPath.GetFileName(LPath), Length(LAnswer.Edits),
+  Log(Format('classComplete: %s(%d,%d) -> %d edit(s) in %d ms (%s)',
+    [TPath.GetFileName(LPath), LPasLine, LPasCol, Length(LAnswer.Edits),
      GetTickCount64 - LStart, LAnswer.Provider]));
   Result := BuildResponse(AMsg.IdJson, Format(
     '{"edits":[%s],"caret":{"line":%d,"character":%d},' +

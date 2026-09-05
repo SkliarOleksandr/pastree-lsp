@@ -190,14 +190,26 @@ end;
 procedure RunClassComplete(const AView: IOTAEditView;
   const AFileName: string);
 var
-  LLenAtRequest: Integer;
+  LLenAtRequest, LRow, LCol: Integer;
+  LPos: IOTAEditPosition;
 begin
   // THE SNAPSHOT THIS ANSWER WILL DESCRIBE, measured now - see the gate in the
   // callback and BufferByteLength for why one integer is the right measure.
   // Measured HERE rather than before the sync step: if the sync rewrote a
   // header, the buffer it left behind is the one this answer describes.
   LLenAtRequest := BufferByteLength(AView);
-  LspClassComplete(AFileName,
+  // The caret NOW - after the sync step, which may have moved it onto the
+  // other half of the routine it was in. Same routine, same type, so the
+  // scope the server derives from it is the one the user pressed the key in.
+  LRow := 0;
+  LCol := 0;
+  LPos := AView.Buffer.EditPosition;
+  if Assigned(LPos) then
+  begin
+    LRow := LPos.Row;
+    LCol := LPos.Column;
+  end;
+  LspClassComplete(AFileName, LRow, LCol,
     procedure(ASuccess: Boolean; const AAnswer: TLspClassComplete;
       const AError: string)
     begin

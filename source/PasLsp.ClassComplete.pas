@@ -23,9 +23,15 @@ unit PasLsp.ClassComplete;
      are implemented by whatever class implements it. Its PROPERTIES still get
      their accessor methods declared, though - see the property pass.)
 
-  2. **The whole unit at once**, not just the type at the caret. The question
-     "what did I declare and not implement" has one answer per file, and
-     answering it per-caret only means pressing the key more times.
+  2. **Free routines have a scope of their own.** The type at the caret is
+     completed whole - every member, whichever of them the caret is on, in the
+     declaration or in a body - which is what the native command does. A free
+     routine belongs to no type, so the caret in one completes that one
+     routine. (Until 2026-09-05 this was the WHOLE UNIT at once, on the
+     argument that "what did I declare and not implement" has one answer per
+     file. It does; but one press on an empty line of a 13000-line unit then
+     rewrote eight classes the user had not looked at, with no way to review
+     what it had decided about each. One type per press is reviewable.)
 
   3. **The mirror question too: what did I IMPLEMENT and not declare.**
      `procedure TFoo.Bar;` typed straight into the implementation section,
@@ -95,9 +101,17 @@ type
     Provider: string;
   end;
 
-{ The missing implementations of the unit ATree describes. Never raises; a
-  file with nothing to do answers with no edits and a Provider that says so. }
-function ClassCompleteFor(const ATree: TPasTree): TLspClassCompleteAnswer;
+{ The missing implementations (and missing declarations) around the caret at
+  the 1-based (APasLine, APasCol) of the buffer ATree describes: the TYPE the
+  caret is in - inside its declaration, or inside the body of one of its
+  methods - and every one of that type's members; or the ONE free routine the
+  caret is in, declaration or body. A caret in neither answers with no edits
+  and a Provider that says so. (0, 0) means the whole unit, the shape the
+  request had before 2026-09-05 and the one an ordinary LSP client with no
+  caret to offer still gets. Never raises; a file with nothing to do answers
+  with no edits and a Provider that says so. }
+function ClassCompleteFor(const ATree: TPasTree;
+  APasLine, APasCol: Integer): TLspClassCompleteAnswer;
 
 { ---- shared with PasLsp.SyncPrototypes ------------------------------------
 
@@ -204,6 +218,8 @@ uses
 type
   TDeclCandidate = record
     Key: string;        // chain.name#argcount:types - see MakeKey
+    TypeKey: string;    // LowerCase(StripGenerics(chain)) - '' for a free
+                        // routine; what the caret's scope is matched against
     Name: string;       // display name, qualified for a method
     Header: string;     // 'procedure TFoo.Bar(const A: string): string;'
     OrderTok: Integer;  // the declaration's first visible token
@@ -943,6 +959,19 @@ begin
       Break;
 end;
 
+{ A member declaration's node ends on its TYPE, not on the `;` after it -
+  `FNewProvider: Boolean` is the nkVarDecl and the `;` is the parser's, not
+  the node's. Anchoring an insertion at the node's last token therefore lands
+  BEFORE the semicolon: `FNewProvider: Boolean` + CRLF + `Code: string;` +
+  `;` (uaviTypes.pas, 2026-09-05 - a field left unterminated and a `;;` two
+  lines down). So step over the `;` when it is there. }
+function PastSemicolon(const ATree: TPasTree; AVisIdx: Integer): Integer;
+begin
+  Result := AVisIdx;
+  if RawSpan(ATree, AVisIdx + 1, AVisIdx + 1) = ';' then
+    Result := AVisIdx + 1;
+end;
+
 { Where new members go - a method's body-less declaration (the orphan pass)
   exactly as much as a property's synthesized accessor: the END of the type's
   `private` section when it has one; failing that, a NEW `private` section,
@@ -981,7 +1010,7 @@ begin
     if LAnchor = NIL_NODE then
       Exit;   // an empty interface has no property to need an accessor
     ANeedsSection := False;
-    LVisIdx := ATree.Nodes[LAnchor].LastToken;
+    LVisIdx := PastSemicolon(ATree, ATree.Nodes[LAnchor].LastToken);
     AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LAnchor));
     if (LVisIdx < 0) or (LVisIdx > High(ATree.Source.Visible)) then
       Exit;
@@ -1008,7 +1037,7 @@ begin
   if LAnchor <> NIL_NODE then
   begin
     ANeedsSection := False;
-    LVisIdx := ATree.Nodes[LAnchor].LastToken;
+    LVisIdx := PastSemicolon(ATree, ATree.Nodes[LAnchor].LastToken);
     AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LAnchor));
   end
   else if LFirstSection <> NIL_NODE then
@@ -1154,7 +1183,126 @@ begin
   Result := True;
 end;
 
-function ClassCompleteFor(const ATree: TPasTree): TLspClassCompleteAnswer;
+{ ---- the caret's scope --------------------------------------------------- }
+
+{ Line/column of a visible token's start or end, 1-based, main file only. }
+function TokenPos(const ATree: TPasTree; AVisIdx: Integer; AEnd: Boolean;
+  out ALine, ACol: Integer): Boolean;
+var
+  LVis: TPasVisibleToken;
+begin
+  Result := False;
+  ALine := 0;
+  ACol := 0;
+  if (AVisIdx < 0) or (AVisIdx > High(ATree.Source.Visible)) then
+    Exit;
+  LVis := ATree.Source.Visible[AVisIdx];
+  if LVis.FileId <> 0 then
+    Exit;   // an $I include: not the buffer the caret is in
+  with ATree.Source.Files[0] do
+    if AEnd then
+      OffsetToLineCol(Tokens[LVis.TokenIndex].EndPos, ALine, ACol)
+    else
+      OffsetToLineCol(Tokens[LVis.TokenIndex].Start, ALine, ACol);
+  Result := True;
+end;
+
+{ Does ANode's span (leftmost visible token to last token, inclusive at both
+  ends) contain the 1-based caret? ASize is the span in tokens, so the caller
+  can keep the INNERMOST of several containing nodes. }
+function NodeContains(const ATree: TPasTree; ANode, ALine, ACol: Integer;
+  out ASize: Integer): Boolean;
+var
+  LFirst, L1, C1, L2, C2: Integer;
+begin
+  Result := False;
+  ASize := MaxInt;
+  LFirst := ATree.NodeLeftmostVis(ANode);
+  if not TokenPos(ATree, LFirst, False, L1, C1) then
+    Exit;
+  if not TokenPos(ATree, ATree.Nodes[ANode].LastToken, True, L2, C2) then
+    Exit;
+  if (ALine < L1) or ((ALine = L1) and (ACol < C1)) then
+    Exit;
+  if (ALine > L2) or ((ALine = L2) and (ACol > C2)) then
+    Exit;
+  ASize := ATree.Nodes[ANode].LastToken - LFirst;
+  Result := True;
+end;
+
+{ ---- inherited members ---------------------------------------------------- }
+
+{ The names a type's ANCESTOR clause lists - `class(TBase, IFoo)`,
+  `interface(IBase)`, a helper's `for TFoo` - as the parser leaves them: the
+  nkIdent/nkMember children ahead of the GUID, the first visibility word or
+  the first member. Last segment only, generics stripped, lowercased, which is
+  how the in-unit type map is keyed. }
+function AncestorKeys(const ATree: TPasTree; ATypeNode: Integer):
+  TArray<string>;
+var
+  LChild, LDot: Integer;
+  LText: string;
+begin
+  Result := nil;
+  LChild := ATree.Nodes[ATypeNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case ATree.Nodes[LChild].Kind of
+      nkIdent, nkMember:
+        begin
+          LText := StripGenerics(Flatten(ATree.NodeSpanText(LChild)));
+          LDot := LText.LastIndexOf('.');
+          if LDot >= 0 then
+            LText := Copy(LText, LDot + 2, MaxInt);
+          Result := Result + [LowerCase(LText)];
+        end;
+      nkAttrGroup, nkGenericParams:
+        ;
+    else
+      Break;   // nkGuid, nkVisibility, the first member: the clause is over
+    end;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ Adds every ancestor's own member names to ANames, recursively, for the
+  ancestors THIS UNIT declares. False when the chain reaches a type it does
+  not: the set is then incomplete, and a specifier naming something not in it
+  may well name an inherited member. That is exactly what happened in
+  uaviTypes.pas (2026-09-05): eight descendants of a TLabNameObject declared in
+  another unit, each with `property X: string read Code write Code`, and each
+  got a `Code: string` field written into it - the parent's field, seen from
+  here as an unknown name. TObject and the interface roots count as known
+  and memberless. ASeen breaks a cycle a broken buffer could contain. }
+function WalkAncestors(const ATree: TPasTree; ATypeNode: Integer;
+  const ATypeByKey: TDictionary<string, Integer>;
+  ANames, ASeen: TDictionary<string, Boolean>): Boolean;
+var
+  LKey: string;
+  LNode: Integer;
+begin
+  Result := True;
+  for LKey in AncestorKeys(ATree, ATypeNode) do
+  begin
+    if ASeen.ContainsKey(LKey) then
+      Continue;
+    ASeen.AddOrSetValue(LKey, True);
+    if (LKey = 'tobject') or (LKey = 'iinterface') or (LKey = 'iunknown') or
+       (LKey = 'idispatch') then
+      Continue;
+    if not ATypeByKey.TryGetValue(LKey, LNode) then
+    begin
+      Result := False;
+      Continue;
+    end;
+    CollectMemberNames(ATree, LNode, ANames);
+    if not WalkAncestors(ATree, LNode, ATypeByKey, ANames, ASeen) then
+      Result := False;
+  end;
+end;
+
+function ClassCompleteFor(const ATree: TPasTree;
+  APasLine, APasCol: Integer): TLspClassCompleteAnswer;
 var
   LImpls: TDictionary<string, Boolean>;
   LDecls: TList<TDeclCandidate>;
@@ -1190,6 +1338,14 @@ var
   LMembers: TDictionary<string, Boolean>;
   LIsMethod, LNeedsSection, LIsInterface: Boolean;
   LMemberEdits: TArray<TLspClassEdit>;
+  // ---- the caret's scope
+  LScopeAll, LScopeIsRoutine: Boolean;
+  LScopeKey, LScopeName, LTypeKey: string;
+  LBestNode, LBestSize, LSize: Integer;
+  // ---- inherited members
+  LTypeByKey: TDictionary<string, Integer>;
+  LSeen: TDictionary<string, Boolean>;
+  LAncestorsUnknown: Boolean;
 begin
   Result := Default(TLspClassCompleteAnswer);
   Result.Provider := 'pastree/classComplete';
@@ -1198,7 +1354,92 @@ begin
   LDeclaredKeys := TDictionary<string, Boolean>.Create;
   LOrphans := TList<TOrphanCandidate>.Create;
   LOrphansByType := TDictionary<string, TOrphanCandidate>.Create;
+  LTypeByKey := TDictionary<string, Integer>.Create;
   try
+    { THE SCOPE: the type the caret is in, or the one free routine it is in.
+      Not the whole unit - that was the first design (one answer per file,
+      fewer presses) and it is what turned one press on an empty line of
+      uaviTypes.pas into eight classes' worth of edits the user had not asked
+      about and could not review (2026-09-05). The native command completes
+      the class at the caret, and so, now, does this one; a free routine is
+      its own scope because it belongs to no class. (0, 0) keeps the
+      whole-unit answer for a client with no caret to send. }
+    LScopeAll := APasLine <= 0;
+    LScopeIsRoutine := False;
+    LScopeKey := '';
+    LScopeName := '';
+    if not LScopeAll then
+    begin
+      // The innermost routine around the caret: a body, or a declaration.
+      LBestNode := NIL_NODE;
+      LBestSize := MaxInt;
+      for LIdx := 0 to High(ATree.Nodes) do
+        if (ATree.Nodes[LIdx].Kind = nkRoutine) and
+           NodeContains(ATree, LIdx, APasLine, APasCol, LSize) and
+           (LSize < LBestSize) then
+        begin
+          LBestNode := LIdx;
+          LBestSize := LSize;
+        end;
+      LSkip := False;
+      LChain := '';
+      if LBestNode <> NIL_NODE then
+      begin
+        // A member declaration knows its type from its parents; an
+        // implementation carries it in its own dotted name.
+        LChain := TypeChain(ATree, LBestNode, LSkip);
+        if (LChain = '') and not LSkip and
+           RoutineName(ATree, LBestNode, LNameFirst, LNameLast, LSegments) then
+        begin
+          if Length(LSegments) > 1 then
+            LChain := string.Join('.', LSegments, 0, Length(LSegments) - 1)
+          else
+          begin
+            LScopeIsRoutine := True;
+            LScopeKey := MakeKey('', LSegments[0],
+              ParamsKey(ATree, LBestNode));
+            LScopeName := LSegments[0];
+          end;
+        end;
+      end;
+      // No routine, or one whose type the walk could not name (an
+      // interface's method, a nested routine): the innermost TYPE, then.
+      if (LChain = '') and not LScopeIsRoutine then
+      begin
+        LBestNode := NIL_NODE;
+        LBestSize := MaxInt;
+        for LIdx := 0 to High(ATree.Nodes) do
+          if (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
+               nkObjectType, nkHelperType, nkInterfaceType]) and
+             NodeContains(ATree, LIdx, APasLine, APasCol, LSize) and
+             (LSize < LBestSize) then
+          begin
+            LBestNode := LIdx;
+            LBestSize := LSize;
+          end;
+        if LBestNode <> NIL_NODE then
+        begin
+          LTypeName := TypeNameOf(ATree, LBestNode);
+          LChain := TypeChain(ATree, LBestNode, LSkip);
+          if LChain <> '' then
+            LChain := LChain + '.' + LTypeName
+          else
+            LChain := LTypeName;
+        end;
+      end;
+      if not LScopeIsRoutine then
+      begin
+        if LChain = '' then
+        begin
+          Result.Provider := 'pastree/classComplete: the caret is not in a '
+            + 'class or a routine - nothing to complete';
+          Exit;
+        end;
+        LScopeKey := LowerCase(StripGenerics(LChain));
+        LScopeName := LChain;
+      end;
+    end;
+
     for LIdx := 0 to High(ATree.Nodes) do
     begin
       if ATree.Nodes[LIdx].Kind <> nkRoutine then
@@ -1245,6 +1486,7 @@ begin
       // a method resolution, not a routine), so its name is the last segment.
       LName := LSegments[LDots - 1];
       LCand.Key := MakeKey(LChain, LName, ParamsKey(ATree, LIdx));
+      LCand.TypeKey := LowerCase(StripGenerics(LChain));
       LCand.Name := LName;
       if LChain <> '' then
         LCand.Name := LChain + '.' + LName;
@@ -1271,6 +1513,10 @@ begin
       LOrphanCand := LOrphans[LOrphanIdx];
       if LDeclaredKeys.ContainsKey(LOrphanCand.Key) then
         Continue;
+      // Only the caret's own type gets its orphans back.
+      if not LScopeAll and
+         (LScopeIsRoutine or (LOrphanCand.TypeKey <> LScopeKey)) then
+        Continue;
       if LOrphansByType.TryGetValue(LOrphanCand.TypeKey, LOrphanGroup) then
       begin
         // Joined onto the type's group; the group keeps the FIRST orphan's
@@ -1290,6 +1536,28 @@ begin
       planned for it, so its private section is touched once. }
     LOrphanCaretRawLine := 0;
     LOrphanCaretRawCol := 0;
+    // Every named type this unit declares, by bare name - what an ancestor
+    // clause is resolved against (WalkAncestors). A forward declaration
+    // (`TFoo = class;`) has no members and must not shadow the real one.
+    for LIdx := 0 to High(ATree.Nodes) do
+    begin
+      if not (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
+        nkObjectType, nkHelperType, nkInterfaceType]) then
+        Continue;
+      LTypeKey := LowerCase(StripGenerics(TypeNameOf(ATree, LIdx)));
+      if LTypeKey = '' then
+        Continue;
+      if ((ATree.Nodes[LIdx].Kind = nkClassType) and
+          (ATree.Nodes[LIdx].Aux = 1)) or
+         ((ATree.Nodes[LIdx].Kind = nkInterfaceType) and
+          (ATree.Nodes[LIdx].Aux and 2 <> 0)) then
+      begin
+        if not LTypeByKey.ContainsKey(LTypeKey) then
+          LTypeByKey.Add(LTypeKey, LIdx);
+      end
+      else
+        LTypeByKey.AddOrSetValue(LTypeKey, LIdx);
+    end;
     for LIdx := 0 to High(ATree.Nodes) do
     begin
       if not (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
@@ -1310,9 +1578,16 @@ begin
         LChain := LChain + '.' + LTypeName
       else
         LChain := LTypeName;
+      LTypeKey := LowerCase(StripGenerics(LChain));
+      // Only the caret's own type - see the scope block above.
+      if not LScopeAll and (LScopeIsRoutine or (LTypeKey <> LScopeKey)) then
+        Continue;
       LMembers := TDictionary<string, Boolean>.Create;
+      LSeen := TDictionary<string, Boolean>.Create;
       try
         CollectMemberNames(ATree, LIdx, LMembers);
+        LAncestorsUnknown := not WalkAncestors(ATree, LIdx, LTypeByKey,
+          LMembers, LSeen);
         // Orphan declarations for THIS type, if any - seeded first so the
         // property accessors below join them with the same sLineBreak rule
         // they already use for each other. An interface never orphans (it
@@ -1388,6 +1663,7 @@ begin
                   LCand.Name := LChain + '.' + LAccessorName;
                   LCand.OrderTok := ATree.NodeLeftmostVis(LProp);
                   LCand.Seq := LDecls.Count;
+                  LCand.TypeKey := LTypeKey;
                   LCand.Header := AccessorImplHeader(LAccessor, LChain);
                   LDecls.Add(LCand);
                 end;
@@ -1418,9 +1694,22 @@ begin
               begin
                 LName := Flatten(ATree.NodeSpanText(LTarget));
                 // A dotted specifier (`read FInner.Value`) names something
-                // that is not this type's to declare.
+                // that is not this type's to declare. And a name that is not
+                // in the member set may still be INHERITED when an ancestor
+                // lives in another unit (WalkAncestors): then a FIELD name
+                // is left alone - `read Code` on a TLabNameObject descendant
+                // is the parent's Code, not a field to invent - while a
+                // Get/Set-shaped name still gets its method, since pointing a
+                // new property at a foreign base's accessor is not how
+                // anyone writes Delphi. An interface with a foreign ancestor
+                // gets nothing: its specifiers are methods, and inheriting
+                // the getter from the base interface is the common case.
                 if (Pos('.', LName) = 0) and
-                   not LMembers.ContainsKey(LowerCase(LName)) then
+                   not LMembers.ContainsKey(LowerCase(LName)) and
+                   (not LAncestorsUnknown or
+                    (not LIsInterface and
+                     (LName.ToLower.StartsWith('get') or
+                      LName.ToLower.StartsWith('set')))) then
                 begin
                   // Claimed immediately: two properties may share an
                   // accessor, and it is declared once.
@@ -1444,7 +1733,8 @@ begin
                     // The member text minus its trailing ';' is the header,
                     // with the type spliced in - one source for both, so the
                     // declaration and its body can never disagree.
-                    LCand.Header := AccessorImplHeader(LAccessor, LChain);
+                    LCand.TypeKey := LTypeKey;
+                  LCand.Header := AccessorImplHeader(LAccessor, LChain);
                     LDecls.Add(LCand);
                   end;
                 end;
@@ -1514,6 +1804,7 @@ begin
             LOrphanGroup.NameOffset;
         end;
       finally
+        LSeen.Free;
         LMembers.Free;
       end;
     end;
@@ -1534,6 +1825,15 @@ begin
     for LIdx := 0 to LDecls.Count - 1 do
     begin
       LKey := LDecls[LIdx].Key;
+      // The caret's scope: the type's members, or the one free routine.
+      if not LScopeAll then
+        if LScopeIsRoutine then
+        begin
+          if LKey <> LScopeKey then
+            Continue;
+        end
+        else if LDecls[LIdx].TypeKey <> LScopeKey then
+          Continue;
       if LImpls.ContainsKey(LKey) then
         Continue;
       // A duplicate declaration (the same routine declared twice) must not
@@ -1564,6 +1864,8 @@ begin
     if (LText = '') and (Length(LMemberEdits) = 0) then
     begin
       Result.Provider := 'pastree/classComplete: nothing to implement';
+      if LScopeName <> '' then
+        Result.Provider := Result.Provider + ' in ' + LScopeName;
       Exit;
     end;
     Result.Edits := LMemberEdits;
@@ -1611,7 +1913,10 @@ begin
     Result.Provider := Format(
       'pastree/classComplete: %d to implement, %d member edit(s)',
       [LCount, Length(LMemberEdits)]);
+    if LScopeName <> '' then
+      Result.Provider := Result.Provider + ' in ' + LScopeName;
   finally
+    LTypeByKey.Free;
     LOrphansByType.Free;
     LOrphans.Free;
     LDeclaredKeys.Free;

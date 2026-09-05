@@ -449,13 +449,15 @@ procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
 
 /// <summary>
-/// Asks the server which declarations of a file have no implementation, and
-/// for the text that would implement them (`pastree/classComplete` - our own
-/// request, not an LSP method). Whole-file and position-free: the question has
-/// one answer per buffer. The document is synced first, because the very
-/// declaration the user wants a body for is the one they just typed.
+/// Asks the server which declarations around the caret have no implementation
+/// (and which implementations no declaration), and for the text that fixes
+/// that (`pastree/classComplete` - our own request, not an LSP method). Scoped
+/// to the TYPE the caret is in, or the one free routine it is in - a press on
+/// an empty line of a 13000-line unit used to rewrite eight classes at once
+/// (2026-09-05). The document is synced first, because the very declaration
+/// the user wants a body for is the one they just typed.
 /// </summary>
-procedure LspClassComplete(const AFileName: string;
+procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspClassCompleteProc);
 
 /// <summary>
@@ -690,7 +692,7 @@ type
       const AOnDone: TLspHoverProc);
     procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspSignatureHelpProc);
-    procedure ClassComplete(const AFileName: string;
+    procedure ClassComplete(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspClassCompleteProc);
     procedure SyncPrototypes(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspSyncPrototypesProc);
@@ -1569,9 +1571,10 @@ begin
 end;
 
 procedure TLspSession.ClassComplete(const AFileName: string;
-  const AOnDone: TLspClassCompleteProc);
+  ARow, ACol: Integer; const AOnDone: TLspClassCompleteProc);
 var
-  LParams, LDoc: TJSONObject;
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
 begin
   if not EnsureSession then
   begin
@@ -1586,6 +1589,16 @@ begin
   LDoc.AddPair('uri', PathToLspUri(AFileName));
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
+  // The caret, which the server scopes the answer to. Left out (whole unit)
+  // only when the caller had none to give.
+  if ARow > 0 then
+  begin
+    IdeToLsp(ARow, ACol, LLine, LChar);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+  end;
   // No supersede slot: this is a deliberate keystroke, not a stream of
   // per-character questions, and two presses mean two answers.
   FClient.Request('pastree/classComplete', LParams,
@@ -2540,7 +2553,7 @@ begin
   GSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
 end;
 
-procedure LspClassComplete(const AFileName: string;
+procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspClassCompleteProc);
 begin
   if not Assigned(GSession) then
@@ -2548,7 +2561,7 @@ begin
     AOnDone(False, Default(TLspClassComplete), 'LSP session not initialized');
     Exit;
   end;
-  GSession.ClassComplete(AFileName, AOnDone);
+  GSession.ClassComplete(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;

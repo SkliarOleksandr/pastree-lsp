@@ -1416,6 +1416,127 @@ begin
     'a method already declared AND implemented is untouched either way');
 end;
 
+{ 5j. classComplete is SCOPED to the caret: the type it is in, whole, or the
+  one free routine it is in. The whole-unit answer (5f, no position) stays
+  for a client with no caret to send; a press in the IDE always has one. One
+  press on an empty line of uaviTypes.pas rewrote eight classes (2026-09-05)
+  - this is the section that says it never does that again. }
+procedure TestClassCompleteScope;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  function AskAt(const ALineHint, AToken: string): Boolean;
+  var
+    LParams, LDoc, LPos: TJSONObject;
+  begin
+    FindPos(LFile, ALineHint, AToken, LLine, LChar);
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LFile));
+    LParams.AddPair('textDocument', LDoc);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+    Result := Ask('pastree/classComplete', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5j. classComplete completes the type at the caret, and only '
+    + 'it ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassComplete.pas');
+
+  Check(AskAt('procedure Missing(const A: string; B: Integer);', 'Missing'),
+    'answered for a caret on a member declaration');
+  Check(GOk and GResultJson.Contains('procedure TBase.Missing')
+    and GResultJson.Contains('class function TBase.Make'),
+    'the caret''s type is completed WHOLE - every member, not just the one '
+    + 'under the caret');
+  Check(GOk and not GResultJson.Contains('TStack')
+    and not GResultJson.Contains('TProps')
+    and not GResultJson.Contains('FreeRoutine')
+    and not GResultJson.Contains('IWorker'),
+    'and nothing else in the unit is touched');
+  Check(GOk and GResultJson.Contains(' in TBase"'),
+    'the provider names the scope');
+
+  Check(AskAt('procedure TOrphanHost.Extra(const A: Integer);', 'Extra'),
+    'answered for a caret in an implementation body');
+  Check(GOk and GResultJson.Contains('"name":"TOrphanHost"')
+    and GResultJson.Contains('procedure Extra(const A: Integer);'),
+    'the body''s own type is the scope, found through the dotted name');
+  Check(GOk and not GResultJson.Contains('"kind":"body"'),
+    'and TOrphanHost has no bodies missing, so none are written');
+
+  Check(AskAt('procedure FreeRoutine(AValue: Integer);', 'FreeRoutine'),
+    'answered for a caret on a free routine');
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('procedure FreeRoutine(AValue: Integer);'),
+    'a free routine is a scope of its own - one body, nothing else');
+  Check(GOk and GResultJson.Contains(' in FreeRoutine"'),
+    'named as such');
+
+  Check(AskAt('property Bare: string;', 'Bare'),
+    'answered for a caret in an interface');
+  Check(GOk and GResultJson.Contains('"name":"IWorker"')
+    and not GResultJson.Contains('TProps'),
+    'an interface is a scope like any type - its accessors, nobody else''s');
+
+  Check(AskAt('implementation', 'implementation'),
+    'answered for a caret in no type and no routine');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('not in a class or a routine'),
+    'and that is a refusal that says so, not the whole unit');
+end;
+
+{ 5k. what class completion must NOT invent - inherited members - and where
+  a new member''s line begins. See the fixture''s header. }
+procedure TestClassCompleteInherited;
+var
+  LFile: string;
+  LParams, LDoc: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5k. classComplete leaves inherited members alone ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassCompleteScope.pas');
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(LFile));
+  LParams.AddPair('textDocument', LDoc);
+  Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
+  // Parent in THIS unit: its members are seen.
+  Check(GOk and not GResultJson.Contains('FX: Integer')
+    and not GResultJson.Contains('GetY'),
+    'a field and a getter the in-unit parent declares are not declared again');
+  Check(GOk and GResultJson.Contains('function GetZ: Integer;')
+    and GResultJson.Contains('function TChildHere.GetZ: Integer;'),
+    'while one nobody declares still gets declared and implemented');
+  // Parent in ANOTHER unit: nothing can be seen, so nothing field-shaped.
+  Check(GOk and not GResultJson.Contains('Code: string'),
+    'a field-shaped name on a class with a foreign parent is left alone - '
+    + 'it is the parent''s field until proven otherwise (uaviTypes.pas)');
+  Check(GOk and GResultJson.Contains('function GetThing: Integer;'),
+    'a Get-shaped name there still gets its method');
+  Check(GOk and GResultJson.Contains(' read GetBare write SetBare'),
+    'and a bare property there is still completed');
+  // Interfaces: the getter comes from the base interface.
+  Check(GOk and not GResultJson.Contains('GetV'),
+    'an interface''s getter declared by its in-unit base is not redeclared');
+  Check(GOk and not GResultJson.Contains('GetW'),
+    'nor is one that a foreign base may declare');
+  // The semicolon: the new member starts AFTER `FA: Integer;`, not before
+  // its `;`. Character 16 on that line is just past the semicolon.
+  FindPos(LFile, 'FA: Integer;', 'FA', LLine, LChar);
+  Check(GOk and GResultJson.Contains(Format(
+    '{"line":%d,"character":16},"end":{"line":%d,"character":16}},'
+    + '"newText":"\r\n    function GetZ: Integer;"', [LLine, LLine])),
+    'a member added after a field goes after the field''s `;` - no `;;`, '
+    + 'no unterminated field');
+end;
+
 { 5i. classComplete when the ONLY thing to do is write an orphan's
   declaration back - no missing body anywhere in the unit. Isolated on
   purpose: DemoClassComplete.pas above always has bodies to generate too, so
@@ -2042,6 +2163,8 @@ begin
       TestSemanticTokens;
       TestRename;
       TestClassComplete;
+      TestClassCompleteScope;
+      TestClassCompleteInherited;
       TestClassCompleteOrphanCaret;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;

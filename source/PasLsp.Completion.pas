@@ -132,8 +132,8 @@ type
       bridge and no position - the question is about ONE buffer as a whole,
       and the answer must see declarations the last analysis never has:
       the user pressed the key because they just typed one. }
-    function ClassCompleteAt(const AFileName, AText: string):
-      TLspClassCompleteAnswer;
+    function ClassCompleteAt(const AFileName, AText: string;
+      APasLine, APasCol: Integer): TLspClassCompleteAnswer;
     { Prototype sync at a position: the routine under the caret, mirrored onto
       its other half (PasLsp.SyncPrototypes). Same live-buffer, parse-only
       reading as class completion - and for the sharper version of the same
@@ -748,8 +748,8 @@ begin
   end;
 end;
 
-function TLspCompletionEngine.ClassCompleteAt(const AFileName, AText: string):
-  TLspClassCompleteAnswer;
+function TLspCompletionEngine.ClassCompleteAt(const AFileName, AText: string;
+  APasLine, APasCol: Integer): TLspClassCompleteAnswer;
 var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
@@ -815,7 +815,12 @@ begin
       'error(s) in this file, first: %s', [Length(LDiags), LDiags[0].Msg]);
     Exit;
   end;
-  Result := ClassCompleteFor(LTree);
+  // The caret is in the ORIGINAL text's coordinates and the tree is the
+  // repaired text's; a repair only ever adds a `;` to the right of what was
+  // typed on its line, so a caret at or left of it is unmoved, and one to the
+  // right of it on the same line is off by one column - which cannot move
+  // it out of the type or routine it was in. Good enough to name the scope.
+  Result := ClassCompleteFor(LTree, APasLine, APasCol);
   // The answer's positions are in the REPAIRED text; the client edits the
   // original. MergeSemicolonRepairs maps them back and adds the semicolons.
   MergeSemicolonRepairs(Result, LRepairs);
