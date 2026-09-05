@@ -15,6 +15,11 @@ unit DemoClassComplete;
   its generic qualification, and FreeRoutine - a free routine of the
   interface section, which the native class completion ignores and this one
   does not.
+
+  ORPHAN implementation (must get its DECLARATION back, in a NEW `private`
+  section placed BEFORE the class's existing `public` one - never after it):
+  TOrphanHost.Extra. TOrphanHost.Known must NOT be touched - it is already
+  declared and already implemented.
 }
 
 interface
@@ -78,6 +83,14 @@ type
     property ReadOnlyOne: Integer read FKnown;
   end;
 
+  { No `private` section at all yet, only `public` - the shape that proves
+    the new section goes BEFORE it, not appended after (see TOrphanHost.Extra
+    below). }
+  TOrphanHost = class
+  public
+    procedure Known;
+  end;
+
 procedure FreeRoutine(AValue: Integer);
 
 implementation
@@ -99,6 +112,16 @@ end;
 function TProps.GetKnown: Integer;
 begin
   Result := FKnown;
+end;
+
+procedure TOrphanHost.Known;
+begin
+end;
+
+{ ORPHAN: correctly qualified to TOrphanHost, but TOrphanHost declares no
+  Extra - class completion must write the declaration back. }
+procedure TOrphanHost.Extra(const A: Integer);
+begin
 end;
 
 end.

@@ -151,9 +151,19 @@ begin
   end;
   if AAnswer.CaretRow > 0 then
   begin
-    LPos := AView.Buffer.EditPosition;
+    // The same three calls Go To Declaration makes (NavigateToPosition in
+    // PasTreeIdePlugin.GotoDeclaration), for parity: a plain Move scrolls
+    // only as far as it must, which puts the new line on the view's FIRST
+    // row; GotoLine is the ToolsAPI call that CENTRES a line, and
+    // MoveViewToCursor is what makes the view actually follow (Alex,
+    // 2026-09-05 - "Go To Definition shows it in the middle, this at the top").
+    LPos := AView.Position;
     if Assigned(LPos) then
+    begin
+      LPos.GotoLine(AAnswer.CaretRow);
       LPos.Move(AAnswer.CaretRow, AAnswer.CaretCol);
+      AView.MoveViewToCursor;
+    end;
   end;
   // The insertion came from a keystroke with no visible cause; repaint now
   // rather than at the next natural refresh.

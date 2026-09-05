@@ -1313,11 +1313,11 @@ begin
   LDoc.AddPair('uri', PathToLspUri(LFile));
   LParams.AddPair('textDocument', LDoc);
   Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
-  // Five edits for this fixture, one per PLACE and never one per routine:
+  // Six edits for this fixture, one per PLACE and never one per routine:
   // every body in ONE insertion at the end of the implementation section, the
-  // members of TProps and of IWorker, and the `read`/`write` written into the
-  // two bare property lines.
-  Check(GOk and GResultJson.Contains('"count":5'),
+  // members of TProps, IWorker and TOrphanHost, and the `read`/`write`
+  // written into the two bare property lines.
+  Check(GOk and GResultJson.Contains('"count":6'),
     'one edit per place: bodies together, each type''s members together');
   Check(GOk and GResultJson.Contains(
     'procedure TBase.Missing(const A: string; B: Integer);'),
@@ -1397,6 +1397,61 @@ begin
     'and a bare interface property is completed the same way');
   Check(GOk and not GResultJson.Contains('IWorker.GetNamed'),
     'but an interface gets no bodies - its implementors write those');
+
+  // --- an orphan implementation: the declaration comes back, not a body ---
+  // The edit's own text ends on the two spaces `public` already sits at -
+  // that indentation, immediately followed (in the FILE, not this JSON) by
+  // the untouched `public` keyword - is what proves the new section landed
+  // BEFORE it rather than appended after the type's `end`.
+  Check(GOk and GResultJson.Contains(
+    '"newText":"private\r\n    procedure Extra(const A: Integer);\r\n  "'),
+    'an orphan''s declaration goes in a NEW private section, placed BEFORE '
+    + 'the class''s existing public one - never appended after it');
+  Check(GOk and not GResultJson.Contains(
+    'procedure TOrphanHost.Extra(const A: Integer);'),
+    'it already has a body - completion adds the declaration, not a second '
+    + 'stub');
+  Check(GOk and not GResultJson.Contains('TOrphanHost.Known')
+    and not GResultJson.Contains('procedure Known;'),
+    'a method already declared AND implemented is untouched either way');
+end;
+
+{ 5i. classComplete when the ONLY thing to do is write an orphan's
+  declaration back - no missing body anywhere in the unit. Isolated on
+  purpose: DemoClassComplete.pas above always has bodies to generate too, so
+  it can never show whether the caret rule works on its own, only that it
+  does not break when bodies also exist. }
+procedure TestClassCompleteOrphanCaret;
+var
+  LFile: string;
+  LParams, LDoc: TJSONObject;
+begin
+  Writeln;
+  Writeln('=== 5i. classComplete puts the caret on an orphan''s new '
+    + 'declaration ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassCompleteOrphan.pas');
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(LFile));
+  LParams.AddPair('textDocument', LDoc);
+  Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
+  Check(GOk and GResultJson.Contains('"count":1'),
+    'one edit: the declaration TLone was missing, nothing else');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"private\r\n    procedure Extra(const A: Integer);\r\n  "'),
+    'the declaration goes into a new private section, ahead of public');
+  Check(GOk and not GResultJson.Contains('"caret":{"line":0'),
+    'with no body to generate, the caret must not fall back to 0 - a client '
+    + 'reads that as "leave it wherever the user was", the unit''s own start '
+    + 'on a fresh open');
+  // Line: the declaration's own, not the member that used to follow `public`
+  // (live check, 2026-09-05: the text was right, the caret one line past
+  // it). Column: ON the identifier `Extra` - 4 of indent, 10 of `procedure `
+  // - where Go To Definition lands, not the keyword (second live check, same
+  // day).
+  Check(GOk and GResultJson.Contains('"caret":{"line":17,"character":14}'),
+    'and it lands on the declaration''s IDENTIFIER, the way Go To '
+    + 'Definition does - not on its line''s keyword, not one line past it');
 end;
 
 { 5h. pastree/syncPrototypes: a signature edited on one side, mirrored.
@@ -1975,6 +2030,7 @@ begin
       TestSemanticTokens;
       TestRename;
       TestClassComplete;
+      TestClassCompleteOrphanCaret;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;
       TestWorkspaceSymbol;

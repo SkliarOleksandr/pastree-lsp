@@ -8,7 +8,8 @@ unit PasLsp.ClassComplete;
   selection and works badly (user, 2026-08-22), so we do not extend it, we
   replace it by keyboard binding.
 
-  TWO DIFFERENCES FROM THE NATIVE ONE, both asked for:
+  THREE DIFFERENCES FROM THE NATIVE ONE - the first two asked for, the third
+  parity with it:
 
   1. **Free routines count.** A `procedure Foo;` declared in the unit's
      INTERFACE SECTION - not a method of anything - has its body in the
@@ -25,6 +26,17 @@ unit PasLsp.ClassComplete;
   2. **The whole unit at once**, not just the type at the caret. The question
      "what did I declare and not implement" has one answer per file, and
      answering it per-caret only means pressing the key more times.
+
+  3. **The mirror question too: what did I IMPLEMENT and not declare.**
+     `procedure TFoo.Bar;` typed straight into the implementation section,
+     correctly qualified to a class this unit declares, with no matching
+     member in `TFoo` - the declaration goes back into the class. Native
+     Delphi's Ctrl+Shift+C does this; a replacement that only fills in bodies
+     is not a replacement. See ClassCompleteFor's orphan pass, and
+     MemberInsertPos for where the declaration lands - the SAME rule a
+     property's synthesized accessor follows: end of `private` if there is
+     one, a new `private` ahead of any other section if there is not, else
+     right before the type's `end`.
 
   WHAT IT DOES NOT DO. Nested routines (a `forward` inside another routine's
   body) are skipped: their body must go inside that same body, which is a
@@ -200,6 +212,27 @@ type
     // could be emitted before the getter, which is not the order anyone
     // writes them in.
     Seq: Integer;
+  end;
+
+  { An ORPHAN implementation: `procedure TFoo.Bar;` written in the
+    implementation section with no matching declaration in TFoo - the mirror
+    image of TDeclCandidate, computed while walking the SAME implementations
+    that feed LImpls and filtered once every declaration in the unit has been
+    seen (arena order is allocation order, not source order, so the real
+    declaration can sit after this implementation in ATree.Nodes). Native
+    Delphi's Ctrl+Shift+C writes the declaration back in this case; ours must
+    too, for parity. }
+  TOrphanCandidate = record
+    Key: string;      // MakeKey(chain, name, params) - a real declaration with
+                       // this key cancels the candidate
+    TypeKey: string;  // LowerCase(StripGenerics(chain)) - which type to add to
+    Header: string;   // the member declaration line, semicolon-terminated
+    // 0-based offset of the routine NAME within Header - where the caret
+    // goes, the same spot Go To Definition / Go To Implementation land on
+    // (the identifier, not the `procedure` in front of it; live check,
+    // 2026-09-05). Once several orphans of one type are joined into one
+    // Header, this stays the FIRST one's.
+    NameOffset: Integer;
   end;
 
 { ---- small tree helpers (all read-only over the arena) -------------------- }
@@ -594,12 +627,14 @@ end;
   it: whatever the user wrote - default values, `array of const`, an
   attributed parameter, a multiline list - comes back out as they wrote it. }
 function BuildHeader(const ATree: TPasTree; ARoutine, ANameFirst,
-  ANameLast: Integer; const AChain: string): string;
+  ANameLast: Integer; const AChain, AOwnName: string;
+  out ANameOffset: Integer): string; overload;
 var
   LChild, LTailEnd: Integer;
-  LHead, LTail, LDirs, LWord: string;
+  LHead, LTail, LDirs, LWord, LNameText: string;
 begin
   Result := '';
+  ANameOffset := 0;
   if (ANameFirst < 0) or (ANameLast < ANameFirst) then
     Exit;
   // `procedure ` / `function ` / `constructor ` - the keyword the user wrote.
@@ -640,8 +675,29 @@ begin
   LTail := '';
   if LTailEnd > ANameLast then
     LTail := StripDefaults(Flatten(RawSpan(ATree, ANameLast + 1, LTailEnd)));
-  Result := LHead + AChain + Flatten(RawSpan(ATree, ANameFirst, ANameLast)) +
-    LTail + ';' + LDirs;
+  // The name text: the whole dotted span as written, UNLESS the caller hands
+  // over just its own last segment - a member DECLARATION does not repeat the
+  // type's name the way an implementation must (see ClassCompleteFor's orphan
+  // pass, the one caller that does).
+  LNameText := AOwnName;
+  if LNameText = '' then
+    LNameText := Flatten(RawSpan(ATree, ANameFirst, ANameLast));
+  // Where the NAME starts in the result, 0-based - the column a caret wants,
+  // the same one Go To Definition lands on (the identifier, not the keyword
+  // in front of it). Past the chain too: `TFoo.Bar` is the implementation's
+  // name and `Bar` is what a reader looks for.
+  ANameOffset := Length(LHead) + Length(AChain);
+  Result := LHead + AChain + LNameText + LTail + ';' + LDirs;
+end;
+
+{ The one-result form for callers that only want the text. }
+function BuildHeader(const ATree: TPasTree; ARoutine, ANameFirst,
+  ANameLast: Integer; const AChain: string): string; overload;
+var
+  LUnused: Integer;
+begin
+  Result := BuildHeader(ATree, ARoutine, ANameFirst, ANameLast, AChain, '',
+    LUnused);
 end;
 
 { ---- property accessors (the second half of class completion) ------------- }
@@ -887,15 +943,22 @@ begin
       Break;
 end;
 
-{ Where new members go: the END of the type's `private` section when it has
-  one, and a new `private` section right before the type's `end` when it does
-  not. ANeedsSection says which of the two happened, because the text differs
-  (the second has to write the section header and re-indent the `end`). }
+{ Where new members go - a method's body-less declaration (the orphan pass)
+  exactly as much as a property's synthesized accessor: the END of the type's
+  `private` section when it has one; failing that, a NEW `private` section,
+  placed BEFORE any other section the type already has (a reader expects
+  private members first, and appending after `public`/`protected`/`published`
+  would instead bury them behind everything the type already declares);
+  failing THAT - no visibility sections at all, only bare fields/methods in
+  the type's implicit default section, or an empty type - right before the
+  type's `end`. ANeedsSection says whether a `private` header had to be
+  written, because the text differs (a new section also re-indents whatever
+  used to follow the insertion point). }
 function MemberInsertPos(const ATree: TPasTree; ATypeNode: Integer;
   AAllowSection: Boolean; out ALine, ACol: Integer; out AIndent: string;
   out ANeedsSection: Boolean): Boolean;
 var
-  LChild, LLevel, LAnchor, LVisIdx: Integer;
+  LChild, LLevel, LAnchor, LFirstSection, LVisIdx: Integer;
   LVis: TPasVisibleToken;
 begin
   Result := False;
@@ -928,13 +991,18 @@ begin
     Exit(True);
   end;
   LLevel := 0;
+  LFirstSection := NIL_NODE;
   LChild := ATree.Nodes[ATypeNode].FirstChild;
   while LChild <> NIL_NODE do
   begin
     if ATree.Nodes[LChild].Kind = nkVisibility then
-      LLevel := ATree.Nodes[LChild].Aux      // 1 = private (the parser's map)
+    begin
+      if LFirstSection = NIL_NODE then
+        LFirstSection := LChild;              // the first section, whichever
+      LLevel := ATree.Nodes[LChild].Aux;       // 1 = private (the parser's map)
+    end
     else if LLevel = 1 then
-      LAnchor := LChild;                     // last member of a private run
+      LAnchor := LChild;                       // last member of a private run
     LChild := ATree.Nodes[LChild].NextSibling;
   end;
   if LAnchor <> NIL_NODE then
@@ -943,10 +1011,17 @@ begin
     LVisIdx := ATree.Nodes[LAnchor].LastToken;
     AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LAnchor));
   end
+  else if LFirstSection <> NIL_NODE then
+  begin
+    // No private section, but the type has some OTHER one - private goes
+    // FIRST, ahead of it.
+    LVisIdx := ATree.Nodes[LFirstSection].FirstToken;
+    AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LFirstSection));
+  end
   else
   begin
-    // No private section: land right before the type's `end`, whose own
-    // indentation is what the new section header should use.
+    // No visibility sections at all: land right before the type's `end`,
+    // whose own indentation is what the new section header should use.
     LVisIdx := ATree.Nodes[ATypeNode].LastToken;
     AIndent := IndentOfToken(ATree, LVisIdx);
   end;
@@ -955,7 +1030,8 @@ begin
   LVis := ATree.Source.Visible[LVisIdx];
   with ATree.Source.Files[LVis.FileId] do
     if ANeedsSection then
-      // At the `end` token itself: the text goes in front of it.
+      // In front of whatever follows - the type's `end`, or its first
+      // existing section - not after it.
       OffsetToLineCol(Tokens[LVis.TokenIndex].Start, ALine, ACol)
     else
       OffsetToLineCol(Tokens[LVis.TokenIndex].EndPos, ALine, ACol);
@@ -1090,6 +1166,21 @@ var
   LText: string;
   LDots, LCount: Integer;
   LSegments: TArray<string>;
+  // ---- the orphan-implementation pass (declaration from a stray body)
+  LDeclaredKeys: TDictionary<string, Boolean>;
+  LOrphans: TList<TOrphanCandidate>;
+  // TypeKey -> the joined declaration lines plus the FIRST one's NameOffset.
+  LOrphansByType: TDictionary<string, TOrphanCandidate>;
+  LOrphanCand: TOrphanCandidate;
+  LOrphanIdx: Integer;
+  LOrphanGroup: TOrphanCandidate;
+  LHasOrphan: Boolean;
+  LMemberIndent: string;
+  // Where an orphan's OWN declaration lands, raw (pre-shift) - see the caret
+  // rule below the two passes. LOrphanEditRawLine is the CONTAINING edit's
+  // own raw line, kept separately so InsertedLinesBefore is asked about the
+  // right one - see the comment where these are set.
+  LOrphanCaretRawLine, LOrphanCaretRawCol, LOrphanEditRawLine: Integer;
   // ---- the property-accessor pass
   LTypeName, LMemberText, LPropType, LIndexParams, LWord, LAccessor,
     LIndent: string;
@@ -1104,6 +1195,9 @@ begin
   Result.Provider := 'pastree/classComplete';
   LImpls := TDictionary<string, Boolean>.Create;
   LDecls := TList<TDeclCandidate>.Create;
+  LDeclaredKeys := TDictionary<string, Boolean>.Create;
+  LOrphans := TList<TOrphanCandidate>.Create;
+  LOrphansByType := TDictionary<string, TOrphanCandidate>.Create;
   try
     for LIdx := 0 to High(ATree.Nodes) do
     begin
@@ -1121,8 +1215,25 @@ begin
         LChain := '';
         if LDots > 1 then
           LChain := string.Join('.', LSegments, 0, LDots - 1);
-        LImpls.AddOrSetValue(MakeKey(LChain, LSegments[LDots - 1],
-          ParamsKey(ATree, LIdx)), True);
+        LKey := MakeKey(LChain, LSegments[LDots - 1], ParamsKey(ATree, LIdx));
+        LImpls.AddOrSetValue(LKey, True);
+        { An ORPHAN candidate - `TFoo.Bar` with no declaration in TFoo. Built
+          unconditionally here and filtered once every declaration in the
+          unit has been seen (below), because the real declaration can sit
+          AFTER this implementation in ATree.Nodes (arena order, not source
+          order). A free routine (LDots = 1) has no class to be orphaned
+          from - a missing forward declaration there is a compile error, not
+          this feature's business. }
+        if LDots > 1 then
+        begin
+          LOrphanCand := Default(TOrphanCandidate);
+          LOrphanCand.Key := LKey;
+          LOrphanCand.TypeKey := LowerCase(StripGenerics(LChain));
+          LOrphanCand.Header := BuildHeader(ATree, LIdx, LNameFirst, LNameLast,
+            '', LSegments[LDots - 1], LOrphanCand.NameOffset);
+          if LOrphanCand.Header <> '' then
+            LOrphans.Add(LOrphanCand);
+        end;
         Continue;
       end;
       if HasNoBodyDirective(ATree, LIdx) then
@@ -1147,6 +1258,29 @@ begin
       if LCand.Header = '' then
         Continue;
       LDecls.Add(LCand);
+      LDeclaredKeys.AddOrSetValue(LCand.Key, True);
+    end;
+
+    { Which orphan candidates truly have no declaration anywhere in the unit,
+      now that every declaration has been seen. Grouped by TYPE, so a type
+      with several orphaned methods gets its declarations in ONE member edit -
+      the same rule the property pass below follows, and for the same reason:
+      one edit per PLACE, not one per routine. }
+    for LOrphanIdx := 0 to LOrphans.Count - 1 do
+    begin
+      LOrphanCand := LOrphans[LOrphanIdx];
+      if LDeclaredKeys.ContainsKey(LOrphanCand.Key) then
+        Continue;
+      if LOrphansByType.TryGetValue(LOrphanCand.TypeKey, LOrphanGroup) then
+      begin
+        // Joined onto the type's group; the group keeps the FIRST orphan's
+        // NameOffset, since that is the line the caret will go to.
+        LOrphanGroup.Header := LOrphanGroup.Header + sLineBreak +
+          LOrphanCand.Header;
+        LOrphansByType[LOrphanCand.TypeKey] := LOrphanGroup;
+      end
+      else
+        LOrphansByType.Add(LOrphanCand.TypeKey, LOrphanCand);
     end;
 
     { PROPERTY ACCESSORS. A second kind of edit, and the half the user called
@@ -1154,6 +1288,8 @@ begin
       the method (and gets a body like any other), `read FFoo` with no FFoo
       declares the field. Each type gets ONE member edit carrying everything
       planned for it, so its private section is touched once. }
+    LOrphanCaretRawLine := 0;
+    LOrphanCaretRawCol := 0;
     for LIdx := 0 to High(ATree.Nodes) do
     begin
       if not (ATree.Nodes[LIdx].Kind in [nkClassType, nkRecordType,
@@ -1177,7 +1313,17 @@ begin
       LMembers := TDictionary<string, Boolean>.Create;
       try
         CollectMemberNames(ATree, LIdx, LMembers);
+        // Orphan declarations for THIS type, if any - seeded first so the
+        // property accessors below join them with the same sLineBreak rule
+        // they already use for each other. An interface never orphans (it
+        // has no implementations of its own to be missing a declaration
+        // for).
         LMemberText := '';
+        LHasOrphan := not LIsInterface and
+          LOrphansByType.TryGetValue(LowerCase(StripGenerics(LChain)),
+            LOrphanGroup);
+        if LHasOrphan then
+          LMemberText := LOrphanGroup.Header;
         LProp := ATree.Nodes[LIdx].FirstChild;
         while LProp <> NIL_NODE do
         begin
@@ -1318,17 +1464,55 @@ begin
         LEdit.Col := LCol;
         LEdit.Kind := 'member';
         LEdit.Name := LChain;
+        // The members' own indent: one level under a section header we
+        // write, level with their neighbours when they join an existing
+        // section. ONE variable for both the text and the caret column
+        // below, so the two cannot disagree (they did: the first caret
+        // column assumed the header shape for both, 2026-09-05).
+        if LNeedsSection then
+          LMemberIndent := LIndent + '  '
+        else
+          LMemberIndent := LIndent;
         if LNeedsSection then
           // Before the type's `end`: write the section, the members, then the
           // indentation the `end` had, since we are standing on its column.
           LEdit.Text := 'private' + sLineBreak +
-            IndentLines(LMemberText, LIndent + '  ') + sLineBreak + LIndent
+            IndentLines(LMemberText, LMemberIndent) + sLineBreak + LIndent
         else
           // After the last private member: a line break puts us on a fresh
           // line, and that line needs the same indent as its neighbours.
           LEdit.Text := sLineBreak +
-            IndentLines(LMemberText, LIndent);
+            IndentLines(LMemberText, LMemberIndent);
         LMemberEdits := LMemberEdits + [LEdit];
+        { The orphan pass seeds LMemberText FIRST (before any property
+          accessor lines), so its own declaration is always the block's FIRST
+          line - one line below LEdit.Line either way, `private` header or
+          not. Recorded here, raw, because a client that just typed the
+          implementation wants the caret ON the declaration it asked for -
+          the symmetric answer to syncPrototypes putting the caret on the
+          OTHER half when a declaration is what was edited. Earliest wins,
+          when more than one type has an orphan.
+
+          LOrphanEditRawLine is this SAME edit's own (pre-shift) line, kept
+          alongside the declaration's - InsertedLinesBefore below must be
+          asked about THAT line, not the declaration's: asking about the
+          declaration's own line (one past the edit's) would count this
+          edit's own inserted breaks a SECOND time, on top of the "+ 1"
+          already applied here, and land the caret one line too far (a live
+          check, 2026-09-05: the declaration itself was right, the caret
+          landed on the member after it). The body-caret rule above avoids
+          the same trap by asking about ITS edit's own raw line too, for the
+          same reason. }
+        if LHasOrphan and ((LOrphanCaretRawLine = 0) or
+           (LEdit.Line + 1 < LOrphanCaretRawLine)) then
+        begin
+          LOrphanEditRawLine := LEdit.Line;
+          LOrphanCaretRawLine := LEdit.Line + 1;
+          // 1-based: past the indent, past `procedure `/`class function `,
+          // ON the identifier - where Go To Definition would put it.
+          LOrphanCaretRawCol := Length(LMemberIndent) + 1 +
+            LOrphanGroup.NameOffset;
+        end;
       finally
         LMembers.Free;
       end;
@@ -1406,9 +1590,20 @@ begin
       Result.CaretLine := LLine + 4 + InsertedLinesBefore(Result.Edits, LLine);
       Result.CaretCol := 3;
     end
+    else if LOrphanCaretRawLine > 0 then
+    begin
+      // No bodies to write, but at least one orphan got its declaration back:
+      // the caret goes there - the mirror of syncPrototypes landing on the
+      // OTHER half, and of the body caret above landing on the stub just
+      // generated from a declaration.
+      Result.CaretLine := LOrphanCaretRawLine +
+        InsertedLinesBefore(Result.Edits, LOrphanEditRawLine);
+      Result.CaretCol := LOrphanCaretRawCol;
+    end
     else
-      // Members only (a property whose accessors are all fields): the caret
-      // has nowhere better to be than where the user left it.
+      // Members only (a property whose accessors are all fields, and no
+      // orphan): the caret has nowhere better to be than where the user left
+      // it.
       Result.CaretLine := 0;
     // Ascending by position, which is the order an edit writer can apply.
     TArray.Sort<TLspClassEdit>(Result.Edits,
@@ -1417,6 +1612,9 @@ begin
       'pastree/classComplete: %d to implement, %d member edit(s)',
       [LCount, Length(LMemberEdits)]);
   finally
+    LOrphansByType.Free;
+    LOrphans.Free;
+    LDeclaredKeys.Free;
     LDecls.Free;
     LImpls.Free;
   end;

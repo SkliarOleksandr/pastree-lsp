@@ -239,6 +239,74 @@ one request that must NOT wait for the analysis: it is a parse of the live
 buffer, because the declaration the user wants a body for is the one they just
 typed.
 
+### Class completion scenarios
+
+`pastree/classComplete` (`source/PasLsp.ClassComplete.pas`) answers two mirror
+questions over the whole unit, both by the name "what does not match": "what
+did I declare and not implement" (the ordinary case) and "what did I implement
+and not declare" (the orphan case, added 2026-09-05 for parity with native
+Delphi's Ctrl+Shift+C, which handles both directions).
+
+**Handled:**
+
+- A method declared on a `class`/`record`/`object`/`helper` type with no body
+  gets a stub appended at the end of the implementation section, qualified
+  (`TFoo.Bar`), nested types included (`TOuter.TInner.Method`).
+- A free routine declared in the interface section, same treatment - the
+  native class completion skips these; this one does not, because "declared,
+  no body" is one question regardless of what the declaration belongs to.
+- A `forward`-declared routine is just a declaration with no body, so it goes
+  through the same path as any other.
+- A property with neither `read` nor `write` gets both accessors synthesized
+  (`GetFoo`/`SetFoo`, or a field if the name is not `Get`/`Set`-shaped), the
+  property line updated with the specifiers, and (for methods) a body stub.
+- An `interface` type's bare properties get accessor METHODS declared (an
+  interface has no fields to point at) but no bodies - its implementors write
+  those.
+- A property or class declaration missing its closing `;` is repaired once,
+  guessed from the parser's first diagnostic, and only used if the repaired
+  text parses clean (see `TrySemicolonRepair` in the unit header).
+- **An orphan implementation.** `procedure TFoo.Bar;` written in the
+  implementation section, correctly qualified to a class/record/object/helper
+  DECLARED IN THIS UNIT, with no matching declaration in `TFoo`, gets the
+  declaration written back into `TFoo` - same directives, same parameter list,
+  the class's own name dropped (a member does not repeat its type). Computed
+  the same way missing bodies are (a key match over the whole unit, so a
+  declaration appearing anywhere else in the file - including after the
+  implementation in source order - still cancels the candidate) and folded
+  into the SAME per-type member edit a property's synthesized accessors use,
+  so a type with both gets one touch to its body, not two. A free routine
+  implementation with no forward declaration is NOT this case - that is a
+  compile error the language itself catches, not an orphan class member.
+  Nothing is guessed about a type this unit does not declare (a typo'd class
+  name, or one from another unit): the candidate is simply never matched to a
+  type node and is left alone, same as any implementation for something
+  outside this tree's business.
+
+**Where a new member goes - one rule, for accessors and orphan declarations
+alike:** the END of the type's `private` section when it has one; failing
+that, a NEW `private` section placed BEFORE any other section the type
+already has (`public`/`protected`/`published`) - a reader expects private
+members first, and appending after would instead bury the new member behind
+everything the type already declares; failing that - no visibility sections
+at all, only bare fields/methods in the type's implicit default section, or an
+empty type - right before the type's `end`. See `MemberInsertPos` in
+`source/PasLsp.ClassComplete.pas`, the one function both passes call.
+
+**What the same idea looks like elsewhere.** IntelliJ-family IDEs and
+rust-analyzer both offer the orphan-implementation direction as a quick-fix
+keyed off the "unresolved/no such member" diagnostic at the implementation
+itself - "Create method `Bar`", "Generate function" - rather than a
+whole-unit command. We fold it into the existing whole-unit
+`pastree/classComplete` instead, because that request is already bound to
+Ctrl+Shift+C as the one-key answer to "make this compile", and a second,
+per-site mechanism (a `textDocument/codeAction` on a new diagnostic) would
+mean deciding, for every unmatched implementation, which of two keys catches
+it - exactly the kind of ambiguity a single unit-wide pass avoids. A future
+per-site quick-fix, if one is ever added for editors without the Ctrl+Shift+C
+binding, should still answer through the same `ClassCompleteFor` machinery
+rather than a second copy of the matching rules.
+
 **Rename is the reference search, turned into edits - and its refusals are
 half the feature.** `PlanRename` is `DeclHit` + `FindReferences`, so a rename
 can never reach further than the references panel already showed, and never
