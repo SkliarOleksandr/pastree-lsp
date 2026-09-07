@@ -1043,6 +1043,154 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    screen. Absent means "a client that does not report this", which is not
    the same as "not shown", so VS Code says nothing either way.
 
+## Project groups
+
+A `.groupproj` is several projects open at once, and the IDE switches between
+them with one click. Until 0.30.x the plugin treated that switch as a new
+world: `EnsureSession` compared project/platform/configuration against what the
+running server was started for, and any difference meant `FDocs.Forget` and a
+restarted process. Switching back therefore paid a full closure rebuild - 29 s
+on the client closure - for analysis that had been correct minutes earlier and
+was thrown away for no reason other than that one server holds one project.
+
+This section is the design, written before the code; the parts already true and
+the parts still to build are marked.
+
+### Why one server cannot hold two projects
+
+The server fixes its configuration at `initialize` (`FPlatform`, `FMainSource`,
+`FSearchPaths`, `FDefines`, `FNamespaces`, `FAliases`) and holds exactly one
+analysis - `FProject`, `FNav`, `FCompletion`, `FSession`. That is not an
+oversight to be tidied up: PasTree's unit of analysis is a closure under one
+platform and one define set, and the same `.pas` in two projects of a group
+genuinely has two meanings when their defines differ. Two projects are two
+`TPasSemaProject`s whatever process they live in.
+
+So the multiplicity has to exist somewhere, and it goes in the CLIENT: a pool
+of sessions, one server process per project configuration, all alive at once.
+The server needs no change for this, which is the whole reason the shape was
+chosen.
+
+### What is NOT gained by putting them in one process
+
+Worth recording, because it is the first idea everyone has. PasTree's
+`TPasSemaProject.AdoptParseDonor` lets one project reuse another's PARSE
+results - the gate is platform, extra defines and the source manager's
+`ConfigSignature`, and it does not require the donor to be the same project, so
+two projects of a group could donate to each other. But the donation is the
+tree only: a donated MODEL would carry the old generation's unit ids, so
+Phase 1 re-runs and every Phase 2 wave with it. Measured in PasTree's
+`docs/incremental-analysis.md`, that is a rebuild going 29 s -> 23 s, plus
+shared immutable tree arrays.
+
+There is no shared RTL closure to be had, in one process or several: each
+project has its own models for every unit in its closure. A cross-project cache
+of library units is a PasTree-side feature - planned there, along with the
+memory work - and not something this layer can arrange. When it lands this
+section's arithmetic changes and the pool is worth revisiting; until then the
+pool costs that 20% and buys process isolation, no rearchitecture of the
+server, and no behaviour to unwind later.
+
+### The rules
+
+**One server per project configuration**, keyed by exactly what already forces
+a restart today: project file, platform, build configuration, log path, log
+detail. That key is the comparison `EnsureSession` performs, lifted into a
+function. Inside a session the only remaining reason to restart is
+`lcsStopped` - the server actually died.
+
+**No cap, no eviction.** A group is as big as the user made it, and a
+half-populated pool would answer some clicks instantly and some after a full
+rebuild, with nothing on screen to explain which. Memory is a PasTree problem
+being solved in PasTree; the plugin does not paper over it with a policy the
+user cannot predict. On AVImark one server is 3.5-4 GB today, so a large group
+is genuinely expensive - a number to fix, not to hide.
+
+**Lazily, never eagerly.** Opening a group starts the analysis of the ACTIVE
+project only. Every other project is started by the first request that
+addresses it. Prewarming a group of ten would mean ten simultaneous closure
+builds during IDE startup, which is the one moment the IDE can least afford it.
+
+**Opening a module IS opening its project.** A file from another project of the
+group, opened in the editor, is a request for that project's analysis, and the
+pool starts its session. This is the only reading that matches what the user
+sees: the module is on screen, so the features apply to it.
+
+### Routing: by the file, not by the active project
+
+`IOTAProjectGroup.FindProject(FileName)` (`ToolsAPI.pas:3997`) answers "which
+project owns this file", checking the active project first and then the rest of
+the group. Every entry point in `PasTreeIdePlugin.LspSession` already takes the
+file name, so routing is `FindProject` -> key -> session.
+
+A file no project claims - an RTL unit, a file opened from disk - has no owner
+to route to and goes to the ACTIVE session, which is both the only defensible
+guess and today's behaviour.
+
+This also fixes a defect that predates groups: with a single session keyed off
+the active project, a Ctrl+Click inside a module of a NON-active project was
+answered by the wrong server, silently, because the file was not in that
+server's closure. It reads as "navigation does not work in this unit".
+
+### Documents
+
+Each editor buffer is synced to the session of its OWNING project and to no
+other. Not for tidiness: `didOpen`/`didChange` call `ScheduleAnalysis` on the
+server, so broadcasting every buffer to every session would make one tab switch
+schedule a rebuild in every live server. One buffer, one session.
+
+Buffers with no owning project follow their requests to the active session.
+Re-syncing them on a switch is cheap: unchanged text hits the server's
+`FBuiltSignature` backstop and schedules nothing.
+
+### The log
+
+One file per project, `<project-name>-pastree-lsp.log`, beside its `.dproj`.
+The old fixed `pastree-lsp.log` was unambiguous while one server ran at a time;
+with a pool, projects sharing a directory - the normal shape of a group - would
+interleave two servers' lines into one file, which is worse than useless when
+the question being asked is why one of them behaves differently.
+`docs/diagnosing.md` names this file and has to be updated with it.
+
+### What works in a non-active project, and what does not
+
+Seamless, because the input is a file and a position and the output is a file
+and a position: Go To Declaration, the decl/impl toggle, Type Definition,
+hover, completion, signature help, class completion, prototype sync, block
+close, on-type formatting, and the painted diagnostics. Opening a result goes
+through `IOTAActionServices.OpenFile` and the edit buffers, which are
+group-wide - nothing on that path consults the active project.
+
+NOT seamless, and not because of routing: `workspace/symbol`, Find References
+and Rename. Their scope is a closure and a closure is one project. A symbol
+used in two projects of the group returns the hits from ONE of them, and a
+rename plans the sites in ONE of them - silently, which is the dangerous half.
+Until the fan-out below exists, these must SAY which project they answered for.
+
+### Still to build
+
+1. ~~The pool; the switch stops restarting anything, and the log is named per
+   project.~~ **Done, 0.31.0.** `TLspSessionPool` in
+   `PasTreeIdePlugin.LspSession` owns one `TLspSession` per project, keyed by
+   the project's file name; `GSession` became a borrowed pointer to the active
+   one, refreshed by `ActiveSession` on every request rather than only on the
+   IDE's notifications - a switch the plugin has not been told about yet would
+   otherwise send the question to the previous project's server. A session
+   resolves its own `IOTAProject` by name on each use and never holds the
+   interface. `Prune` disposes the sessions of projects the CURRENT group does
+   not contain, and runs on activation rather than on group close, so
+   reopening the group you just closed is still instant.
+2. Routing by `FindProject`, and per-file document sync with it.
+3. Group-wide Find References and Rename: the same request to every live
+   session, results merged and de-duplicated by file and position. Rename is
+   the hard half - it is a plan the user approves, and a plan spanning two
+   closures has to be presented as one before a single file is written. Naming
+   the project in the result surface is the honest interim.
+4. Group-wide `workspace/symbol`: the same fan-out, and cheap, since it is a
+   read with no plan to approve.
+5. A project ADDED to or REMOVED from an open group. Removal must dispose its
+   session; the notification for it is not yet identified.
+
 ## Non-goals
 
 - **A formatter.** Needs a printer; PasTree parses and analyzes but does not

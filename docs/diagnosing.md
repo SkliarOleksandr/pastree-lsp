@@ -3,9 +3,16 @@
 Procedures for symptoms that have already cost a round of investigation. Read
 the one that matches; `CLAUDE.md` links here by symptom.
 
-Everything starts from **`pastree-lsp.log`, in the same folder as the `.dproj`
-being analyzed** - the server's stderr is appended into that same file, not a
-sibling.
+Everything starts from **`<project-name>-pastree-lsp.log`, in the same folder
+as the `.dproj` being analyzed** - the server's stderr is appended into that
+same file, not a sibling.
+
+One log per project, because a project group runs one server per project, all
+at once (`clients/rad-studio/SPEC.md`, "Project groups"): with a fixed name the
+projects of a group - normally one directory - would interleave two servers'
+lines into one file, which is worst exactly when the question is why one of
+them behaves differently. A log written by a version before 0.31.0, or by the
+VS Code client, is still the bare `pastree-lsp.log`.
 
 ## "Ctrl+Click did nothing"
 

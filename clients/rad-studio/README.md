@@ -336,7 +336,9 @@ when the last of them went. The four LSP units are described in "Files";
   `source\ToolsAPI`) turned out not to include the RTL at all: the RTL sources
   live in `source\rtl\sys`, `\common`, `\win`, not in `source\rtl` itself.
 
-- **The server log goes next to the project**, as `pastree-lsp.log`, with the
+- **The server log goes next to the project**, one per project, as
+  `<project-name>-pastree-lsp.log` - a group runs one server per project and
+  they normally share a directory - with the
   server's stderr beside it as `pastree-lsp-stderr.log`. Both are appended to,
   with a separator line per server run, so history survives a restart and the
   name stays stable enough to keep open in a tail. Same reason as above: the
@@ -507,7 +509,8 @@ unreliable here.
 The editor's own report is deliberately thin - `[pastree] Goto Declaration: no
 identifier/declaration resolved at cursor` in the Build tab is all a miss ever
 says, because it fires on every Ctrl+Click. The actual reason is in
-**`pastree-lsp.log`, in the same folder as the `.dproj`**, and it is worth
+**`<project-name>-pastree-lsp.log`, in the same folder as the `.dproj`**, and
+it is worth
 reading before assuming the resolver is at fault:
 
 - `F1027 Unit not found: 'X'` on a `uses` line means the search paths are

@@ -624,6 +624,10 @@ type
     FClient: TLspClient;
     FDocs: TLspDocumentSync;
     FExePath: string;
+    // THE PROJECT THIS SESSION IS FOR, as a file name - see
+    // GetOpenProjectByFile for why a name and not an interface. Fixed at
+    // construction: a session never retargets, the pool creates another one.
+    FProjectFile: string;
     // The configuration the running server was started for; a change means a
     // restart.
     FStartedProject: string;
@@ -670,8 +674,10 @@ type
     procedure Ask(const AMethod: string; const AFileName: string;
       ARow, ACol: Integer; AIncludeDeclaration: Boolean;
       var APendingId: Int64; const AOnDone: TLspHitsProc);
+    function Project: IOTAProject;
   public
-    constructor Create;
+    constructor Create(const AProjectFile: string);
+    property ProjectFile: string read FProjectFile;
     destructor Destroy; override;
     procedure Prewarm;
     procedure ProjectOpened;
@@ -712,8 +718,62 @@ type
     procedure IdleSync;
   end;
 
+  { THE SESSIONS OF AN OPEN PROJECT GROUP - one per project, one server
+    process each, all alive at once.
+
+    Why a pool at all: the server fixes its configuration at initialize and
+    holds exactly one analysis, so it cannot be retargeted - and until this
+    existed, switching projects inside a group meant FDocs.Forget and a
+    restarted process, throwing away a closure that had been correct minutes
+    earlier and paying for it again on the way back (29 s on the client
+    closure). Two projects are two closures wherever they live; the
+    multiplicity had to go somewhere, and the client is the only place it
+    costs no server change. See "Project groups" in SPEC.md.
+
+    NO CAP AND NO EVICTION. A group is as big as the user made it, and a
+    half-populated pool would answer some clicks instantly and some after a
+    full rebuild with nothing on screen to explain which. The sessions are
+    created LAZILY - opening a group starts the active project only, or ten
+    simultaneous closure builds would land on the one moment IDE startup can
+    least afford them.
+
+    What DOES bound it is Prune: opening a different group disposes the
+    sessions of projects that group does not contain. Closing a group leaves
+    them up, deliberately - that is the same choice ProjectClosed already
+    records, and it is what makes reopening the group you just closed
+    instant. }
+  TLspSessionPool = class
+  private
+    FSessions: TObjectList<TLspSession>;
+    // See Destroy: freeing a session fails its outstanding requests, whose
+    // callbacks reach the entry points below, and one of those would
+    // otherwise build a fresh session - and a whole server process - into a
+    // list that is being torn down. The same flag TLspSession keeps, for the
+    // same reason, one level up.
+    FDestroying: Boolean;
+    function IndexOf(const AProjectFile: string): Integer;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    { The session for AProject, created if this is the first time it is asked
+      for. nil only for a nil project. }
+    function SessionFor(const AProject: IOTAProject): TLspSession;
+    { Makes the active project's session the one GSession points at, creating
+      it if needed, and disposes any session whose project is not in the
+      current group. Returns it, or nil when no project is active. }
+    function Activate: TLspSession;
+    procedure Prune;
+    procedure ForEach(const AProc: TProc<TLspSession>);
+  end;
+
 var
+  { The pool owns every session; this is a BORROWED pointer to the one
+    requests currently go to - the active project's. It stays a variable of
+    this name because every entry point below reads it, and routing a request
+    by the file at the caret rather than by the active project is the next
+    commit, not this one (SPEC.md, "Still to build" item 2). }
   GSession: TLspSession;
+  GPool: TLspSessionPool;
   // The painted-squiggle layer's repaint trigger; see
   // LspSetDiagnosticsChangedListener.
   GDiagnosticsListener: TLspDiagnosticsChangedProc;
@@ -722,18 +782,50 @@ var
   ToolsAPI harvesting
   --------------------------------------------------------------------------- }
 
-function GetActiveProject: IOTAProject;
+function GetProjectGroup: IOTAProjectGroup;
 var
   LModuleServices: IOTAModuleServices;
-  LGroup: IOTAProjectGroup;
 begin
   Result := nil;
   if Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-  begin
-    LGroup := LModuleServices.MainProjectGroup;
-    if Assigned(LGroup) then
-      Result := LGroup.ActiveProject;
-  end;
+    Result := LModuleServices.MainProjectGroup;
+end;
+
+function GetActiveProject: IOTAProject;
+var
+  LGroup: IOTAProjectGroup;
+begin
+  Result := nil;
+  LGroup := GetProjectGroup;
+  if Assigned(LGroup) then
+    Result := LGroup.ActiveProject;
+end;
+
+/// <summary>
+/// The open project whose own file is AProjectFile - the .dproj, not a member
+/// unit, which is why this scans the group rather than calling FindProject.
+///
+/// RESOLVED FRESH, NEVER HELD. A pooled session outlives switches, group
+/// closes and reopens, and an IOTAProject it kept a reference to would be a
+/// live interface to a project the IDE has finished with - the session's
+/// identity is the file NAME for exactly that reason. nil means the project
+/// is no longer open, which is a normal state for a session the pool has not
+/// yet disposed.
+/// </summary>
+function GetOpenProjectByFile(const AProjectFile: string): IOTAProject;
+var
+  LGroup: IOTAProjectGroup;
+  LIdx: Integer;
+begin
+  Result := nil;
+  if AProjectFile = '' then
+    Exit;
+  LGroup := GetProjectGroup;
+  if not Assigned(LGroup) then
+    Exit;
+  for LIdx := 0 to LGroup.ProjectCount - 1 do
+    if SameText(LGroup.Projects[LIdx].FileName, AProjectFile) then
+      Exit(LGroup.Projects[LIdx]);
 end;
 
 /// <summary>
@@ -742,12 +834,22 @@ end;
 /// </summary>
 function LogPathFor(const AProjectFile: string): string;
 var
-  LDir: string;
+  LDir, LName: string;
 begin
   LDir := ExtractFilePath(AProjectFile);
   if (LDir = '') or not TDirectory.Exists(LDir) then
     LDir := TPath.GetTempPath;
-  Result := TPath.Combine(LDir, cLspLogName);
+  // ONE LOG PER PROJECT, named after it. A project group runs one server per
+  // project, all at once, and the projects of a group normally sit in one
+  // directory - so a fixed name would interleave two servers' lines into one
+  // file, which is worst exactly when the question is why one of them behaves
+  // differently from the other. Unnamed project (never saved): the bare name,
+  // which is also what every log written before groups existed was called.
+  LName := TPath.GetFileNameWithoutExtension(AProjectFile);
+  if LName = '' then
+    Result := TPath.Combine(LDir, cLspLogName)
+  else
+    Result := TPath.Combine(LDir, LName + '-' + cLspLogName);
 end;
 
 /// <summary>
@@ -999,9 +1101,10 @@ end;
 
 { TLspSession }
 
-constructor TLspSession.Create;
+constructor TLspSession.Create(const AProjectFile: string);
 begin
   inherited Create;
+  FProjectFile := AProjectFile;
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
@@ -1134,6 +1237,11 @@ begin
      HiWord(LInfo.dwFileVersionLS), LoWord(LInfo.dwFileVersionLS)]);
 end;
 
+function TLspSession.Project: IOTAProject;
+begin
+  Result := GetOpenProjectByFile(FProjectFile);
+end;
+
 function TLspSession.BuildOptions(const AProject: IOTAProject;
   out APlatform, AConfig: string): TLspInitOptions;
 var
@@ -1220,7 +1328,11 @@ begin
     end;
   end;
 
-  LProject := GetActiveProject;
+  // THIS SESSION'S project, not the active one: a pooled session answers for
+  // the project it was created for whether or not the IDE currently has that
+  // one selected. nil means the project has been closed and the pool has not
+  // disposed this session yet.
+  LProject := Project;
   // SILENTLY. EnsureSession is the gate in front of EVERY request, and most
   // requests are not user actions: the outline asks on each tab activation,
   // the idle sync on each pause. During IDE startup those fire while the
@@ -2346,7 +2458,7 @@ begin
   // for; a panel that reports non-events is a panel people stop reading. The
   // ofnEndProjectGroupOpen notification arrives moments later and does the
   // real work.
-  LProject := GetActiveProject;
+  LProject := Project;
   if not Assigned(LProject) then
     Exit;
   // The rest is EnsureSession: it spawns the server and issues the handshake,
@@ -2374,7 +2486,7 @@ var
   LWasReady: Boolean;
   LReadyLine: string;
 begin
-  LProject := GetActiveProject;
+  LProject := Project;
   if not Assigned(LProject) then
     Exit;   // see Prewarm: normal during startup, and not ours to report
   LWasReady := Assigned(FClient) and (FClient.State = lcsReady);
@@ -2482,24 +2594,171 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
+  TLspSessionPool
+  --------------------------------------------------------------------------- }
+
+constructor TLspSessionPool.Create;
+begin
+  inherited Create;
+  FSessions := TObjectList<TLspSession>.Create(True);
+end;
+
+destructor TLspSessionPool.Destroy;
+begin
+  // The borrowed pointer dies with the objects it borrows from, and BEFORE
+  // them: freeing a session runs its destructor, which fails outstanding
+  // requests, which invokes their callbacks - and a callback that asks
+  // another question reaches the entry points below. They must find nothing
+  // rather than a session that is being destroyed.
+  FDestroying := True;
+  GSession := nil;
+  FreeAndNil(FSessions);
+  inherited;
+end;
+
+function TLspSessionPool.IndexOf(const AProjectFile: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := -1;
+  for LIdx := 0 to FSessions.Count - 1 do
+    if SameText(FSessions[LIdx].ProjectFile, AProjectFile) then
+      Exit(LIdx);
+end;
+
+function TLspSessionPool.SessionFor(const AProject: IOTAProject): TLspSession;
+var
+  LIdx: Integer;
+begin
+  Result := nil;
+  if FDestroying or not Assigned(AProject) then
+    Exit;
+  LIdx := IndexOf(AProject.FileName);
+  if LIdx >= 0 then
+    Exit(FSessions[LIdx]);
+  // Created, not started: TLspSession.Create spawns nothing, so the cost of
+  // an entry the user never navigates in is one object.
+  Result := TLspSession.Create(AProject.FileName);
+  FSessions.Add(Result);
+end;
+
+{ Every project of the CURRENT group survives; everything else goes.
+
+  Not on group close, on group OPEN. Closing a project leaves its server up on
+  purpose - see ProjectClosed, and it is what makes reopening what you just
+  closed instant - so the boundary that can safely dispose is the one where a
+  DIFFERENT group has just come up and the old sessions can no longer be
+  reached by any file the user can open. }
+procedure TLspSessionPool.Prune;
+var
+  LGroup: IOTAProjectGroup;
+  LIdx, LProj: Integer;
+  LKeep: Boolean;
+  LDoomed: TLspSession;
+begin
+  if FDestroying then
+    Exit;
+  LGroup := GetProjectGroup;
+  if not Assigned(LGroup) then
+    Exit;   // no group open: nothing to compare against, keep everything
+  for LIdx := FSessions.Count - 1 downto 0 do
+  begin
+    LKeep := False;
+    for LProj := 0 to LGroup.ProjectCount - 1 do
+      if SameText(LGroup.Projects[LProj].FileName,
+                  FSessions[LIdx].ProjectFile) then
+      begin
+        LKeep := True;
+        Break;
+      end;
+    if LKeep then
+      Continue;
+    if FSessions[LIdx] = GSession then
+      GSession := nil;   // never leave the borrowed pointer on a freed object
+    { EXTRACT, THEN FREE - not Delete, which would do both at once with the
+      list mid-mutation. Freeing a session fails its outstanding requests and
+      runs their callbacks, and a callback that asks another question comes
+      back through ActiveSession into this very list. By then the doomed
+      session must already be out of it and the list must be consistent. }
+    LDoomed := FSessions.Extract(FSessions[LIdx]);
+    LDoomed.Free;   // stops its server
+  end;
+end;
+
+function TLspSessionPool.Activate: TLspSession;
+begin
+  Result := SessionFor(GetActiveProject);
+  // ONLY ON SUCCESS. During IDE startup the group is not up yet and there is
+  // no active project; clearing GSession here would drop a perfectly good
+  // session for a notification that means "not yet", not "none".
+  if Assigned(Result) then
+  begin
+    GSession := Result;
+    Prune;
+  end;
+end;
+
+procedure TLspSessionPool.ForEach(const AProc: TProc<TLspSession>);
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FSessions.Count - 1 do
+    AProc(FSessions[LIdx]);
+end;
+
+{ ---------------------------------------------------------------------------
   Unit-level entry points
   --------------------------------------------------------------------------- }
 
+{ THE SESSION A REQUEST GOES TO, re-picked on every request rather than only
+  on the IDE's notifications.
+
+  Two reasons it is not just GSession. A request arriving before any
+  notification has been acted on - the first Ctrl+Click of a session, which
+  routinely beats ofnEndProjectGroupOpen - would otherwise be answered with
+  "LSP session not initialized" in front of the user, where the old single
+  session merely found no project and stayed silent. And a switch the plugin
+  has not been told about yet (the IDE does not notify for every route into
+  Project Manager) would send the question to the previous project's server,
+  which is the silent wrong answer this whole change exists to remove.
+
+  Cheap by construction: it creates an object at most, never a server. The
+  read-only paths below (diagnostics, sent text, idle sync) deliberately keep
+  reading GSession instead - they run per repaint and per idle tick, and they
+  have nothing to say about which project is active. }
+function ActiveSession: TLspSession;
+begin
+  if Assigned(GPool) then
+    Result := GPool.Activate
+  else
+    Result := nil;
+end;
+
 procedure InitializeLspSession;
 begin
-  if not Assigned(GSession) then
-    GSession := TLspSession.Create;
+  if not Assigned(GPool) then
+    GPool := TLspSessionPool.Create;
 end;
 
 procedure FinalizeLspSession;
 begin
-  FreeAndNil(GSession);
+  FreeAndNil(GPool);   // clears GSession first - see the destructor
 end;
 
 procedure LspProjectOpened;
+var
+  LSession: TLspSession;
 begin
-  if Assigned(GSession) then
-    GSession.ProjectOpened;
+  if not Assigned(GPool) then
+    Exit;
+  // THE ACTIVE PROJECT'S SESSION, WHICHEVER IT NOW IS. This fires for both
+  // ofnEndProjectGroupOpen and ofnActiveProjectChanged, and the second is the
+  // switch inside a group: before the pool it meant a restarted server, and
+  // now it means picking the session that already holds that project's
+  // analysis. Nothing is torn down either way.
+  LSession := GPool.Activate;
+  if Assigned(LSession) then
+    LSession.ProjectOpened;
 end;
 
 procedure LspSyncDocuments;
@@ -2513,8 +2772,17 @@ end;
 
 procedure LspProjectClosed;
 begin
-  if Assigned(GSession) then
-    GSession.ProjectClosed;
+  // EVERY session, not just the active one: this is the group going away, and
+  // each of its projects is entitled to the boundary line in its own log and
+  // to a fresh "server ready" if the group comes back. The servers stay up -
+  // see TLspSession.ProjectClosed - and Prune disposes them if a DIFFERENT
+  // group opens next.
+  if Assigned(GPool) then
+    GPool.ForEach(
+      procedure(ASession: TLspSession)
+      begin
+        ASession.ProjectClosed;
+      end);
 end;
 
 
@@ -2524,17 +2792,25 @@ begin
 end;
 
 procedure LspPrewarm;
+var
+  LSession: TLspSession;
 begin
-  // Silent when there is no session: this is fired by an IDE event, not by a
-  // user action, so there is nobody to tell and nothing they could do.
-  if Assigned(GSession) then
-    GSession.Prewarm;
+  // Silent when there is no pool or no active project: this is fired by an IDE
+  // event, not by a user action, so there is nobody to tell and nothing they
+  // could do. THE ACTIVE PROJECT ONLY, deliberately - warming a whole group
+  // would put one closure build per project on the IDE's startup, which is the
+  // moment it can least afford them. The others start on their first request.
+  if not Assigned(GPool) then
+    Exit;
+  LSession := GPool.Activate;
+  if Assigned(LSession) then
+    LSession.Prewarm;
 end;
 
 procedure LspDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2545,7 +2821,7 @@ end;
 procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2556,7 +2832,7 @@ end;
 procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspClassCompleteProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, Default(TLspClassComplete), 'LSP session not initialized');
     Exit;
@@ -2567,7 +2843,7 @@ end;
 procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspSyncPrototypesProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, Default(TLspSyncPrototypes),
       'LSP session not initialized');
@@ -2579,7 +2855,7 @@ end;
 procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspTextEditsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2590,7 +2866,7 @@ end;
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
   const ANewName: string; const AOnDone: TLspRenamePlanProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, Default(TLspRenamePlan), 'LSP session not initialized');
     Exit;
@@ -2601,7 +2877,7 @@ end;
 procedure LspRenameTarget(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspRenameTargetProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, '', 'LSP session not initialized');
     Exit;
@@ -2612,7 +2888,7 @@ end;
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
   AToImpl: Boolean; const AOnDone: TLspHitsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2623,7 +2899,7 @@ end;
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2634,7 +2910,7 @@ end;
 procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2645,7 +2921,7 @@ end;
 procedure LspHover(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHoverProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, '', 'LSP session not initialized');
     Exit;
@@ -2656,7 +2932,7 @@ end;
 procedure LspDocumentSymbols(const AFileName: string;
   const AOnDone: TLspDocSymbolsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2697,7 +2973,7 @@ end;
 procedure LspWorkspaceSymbols(const AQuery: string;
   const AOnDone: TLspWorkspaceSymbolsProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
@@ -2708,7 +2984,7 @@ end;
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspSignatureHelpProc);
 begin
-  if not Assigned(GSession) then
+  if ActiveSession = nil then
   begin
     AOnDone(False, Default(TLspSignatureHelp), 'LSP session not initialized');
     Exit;

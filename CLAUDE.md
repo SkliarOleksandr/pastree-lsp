@@ -141,7 +141,8 @@ resolve nothing anywhere in a file while the log said only `no identifier at`.
 
 ## Where the answers are
 
-- A failure a user reports: `pastree-lsp.log`, beside the `.dproj`. Then
+- A failure a user reports: `<project-name>-pastree-lsp.log`, beside the
+  `.dproj` - one per project, since a group runs one server each. Then
   `docs/diagnosing.md`.
 - Why the analysis is shaped as it is: `SPEC.md`. Do not re-derive it.
 - Why the IDE half is shaped as it is: `clients/rad-studio/SPEC.md` and its
