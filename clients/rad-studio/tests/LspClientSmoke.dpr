@@ -1323,8 +1323,15 @@ begin
     'procedure TBase.Missing(const A: string; B: Integer);'),
     'the missing method, with its parameter list verbatim');
   Check(GOk and GResultJson.Contains(
-    'class function TBase.Make: TBase; static;'),
-    'a class static method repeats `static` - required on the implementation');
+    'class function TBase.Make: TBase;'),
+    '`class` IS re-emitted - the parser keeps it outside the routine node');
+  // NO DIRECTIVES on a generated body. Not one of them is required there,
+  // several are an error, and the declaration governs all of them anyway
+  // (Alex, 2026-09-07 - an earlier version repeated a "safe" subset).
+  Check(GOk and not GResultJson.Contains('static;')
+    and not GResultJson.Contains('overload;')
+    and not GResultJson.Contains('inline;'),
+    'and no directive rides along into the implementation section');
   Check(GOk and GResultJson.Contains(
     'function TBase.Overloaded(A: Integer): Integer;'),
     'the overload that has no body');

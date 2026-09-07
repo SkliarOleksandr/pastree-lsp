@@ -275,6 +275,18 @@ getter is the common case). No resolver: a parse of the live buffer cannot
 have one, and the honest answer without it is "I cannot see, so I do not
 write".
 
+**Directives travel one way only.** A generated IMPLEMENTATION carries none
+of them: not one is required on a body, several are an outright error there
+(`virtual`, `override`, `abstract`, `reintroduce`, `dynamic`, `message`), and
+the rest - `static`, `overload`, `inline`, a calling convention - only repeat
+what the declaration already governs. Native class completion writes a bare
+header too. (Until 2026-09-07 a "safe" subset was repeated, `static` among
+them, on the reasoning that a class static method's body must say so again; it
+must not.) The orphan direction is the opposite: a DECLARATION generated from
+a body keeps every directive the body carries, because a body may legally
+carry a calling convention and a declaration that drops it declares a
+different one to every caller. See `BuildHeader`'s `AKeepDirectives`.
+
 **Handled:**
 
 - A method declared on a `class`/`record`/`object`/`helper` type with no body

@@ -10,8 +10,10 @@ unit DemoClassComplete;
   parameterless TBase.Overloaded.
   Never implementable here (must NOT be generated): IWorker.Work (an
   interface's methods belong to its implementors), TBase.Abstracted.
-  Missing (must ALL be generated): TBase.Missing, TBase.Make with its
-  `static` repeated, the one-argument TBase.Overloaded, TStack<T>.Push with
+  Missing (must ALL be generated): TBase.Missing, TBase.Make with its `class`
+  kept and its `static` DROPPED - no directive belongs on a body, and the
+  declaration governs them all - the one-argument TBase.Overloaded (its
+  `overload` dropped for the same reason), TStack<T>.Push with
   its generic qualification, and FreeRoutine - a free routine of the
   interface section, which the native class completion ignores and this one
   does not.

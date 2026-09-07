@@ -598,21 +598,6 @@ begin
   end;
 end;
 
-{ Directives the IMPLEMENTATION must or may repeat. The rest belong to the
-  declaration alone: `virtual`, `override`, `abstract`, `reintroduce`,
-  `dynamic`, `message`, `deprecated`, `final`, `export`, `external`,
-  `forward`. Repeating one of those is a compile error or a lie, and leaving
-  out one of THESE is a compile error the other way - `static` in particular
-  (a class static method's implementation must say so again). }
-function RepeatableDirective(const AWord: string): Boolean;
-begin
-  Result := SameText(AWord, 'static') or SameText(AWord, 'overload') or
-    SameText(AWord, 'inline') or SameText(AWord, 'varargs') or
-    SameText(AWord, 'stdcall') or SameText(AWord, 'cdecl') or
-    SameText(AWord, 'pascal') or SameText(AWord, 'register') or
-    SameText(AWord, 'safecall') or SameText(AWord, 'winapi');
-end;
-
 { True when the declaration has a directive that means "there is no body
   here": an abstract method, or one implemented outside Pascal. }
 function HasNoBodyDirective(const ATree: TPasTree; ARoutine: Integer): Boolean;
@@ -634,20 +619,38 @@ begin
   end;
 end;
 
-{ The implementation header for a declaration: its own text, with the type
-  name spliced in front of the routine name and the declaration-only
-  directives dropped.
+{ One half's header, written as the OTHER half must read it: the routine's own
+  text with the type name spliced in or taken out.
 
   Built from the SOURCE SPAN rather than reassembled from the model, for the
   same reason the completion seam reads ItemParamsText instead of rebuilding
   it: whatever the user wrote - default values, `array of const`, an
-  attributed parameter, a multiline list - comes back out as they wrote it. }
+  attributed parameter, a multiline list - comes back out as they wrote it.
+
+  AKEEPDIRECTIVES IS THE DIRECTION, and the two directions are not symmetric.
+
+  Writing an IMPLEMENTATION (False): NO directives at all. Not one of them is
+  required on a body, several are an outright error there (`virtual`,
+  `override`, `abstract`, `reintroduce`, `dynamic`, `message`), and the rest -
+  `static`, `overload`, `inline`, a calling convention - are at best a
+  duplicate of what the declaration already governs. An earlier version
+  repeated a "safe" subset and in particular re-emitted `static`, on the
+  reasoning that a class static method's body must say so again; it does not
+  (Alex, 2026-09-07, and Embarcadero's own class-property example writes
+  `class function TMyClass.GetX: Integer;` bare). Native class completion
+  writes a bare header too. The declaration is where these words live.
+
+  Writing a DECLARATION from a body (True, the orphan pass): keep every
+  directive the body carries. A body may legally carry a calling convention -
+  `procedure TFoo.Bar; stdcall;` - and a declaration that omits it does not
+  merely lose a word, it declares a different convention to every caller. What
+  the body could carry, the declaration must. }
 function BuildHeader(const ATree: TPasTree; ARoutine, ANameFirst,
   ANameLast: Integer; const AChain, AOwnName: string;
-  out ANameOffset: Integer): string; overload;
+  AKeepDirectives: Boolean; out ANameOffset: Integer): string; overload;
 var
   LChild, LTailEnd: Integer;
-  LHead, LTail, LDirs, LWord, LNameText: string;
+  LHead, LTail, LDirs, LNameText: string;
 begin
   Result := '';
   ANameOffset := 0;
@@ -676,11 +679,8 @@ begin
     case ATree.Nodes[LChild].Kind of
       nkRoutineBody: ;
       nkDirective:
-        begin
-          LWord := ATree.NodeText(LChild);
-          if RepeatableDirective(LWord) then
-            LDirs := LDirs + ' ' + Flatten(ATree.NodeSpanText(LChild)) + ';';
-        end;
+        if AKeepDirectives then
+          LDirs := LDirs + ' ' + Flatten(ATree.NodeSpanText(LChild)) + ';';
     else
       if (ATree.NodeLeftmostVis(LChild) > ANameLast) and
          (ATree.Nodes[LChild].LastToken > LTailEnd) then
@@ -706,14 +706,15 @@ begin
   Result := LHead + AChain + LNameText + LTail + ';' + LDirs;
 end;
 
-{ The one-result form for callers that only want the text. }
+{ The one-result form: an IMPLEMENTATION header, so no directives - see the
+  direction note above. }
 function BuildHeader(const ATree: TPasTree; ARoutine, ANameFirst,
   ANameLast: Integer; const AChain: string): string; overload;
 var
   LUnused: Integer;
 begin
   Result := BuildHeader(ATree, ARoutine, ANameFirst, ANameLast, AChain, '',
-    LUnused);
+    {AKeepDirectives} False, LUnused);
 end;
 
 { ---- property accessors (the second half of class completion) ------------- }
@@ -1471,7 +1472,8 @@ begin
           LOrphanCand.Key := LKey;
           LOrphanCand.TypeKey := LowerCase(StripGenerics(LChain));
           LOrphanCand.Header := BuildHeader(ATree, LIdx, LNameFirst, LNameLast,
-            '', LSegments[LDots - 1], LOrphanCand.NameOffset);
+            '', LSegments[LDots - 1], {AKeepDirectives} True,
+            LOrphanCand.NameOffset);
           if LOrphanCand.Header <> '' then
             LOrphans.Add(LOrphanCand);
         end;
