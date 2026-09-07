@@ -1172,7 +1172,32 @@ own search box - and still answers for the active project alone.
 Find References left that category in 0.32.0: it now asks every running project
 and merges. Its title reports the coverage instead of the project.
 
-### Still to build
+### Closing and reopening a group costs nothing
+
+Asked directly (Alex, 2026-09-07) and worth an answer in writing, because the
+memory sitting in Task Manager makes the opposite look obvious.
+
+Closing a group leaves its servers up, and reopening THE SAME group reuses them
+whole: `Activate` finds each session by its project's file name, `Prune` keeps
+it because the project is in the current group, and `EnsureSession` sees a
+ready client whose project, platform, configuration and log settings all still
+match - so nothing restarts and nothing is re-analyzed. The first Ctrl+Click
+after a reopen answers immediately.
+
+The buffers closing and reopening do not force a rebuild either: only documents
+whose text OVERRIDES their file are in the server's overlay signature
+(`OverlayParts`), so closing and reopening unmodified tabs leaves it unchanged
+and the scheduled rebuild is dropped - `scheduled rebuild dropped: the analyzed
+inputs did not change` in the log. A buffer that held unsaved edits at close IS
+a real change of inputs, and does rebuild, correctly.
+
+So the servers die at exactly two moments: a DIFFERENT group opening (`Prune`),
+and the package unloading. The price is that they hold their memory while no
+group is open at all. Killing them on close would buy that back and cost the
+instant reopen - 7 s per project on AVImark - which is the wrong trade while
+the alternative is a wait the user did not ask for.
+
+### Delivered
 
 1. ~~The pool; the switch stops restarting anything, and the log is named per
    project.~~ **Done, 0.31.0.** `TLspSessionPool` in
@@ -1218,10 +1243,42 @@ and merges. Its title reports the coverage instead of the project.
    until the rename itself is reworked. It is a plan the user approves, and a
    plan spanning two closures has to be presented as one before a single file
    is written; the interim remains naming the project in its result title.
+### Verified in a real group
+
+2026-09-07, `AVImark.groupproj` - NINE projects - on 0.31.1, from the five
+per-project logs it produced. Five servers came up within three minutes of
+ordinary work (3759 + 2127 + 707 + 311 + 266 units), with no
+`project configuration changed - restarting the server` line anywhere and no
+duplicated `server ready`.
+
+The evidence for each rule, since it is the kind that is hard to reconstruct
+later:
+
+- **Cross-project routing.** `AVImarkChromium` answered a definition at
+  22:22:18 and its `IDE opened AVImarkChromium.dproj` line arrived at 22:22:24
+  - the click was in a module of a project that was not yet active, and it was
+  answered by that project's server seven seconds before the IDE said the
+  project had become current.
+- **Lazy start by request.** `AVImarkChromiumHost` has no `IDE opened` line at
+  all. It was never activated; a routed request started it.
+- **A shared unit in two closures.** `uChromiumInit.pas` is an open buffer in
+  `AVImarkChromium` and the target of a definition in `AVImarkChromiumHost`,
+  each server working from its own copy.
+- **Per-file document sync.** `AVImarkServer`'s log contains no `didOpen` at
+  all while the user navigated in `AVImark`'s units - before 0.31.1 both
+  servers would have received both buffers and both would have rebuilt.
+- **The unowned-file fallback.** `UITestManager` received
+  `didOpen Winapi.TlHelp32.pas` as the active session: an RTL unit no project
+  claims.
+
+### Still to build
+
 4. Group-wide `workspace/symbol`: the same fan-out, and cheap, since it is a
    read with no plan to approve.
 5. A project ADDED to or REMOVED from an open group. Removal must dispose its
    session; the notification for it is not yet identified.
+6. Group-wide Rename - see item 3. Waiting on the rename's own rework, not on
+   the group machinery.
 
 ## Non-goals
 
