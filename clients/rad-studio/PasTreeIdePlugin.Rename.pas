@@ -267,8 +267,10 @@ end;
   snippet) span exactly it. See PasTreeIdePlugin.FindReferences for why the
   removal below is conditional on the IDE not terminating - it is the same
   group mechanism and the same 2026-08-22 access violation. }
-procedure ReportRename(const APlan: TLspRenamePlan; AOpenedCount: Integer);
+procedure ReportRename(const APlan: TLspRenamePlan; const AStartFile: string;
+  AOpenedCount: Integer);
 var
+  LProjectName: string;
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
@@ -285,8 +287,18 @@ begin
   LMessageServices.ClearMessageGroup(LGroup);
   // Built by concatenation so the count's orange span is known, not
   // searched for - same as the Find References title.
-  LTitleHead := Format('PasTree Rename: "%s" -> "%s" - ',
-    [APlan.OldName, APlan.NewName]);
+  // NAMING THE PROJECT, in a group of more than one, and here it matters more
+  // than in Find References: this line says sites were CHANGED. The plan came
+  // from one project's closure - the one owning the file the rename started
+  // in - so uses of the symbol in the group's other projects were not
+  // rewritten, and the record of what happened has to say so.
+  LProjectName := LspAnsweringProject(AStartFile);
+  if LProjectName <> '' then
+    LTitleHead := Format('PasTree Rename: "%s" -> "%s" in %s - ',
+      [APlan.OldName, APlan.NewName, LProjectName])
+  else
+    LTitleHead := Format('PasTree Rename: "%s" -> "%s" - ',
+      [APlan.OldName, APlan.NewName]);
   LTitleCount := IntToStr(Length(APlan.Edits));
   LMessageServices.AddCustomMessagePtr(
     NewTitleRow(LTitleHead + LTitleCount + ' site(s) changed',
@@ -876,7 +888,7 @@ begin
           Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
         end;
-        ReportRename(APlan, LOpenedCount);
+        ReportRename(APlan, AFileName, LOpenedCount);
         LogDiagnostic(Format('rename: %s -> %s, %d site(s)%s',
           [APlan.OldName, APlan.NewName, Length(APlan.Edits),
            IfThen(LOpenedCount > 0,

@@ -574,6 +574,19 @@ procedure LspSyncDocuments;
 function LspLogToServer(const AText: string): Boolean;
 
 /// <summary>
+/// WHICH PROJECT'S ANALYSIS ANSWERS FOR AFileName, as a bare name, or '' when
+/// there is nothing to disambiguate (no group, or a group of one).
+///
+/// For the surfaces whose scope IS a closure - Find References and Rename.
+/// They see one project's closure, so a symbol used in two projects of a
+/// group is reported for one of them, and saying which is the difference
+/// between a partial answer and a wrong one. Fanning the request out across
+/// the group is the real fix and is not this; see "Project groups" in
+/// SPEC.md.
+/// </summary>
+function LspAnsweringProject(const AFileName: string): string;
+
+/// <summary>
 /// The text of AFileName as the server currently sees it: the live buffer we
 /// last sent, or the file on disk if it was never open. Callers displaying a
 /// line the server pointed at must use this and not read the file directly - a
@@ -751,10 +764,31 @@ type
     // list that is being torn down. The same flag TLspSession keeps, for the
     // same reason, one level up.
     FDestroying: Boolean;
+    { ROUTE CACHE: lower-cased source path -> the .dproj that owns it, '' for
+      a file no project claims. IOTAProjectGroup.FindProject walks the group's
+      projects and their module lists, and the painted-diagnostics layer asks
+      per SYNTAX RUN - several hundred times per repaint on a full screen. A
+      dictionary read is what that path can afford; FindProject is not.
+      Cleared whenever the answer could have changed: the active project, the
+      session set, a group open or close. }
+    FRoutes: TDictionary<string, string>;
+    FRoutedActive: string;
     function IndexOf(const AProjectFile: string): Integer;
+    function OwningProjectFile(const APath: string): string;
   public
     constructor Create;
     destructor Destroy; override;
+    { The session that should answer for APath: the one whose project owns the
+      file, whether or not the IDE has that project selected. A file no
+      project claims - an RTL unit, a file opened from disk - has no owner to
+      route to and falls back to the ACTIVE session.
+
+      ACreate=False never spawns a session object, which is what the document
+      sync needs: "is this buffer mine" must not conjure a session for a
+      project nothing has asked a question of yet. }
+    function SessionForFile(const APath: string;
+      ACreate: Boolean = True): TLspSession;
+    procedure InvalidateRoutes;
     { The session for AProject, created if this is the first time it is asked
       for. nil only for a nil project. }
     function SessionFor(const AProject: IOTAProject): TLspSession;
@@ -1353,7 +1387,17 @@ begin
       begin
         LogDiagnostic(AText);
       end);
-    FDocs := TLspDocumentSync.Create(FClient);
+    { ONLY THIS PROJECT'S BUFFERS. Every open module is some server's, and
+      exactly one server's: didOpen and didChange schedule an analysis, so a
+      buffer sent to all of them would rebuild all of them on one tab switch.
+      A file no project claims goes to the active session, which is what
+      SessionForFile falls back to - so an RTL unit under the cursor is
+      overlaid on the server the user is actually working in. }
+    FDocs := TLspDocumentSync.Create(FClient,
+      function(APath: string): Boolean
+      begin
+        Result := Assigned(GPool) and (GPool.SessionForFile(APath, False) = Self);
+      end);
     // A restarted server has no documents; re-open them before anything that
     // was queued behind the handshake gets answered from stale disk text.
     FClient.OnReady :=
@@ -2443,7 +2487,11 @@ end;
 
 procedure TLspSession.SyncDocuments;
 begin
-  FDocs.Sync;
+  // A pooled session exists before it has a client: it is created the moment
+  // its project is first routed to, and the server starts on the first
+  // request. Nothing to sync until then.
+  if Assigned(FDocs) and not FDestroying then
+    FDocs.Sync;
 end;
 
 procedure TLspSession.Prewarm;
@@ -2601,6 +2649,7 @@ constructor TLspSessionPool.Create;
 begin
   inherited Create;
   FSessions := TObjectList<TLspSession>.Create(True);
+  FRoutes := TDictionary<string, string>.Create;
 end;
 
 destructor TLspSessionPool.Destroy;
@@ -2613,7 +2662,14 @@ begin
   FDestroying := True;
   GSession := nil;
   FreeAndNil(FSessions);
+  FreeAndNil(FRoutes);
   inherited;
+end;
+
+procedure TLspSessionPool.InvalidateRoutes;
+begin
+  if Assigned(FRoutes) then
+    FRoutes.Clear;
 end;
 
 function TLspSessionPool.IndexOf(const AProjectFile: string): Integer;
@@ -2640,6 +2696,52 @@ begin
   // an entry the user never navigates in is one object.
   Result := TLspSession.Create(AProject.FileName);
   FSessions.Add(Result);
+end;
+
+function TLspSessionPool.OwningProjectFile(const APath: string): string;
+var
+  LKey: string;
+  LGroup: IOTAProjectGroup;
+  LProject: IOTAProject;
+begin
+  Result := '';
+  if APath = '' then
+    Exit;
+  LKey := LowerCase(APath);
+  if FRoutes.TryGetValue(LKey, Result) then
+    Exit;
+  LGroup := GetProjectGroup;
+  if Assigned(LGroup) then
+  begin
+    // The ToolsAPI's own answer to "which project does this file belong to",
+    // and it checks the active project first, so the common case is also its
+    // fast case (ToolsAPI.pas:3997).
+    LProject := LGroup.FindProject(APath);
+    if Assigned(LProject) then
+      Result := LProject.FileName;
+  end;
+  // A MISS IS CACHED TOO, as ''. Every RTL and VCL unit the user opens is a
+  // miss, and they are exactly the files a repaint asks about most.
+  FRoutes.AddOrSetValue(LKey, Result);
+end;
+
+function TLspSessionPool.SessionForFile(const APath: string;
+  ACreate: Boolean): TLspSession;
+var
+  LOwner: string;
+  LIdx: Integer;
+begin
+  Result := nil;
+  if FDestroying then
+    Exit;
+  LOwner := OwningProjectFile(APath);
+  if LOwner = '' then
+    Exit(GSession);   // no owning project: the active session or nothing
+  LIdx := IndexOf(LOwner);
+  if LIdx >= 0 then
+    Exit(FSessions[LIdx]);
+  if ACreate then
+    Result := SessionFor(GetOpenProjectByFile(LOwner));
 end;
 
 { Every project of the CURRENT group survives; everything else goes.
@@ -2682,12 +2784,28 @@ begin
       session must already be out of it and the list must be consistent. }
     LDoomed := FSessions.Extract(FSessions[LIdx]);
     LDoomed.Free;   // stops its server
+    InvalidateRoutes;
   end;
 end;
 
 function TLspSessionPool.Activate: TLspSession;
+var
+  LActive: IOTAProject;
 begin
-  Result := SessionFor(GetActiveProject);
+  LActive := GetActiveProject;
+  { FindProject answers relative to WHICH PROJECT IS ACTIVE - it checks that
+    one first - so a file both projects of a group compile routes to whichever
+    was active when the question was first asked. Dropping the cache on every
+    switch is the cheap half of keeping that honest; the other half is that a
+    unit MOVED between projects mid-session is not noticed until something
+    else clears this, which is a trade recorded in SPEC.md rather than a
+    thing to fix here. }
+  if Assigned(LActive) and not SameText(FRoutedActive, LActive.FileName) then
+  begin
+    FRoutedActive := LActive.FileName;
+    InvalidateRoutes;
+  end;
+  Result := SessionFor(LActive);
   // ONLY ON SUCCESS. During IDE startup the group is not up yet and there is
   // no active project; clearing GSession here would drop a perfectly good
   // session for a notification that means "not yet", not "none".
@@ -2765,9 +2883,14 @@ procedure LspSyncDocuments;
 begin
   // No session means nothing has been told anything yet, and the didOpen
   // catch-up on the next handshake will describe the buffers as they are by
-  // then - so there is nothing to do and nothing to report.
-  if Assigned(GSession) then
-    GSession.SyncDocuments;
+  // then - so there is nothing to do and nothing to report. All of them, for
+  // the reason LspIdleSync gives.
+  if Assigned(GPool) then
+    GPool.ForEach(
+      procedure(ASession: TLspSession)
+      begin
+        ASession.SyncDocuments;
+      end);
 end;
 
 procedure LspProjectClosed;
@@ -2807,144 +2930,208 @@ begin
     LSession.Prewarm;
 end;
 
+{ THE SESSION A REQUEST ABOUT A FILE GOES TO.
+
+  Routed by the FILE at the caret, not by the active project, and the
+  difference is a defect that predates groups: a Ctrl+Click inside a module of
+  a NON-active project used to be answered by the active project's server,
+  which has never heard of that file, so it resolved nothing - silently, and
+  reading exactly like "navigation does not work in this unit".
+
+  Activate first, so the pool still tracks the active project (and prunes) on
+  the ordinary request path, then route. A file no project owns falls back to
+  the active session inside SessionForFile. }
+function SessionForRequest(const AFileName: string): TLspSession;
+begin
+  if not Assigned(GPool) then
+    Exit(nil);
+  GPool.Activate;
+  Result := GPool.SessionForFile(AFileName);
+end;
+
 procedure LspDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.Definition(AFileName, ARow, ACol, AOnDone);
+  LSession.Definition(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+  LSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
 end;
 
 procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspClassCompleteProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, Default(TLspClassComplete), 'LSP session not initialized');
     Exit;
   end;
-  GSession.ClassComplete(AFileName, ARow, ACol, AOnDone);
+  LSession.ClassComplete(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspSyncPrototypesProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, Default(TLspSyncPrototypes),
       'LSP session not initialized');
     Exit;
   end;
-  GSession.SyncPrototypes(AFileName, ARow, ACol, AOnDone);
+  LSession.SyncPrototypes(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspTextEditsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.OnTypeFormatting(AFileName, ARow, ACol, AOnDone);
+  LSession.OnTypeFormatting(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
   const ANewName: string; const AOnDone: TLspRenamePlanProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, Default(TLspRenamePlan), 'LSP session not initialized');
     Exit;
   end;
-  GSession.RenamePlan(AFileName, ARow, ACol, ANewName, AOnDone);
+  LSession.RenamePlan(AFileName, ARow, ACol, ANewName, AOnDone);
 end;
 
 procedure LspRenameTarget(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspRenameTargetProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, '', 'LSP session not initialized');
     Exit;
   end;
-  GSession.RenameTarget(AFileName, ARow, ACol, AOnDone);
+  LSession.RenameTarget(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspToggle(const AFileName: string; ARow, ACol: Integer;
   AToImpl: Boolean; const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.Toggle(AFileName, ARow, ACol, AToImpl, AOnDone);
+  LSession.Toggle(AFileName, ARow, ACol, AToImpl, AOnDone);
 end;
 
 procedure LspTypeDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.TypeDefinition(AFileName, ARow, ACol, AOnDone);
+  LSession.TypeDefinition(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspCompletion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.Completion(AFileName, ARow, ACol, AOnDone);
+  LSession.Completion(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspHover(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHoverProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, '', 'LSP session not initialized');
     Exit;
   end;
-  GSession.Hover(AFileName, ARow, ACol, AOnDone);
+  LSession.Hover(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspDocumentSymbols(const AFileName: string;
   const AOnDone: TLspDocSymbolsProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  GSession.DocumentSymbols(AFileName, AOnDone);
+  LSession.DocumentSymbols(AFileName, AOnDone);
 end;
 
 function LspTryGetDiagnostics(const APath: string;
   out ADiags: TArray<TLspDiagnostic>): Boolean;
+var
+  LSession: TLspSession;
 begin
   ADiags := nil;
-  Result := Assigned(GSession) and GSession.TryGetDiagnostics(APath, ADiags);
+  if not Assigned(GPool) then
+    Exit(False);
+  // Routed like a request - a module of another project must show ITS
+  // project's squiggles, not nothing - but WITHOUT creating a session: this
+  // runs per syntax run during a repaint, and a paint may not start servers.
+  // The route cache is what makes that affordable; see FRoutes.
+  LSession := GPool.SessionForFile(APath, False);
+  Result := Assigned(LSession) and LSession.TryGetDiagnostics(APath, ADiags);
 end;
 
 procedure LspSetDiagnosticsChangedListener(
@@ -2966,8 +3153,18 @@ end;
 
 procedure LspIdleSync;
 begin
-  if Assigned(GSession) then
-    GSession.IdleSync;
+  // EVERY live session, not just the active one. Each collects only its own
+  // project's buffers, so this is one pass over the open modules per running
+  // server and no server hears about a file that is not its own - and a
+  // module of a background project being typed in keeps ITS server current
+  // rather than going stale until the user switches back. Passive throughout:
+  // TLspSession.IdleSync starts nothing.
+  if Assigned(GPool) then
+    GPool.ForEach(
+      procedure(ASession: TLspSession)
+      begin
+        ASession.IdleSync;
+      end);
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;
@@ -2983,19 +3180,46 @@ end;
 
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspSignatureHelpProc);
+var
+  LSession: TLspSession;
 begin
-  if ActiveSession = nil then
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
   begin
     AOnDone(False, Default(TLspSignatureHelp), 'LSP session not initialized');
     Exit;
   end;
-  GSession.SignatureHelp(AFileName, ARow, ACol, AOnDone);
+  LSession.SignatureHelp(AFileName, ARow, ACol, AOnDone);
+end;
+
+function LspAnsweringProject(const AFileName: string): string;
+var
+  LGroup: IOTAProjectGroup;
+  LSession: TLspSession;
+begin
+  Result := '';
+  LGroup := GetProjectGroup;
+  // A group of one is the ordinary single-project case, and there the name
+  // would be noise on every result title.
+  if not Assigned(LGroup) or (LGroup.ProjectCount < 2) or not Assigned(GPool) then
+    Exit;
+  LSession := GPool.SessionForFile(AFileName, False);
+  if Assigned(LSession) then
+    Result := TPath.GetFileNameWithoutExtension(LSession.ProjectFile);
 end;
 
 function LspSourceTextOf(const AFileName: string): string;
+var
+  LSession: TLspSession;
 begin
   Result := '';
-  if Assigned(GSession) and GSession.TryGetSentText(AFileName, Result) then
+  // The session that HOLDS this file is the one whose overlay is the text the
+  // answer was computed from; the active one may never have been sent it.
+  if Assigned(GPool) then
+    LSession := GPool.SessionForFile(AFileName, False)
+  else
+    LSession := nil;
+  if Assigned(LSession) and LSession.TryGetSentText(AFileName, Result) then
     Exit;
   // Never opened in an editor, so disk IS what the server read. Unreadable
   // yields '' and callers degrade to no snippet - see TryReadTextNoBom.

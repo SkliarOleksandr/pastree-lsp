@@ -49,6 +49,7 @@ interface
 
 uses
   ToolsAPI,
+  System.SysUtils,
   System.Generics.Collections,
   PasTreeIdePlugin.LspClient;
 
@@ -72,13 +73,23 @@ type
   private
     FClient: TLspClient;
     FSent: TObjectDictionary<string, TSentDocument>;   // key: lowercase path
+    { WHICH OPEN BUFFERS ARE THIS SERVER'S, asked per module on every sync.
+
+      A project group runs one server per project, and a buffer belongs to
+      exactly one of them. Broadcasting all of them to all servers would not
+      just waste memory: didOpen and didChange call ScheduleAnalysis on the
+      server, so one tab switch would schedule a rebuild in every live server
+      in the group. nil = take everything, which is what a single-project
+      client wants and what the VS Code side does. }
+    FOwnsPath: TFunc<string, Boolean>;
     function CollectOpenDocuments: TArray<TSentDocument>;
     procedure SendDidOpen(const APath, AText: string; AVersion: Integer;
       AShown: Boolean);
     procedure SendDidChange(const APath, AText: string; AVersion: Integer);
     procedure SendDidClose(const APath: string);
   public
-    constructor Create(AClient: TLspClient);
+    constructor Create(AClient: TLspClient;
+      const AOwnsPath: TFunc<string, Boolean> = nil);
     destructor Destroy; override;
 
     /// <summary>
@@ -150,7 +161,6 @@ function BufferByteLength(const AView: IOTAEditView): Integer;
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.JSON,
   Winapi.ActiveX,
@@ -271,10 +281,12 @@ end;
 
 { TLspDocumentSync }
 
-constructor TLspDocumentSync.Create(AClient: TLspClient);
+constructor TLspDocumentSync.Create(AClient: TLspClient;
+  const AOwnsPath: TFunc<string, Boolean>);
 begin
   inherited Create;
   FClient := AClient;
+  FOwnsPath := AOwnsPath;
   FSent := TObjectDictionary<string, TSentDocument>.Create([doOwnsValues]);
 end;
 
@@ -306,6 +318,8 @@ begin
         Continue;
       if not IsPascalSourceFile(LModule.FileName) then
         Continue;
+      if Assigned(FOwnsPath) and not FOwnsPath(LModule.FileName) then
+        Continue;   // another project's buffer, and another server's business
       try
         LDoc := TSentDocument.Create;
         try

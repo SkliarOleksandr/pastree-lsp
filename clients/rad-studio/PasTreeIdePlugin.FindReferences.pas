@@ -246,9 +246,10 @@ end;
 /// AddCustomMessage(row, Parent) (hits) - the custom-message parallel of
 /// the AddToolMessage Parent/LineRef mechanism used before.
 /// </summary>
-procedure ReportHits(const AIdentifier: string; AHasDecl: Boolean;
+procedure ReportHits(const AIdentifier, AStartFile: string; AHasDecl: Boolean;
   const ADeclHit: TLspHit; const AHits: TArray<TLspHit>);
 var
+  LProjectName: string;
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
@@ -321,7 +322,17 @@ begin
   // in the plain text color, and this line is styled like the headers -
   // blue bold, the count in the line-number orange (built by concatenation
   // so the count's span is known, not searched for).
-  LTitleHead := Format('PasTree Find References: "%s" - ', [AIdentifier]);
+  // NAMING THE PROJECT, in a group of more than one: these hits come from ONE
+  // project's closure - the one that owns the file the search started in - so
+  // a symbol the group's other projects also use is under-reported here.
+  // Saying which project answered is the difference between a partial answer
+  // and a wrong one, until the request fans out across the group.
+  LProjectName := LspAnsweringProject(AStartFile);
+  if LProjectName <> '' then
+    LTitleHead := Format('PasTree Find References: "%s" in %s - ',
+      [AIdentifier, LProjectName])
+  else
+    LTitleHead := Format('PasTree Find References: "%s" - ', [AIdentifier]);
   LTitleCount := IntToStr(Length(AHits));
   LMessageServices.AddCustomMessagePtr(
     NewTitleRow(LTitleHead + LTitleCount + ' reference(s)',
@@ -470,9 +481,9 @@ begin
               LogDiagnostic('Find References: the declaration request failed: '
                 + ADeclError);
             if ADeclOk and (Length(ADeclHits) > 0) then
-              ReportHits(LName, True, ADeclHits[0], LRefs)
+              ReportHits(LName, LCursorFile, True, ADeclHits[0], LRefs)
             else
-              ReportHits(LName, False, Default(TLspHit), LRefs);
+              ReportHits(LName, LCursorFile, False, Default(TLspHit), LRefs);
           end);
       end);
   except

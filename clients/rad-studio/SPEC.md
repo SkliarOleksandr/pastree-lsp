@@ -1164,8 +1164,12 @@ group-wide - nothing on that path consults the active project.
 NOT seamless, and not because of routing: `workspace/symbol`, Find References
 and Rename. Their scope is a closure and a closure is one project. A symbol
 used in two projects of the group returns the hits from ONE of them, and a
-rename plans the sites in ONE of them - silently, which is the dangerous half.
-Until the fan-out below exists, these must SAY which project they answered for.
+rename plans the sites in ONE of them - silently, which was the dangerous half.
+Since 0.31.1 both result titles NAME the project they answered for, whenever
+the group holds more than one (`LspAnsweringProject`), which turns a wrong
+answer into a partial one until the fan-out below exists. `workspace/symbol`
+has no title of ours to say it in - it feeds the IDE's own search box - and
+still answers for the active project alone.
 
 ### Still to build
 
@@ -1180,7 +1184,23 @@ Until the fan-out below exists, these must SAY which project they answered for.
    interface. `Prune` disposes the sessions of projects the CURRENT group does
    not contain, and runs on activation rather than on group close, so
    reopening the group you just closed is still instant.
-2. Routing by `FindProject`, and per-file document sync with it.
+2. ~~Routing by `FindProject`, and per-file document sync with it.~~ **Done,
+   0.31.1.** `SessionForRequest` routes every file-bearing request through
+   `TLspSessionPool.SessionForFile`, and the document sync takes an ownership
+   predicate so each buffer reaches exactly one server. Two things had to be
+   solved along the way. `FindProject` walks the group's projects and their
+   module lists, and the painted-diagnostics layer asks per SYNTAX RUN - so
+   the pool caches path -> owning `.dproj` (misses included: every RTL unit is
+   one) and drops the cache when the active project, the session set or the
+   group changes. And a repaint may not start servers, so the diagnostics and
+   sent-text paths route with `ACreate=False`.
+
+   Known limit, accepted: `FindProject` answers relative to the active
+   project, so a file BOTH projects compile routes to whichever was active
+   when it was first asked about, and a unit moved between projects
+   mid-session keeps its old route until something clears the cache. Both are
+   cheap to correct by switching projects, and neither can produce an answer
+   from a project that does not contain the file.
 3. Group-wide Find References and Rename: the same request to every live
    session, results merged and de-duplicated by file and position. Rename is
    the hard half - it is a plan the user approves, and a plan spanning two
