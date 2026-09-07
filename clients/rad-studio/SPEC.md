@@ -1161,15 +1161,16 @@ close, on-type formatting, and the painted diagnostics. Opening a result goes
 through `IOTAActionServices.OpenFile` and the edit buffers, which are
 group-wide - nothing on that path consults the active project.
 
-NOT seamless, and not because of routing: `workspace/symbol`, Find References
-and Rename. Their scope is a closure and a closure is one project. A symbol
-used in two projects of the group returns the hits from ONE of them, and a
-rename plans the sites in ONE of them - silently, which was the dangerous half.
-Since 0.31.1 both result titles NAME the project they answered for, whenever
-the group holds more than one (`LspAnsweringProject`), which turns a wrong
-answer into a partial one until the fan-out below exists. `workspace/symbol`
-has no title of ours to say it in - it feeds the IDE's own search box - and
-still answers for the active project alone.
+NOT seamless, and not because of routing: `workspace/symbol` and Rename. Their
+scope is a closure and a closure is one project, so a rename plans the sites in
+ONE of them - silently, which was the dangerous half. Since 0.31.1 the rename's
+result title NAMES the project it answered for whenever the group holds more
+than one (`LspAnsweringProject`), which turns a wrong answer into a partial
+one. `workspace/symbol` has no title of ours to say it in - it feeds the IDE's
+own search box - and still answers for the active project alone.
+
+Find References left that category in 0.32.0: it now asks every running project
+and merges. Its title reports the coverage instead of the project.
 
 ### Still to build
 
@@ -1201,11 +1202,22 @@ still answers for the active project alone.
    mid-session keeps its old route until something clears the cache. Both are
    cheap to correct by switching projects, and neither can produce an answer
    from a project that does not contain the file.
-3. Group-wide Find References and Rename: the same request to every live
-   session, results merged and de-duplicated by file and position. Rename is
-   the hard half - it is a plan the user approves, and a plan spanning two
-   closures has to be presented as one before a single file is written. Naming
-   the project in the result surface is the honest interim.
+3. ~~Group-wide Find References~~ **Done, 0.32.0.** `LspReferencesInGroup`
+   asks every session whose server is already up - the owning one first, since
+   it is the only one allowed to start - and merges the answers through
+   `MergeHits`, which sorts by file, row and column and drops exact
+   duplicates: a unit two projects compile is analyzed twice, so every use
+   inside it comes back from both servers and would otherwise be listed twice.
+   A server that does not have the file in its closure is the ordinary case,
+   not a fault, so a failure is reported only when EVERY target failed. The
+   title says what was covered - `across 3 of 9 projects` - because a project
+   whose analysis has never started is not started for a search: nine closure
+   builds on one keystroke is a hang, not a search.
+
+   **Group-wide Rename is deliberately NOT this.** Deferred (Alex, 2026-09-07)
+   until the rename itself is reworked. It is a plan the user approves, and a
+   plan spanning two closures has to be presented as one before a single file
+   is written; the interim remains naming the project in its result title.
 4. Group-wide `workspace/symbol`: the same fan-out, and cheap, since it is a
    read with no plan to approve.
 5. A project ADDED to or REMOVED from an open group. Removal must dispose its

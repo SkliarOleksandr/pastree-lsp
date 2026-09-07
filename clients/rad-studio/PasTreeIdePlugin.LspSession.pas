@@ -69,6 +69,17 @@ type
     const AHits: TArray<TLspHit>; const AError: string);
 
   /// <summary>
+  /// The same, for a search that spans a project group. AProjectsSearched is
+  /// how many projects actually answered and AProjectsInGroup how many the
+  /// group holds - the two differ because a project whose analysis has never
+  /// been started is NOT started for a search, so the caller can say what the
+  /// answer covers instead of implying it covers everything.
+  /// </summary>
+  TLspGroupHitsProc = reference to procedure(ASuccess: Boolean;
+    const AHits: TArray<TLspHit>;
+    AProjectsSearched, AProjectsInGroup: Integer; const AError: string);
+
+  /// <summary>
   /// One completion item, already in IDE coordinates. The replace span
   /// (Row/ColFrom..ColTo, 1-based, ColTo exclusive) is the partially-typed
   /// token the item replaces - the server always answers with a textEdit, so
@@ -353,6 +364,24 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 
 /// <summary>
+/// The same question asked of EVERY project of the group whose analysis is
+/// already running, with the answers merged and de-duplicated by file, row and
+/// column - a site that two projects both compile is reported once.
+///
+/// A closure is one project, so a unit shared by two projects of a group has
+/// its uses counted twice over, once per closure, and each server sees only
+/// its own. Asking one of them is a partial answer that looks complete, which
+/// is the failure mode this exists to remove.
+///
+/// A project whose server has never started is NOT started for this: nine
+/// closure builds on one keystroke is not a search, it is a hang. Those
+/// projects are simply not searched, and the count handed to AOnDone is how
+/// the caller says so.
+/// </summary>
+procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
+  AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
+
+/// <summary>
 /// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
 /// (AToImpl) or from anywhere inside the body back to its header. AOnDone
 /// receives zero or one hit - zero is a legitimate answer, not a failure: a
@@ -603,6 +632,7 @@ uses
   System.IOUtils,
   System.JSON,
   System.Generics.Collections,
+  System.Generics.Defaults,   // TComparer, for the group-wide merge
   System.Win.Registry,
   Winapi.Windows,
   PasTreeIdePlugin.LspClient,
@@ -691,6 +721,10 @@ type
   public
     constructor Create(const AProjectFile: string);
     property ProjectFile: string read FProjectFile;
+    { Has a server that is up and past its handshake. A pooled session exists
+      from the moment its project is first routed to, so "exists" and "can
+      answer" are different questions - the group-wide search asks this one. }
+    function IsReady: Boolean;
     destructor Destroy; override;
     procedure Prewarm;
     procedure ProjectOpened;
@@ -789,6 +823,9 @@ type
     function SessionForFile(const APath: string;
       ACreate: Boolean = True): TLspSession;
     procedure InvalidateRoutes;
+    { Every session with a server up and past its handshake - the ones a
+      group-wide search can ask without starting anything. }
+    function ReadySessions: TArray<TLspSession>;
     { The session for AProject, created if this is the first time it is asked
       for. nil only for a nil project. }
     function SessionFor(const AProject: IOTAProject): TLspSession;
@@ -1269,6 +1306,11 @@ begin
     [Result,
      HiWord(LInfo.dwFileVersionMS), LoWord(LInfo.dwFileVersionMS),
      HiWord(LInfo.dwFileVersionLS), LoWord(LInfo.dwFileVersionLS)]);
+end;
+
+function TLspSession.IsReady: Boolean;
+begin
+  Result := not FDestroying and Assigned(FClient) and FClient.IsReady;
 end;
 
 function TLspSession.Project: IOTAProject;
@@ -2816,6 +2858,18 @@ begin
   end;
 end;
 
+function TLspSessionPool.ReadySessions: TArray<TLspSession>;
+var
+  LIdx: Integer;
+begin
+  Result := nil;
+  if FDestroying then
+    Exit;
+  for LIdx := 0 to FSessions.Count - 1 do
+    if FSessions[LIdx].IsReady then
+      Result := Result + [FSessions[LIdx]];
+end;
+
 procedure TLspSessionPool.ForEach(const AProc: TProc<TLspSession>);
 var
   LIdx: Integer;
@@ -2975,6 +3029,110 @@ begin
     Exit;
   end;
   LSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+end;
+
+{ Sorted by file, then row, then column, with exact duplicates dropped.
+
+  THE DE-DUPLICATION IS THE POINT, not tidiness: a unit compiled by two
+  projects of a group is analyzed twice, so every use inside it comes back
+  from both servers, and the merged list would otherwise double every line of
+  the shared half of the codebase. The same site is the same site regardless of
+  how many closures contain it, so it is reported once.
+
+  Sorting first makes that one linear pass, and gives the report a stable
+  order - the file headers come out grouped and in the same sequence every
+  time, which a dictionary-based merge would not guarantee. }
+function MergeHits(const AHits: TArray<TLspHit>): TArray<TLspHit>;
+var
+  LSorted: TArray<TLspHit>;
+  LIdx: Integer;
+begin
+  Result := nil;
+  LSorted := Copy(AHits);
+  TArray.Sort<TLspHit>(LSorted, TComparer<TLspHit>.Construct(
+    function(const A, B: TLspHit): Integer
+    begin
+      // Case-insensitively: the same file reaches two servers through two
+      // projects' paths and Windows does not distinguish them, so a case
+      // difference here would read as two distinct sites.
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Row - B.Row;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+  for LIdx := 0 to High(LSorted) do
+    if (LIdx = 0) or
+       not SameText(LSorted[LIdx].FilePath, LSorted[LIdx - 1].FilePath) or
+       (LSorted[LIdx].Row <> LSorted[LIdx - 1].Row) or
+       (LSorted[LIdx].Col <> LSorted[LIdx - 1].Col) then
+      Result := Result + [LSorted[LIdx]];
+end;
+
+procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
+  AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
+var
+  LOwner: TLspSession;
+  LTargets: TArray<TLspSession>;
+  LSession: TLspSession;
+  LGroup: IOTAProjectGroup;
+  { Captured by every one of the callbacks below, which share this frame -
+    the answers arrive one at a time on the main thread, so no lock is
+    needed, only a count of what is still outstanding. }
+  LOutstanding, LAnswered, LInGroup: Integer;
+  LCollected: TArray<TLspHit>;
+  LFirstError: string;
+begin
+  LOwner := SessionForRequest(AFileName);
+  if LOwner = nil then
+  begin
+    AOnDone(False, nil, 0, 0, 'LSP session not initialized');
+    Exit;
+  end;
+
+  LGroup := GetProjectGroup;
+  if Assigned(LGroup) then
+    LInGroup := LGroup.ProjectCount
+  else
+    LInGroup := 1;
+
+  // The owning session FIRST and unconditionally - it is the one that can
+  // answer at all, since the position is in a file of its project, and it is
+  // the one allowed to start a server. The rest are the already-running ones.
+  LTargets := [LOwner];
+  for LSession in GPool.ReadySessions do
+    if LSession <> LOwner then
+      LTargets := LTargets + [LSession];
+
+  LOutstanding := Length(LTargets);
+  LAnswered := 0;
+  LCollected := nil;
+  LFirstError := '';
+
+  for LSession in LTargets do
+    LSession.References(AFileName, ARow, ACol, AIncludeDeclaration,
+      procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
+        const AError: string)
+      begin
+        if ASuccess then
+        begin
+          Inc(LAnswered);
+          LCollected := LCollected + AHits;
+        end
+        else if LFirstError = '' then
+          // A server that does not have this file in its closure is the
+          // ORDINARY case here, not a fault - most projects of a group do
+          // not compile most of its units - so a failure is only worth
+          // reporting when EVERY target failed. Kept, not shown, until then.
+          LFirstError := AError;
+        Dec(LOutstanding);
+        if LOutstanding > 0 then
+          Exit;   // still waiting on another project
+        if LAnswered = 0 then
+          AOnDone(False, nil, 0, LInGroup, LFirstError)
+        else
+          AOnDone(True, MergeHits(LCollected), LAnswered, LInGroup, '');
+      end);
 end;
 
 procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;

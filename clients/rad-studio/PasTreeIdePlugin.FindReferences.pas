@@ -246,10 +246,11 @@ end;
 /// AddCustomMessage(row, Parent) (hits) - the custom-message parallel of
 /// the AddToolMessage Parent/LineRef mechanism used before.
 /// </summary>
-procedure ReportHits(const AIdentifier, AStartFile: string; AHasDecl: Boolean;
+procedure ReportHits(const AIdentifier: string;
+  AProjectsSearched, AProjectsInGroup: Integer; AHasDecl: Boolean;
   const ADeclHit: TLspHit; const AHits: TArray<TLspHit>);
 var
-  LProjectName: string;
+  LScope: string;
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
@@ -322,20 +323,20 @@ begin
   // in the plain text color, and this line is styled like the headers -
   // blue bold, the count in the line-number orange (built by concatenation
   // so the count's span is known, not searched for).
-  // NAMING THE PROJECT, in a group of more than one: these hits come from ONE
-  // project's closure - the one that owns the file the search started in - so
-  // a symbol the group's other projects also use is under-reported here.
-  // Saying which project answered is the difference between a partial answer
-  // and a wrong one, until the request fans out across the group.
-  LProjectName := LspAnsweringProject(AStartFile);
-  if LProjectName <> '' then
-    LTitleHead := Format('PasTree Find References: "%s" in %s - ',
-      [AIdentifier, LProjectName])
-  else
-    LTitleHead := Format('PasTree Find References: "%s" - ', [AIdentifier]);
+  LTitleHead := Format('PasTree Find References: "%s" - ', [AIdentifier]);
+  { WHAT THE SEARCH COVERED, whenever the group holds more than one project.
+    A project whose analysis has never started is not started for a search -
+    nine closure builds on one keystroke would be a hang, not a search - so
+    the answer covers the projects that were running, and the difference
+    between "3 of 9" and "9 of 9" is the difference between a complete answer
+    and a plausible-looking partial one. A group of one has nothing to say. }
+  LScope := '';
+  if AProjectsInGroup > 1 then
+    LScope := Format(' across %d of %d projects',
+      [AProjectsSearched, AProjectsInGroup]);
   LTitleCount := IntToStr(Length(AHits));
   LMessageServices.AddCustomMessagePtr(
-    NewTitleRow(LTitleHead + LTitleCount + ' reference(s)',
+    NewTitleRow(LTitleHead + LTitleCount + ' reference(s)' + LScope,
       Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
@@ -436,9 +437,14 @@ begin
     // Short on purpose: the wait dialog does not grow for its text and a
     // long line is clipped (user, 2026-08-31).
     ShowWaitDialog('Searching references...');
-    LspReferences(LCursorFile, LRow, LCol, False,
+    // ACROSS THE GROUP, not just the project owning the file: a unit two
+    // projects compile has its uses counted in both closures, and each server
+    // sees only its own. LspReferencesInGroup asks every project whose
+    // analysis is already running and merges the answers, dropping the
+    // duplicates a shared unit produces.
+    LspReferencesInGroup(LCursorFile, LRow, LCol, False,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
-        const AError: string)
+        AProjectsSearched, AProjectsInGroup: Integer; const AError: string)
       var
         LName: string;
         LRefs: TArray<TLspHit>;
@@ -481,9 +487,11 @@ begin
               LogDiagnostic('Find References: the declaration request failed: '
                 + ADeclError);
             if ADeclOk and (Length(ADeclHits) > 0) then
-              ReportHits(LName, LCursorFile, True, ADeclHits[0], LRefs)
+              ReportHits(LName, AProjectsSearched, AProjectsInGroup,
+                True, ADeclHits[0], LRefs)
             else
-              ReportHits(LName, LCursorFile, False, Default(TLspHit), LRefs);
+              ReportHits(LName, AProjectsSearched, AProjectsInGroup,
+                False, Default(TLspHit), LRefs);
           end);
       end);
   except
