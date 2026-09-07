@@ -213,7 +213,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `$/cancelRequest` | |
 | `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below) |
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
-| `textDocument/typeDefinition` | via the declared type expression, so it crosses units |
+| `textDocument/typeDefinition` | three routes, in order: the declared type EXPRESSION (crosses units, follows an alias), the model-local `TypeSym`, and - for a symbol that names no type at all - the cross pass (`DeclTypeX`, then `SymDeclTypeX`). The third exists because an inferred inline `var` and a bare `property Items;` promotion name their type nowhere, and answered null here while member resolution THROUGH the same name worked (2026-09-07) |
 | `textDocument/documentHighlight` | occurrences in the current file |
 | `textDocument/semanticTokens/full`, `/range` | what every identifier resolved to, as standard token types (`class`, `struct`, `enum`, `interface`, `type`, `typeParameter`, `parameter`, `variable`, `property`, `enumMember`, `function`, `method`, `namespace`) with `declaration`/`readonly`/`defaultLibrary`; `$IFDEF`'d-out lines as `comment`. Keywords, strings and comments are NOT sent - the client grammar owns them. No `full/delta` (see Tier 3) |
 | `textDocument/completion` | PasTree's engine through the seam; `documentation` per item; [COMPLETION.md](COMPLETION.md) owns the story |

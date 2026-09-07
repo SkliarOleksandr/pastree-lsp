@@ -1693,6 +1693,109 @@ begin
     'and a caret in no routine is a refusal that names itself');
 end;
 
+{ 5l. Two PasTree 0.17 typings, through THIS server's seam: an inline
+  `var L := Expr` (0.17.0) and a promoted `property Items;` whose type comes
+  from its ancestor (0.17.1). cMinPasTreeVersion names 0.17.0 because of this
+  section - not because our own code changed, but because these checks are
+  the first thing here that a 0.16 sibling would fail.
+
+  WHY IT NEEDS ITS OWN SECTION. Both are silent when they break: the
+  identifier still exists, hover still answers, definition still lands
+  somewhere - only the TYPE behind it goes missing, and with it every member
+  reached through it. The checks therefore ask questions that have no answer
+  at all without the type: what type is this, and where does the member
+  BEHIND it live. See DemoInference.pas. }
+procedure TestInferredTypes;
+var
+  LFile: string;
+  LLine, LChar, LValLine, LValChar, LTypeLine, LTypeChar: Integer;
+
+  { Definition at the ALineHint/AToken position, reported against the
+    expected line/char. One helper because the five shapes ask the SAME
+    question - "where does the member behind this name live" - and only the
+    qualifier differs. }
+  procedure CheckMemberAt(const ALineHint, AToken: string;
+    AWantLine, AWantChar: Integer; const AWhat: string);
+  begin
+    FindPos(LFile, ALineHint, AToken, LLine, LChar);
+    Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+      Format('definition answered for %s', [AWhat]));
+    Check(GOk and GResultJson.Contains(
+      Format('"line":%d,"character":%d', [AWantLine, AWantChar])),
+      Format('%s reaches (%d,%d)', [AWhat, AWantLine, AWantChar]));
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5l. member typing: a promoted property, an inline var ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoInference.pas');
+  DidOpen(LFile);
+  FindPos(LFile, 'Value: string;', 'Value', LValLine, LValChar);
+  FindPos(LFile, 'THolder = class(TBaseHolder)', 'THolder', LTypeLine,
+    LTypeChar);
+
+  // 1-2. THE BASELINE, which has worked all along: a local with a written
+  // type, and a property with one. If either fails, member typing itself is
+  // gone and nothing below says anything about PasTree 0.17.
+  CheckMemberAt('LPlain.Value := ''plain''', 'Value', LValLine, LValChar,
+    'a member of a typed local');
+  FindPos(LFile, 'LBase.Items := LPlain;', 'Items', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for a property with a written type');
+  Check(GOk and GResultJson.Contains('DemoInference.pas'),
+    'and resolves it');
+
+  // 3. THE PROMOTION (PasTree 0.17.1), from a TYPED local so it stands on
+  // its own: `property Items;` writes no type, the ancestor's is the only
+  // one there is, and before 0.17.1 everything behind the promotion went
+  // dark - Items resolved and Value did not.
+  CheckMemberAt('LTyped.Items.Value := ''promoted''', 'Value',
+    LValLine, LValChar, 'a field behind a promoted property');
+  // A METHOD too, so the check is not one lucky field.
+  FindPos(LFile, 'LTyped.Items.Describe;', 'Describe', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for a method behind a promoted property');
+  Check(GOk and GResultJson.Contains('DemoInference.pas'),
+    'and resolves it rather than answering nothing');
+  // NOT completion: member completion through a two-hop chain
+  // (`LTyped.Items.` -> TInner's members) answers an empty list here, at the
+  // identifier's start and at the end of its prefix alike, while definition
+  // over the very same chain resolves. That is a gap in the COMPLETION seam
+  // rather than in the typing this section is about, so it is not asserted
+  // here - it needs its own diagnosis and its own section (2026-09-07).
+
+  // 4-5. THE INLINE VAR (PasTree 0.17.0), typed from a parameterless call
+  // and from a constructor call. NOT checked with hover: hover shows the
+  // declaration LINE, initializer included, so `var LFromCall :=
+  // MakeHolder;` mentions MakeHolder whether anything inferred a type or
+  // not. typeDefinition and a member behind the name are the questions with
+  // no answer without the type.
+  // At a USE site, not at the declaration: SymbolAt does not claim an inline
+  // var's own declaration name (measured 2026-09-07 - typeDefinition there
+  // answers null before any of its routes run), and a use is the gesture
+  // anyway: the caret is on a variable being read, and the question is what
+  // type it is.
+  FindPos(LFile, 'LFromCall.Items := LPlain;', 'LFromCall', LLine, LChar);
+  Check(Ask('textDocument/typeDefinition', PositionParams(LFile, LLine,
+    LChar)), 'typeDefinition answered for an inline var');
+  Check(GOk and GResultJson.Contains(
+    Format('"line":%d,"character":%d', [LTypeLine, LTypeChar])),
+    Format('and lands on THolder (%d,%d), the call''s result type',
+      [LTypeLine, LTypeChar]));
+  FindPos(LFile, 'LFromCall.Items := LPlain;', 'Items', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for a member of an inline var');
+  Check(GOk and GResultJson.Contains('DemoInference.pas'),
+    'and reaches the property through the inferred type');
+  // `var L := THolder.Create` - a CONSTRUCTOR call - is NOT asserted: PasTree
+  // 0.17.1 does not type it (measured 2026-09-07 - neither typeDefinition on
+  // the var nor definition on a member behind it resolves, while the
+  // parameterless-call form above does both). The fixture keeps the line
+  // because the idiom is everywhere and this is where the coverage goes when
+  // the library grows it; an assertion that it stays broken would fail on the
+  // day it is fixed, which is the wrong way round.
+end;
+
 { 5g. classComplete on a buffer that does not parse: repair the ONE break it
   knows (a missing `;`), refuse everything else.
 
@@ -2169,6 +2272,7 @@ begin
       TestDocumentSymbol;
       TestSemanticTokens;
       TestRename;
+      TestInferredTypes;
       TestClassComplete;
       TestClassCompleteScope;
       TestClassCompleteInherited;

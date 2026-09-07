@@ -3822,6 +3822,7 @@ var
   LSym: TSemaSymbol;
   LTarget: TPasNavTarget;
   LHit: TPasRefHit;
+  LX: TSemaXType;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -3860,8 +3861,8 @@ begin
   end;
 
   // Route 2: the resolved type symbol, for the same-unit case where the type
-  // expression itself did not resolve to a declaration (an inferred inline
-  // `var`, say). Not for a type symbol - its own type is itself.
+  // expression itself did not resolve to a declaration. Not for a type
+  // symbol - its own type is itself.
   if (LSym.Kind <> skType) and (LSym.TypeSym <> NIL_SYM) and
      FNav.DeclHit(LTMid, LSym.TypeSym, LHit) then
   begin
@@ -3871,6 +3872,42 @@ begin
     Exit(BuildResponse(AMsg.IdJson,
       LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
         LHit.HiTo - LHit.HiFrom)));
+  end;
+
+  { Route 3: the type the CROSS pass computed, for a symbol that NAMES no
+    type at all.
+
+    The two routes above read the DECLARATION: a type expression to resolve,
+    or a model-local TypeSym written from one. A symbol whose type was never
+    written has neither - an inline `var L := MakeHolder` (PasTree 0.17.0)
+    and a bare `property Items;` promotion typed from its ancestor (0.17.1)
+    both name their type nowhere - so both answered null here while member
+    resolution THROUGH the same name worked perfectly, because that path asks
+    the cross pass and this one did not (measured 2026-09-07: `LFromCall.Items`
+    resolved, typeDefinition on `LFromCall` did not).
+
+    BOTH library calls, because they answer different halves and neither
+    covers the other: DeclTypeX reads the model's SymTypeX, which is where an
+    INFERRED type lands, and SymDeclTypeX walks the ancestor chain but returns
+    nothing for a typeless symbol that is not a property. Ordered inference
+    first, promotion second, and only reached when the declaration said
+    nothing - the routes above are the better answer when they have one, since
+    they cross units and follow an alias. }
+  if LSym.Kind <> skType then
+  begin
+    LX := FProject.DeclTypeX(LTMid, LSymIdx);
+    if (LX.UnitId = NIL_SYM) or (LX.Sym = NIL_SYM) then
+      LX := FProject.SymDeclTypeX(LTMid, LSymIdx);
+    if (LX.UnitId <> NIL_SYM) and (LX.Sym <> NIL_SYM) and
+       FNav.DeclHit(LX.UnitId, LX.Sym, LHit) then
+    begin
+      Log(Format(AMsg.Method + ': %s ''%s'' -> %s via the cross type pass',
+        [PosTag(LPath, LPasLine, LPasCol), LName,
+         PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
+      Exit(BuildResponse(AMsg.IdJson,
+        LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
+          LHit.HiTo - LHit.HiFrom)));
+    end;
   end;
 
   Log(Format(AMsg.Method + ': %s no type declaration reachable for ''%s''',

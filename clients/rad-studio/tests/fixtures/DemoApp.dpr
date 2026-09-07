@@ -12,7 +12,8 @@ uses
   DemoUnit in 'DemoUnit.pas',
   DemoUnicode in 'DemoUnicode.pas',
   Demo.Dotted in 'Demo.Dotted.pas',
-  DemoInherited in 'DemoInherited.pas';
+  DemoInherited in 'DemoInherited.pas',
+  DemoInference in 'DemoInference.pas';
 
 var
   LDerived: TDerived;

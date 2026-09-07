@@ -100,7 +100,15 @@ const
   /// about its origin, and indistinguishable from a resolver defect. It cost
   /// two rounds of diagnosis, so an older sibling checkout has to fail here
   /// rather than at the user's first Ctrl+Click.
-  cMinPasTreeVersion = '0.15.1';
+  ///
+  /// 0.17.0 (2026-09-07): inline `var L := Expr` / `const C = Expr` /
+  /// `for var I :=` typing, and with 0.17.1 a promoted `property Items;`
+  /// taking its type from the ancestor. Not because this server's own code
+  /// changed - it did not - but because LspClientSmoke 5l now ASKS for those
+  /// types, and an older sibling answers nothing while every request still
+  /// succeeds. That is the shape this floor exists for: a silent absence
+  /// rather than a compile error.
+  cMinPasTreeVersion = '0.17.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
