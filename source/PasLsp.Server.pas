@@ -935,6 +935,28 @@ begin
     FDirty := False;
     Exit;
   end;
+  // A FULL REBUILD IN FLIGHT IS LEFT TO FINISH. StartAnalysis would cancel it
+  // and begin again from nothing, and on a machine where the rebuild takes
+  // longer than a typing pause that is a rebuild that never completes: six
+  // restarts in five seconds of typing on the reference project (2026-09-08
+  // log), every core busy the whole time and nothing ever analyzed. FDirty
+  // stays set, so FinalizeAnalysisIfDone sees the result as stale the moment
+  // it lands and calls StartAnalysis itself - which, with a completed project
+  // to patch, takes the incremental one-module path for a keystroke. The
+  // edit therefore costs one full build plus ~70 ms instead of a restart.
+  //
+  // Only the FULL session: a module session takes tens of milliseconds and
+  // its Cancel is a WaitFor anyway (see StartAnalysis), so restarting it is
+  // what it always was. The pending priority file is dropped with the plan -
+  // the running session cannot take one, and the stale restart is the
+  // incremental path, which has no use for it.
+  if (FSession <> nil) and not FModuleMode then
+  begin
+    Log('rebuild in flight - the change waits for it rather than restarting');
+    FPendingDue := 0;
+    FPendingPriority := '';
+    Exit;
+  end;
   StartAnalysis(FPendingPriority);
 end;
 
@@ -1107,8 +1129,22 @@ begin
   PublishDiagnostics;
   if LStale then
   begin
-    Log('result is stale (documents changed mid-build) - restarting');
-    StartAnalysis('');
+    // Typed and undone while the build ran: the inputs are back to what this
+    // result was built from, and there is nothing to restart for. Without
+    // this check the restart would find no single changed document and run a
+    // second FULL rebuild for an edit that no longer exists - the same trap
+    // FlushPending's drop guards against, reached from the other side now
+    // that an in-flight full build is left to finish instead of restarted.
+    if OverlaySignature = FBuiltSignature then
+    begin
+      Log('documents changed mid-build and changed back - result is current');
+      FDirty := False;
+    end
+    else
+    begin
+      Log('result is stale (documents changed mid-build) - restarting');
+      StartAnalysis('');
+    end;
   end;
 end;
 

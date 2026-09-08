@@ -117,6 +117,7 @@
         <DCCReference Include="PasTreeIdePlugin.IdeInsight.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ErrorPaint.pas"/>
         <DCCReference Include="PasTreeIdePlugin.IdleSync.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.Timing.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>

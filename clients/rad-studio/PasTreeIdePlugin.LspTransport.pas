@@ -126,6 +126,10 @@ type
     FOnFrame: TLspFrameProc;
     FOnGone: TLspGoneProc;
     FGoneReported: Boolean;
+    // What the last Send cost - see the properties below.
+    FLastSendBytes: Integer;
+    FLastSendWaitMs: Double;
+    FLastSendPending: Boolean;
     procedure Spawn(const AExePath, AWorkDir: string; AChildIn, AChildOut: THandle);
     procedure CloseAll;
   protected
@@ -179,12 +183,24 @@ type
     /// </summary>
     property StdErrPath: string read FStdErrPath;
     property ProcessId: DWORD read FProcessId;
+    /// <summary>
+    /// The last Send, for the timing lines (PasTreeIdePlugin.Timing): frame
+    /// size, whether WriteFile completed inside the call (Pending=False, the
+    /// frame fit the pipe buffer) or had to wait for the server's reader to
+    /// drain the pipe, and how long that wait was. A didChange that carries a
+    /// whole document is where a slow machine blocks the IDE: the write runs
+    /// on the main thread and the wait is bounded only by cWriteTimeoutMs.
+    /// </summary>
+    property LastSendBytes: Integer read FLastSendBytes;
+    property LastSendWaitMs: Double read FLastSendWaitMs;
+    property LastSendPending: Boolean read FLastSendPending;
   end;
 
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils,
+  PasTreeIdePlugin.Timing;
 
 const
   // 64 KB each way: a full-sync didChange carries the whole document, so the
@@ -593,8 +609,17 @@ begin
       // CREATE_NO_WINDOW: the server is a console app and we are a GUI
       // process - without this a console window flashes on every start.
       // bInheritHandles must still be True for the handle list to apply.
+      //
+      // BELOW_NORMAL_PRIORITY_CLASS: PasTree parallelises the analysis over
+      // every core (TParallel.For), and a rebuild on a six-core i5 at the
+      // same priority as bds.exe left the IDE's UI thread competing with six
+      // parser threads for CPU - a busy cursor on every typing pause
+      // (2026-09-08 report). Below normal costs nothing while the IDE is
+      // idle, which is when a rebuild has the machine to itself anyway, and
+      // gives the editor first call when it is not.
       if not CreateProcess(nil, PChar('"' + AExePath + '"'), nil, nil, True,
-        EXTENDED_STARTUPINFO_PRESENT or CREATE_NO_WINDOW, nil, LDir,
+        EXTENDED_STARTUPINFO_PRESENT or CREATE_NO_WINDOW or
+        BELOW_NORMAL_PRIORITY_CLASS, nil, LDir,
         LSIEx.StartupInfo, LPI) then
         raise ELspTransport.CreateFmt('cannot start %s (%d)',
           [AExePath, GetLastError]);
@@ -720,6 +745,7 @@ var
   LHeader: string;
   LOv: TOverlapped;
   LWritten: DWORD;
+  LStart: Double;
 begin
   Result := False;
   if FWriteEnd = INVALID_HANDLE_VALUE then
@@ -736,6 +762,9 @@ begin
   LOv.hEvent := FWriteEvent;
   ResetEvent(FWriteEvent);
   LWritten := 0;
+  FLastSendBytes := Length(LFrame);
+  FLastSendWaitMs := 0;
+  FLastSendPending := False;
 
   if WriteFile(FWriteEnd, LFrame[0], Length(LFrame), LWritten, @LOv) then
     Exit(LWritten = DWORD(Length(LFrame)));
@@ -743,6 +772,10 @@ begin
   if GetLastError <> ERROR_IO_PENDING then
     Exit;
 
+  // Pending: the frame did not fit what was free in the pipe buffer, and
+  // from here the MAIN THREAD waits for the server's reader to drain it.
+  FLastSendPending := True;
+  LStart := TimingNowMs;
   case WaitForSingleObject(FWriteEvent, cWriteTimeoutMs) of
     WAIT_OBJECT_0:
       Result := GetOverlappedResult(FWriteEnd, LOv, LWritten, False) and
@@ -753,7 +786,10 @@ begin
     // scope with this stack frame.
     CancelIoEx(FWriteEnd, @LOv);
     GetOverlappedResult(FWriteEnd, LOv, LWritten, True);
+    TimingLogFmt('send TIMED OUT after %s: %d bytes, %d written',
+      [TimingSince(LStart), Length(LFrame), LWritten]);
   end;
+  FLastSendWaitMs := TimingNowMs - LStart;
 end;
 
 function TLspConnection.IsRunning: Boolean;

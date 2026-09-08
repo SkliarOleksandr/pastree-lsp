@@ -133,6 +133,8 @@ type
     FOptions: TLspInitOptions;
     FStarted: Boolean;        // Start was called; restarts are allowed
     FNextId: Int64;
+    FLastNotifyJsonMs: Double;
+    FLastNotifyChars: Integer;
     FPending: TObjectDictionary<Int64, TPendingRequest>;
     FOutbox: TList<string>;   // frames held back until the handshake lands
     FServerInfo: string;
@@ -274,6 +276,23 @@ type
     /// them, so without this it would answer from stale text on disk.
     /// </summary>
     property OnReady: TProc read FOnReady write FOnReady;
+
+    /// <summary>
+    /// What the last Notify cost, for the timing lines
+    /// (PasTreeIdePlugin.Timing). JsonMs is TJSONObject.ToJSON over the
+    /// params - for a didChange that is the whole document escaped character
+    /// by character. Send* is the transport's account of the write that
+    /// followed (0 / False when nothing was sent, e.g. queued behind the
+    /// handshake).
+    /// </summary>
+    property LastNotifyJsonMs: Double read FLastNotifyJsonMs;
+    property LastNotifyChars: Integer read FLastNotifyChars;
+    function LastSendBytes: Integer;
+    function LastSendWaitMs: Double;
+    function LastSendPending: Boolean;
+    /// <summary>The project the running (or last started) server was given;
+    /// '' before the first Start. Names the session in a log line.</summary>
+    function ProjectFile: string;
   end;
 
 /// <summary>
@@ -314,13 +333,17 @@ implementation
 
 uses
   System.IOUtils,
-  Winapi.Windows;
+  Winapi.Windows,
+  PasTreeIdePlugin.Timing;
 
 const
   // Five tries, then stop pestering: a server that will not start is usually
   // misconfigured, and respawning on every Ctrl+Click turns one problem into
   // a stream of them.
   cMaxRestartAttempts = 5;
+  // An incoming frame costing at least this much main-thread time gets a
+  // timing line; see HandleFrame.
+  cFrameLogMs = 2.0;
   cBackoffBaseMs = 1000;
   cBackoffCapMs = 30000;
 
@@ -1055,7 +1078,9 @@ procedure TLspClient.Notify(const AMethod: string; AParams: TJSONObject);
 var
   LMsg: TJSONObject;
   LJson: string;
+  LStart: Double;
 begin
+  LStart := TimingNowMs;
   LMsg := TJSONObject.Create;
   try
     LMsg.AddPair('jsonrpc', '2.0');
@@ -1066,8 +1091,36 @@ begin
   finally
     LMsg.Free;
   end;
+  FLastNotifyJsonMs := TimingNowMs - LStart;
+  FLastNotifyChars := Length(LJson);
   SendOrQueue(LJson, SameText(AMethod, 'initialized') or
     SameText(AMethod, 'exit'));
+end;
+
+function TLspClient.LastSendBytes: Integer;
+begin
+  if Assigned(FConn) then
+    Result := FConn.LastSendBytes
+  else
+    Result := 0;
+end;
+
+function TLspClient.LastSendWaitMs: Double;
+begin
+  if Assigned(FConn) then
+    Result := FConn.LastSendWaitMs
+  else
+    Result := 0;
+end;
+
+function TLspClient.LastSendPending: Boolean;
+begin
+  Result := Assigned(FConn) and FConn.LastSendPending;
+end;
+
+function TLspClient.ProjectFile: string;
+begin
+  Result := FOptions.ProjectFile;
 end;
 
 procedure TLspClient.HandleFrame(const AJson: string);
@@ -1077,13 +1130,21 @@ var
   LIdVal: TJSONValue;
   LMethod: string;
   LId: Int64;
+  LStart, LParsed: Double;
 begin
+  // Timed end to end: this is main-thread work per frame, and a
+  // publishDiagnostics for a big open document set is not small. Only frames
+  // that cost something are logged (cFrameLogMs) - the 200 ms progress ticks
+  // would otherwise drown the lines that matter.
+  LStart := TimingNowMs;
   LRoot := TJSONObject.ParseJSONValue(AJson);
   if LRoot = nil then
   begin
     Log('unparseable frame from server: ' + Copy(AJson, 1, 200));
     Exit;
   end;
+  LParsed := TimingNowMs;
+  LMethod := '';
   try
     if not (LRoot is TJSONObject) then
       Exit;   // LSP has no batches
@@ -1097,6 +1158,7 @@ begin
         HandleResponse(LId, LObj)
       else
         Log('response with no usable id - ignored');
+      LMethod := 'response';
       Exit;
     end;
 
@@ -1106,6 +1168,10 @@ begin
       FOnNotification(LMethod, LObj.FindValue('params'));
   finally
     LRoot.Free;
+    if TimingNowMs - LStart >= cFrameLogMs then
+      TimingLogFmt('recv %s: %d chars, parse %s, handle %s',
+        [LMethod, Length(AJson), FormatFloat('0.0', LParsed - LStart,
+         TFormatSettings.Invariant) + 'ms', TimingSince(LParsed)]);
   end;
 end;
 

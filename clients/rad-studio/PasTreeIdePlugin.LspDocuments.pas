@@ -27,8 +27,10 @@ unit PasTreeIdePlugin.LspDocuments;
   invisible for navigation and unacceptable for diagnostics. Both halves of
   that sentence have since happened: publishDiagnostics is implemented, and the
   push side is PasTreeIdePlugin.IdleSync (2026-08-22), a debounced idle-timer
-  notifier that calls Sync BESIDE this pull path rather than instead of it -
-  exactly as planned here.
+  notifier that runs BESIDE this pull path rather than instead of it -
+  exactly as planned here. Since 2026-09-08 it reads only the buffers the
+  editor reported modified (SyncOne), because the full pass below costs
+  ~15 ms per open module in IOTAEditorContent.Content on a slow machine.
 
   Reading the live buffer goes through IOTAEditorContent, with the warnings
   that technique carries intact (see ReadBufferText).
@@ -87,6 +89,8 @@ type
       AShown: Boolean);
     procedure SendDidChange(const APath, AText: string; AVersion: Integer);
     procedure SendDidClose(const APath: string);
+    procedure LogSent(const AVerb, APath: string; AVersion: Integer;
+      AChars: Integer; ASendStart: Double);
   public
     constructor Create(AClient: TLspClient;
       const AOwnsPath: TFunc<string, Boolean> = nil);
@@ -99,6 +103,22 @@ type
     /// the in-process version already does on every click.
     /// </summary>
     procedure Sync;
+
+    /// <summary>
+    /// The idle-typing counterpart of Sync: reads ONE buffer, the one the
+    /// editor just reported modified, and sends didChange if its text moved.
+    /// False when this path is not a document the server already has (never
+    /// synced, or not open at all) - the caller then falls back to Sync,
+    /// which is the only thing that can open and close documents.
+    ///
+    /// WHY NOT SYNC EVERY TIME. IOTAEditorContent.Content costs about 15 ms
+    /// per module on a six-core i5 (measured 2026-09-08, 32 open modules,
+    /// 480 ms per typing pause) regardless of the module's size, and the
+    /// idle tick fires on every pause. One keystroke changes one buffer; the
+    /// whole set is re-read where the answer has to be complete - before a
+    /// request, in Sync.
+    /// </summary>
+    function SyncOne(const APath: string): Boolean;
 
     /// <summary>
     /// Re-opens every tracked document from scratch. Hook this to
@@ -162,10 +182,14 @@ implementation
 
 uses
   System.Classes,
+  System.StrUtils,
+  System.Math,
+  System.Generics.Defaults,
   System.JSON,
   Winapi.ActiveX,
   IStreams,
-  PasLsp.SourceText;
+  PasLsp.SourceText,
+  PasTreeIdePlugin.Timing;
 
 function BufferByteLength(const AView: IOTAEditView): Integer;
 var
@@ -249,7 +273,17 @@ begin
   end;
 end;
 
-function ReadBufferText(const AModule: IOTAModule): string;
+{ The three costs of one buffer read, for the per-module timing line in
+  CollectOpenDocuments: finding the editor (GetModuleFileEditor), asking the
+  IDE for the content stream (IOTAEditorContent.Content - where the IDE may
+  have to flatten an edited buffer), and our own copy plus UTF-8 decode. }
+type
+  TReadCost = record
+    EditorMs, ContentMs, DecodeMs: Double;
+  end;
+
+function ReadBufferText(const AModule: IOTAModule;
+  out ACost: TReadCost): string;
 var
   LBuffer: IOTAEditBuffer;
   LEditorContent: IOTAEditorContent;
@@ -257,15 +291,25 @@ var
   LIMemStream: TIMemoryStream;
   LMemStream: TMemoryStream;
   LFileContent: UTF8String;
+  LT: Double;
 begin
   Result := '';
+  ACost := Default(TReadCost);
+  LT := TimingNowMs;
   if not Supports(AModule.GetModuleFileEditor(0), IOTAEditBuffer, LBuffer) then
+  begin
+    ACost.EditorMs := TimingNowMs - LT;
     Exit;
+  end;
+  ACost.EditorMs := TimingNowMs - LT;
 
+  LT := TimingNowMs;
   LEditorContent := LBuffer as IOTAEditorContent;
   LIStream := LEditorContent.Content;
   LIMemStream := LIStream as TIMemoryStream;
   LMemStream := LIMemStream.MemoryStream;
+  ACost.ContentMs := TimingNowMs - LT;
+  LT := TimingNowMs;
   SetLength(LFileContent, LMemStream.Size);
   LMemStream.Position := 0;
   if LMemStream.Size <> 0 then
@@ -277,6 +321,7 @@ begin
   // top of braces rather than the only defence; it stays because it is free
   // and because it keeps what this client SENDS honest, whatever it talks to.
   Result := StripLeadingBom(Result);
+  ACost.DecodeMs := TimingNowMs - LT;
 end;
 
 { TLspDocumentSync }
@@ -296,6 +341,32 @@ begin
   inherited;
 end;
 
+{ WHERE A SLOW READ GOES, module by module. The first measured log from the
+  six-core machine (2026-09-08) put 470 ms of a 480 ms typing pause in
+  CollectOpenDocuments for 31 documents - and the same 31 documents read in
+  9.5 ms when a request, not an idle tick, asked. So the cost is not the byte
+  copy, it is something the IDE does when asked about a buffer shortly after
+  an edit, and the only way to see which buffer and which call is to time
+  each one. The three slowest modules of a sync are logged when the sync as a
+  whole cost more than cSlowCollectMs; a cheap sync logs nothing extra. }
+type
+  TModuleCost = record
+    Name: string;
+    OwnsMs, ShownMs: Double;
+    Read: TReadCost;
+    Chars: Integer;
+    function Total: Double;
+  end;
+
+function TModuleCost.Total: Double;
+begin
+  Result := OwnsMs + ShownMs + Read.EditorMs + Read.ContentMs + Read.DecodeMs;
+end;
+
+const
+  cSlowCollectMs = 20.0;
+  cSlowestToLog = 3;
+
 function TLspDocumentSync.CollectOpenDocuments: TArray<TSentDocument>;
 var
   LModuleServices: IOTAModuleServices;
@@ -303,12 +374,21 @@ var
   LList: TObjectList<TSentDocument>;
   LDoc: TSentDocument;
   LActive: string;
-  I: Integer;
+  I, J, LSkipped: Integer;
+  LStart, LT: Double;
+  LCost: TModuleCost;
+  LCosts: TList<TModuleCost>;
+  LOwns: Boolean;
 begin
   Result := nil;
   if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
     Exit;
 
+  LStart := TimingNowMs;
+  LSkipped := 0;
+  LCosts := nil;
+  if TimingLogPath <> '' then
+    LCosts := TList<TModuleCost>.Create;
   LList := TObjectList<TSentDocument>.Create(False);   // caller owns the items
   try
     for I := 0 to LModuleServices.ModuleCount - 1 do
@@ -318,14 +398,29 @@ begin
         Continue;
       if not IsPascalSourceFile(LModule.FileName) then
         Continue;
-      if Assigned(FOwnsPath) and not FOwnsPath(LModule.FileName) then
-        Continue;   // another project's buffer, and another server's business
+      LCost := Default(TModuleCost);
+      LCost.Name := ExtractFileName(LModule.FileName);
+      LT := TimingNowMs;
+      LOwns := not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
+      LCost.OwnsMs := TimingNowMs - LT;
+      if not LOwns then
+      begin
+        // Another project's buffer, and another server's business. Still
+        // accounted: the route lookup is per module per sync.
+        Inc(LSkipped);
+        if LCosts <> nil then
+          LCosts.Add(LCost);
+        Continue;
+      end;
       try
         LDoc := TSentDocument.Create;
         try
           LDoc.Path := LModule.FileName;
-          LDoc.Text := ReadBufferText(LModule);
+          LDoc.Text := ReadBufferText(LModule, LCost.Read);
+          LCost.Chars := Length(LDoc.Text);
+          LT := TimingNowMs;
           LDoc.Shown := ModuleIsShown(LModule);
+          LCost.ShownMs := TimingNowMs - LT;
           LList.Add(LDoc);
         except
           LDoc.Free;
@@ -337,6 +432,30 @@ begin
         // disk. That is a safe degradation, and there is no single right place
         // to report it from shared plumbing.
       end;
+      if LCosts <> nil then
+        LCosts.Add(LCost);
+    end;
+    if (LCosts <> nil) and (TimingNowMs - LStart >= cSlowCollectMs) then
+    begin
+      LCosts.Sort(TComparer<TModuleCost>.Construct(
+        function(const A, B: TModuleCost): Integer
+        begin
+          if A.Total > B.Total then
+            Result := -1
+          else if A.Total < B.Total then
+            Result := 1
+          else
+            Result := 0;
+        end));
+      TimingLogFmt('  collect: %d modules read, %d not this project''s, ' +
+        '%s; slowest:', [LList.Count, LSkipped, TimingSince(LStart)]);
+      for J := 0 to Min(cSlowestToLog, LCosts.Count) - 1 do
+        TimingLogFmt('    %s: %s total (owns %s, editor %s, content %s, ' +
+          'decode %s, shown %s), %d chars',
+          [LCosts[J].Name, Ms(LCosts[J].Total), Ms(LCosts[J].OwnsMs),
+           Ms(LCosts[J].Read.EditorMs), Ms(LCosts[J].Read.ContentMs),
+           Ms(LCosts[J].Read.DecodeMs), Ms(LCosts[J].ShownMs),
+           LCosts[J].Chars]);
     end;
     // The file the user is LOOKING AT goes last, and that ordering is load-
     // bearing rather than cosmetic. Every didOpen the server receives before
@@ -358,6 +477,7 @@ begin
     Result := LList.ToArray;
   finally
     LList.Free;
+    LCosts.Free;
   end;
 end;
 
@@ -429,6 +549,30 @@ end;
   There is no race between "not ready" here and the handshake completing: the
   reply can only be dispatched on a later main-thread turn, and the caller runs
   EnsureSession and Sync back to back on this one. }
+{ One timing line per notification actually written - see
+  PasTreeIdePlugin.Timing for why. The whole chain on the main thread for a
+  didChange is: read the buffer (in CollectOpenDocuments, reported by Sync),
+  build the JSON (LastNotifyJsonMs, the document escaped character by
+  character), then WriteFile on a 64 KB pipe (LastSendWaitMs, and Pending
+  says whether the frame even fit the buffer). }
+procedure TLspDocumentSync.LogSent(const AVerb, APath: string;
+  AVersion: Integer; AChars: Integer; ASendStart: Double);
+var
+  LPending: string;
+begin
+  if TimingLogPath = '' then
+    Exit;
+  if FClient.LastSendPending then
+    LPending := Format(', waited %sms for the pipe',
+      [FormatFloat('0.0', FClient.LastSendWaitMs, TFormatSettings.Invariant)])
+  else
+    LPending := ', fit the pipe buffer';
+  TimingLogFmt('  %s %s v%d: %d chars, json %sms, frame %d bytes, send %s%s',
+    [AVerb, ExtractFileName(APath), AVersion, AChars,
+     FormatFloat('0.0', FClient.LastNotifyJsonMs, TFormatSettings.Invariant),
+     FClient.LastSendBytes, TimingSince(ASendStart), LPending]);
+end;
+
 procedure TLspDocumentSync.Sync;
 var
   LOpen: TArray<TSentDocument>;
@@ -437,10 +581,17 @@ var
   LSeen: TDictionary<string, Boolean>;
   LStale: TArray<string>;
   LReady: Boolean;
-  LIdx: Integer;
+  LIdx, LChars, LOpened, LChanged, LClosed: Integer;
+  LStart, LCollected, LSendStart: Double;
 begin
+  LStart := TimingNowMs;
   LReady := FClient.IsReady;
   LOpen := CollectOpenDocuments;
+  LCollected := TimingNowMs;
+  LChars := 0;
+  LOpened := 0;
+  LChanged := 0;
+  LClosed := 0;
   LSeen := TDictionary<string, Boolean>.Create;
   try
     for LIdx := 0 to High(LOpen) do
@@ -454,12 +605,19 @@ begin
       LOpen[LIdx] := nil;
       LKey := LowerCase(LDoc.Path);
       LSeen.AddOrSetValue(LKey, True);
+      Inc(LChars, Length(LDoc.Text));
 
       if not FSent.TryGetValue(LKey, LKnown) then
       begin
         LDoc.Version := 1;
         if LReady then
+        begin
+          LSendStart := TimingNowMs;
           SendDidOpen(LDoc.Path, LDoc.Text, LDoc.Version, LDoc.Shown);
+          LogSent('didOpen', LDoc.Path, LDoc.Version, Length(LDoc.Text),
+            LSendStart);
+          Inc(LOpened);
+        end;
         FSent.Add(LKey, LDoc);       // FSent owns it from here
         Continue;
       end;
@@ -473,7 +631,13 @@ begin
         Inc(LKnown.Version);
         LKnown.Text := LDoc.Text;
         if LReady then
+        begin
+          LSendStart := TimingNowMs;
           SendDidChange(LKnown.Path, LKnown.Text, LKnown.Version);
+          LogSent('didChange', LKnown.Path, LKnown.Version,
+            Length(LKnown.Text), LSendStart);
+          Inc(LChanged);
+        end;
       end;
       LDoc.Free;                     // duplicate of a document we already hold
     end;
@@ -489,7 +653,10 @@ begin
       // Not ready: the server either never heard of this document or is about
       // to be told the whole set by ResendAll, which omits it anyway.
       if LReady then
+      begin
         SendDidClose(FSent[LKey].Path);
+        Inc(LClosed);
+      end;
       FSent.Remove(LKey);
     end;
   finally
@@ -498,6 +665,64 @@ begin
       LOpen[LIdx].Free;
     LSeen.Free;
   end;
+  // The summary AFTER the per-send lines, so the reader sees what the total
+  // is made of. "read" is CollectOpenDocuments - every open module of this
+  // server's project pulled out of the editor and UTF-8 decoded - and is paid
+  // whether or not anything changed; the rest is the comparison plus
+  // whatever was sent.
+  TimingLogFmt('sync %s: %d docs, %d chars, read %sms, rest %s, ' +
+    'sent %d didOpen %d didChange %d didClose%s',
+    [ExtractFileName(FClient.ProjectFile), FSent.Count, LChars,
+     FormatFloat('0.0', LCollected - LStart, TFormatSettings.Invariant),
+     TimingSince(LCollected), LOpened, LChanged, LClosed,
+     IfThen(LReady, '', ' (server not ready: nothing sent)')]);
+end;
+
+function TLspDocumentSync.SyncOne(const APath: string): Boolean;
+var
+  LModuleServices: IOTAModuleServices;
+  LModule: IOTAModule;
+  LKnown: TSentDocument;
+  LText: string;
+  LCost: TReadCost;
+  LStart, LRead, LSendStart: Double;
+begin
+  Result := False;
+  if not FSent.TryGetValue(LowerCase(APath), LKnown) then
+    Exit;   // not a document the server holds: Sync's job
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+    Exit;
+  LStart := TimingNowMs;
+  LModule := LModuleServices.FindModule(APath);
+  if not Assigned(LModule) then
+    Exit;   // closed since: Sync sends the didClose
+  try
+    LText := ReadBufferText(LModule, LCost);
+  except
+    // Same degradation as CollectOpenDocuments: unreadable means unsent, and
+    // the server keeps the text it has.
+    Exit(True);
+  end;
+  LRead := TimingNowMs;
+  Result := True;
+  if LKnown.Text = LText then
+  begin
+    TimingLogFmt('sync-one %s: unchanged, read %s',
+      [ExtractFileName(APath), Ms(LRead - LStart)]);
+    Exit;
+  end;
+  Inc(LKnown.Version);
+  LKnown.Text := LText;
+  if FClient.IsReady then
+  begin
+    LSendStart := TimingNowMs;
+    SendDidChange(LKnown.Path, LKnown.Text, LKnown.Version);
+    LogSent('didChange', LKnown.Path, LKnown.Version, Length(LKnown.Text),
+      LSendStart);
+  end;
+  TimingLogFmt('sync-one %s: read %s (content %s), compare+send %s',
+    [ExtractFileName(APath), Ms(LRead - LStart), Ms(LCost.ContentMs),
+     TimingSince(LRead)]);
 end;
 
 procedure TLspDocumentSync.ResendAll;

@@ -438,8 +438,16 @@ procedure LspSetDiagnosticsChangedListener(
 /// live diagnostics (PasTreeIdePlugin.IdleSync). No server, or one still in
 /// its handshake, makes this a silent no-op: idle typing never STARTS a
 /// server.
+///
+/// APaths are the buffers the editor reported modified since the last tick.
+/// Each goes to the session that owns it and is read ALONE (SyncOne): the
+/// full pass over every open module costs ~15 ms per module in
+/// IOTAEditorContent.Content on a slow machine, which at 32 modules was the
+/// whole of a half-second busy cursor per typing pause (2026-09-08). A path
+/// SyncOne cannot handle - a document the server has not been given yet -
+/// falls back to that session's full Sync, once.
 /// </summary>
-procedure LspIdleSync;
+procedure LspIdleSync(const APaths: TArray<string>);
 
 /// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
@@ -640,6 +648,7 @@ uses
   PasLsp.SourceText,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.Timing,
   PasTreeIdePlugin.Settings;
 
 const
@@ -762,7 +771,7 @@ type
     function TryGetSentText(const APath: string; out AText: string): Boolean;
     function TryGetDiagnostics(const APath: string;
       out ADiags: TArray<TLspDiagnostic>): Boolean;
-    procedure IdleSync;
+    procedure IdleSync(const APath: string);
   end;
 
   { THE SESSIONS OF AN OPEN PROJECT GROUP - one per project, one server
@@ -1361,6 +1370,16 @@ begin
   if LoggingEnabled then
     Result.LogFile := LLogPath;
   Result.SuppressLogDetail := not AdvancedLoggingEnabled;
+  // The IDE-side timing lines (PasTreeIdePlugin.Timing) go into the same
+  // file as the server's, but only with ADVANCED logging on: they are a few
+  // lines per typing pause, which is the "log nobody can skim" the advanced
+  // switch exists to keep out of the ordinary one. One global, so in a
+  // project group they follow the project whose options were built last - the
+  // active one - which is where the user is typing.
+  if AdvancedLoggingEnabled then
+    SetTimingLogPath(Result.LogFile)
+  else
+    SetTimingLogPath('');
   // The IDE-side crash log goes to the same folder (its own file - see
   // PasTreeIdePlugin.CrashLog): the two are read together, and this is the
   // one place that already knows where "beside this project" is. NOT gated on
@@ -3298,31 +3317,40 @@ begin
   GDiagnosticsListener := AListener;
 end;
 
-procedure TLspSession.IdleSync;
+procedure TLspSession.IdleSync(const APath: string);
 begin
-  // PASSIVE by design: pushes the live buffers to a server that is already
+  // PASSIVE by design: pushes the live buffer to a server that is already
   // up and past its handshake, and starts nothing - idle typing must not
   // spawn a server the user never asked a question of. Requests keep their
   // own EnsureSession+Sync pairing.
-  if (FClient <> nil) and FClient.IsReady and (FDocs <> nil) and
-     not FDestroying then
+  if (FClient = nil) or not FClient.IsReady or (FDocs = nil) or
+     FDestroying then
+    Exit;
+  // The one buffer first; the whole set only when the server does not hold
+  // this document yet (a module opened since the last request), because
+  // opening it is Sync's job. See LspIdleSync on what the full pass costs.
+  if not FDocs.SyncOne(APath) then
     FDocs.Sync;
 end;
 
-procedure LspIdleSync;
+procedure LspIdleSync(const APaths: TArray<string>);
+var
+  LPath: string;
+  LSession: TLspSession;
 begin
-  // EVERY live session, not just the active one. Each collects only its own
-  // project's buffers, so this is one pass over the open modules per running
-  // server and no server hears about a file that is not its own - and a
-  // module of a background project being typed in keeps ITS server current
-  // rather than going stale until the user switches back. Passive throughout:
-  // TLspSession.IdleSync starts nothing.
-  if Assigned(GPool) then
-    GPool.ForEach(
-      procedure(ASession: TLspSession)
-      begin
-        ASession.IdleSync;
-      end);
+  // The session that OWNS each modified buffer, not every live session: a
+  // module of a background project being typed in keeps ITS server current,
+  // and no server is asked about a file that is not its own. A file no
+  // project claims goes where SessionForFile sends it - the active session.
+  // Passive throughout: TLspSession.IdleSync starts nothing.
+  if not Assigned(GPool) then
+    Exit;
+  for LPath in APaths do
+  begin
+    LSession := GPool.SessionForFile(LPath, False);
+    if Assigned(LSession) then
+      LSession.IdleSync(LPath);
+  end;
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;
