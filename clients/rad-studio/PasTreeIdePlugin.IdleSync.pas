@@ -138,6 +138,7 @@ begin
     Exit;
   Inc(GEdits);
   GLastEdited := EditView.Buffer.FileName;
+  NoteBufferModified(GLastEdited);
   // Typing stays in one file, so the last entry is the fast check; the scan
   // only runs when the cursor has moved between tabs.
   LKnown := (Length(GModified) > 0) and
@@ -209,12 +210,18 @@ begin
   GTimer.Interval := cIdleMs;
   GTimer.OnTimer := GDispatch.OnTimer;
   GNotifierIndex := LServices.AddNotifier(TIdleSyncNotifier.Create);
+  // From here every buffer modification is reported to the document layer,
+  // which lets the request-path Sync skip reading buffers nobody touched.
+  // Off again in FinalizeIdleSync, and never on without the notifier: with no
+  // reports, "not reported modified" would mean nothing.
+  SetBufferChangeTracking(GNotifierIndex >= 0);
 end;
 
 procedure FinalizeIdleSync;
 var
   LServices: IOTAEditorServices80;
 begin
+  SetBufferChangeTracking(False);
   if GNotifierIndex >= 0 then
   begin
     if Supports(BorlandIDEServices, IOTAEditorServices80, LServices) then

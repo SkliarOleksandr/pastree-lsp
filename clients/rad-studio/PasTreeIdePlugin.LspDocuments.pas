@@ -71,6 +71,12 @@ type
       // is its text, and a module gaining or losing a tab changes nothing
       // about that.
       Shown: Boolean;
+      // When Text was last READ from the editor: the buffer's modification
+      // count then (see NoteBufferModified) and the file's disk stamp. Equal
+      // now means the editor still holds this exact text, and the 15 ms
+      // IOTAEditorContent.Content call can be skipped.
+      ReadStamp: Int64;
+      DiskStamp: TDateTime;
     end;
   private
     FClient: TLspClient;
@@ -144,6 +150,27 @@ type
   end;
 
 /// <summary>
+/// The editor reported this buffer modified. Called from the
+/// EditorViewModified notifier (PasTreeIdePlugin.IdleSync) for every change
+/// event; bumps the buffer's modification count, which is what lets Sync
+/// skip reading a buffer nobody touched.
+///
+/// WHY A COUNT AND NOT A FLAG: several sessions (one per project in a group)
+/// sync independently, and a flag cleared by one would hide the change from
+/// the next. Each remembered document keeps the count it was read at, and
+/// "count moved since" is a per-reader question with no clearing at all.
+/// </summary>
+procedure NoteBufferModified(const APath: string);
+
+/// <summary>
+/// Whether NoteBufferModified is actually being fed - True while the
+/// EditorViewModified notifier is registered. False makes Sync read every
+/// buffer, as it did before there was any tracking: a plugin whose notifier
+/// failed to register must degrade to slow, not to stale.
+/// </summary>
+procedure SetBufferChangeTracking(AActive: Boolean);
+
+/// <summary>
 /// IDE (1-based row/column) to LSP (0-based line/character). See the unit
 /// header on why this is the whole conversion.
 /// </summary>
@@ -205,6 +232,50 @@ begin
   if not Assigned(LStream) then
     Exit;
   Result := (LStream as TIMemoryStream).MemoryStream.Size;
+end;
+
+var
+  // Lower-cased path -> modification count. Grows by one entry per file
+  // ever edited in the session, which is bounded by what a person can type
+  // in; never pruned, because a count for a closed file is harmless and a
+  // reopen of the same file must not restart at zero while a remembered
+  // document still carries the old count.
+  GModCounts: TDictionary<string, Int64>;
+  GTracking: Boolean = False;
+
+procedure NoteBufferModified(const APath: string);
+var
+  LKey: string;
+  LCount: Int64;
+begin
+  if GModCounts = nil then
+    GModCounts := TDictionary<string, Int64>.Create;
+  LKey := LowerCase(APath);
+  if not GModCounts.TryGetValue(LKey, LCount) then
+    LCount := 0;
+  GModCounts.AddOrSetValue(LKey, LCount + 1);
+end;
+
+procedure SetBufferChangeTracking(AActive: Boolean);
+begin
+  GTracking := AActive;
+end;
+
+function ModCountOf(const AKey: string): Int64;
+begin
+  if (GModCounts = nil) or not GModCounts.TryGetValue(AKey, Result) then
+    Result := 0;
+end;
+
+{ The file's last-write time, 0 for a file that is not on disk (a new unit
+  never saved). The second half of "did this buffer change": the notifier
+  sees every edit made IN the editor, and this sees the IDE reloading a file
+  someone else wrote - a git checkout, a generator - which may or may not be
+  announced as a modification. One stat call, tens of microseconds. }
+function DiskStampOf(const APath: string): TDateTime;
+begin
+  if not FileAge(APath, Result) then
+    Result := 0;
 end;
 
 procedure IdeToLsp(ARow, ACol: Integer; out ALine, ACharacter: Integer);
@@ -373,12 +444,13 @@ var
   LModule: IOTAModule;
   LList: TObjectList<TSentDocument>;
   LDoc: TSentDocument;
-  LActive: string;
-  I, J, LSkipped: Integer;
+  LActive, LKey: string;
+  I, J, LSkipped, LReused: Integer;
   LStart, LT: Double;
   LCost: TModuleCost;
   LCosts: TList<TModuleCost>;
   LOwns: Boolean;
+  LKnown: TSentDocument;
 begin
   Result := nil;
   if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
@@ -386,6 +458,7 @@ begin
 
   LStart := TimingNowMs;
   LSkipped := 0;
+  LReused := 0;
   LCosts := nil;
   if TimingLogPath <> '' then
     LCosts := TList<TModuleCost>.Create;
@@ -416,8 +489,27 @@ begin
         LDoc := TSentDocument.Create;
         try
           LDoc.Path := LModule.FileName;
-          LDoc.Text := ReadBufferText(LModule, LCost.Read);
-          LCost.Chars := Length(LDoc.Text);
+          LKey := LowerCase(LDoc.Path);
+          LDoc.ReadStamp := ModCountOf(LKey);
+          LDoc.DiskStamp := DiskStampOf(LDoc.Path);
+          // REUSE THE TEXT WE HOLD when nothing says it moved: the editor has
+          // not reported a modification since it was read, and the file on
+          // disk is what it was. Both stamps equal is the whole test; the
+          // 15 ms IOTAEditorContent.Content call (see the header) is paid only
+          // for a buffer that is new to us or has actually changed. With no
+          // tracking every buffer is read, as before tracking existed.
+          if GTracking and FSent.TryGetValue(LKey, LKnown) and
+             (LKnown.ReadStamp = LDoc.ReadStamp) and
+             (LKnown.DiskStamp = LDoc.DiskStamp) then
+          begin
+            LDoc.Text := LKnown.Text;
+            Inc(LReused);
+          end
+          else
+          begin
+            LDoc.Text := ReadBufferText(LModule, LCost.Read);
+            LCost.Chars := Length(LDoc.Text);
+          end;
           LT := TimingNowMs;
           LDoc.Shown := ModuleIsShown(LModule);
           LCost.ShownMs := TimingNowMs - LT;
@@ -447,8 +539,9 @@ begin
           else
             Result := 0;
         end));
-      TimingLogFmt('  collect: %d modules read, %d not this project''s, ' +
-        '%s; slowest:', [LList.Count, LSkipped, TimingSince(LStart)]);
+      TimingLogFmt('  collect: %d modules, %d read, %d reused, %d not this ' +
+        'project''s, %s; slowest:', [LList.Count, LList.Count - LReused,
+        LReused, LSkipped, TimingSince(LStart)]);
       for J := 0 to Min(cSlowestToLog, LCosts.Count) - 1 do
         TimingLogFmt('    %s: %s total (owns %s, editor %s, content %s, ' +
           'decode %s, shown %s), %d chars',
@@ -626,6 +719,12 @@ begin
       // since been given a tab must not be described as background by the
       // ResendAll after the next server restart.
       LKnown.Shown := LDoc.Shown;
+      // The stamps describe the editor state this text was taken from, moved
+      // or not: a modification that left the text identical (typed and
+      // undone) still advances the count, and must not force a re-read on
+      // every sync after it.
+      LKnown.ReadStamp := LDoc.ReadStamp;
+      LKnown.DiskStamp := LDoc.DiskStamp;
       if LKnown.Text <> LDoc.Text then
       begin
         Inc(LKnown.Version);
@@ -686,6 +785,8 @@ var
   LText: string;
   LCost: TReadCost;
   LStart, LRead, LSendStart: Double;
+  LReadStamp: Int64;
+  LDiskStamp: TDateTime;
 begin
   Result := False;
   if not FSent.TryGetValue(LowerCase(APath), LKnown) then
@@ -696,13 +797,21 @@ begin
   LModule := LModuleServices.FindModule(APath);
   if not Assigned(LModule) then
     Exit;   // closed since: Sync sends the didClose
+  // Stamps BEFORE the read, like CollectOpenDocuments: an edit landing
+  // between the two is then seen as newer than this read and re-read next
+  // time, rather than lost.
+  LReadStamp := ModCountOf(LowerCase(APath));
+  LDiskStamp := DiskStampOf(APath);
   try
     LText := ReadBufferText(LModule, LCost);
   except
     // Same degradation as CollectOpenDocuments: unreadable means unsent, and
-    // the server keeps the text it has.
+    // the server keeps the text it has. The stamps stay old too, so the next
+    // sync reads it again instead of trusting a text it never got.
     Exit(True);
   end;
+  LKnown.ReadStamp := LReadStamp;
+  LKnown.DiskStamp := LDiskStamp;
   LRead := TimingNowMs;
   Result := True;
   if LKnown.Text = LText then
@@ -753,5 +862,10 @@ begin
   if Result then
     AText := LDoc.Text;
 end;
+
+initialization
+
+finalization
+  FreeAndNil(GModCounts);
 
 end.
