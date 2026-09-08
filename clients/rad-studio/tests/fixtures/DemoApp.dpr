@@ -13,7 +13,8 @@ uses
   DemoUnicode in 'DemoUnicode.pas',
   Demo.Dotted in 'Demo.Dotted.pas',
   DemoInherited in 'DemoInherited.pas',
-  DemoInference in 'DemoInference.pas';
+  DemoInference in 'DemoInference.pas',
+  DemoHierarchy in 'DemoHierarchy.pas';
 
 var
   LDerived: TDerived;

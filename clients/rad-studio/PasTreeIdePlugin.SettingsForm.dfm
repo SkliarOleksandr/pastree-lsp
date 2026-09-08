@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 677
+  ClientHeight = 545
   ClientWidth = 500
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -64,7 +64,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       Top = 41
       Width = 215
       Height = 19
-      Caption = 
+      Caption =
         '<a href="https://github.com/SkliarOleksandr/pastree-lsp">github.' +
         'com/SkliarOleksandr/pastree-lsp</a>'
       TabOrder = 0
@@ -75,187 +75,233 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       Top = 60
       Width = 253
       Height = 19
-      Caption = 
+      Caption =
         '<a href="https://github.com/SkliarOleksandr/object-pascal-tree">' +
         'github.com/SkliarOleksandr/object-pascal-tree</a>'
       TabOrder = 1
       OnLinkClick = lnkHomeLinkClick
     end
   end
-  object gbOverrides: TGroupBox
-    Left = 16
-    Top = 108
-    Width = 465
-    Height = 352
-    Caption = ' Overrides '
+  object pgcSettings: TPageControl
+    Left = 12
+    Top = 106
+    Width = 476
+    Height = 380
+    ActivePage = tsNavigation
     TabOrder = 1
-    object lblCtrlClickHint: TLabel
-      Left = 35
-      Top = 45
-      Width = 349
-      Height = 30
-      Caption = 
-        'Ctrl+Click and the editor menu item resolve through PasTree. The' +
-        ' menu half only changes at the next IDE restart.'
-      WordWrap = True
+    object tsNavigation: TTabSheet
+      Caption = 'Navigation'
+      object lblCtrlClickHint: TLabel
+        Left = 35
+        Top = 41
+        Width = 405
+        Height = 30
+        Caption =
+          'Ctrl+Click and the editor menu item resolve through PasTree. The' +
+          ' menu half only changes at the next IDE restart.'
+        WordWrap = True
+      end
+      object lblDeclImplToggleHint: TLabel
+        Left = 35
+        Top = 111
+        Width = 405
+        Height = 30
+        Caption =
+          'Off hands the keystroke back to the IDE, which runs its own decl' +
+          'aration/implementation jump.'
+        WordWrap = True
+      end
+      object lblFindOverridesHint: TLabel
+        Left = 35
+        Top = 181
+        Width = 405
+        Height = 45
+        Caption =
+          'The VMT chain of the class method under the cursor, across the w' +
+          'hole project group: the declaration that introduced the slot and' +
+          ' every override, reintroduce and message handler below it. Off h' +
+          'ides the command.'
+        WordWrap = True
+      end
+      object lblFindImplementationsHint: TLabel
+        Left = 35
+        Top = 266
+        Width = 405
+        Height = 45
+        Caption =
+          'Every class implementing the interface method under the cursor, ' +
+          'including classes that list a descendant interface or inherit th' +
+          'e implementation. Off hides the command.'
+        WordWrap = True
+      end
+      object chkCtrlClick: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Find Declaration (Ctrl+Click and the editor menu)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
+      end
+      object chkDeclImplToggle: TCheckBox
+        Left = 16
+        Top = 90
+        Width = 430
+        Height = 17
+        Caption = 'Ctrl+Shift+Up / Ctrl+Shift+Down declaration'#8596'implementation jump'
+        Checked = True
+        State = cbChecked
+        TabOrder = 1
+      end
+      object chkFindOverrides: TCheckBox
+        Left = 16
+        Top = 160
+        Width = 430
+        Height = 17
+        Caption = 'Find Overrides (editor menu)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 2
+      end
+      object chkFindImplementations: TCheckBox
+        Left = 16
+        Top = 245
+        Width = 430
+        Height = 17
+        Caption = 'Find Implementations (editor menu)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 3
+      end
     end
-    object lblDeclImplToggleHint: TLabel
-      Left = 35
-      Top = 110
-      Width = 315
-      Height = 30
-      Caption = 
-        'Off hands the keystroke back to the IDE, which runs its own decl' +
-        'aration/implementation jump.'
-      WordWrap = True
+    object tsEditing: TTabSheet
+      Caption = 'Editing'
+      ImageIndex = 1
+      object lblRenameHint: TLabel
+        Left = 35
+        Top = 41
+        Width = 405
+        Height = 30
+        Caption =
+          'Renames a symbol across the project and lists every changed line' +
+          ' in its own Messages tab. Off hides the command entirely.'
+        WordWrap = True
+      end
+      object lblClassCompleteHint: TLabel
+        Left = 35
+        Top = 111
+        Width = 405
+        Height = 30
+        Caption =
+          'Implements what is declared, and first mirrors a changed signatu' +
+          're onto the routine'#39's other half. Off leaves the key to the IDE.'
+        WordWrap = True
+      end
+      object lblBlockCompletionHint: TLabel
+        Left = 35
+        Top = 181
+        Width = 405
+        Height = 30
+        Caption =
+          'Inserts the missing end;/until ; on the next line when Enter is ' +
+          'pressed right after an unclosed block opener.'
+        WordWrap = True
+      end
+      object chkRename: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Rename (Ctrl+Shift+E)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
+      end
+      object chkClassComplete: TCheckBox
+        Left = 16
+        Top = 90
+        Width = 430
+        Height = 17
+        Caption = 'Complete Class At Cursor (Ctrl+Shift+C)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 1
+      end
+      object chkBlockCompletion: TCheckBox
+        Left = 16
+        Top = 160
+        Width = 430
+        Height = 17
+        Caption = 'Block completion (Enter after begin/try/case/repeat)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 2
+      end
     end
-    object lblRenameHint: TLabel
-      Left = 35
-      Top = 175
-      Width = 374
-      Height = 30
-      Caption = 
-        'Renames a symbol across the project and lists every changed line' +
-        ' in its own Messages tab. Off hides the command entirely.'
-      WordWrap = True
-    end
-    object lblBlockCompletionHint: TLabel
-      Left = 35
-      Top = 240
-      Width = 362
-      Height = 30
-      Caption = 
-        'Inserts the missing end;/until ; on the next line when Enter is ' +
-        'pressed right after an unclosed block opener.'
-      WordWrap = True
-    end
-    object lblClassCompleteHint: TLabel
-      Left = 35
-      Top = 305
-      Width = 354
-      Height = 30
-      Caption = 
-        'Implements what is declared, and first mirrors a changed signatu' +
-        're onto the routine'#39's other half. Off leaves the key to the IDE.'
-      WordWrap = True
-    end
-    object chkCtrlClick: TCheckBox
-      Left = 16
-      Top = 24
-      Width = 396
-      Height = 17
-      Caption = 'Find Declaration (Ctrl+Click and the editor menu)'
-      Checked = True
-      State = cbChecked
-      TabOrder = 0
-    end
-    object chkDeclImplToggle: TCheckBox
-      Left = 16
-      Top = 89
-      Width = 396
-      Height = 17
-      Caption = 'Ctrl+Shift+Up / Ctrl+Shift+Down declaration'#8596'implementation jump'
-      Checked = True
-      State = cbChecked
-      TabOrder = 1
-    end
-    object chkRename: TCheckBox
-      Left = 16
-      Top = 154
-      Width = 396
-      Height = 17
-      Caption = 'Rename (Ctrl+Shift+E)'
-      Checked = True
-      State = cbChecked
-      TabOrder = 2
-    end
-    object chkBlockCompletion: TCheckBox
-      Left = 16
-      Top = 219
-      Width = 396
-      Height = 17
-      Caption = 'Block completion (Enter after begin/try/case/repeat)'
-      Checked = True
-      State = cbChecked
-      TabOrder = 3
-    end
-    object chkClassComplete: TCheckBox
-      Left = 16
-      Top = 284
-      Width = 396
-      Height = 17
-      Caption = 'Complete Class At Cursor (Ctrl+Shift+C)'
-      Checked = True
-      State = cbChecked
-      TabOrder = 4
-    end
-  end
-  object gbLogging: TGroupBox
-    Left = 16
-    Top = 468
-    Width = 465
-    Height = 150
-    Caption = ' Logging '
-    TabOrder = 2
-    object lblLoggingHint: TLabel
-      Left = 35
-      Top = 45
-      Width = 346
-      Height = 30
-      Caption = 
-        'Writes pastree-lsp.log next to the project file - the handshake,' +
-        ' the analysis timings and every failed navigation. Off writes no' +
-        'thing.'
-      WordWrap = True
-    end
-    object lblAdvancedLoggingHint: TLabel
-      Left = 35
-      Top = 110
-      Width = 377
-      Height = 30
-      Caption = 
-        'Adds every search path, define, namespace and unit alias to the ' +
-        'log. Off keeps the one-line summary with the counts.'
-      WordWrap = True
-    end
-    object chkLogging: TCheckBox
-      Left = 16
-      Top = 24
-      Width = 396
-      Height = 17
-      Caption = 'Enable logging'
-      Checked = True
-      State = cbChecked
-      TabOrder = 0
-      OnClick = chkLoggingClick
-    end
-    object chkAdvancedLogging: TCheckBox
-      Left = 16
-      Top = 89
-      Width = 396
-      Height = 17
-      Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
-      TabOrder = 1
+    object tsDiagnostics: TTabSheet
+      Caption = 'Diagnostics'
+      ImageIndex = 2
+      object lblLoggingHint: TLabel
+        Left = 35
+        Top = 41
+        Width = 405
+        Height = 30
+        Caption =
+          'Writes pastree-lsp.log next to the project file - the handshake,' +
+          ' the analysis timings and every failed navigation. Off writes no' +
+          'thing.'
+        WordWrap = True
+      end
+      object lblAdvancedLoggingHint: TLabel
+        Left = 35
+        Top = 111
+        Width = 405
+        Height = 30
+        Caption =
+          'Adds every search path, define, namespace and unit alias to the ' +
+          'log. Off keeps the one-line summary with the counts.'
+        WordWrap = True
+      end
+      object chkLogging: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Enable logging'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
+        OnClick = chkLoggingClick
+      end
+      object chkAdvancedLogging: TCheckBox
+        Left = 16
+        Top = 90
+        Width = 430
+        Height = 17
+        Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
+        TabOrder = 1
+      end
     end
   end
   object btnOK: TButton
-    Left = 316
-    Top = 642
+    Left = 312
+    Top = 504
     Width = 85
     Height = 27
     Caption = 'OK'
     Default = True
     ModalResult = 1
-    TabOrder = 3
+    TabOrder = 2
   end
   object btnCancel: TButton
-    Left = 407
-    Top = 642
+    Left = 403
+    Top = 504
     Width = 85
     Height = 27
     Cancel = True
     Caption = 'Cancel'
     ModalResult = 2
-    TabOrder = 4
+    TabOrder = 3
   end
 end

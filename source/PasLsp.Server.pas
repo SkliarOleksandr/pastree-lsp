@@ -273,6 +273,8 @@ type
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
     function HandleRenamePlan(const AMsg: TLspIncoming): string;
+    function HandleFindOverrides(const AMsg: TLspIncoming): string;
+    function HandleFindImplementations(const AMsg: TLspIncoming): string;
     function PlanRenameAt(const APath: string; APasLine, APasCol: Integer;
       const ANewName: string; out APlan: TLspRenamePlanned;
       out AError: string): Boolean;
@@ -3153,6 +3155,149 @@ begin
   end;
 end;
 
+{ One row of a Find Overrides / Find Implementations answer. A Location plus
+  what a Location cannot carry and the results panel shows: the row's KIND
+  (which side of the chain it is), the type declaring it, and - for an
+  inherited implementor - the class that listed the interface. `snippet`/
+  `hiFrom`/`hiTo` ride along as in renamePlan, so a host that has no text for
+  a file it never opened can still paint the line. `filePath` is the same
+  path the uri encodes, spelled for a host that does not want to decode. }
+function HierarchyRowJson(const AHit: TPasRefHit; const AKind, ATypeName,
+  AViaTypeName: string): string;
+begin
+  Result := Format('{"uri":%s,"filePath":%s,"line":%d,"col":%d,"len":%d,' +
+    '"kind":%s,"typeName":%s,"viaTypeName":%s,"snippet":%s,' +
+    '"hiFrom":%d,"hiTo":%d}',
+    [JsonQuote(PathToUri(AHit.FilePath)), JsonQuote(AHit.FilePath),
+     AHit.Line, AHit.Col, AHit.HiTo - AHit.HiFrom, JsonQuote(AKind),
+     JsonQuote(ATypeName), JsonQuote(AViaTypeName), JsonQuote(AHit.Snippet),
+     AHit.HiFrom, AHit.HiTo]);
+end;
+
+{ pastree/findOverrides - OURS, not LSP. The VMT chain of the class method at
+  the position: the declaration that introduced its slot plus every override,
+  reintroduce and message handler below it, across the whole closure
+  (TPasNavigator.MethodAt + FindOverrides - PasTree's docs/editor-features.md
+  section 4 owns what is and is not a row). NOT a reference search and not
+  the decl<->impl toggle: no call site is a row, and textDocument/
+  implementation is already taken by the toggle, which is why this is a
+  custom method rather than an overload of a standard one.
+
+  `null` when the position is not a class method at all - a routine, a record
+  or interface method, a field - so the client can say "not a method" rather
+  than "nothing overrides this". The two are different answers: a method
+  nothing overrides still comes back with its own single `root` row. }
+function TLspServer.HandleFindOverrides(const AMsg: TLspIncoming): string;
+const
+  cKindWord: array[TPasOverrideKind] of string =
+    ('root', 'override', 'message', 'reintroduce');
+var
+  LPath, LName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LRows: TArray<TPasOverrideHit>;
+  LSB: TStringBuilder;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'findOverrides: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    Log(Format('findOverrides: %s -> not a class method',
+      [PosTag(LPath, LPasLine, LPasCol)]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LRows := FNav.FindOverrides(LTMid, LSym);
+  Log(Format('findOverrides: %s ''%s'' -> %d rows',
+    [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
+  LSB := TStringBuilder.Create;
+  try
+    LSB.AppendFormat('{"name":%s,"rows":[', [JsonQuote(LName)]);
+    for LIdx := 0 to High(LRows) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(HierarchyRowJson(LRows[LIdx].Hit, cKindWord[LRows[LIdx].Kind],
+        LRows[LIdx].TypeName, ''));
+    end;
+    LSB.Append(']}');
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ pastree/findImplementations - OURS, not LSP. The interface-side twin of
+  findOverrides, and a separate method for a separate identity (PasTree's
+  InterfaceMethodAt against MethodAt): the classes implementing the INTERFACE
+  method at the position, through the interface's own descendants, with an
+  implementor that inherits the method reported on the ancestor's declaration
+  and `viaTypeName` naming the class that listed the interface. Section 5 of
+  PasTree's docs/editor-features.md owns the rows and the documented gaps
+  (method resolution clauses, `implements` delegation, type aliases).
+
+  `null` when the position is not an interface method - same contract as
+  findOverrides, same reason. }
+function TLspServer.HandleFindImplementations(const AMsg: TLspIncoming): string;
+const
+  cKindWord: array[TPasImplKind] of string =
+    ('root', 'implementor', 'inherited');
+var
+  LPath, LName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LRows: TArray<TPasImplHit>;
+  LSB: TStringBuilder;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'findImplementations: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  if LMid < 0 then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    Log(Format('findImplementations: %s -> not an interface method',
+      [PosTag(LPath, LPasLine, LPasCol)]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LRows := FNav.FindImplementations(LTMid, LSym);
+  Log(Format('findImplementations: %s ''%s'' -> %d rows',
+    [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
+  LSB := TStringBuilder.Create;
+  try
+    LSB.AppendFormat('{"name":%s,"rows":[', [JsonQuote(LName)]);
+    for LIdx := 0 to High(LRows) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(HierarchyRowJson(LRows[LIdx].Hit, cKindWord[LRows[LIdx].Kind],
+        LRows[LIdx].TypeName, LRows[LIdx].ViaTypeName));
+    end;
+    LSB.Append(']}');
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
 { textDocument/implementation and textDocument/declaration - the decl<->impl
   toggle, a Pascal-specific navigation the navigator implements as pure CST
   walks (GotoImplementation/GotoDeclaration; they never cross units, because
@@ -4459,6 +4604,10 @@ begin
         Exit(HandleRename(LMsg));
       if LMsg.Method = 'pastree/renamePlan' then
         Exit(HandleRenamePlan(LMsg));
+      if LMsg.Method = 'pastree/findOverrides' then
+        Exit(HandleFindOverrides(LMsg));
+      if LMsg.Method = 'pastree/findImplementations' then
+        Exit(HandleFindImplementations(LMsg));
       { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when
         something happens that the server cannot see but a reader of this log
         needs as a boundary: the IDE opening or closing a project. Reopening

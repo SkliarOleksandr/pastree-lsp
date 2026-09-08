@@ -15,6 +15,13 @@ unit PasTreeIdePlugin.SettingsForm;
   "tidy up" the field or the registry name on the strength of it being absent
   here.
 
+  THREE TABS SINCE 0.33.0 - Navigation (what a click or a key resolves to),
+  Editing (what changes code), Diagnostics (the log) - because seven switches
+  in two group boxes had become a column that no longer fit the screen at the
+  IDE's default DPI. A switch goes on the tab that answers "what does this
+  turn off": a feature that EDITS the user's code is Editing regardless of
+  how it is triggered.
+
   IF YOU ARE EDITING THE .dfm: the only names the code depends on are the ones
   bound below (the checkboxes, their hint labels, the readout labels and the
   link). Move them, resize them, restyle them freely; renaming or deleting one breaks the
@@ -42,7 +49,8 @@ uses
   Vcl.Controls,
   Vcl.Forms,
   Vcl.StdCtrls,
-  Vcl.ExtCtrls;
+  Vcl.ExtCtrls,
+  Vcl.ComCtrls;
 
 type
   TPasTreeSettingsForm = class(TForm)
@@ -53,18 +61,24 @@ type
     lnkHome: TLinkLabel;
     lnkHomePasTree: TLinkLabel;
     bvlHeader: TBevel;
-    gbOverrides: TGroupBox;
+    pgcSettings: TPageControl;
+    tsNavigation: TTabSheet;
+    tsEditing: TTabSheet;
+    tsDiagnostics: TTabSheet;
     chkCtrlClick: TCheckBox;
     lblCtrlClickHint: TLabel;
     chkDeclImplToggle: TCheckBox;
     lblDeclImplToggleHint: TLabel;
+    chkFindOverrides: TCheckBox;
+    lblFindOverridesHint: TLabel;
+    chkFindImplementations: TCheckBox;
+    lblFindImplementationsHint: TLabel;
     chkRename: TCheckBox;
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
     lblBlockCompletionHint: TLabel;
     chkClassComplete: TCheckBox;
     lblClassCompleteHint: TLabel;
-    gbLogging: TGroupBox;
     chkLogging: TCheckBox;
     lblLoggingHint: TLabel;
     chkAdvancedLogging: TCheckBox;
@@ -165,6 +179,9 @@ begin
     LSettings := LoadSettings;
     LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
+    LForm.chkFindOverrides.Checked := LSettings.EnableFindOverrides;
+    LForm.chkFindImplementations.Checked :=
+      LSettings.EnableFindImplementations;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
@@ -179,6 +196,9 @@ begin
 
     LSettings.CtrlClickNavigation := LForm.chkCtrlClick.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
+    LSettings.EnableFindOverrides := LForm.chkFindOverrides.Checked;
+    LSettings.EnableFindImplementations :=
+      LForm.chkFindImplementations.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;

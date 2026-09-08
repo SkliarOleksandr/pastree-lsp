@@ -86,6 +86,16 @@ function OverrideDeclImplToggle: Boolean;
 function RenameEnabled: Boolean;
 
 /// <summary>
+/// Whether the editor menu offers "Find Overrides" / "Find Implementations".
+/// False HIDES the item, as for Rename: a disabled item reads as "not right
+/// now", and this one would never come back without the settings dialog.
+/// Neither replaces a native command, so off means gone rather than "the
+/// native one".
+/// </summary>
+function FindOverridesEnabled: Boolean;
+function FindImplementationsEnabled: Boolean;
+
+/// <summary>
 /// Whether Ctrl+Shift+C is ours - class completion AND the prototype sync
 /// that now runs in front of it (PasTreeIdePlugin.SyncPrototypes), which is
 /// one keystroke and therefore one switch. False hands the keystroke back to
@@ -156,6 +166,8 @@ type
     CtrlClickNavigation: Boolean;
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
+    EnableFindOverrides: Boolean;
+    EnableFindImplementations: Boolean;
     EnableBlockCompletion: Boolean;
     EnableClassComplete: Boolean;
     EnableLogging: Boolean;
@@ -186,6 +198,8 @@ const
   cValueCtrlClick = 'CtrlClickNavigation';
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
+  cValueFindOverrides = 'EnableFindOverrides';
+  cValueFindImplementations = 'EnableFindImplementations';
   cValueBlockCompletion = 'EnableBlockCompletion';
   cValueClassComplete = 'EnableClassComplete';
   cValueLogging = 'EnableLogging';
@@ -278,6 +292,8 @@ begin
   Result.CtrlClickNavigation := True;
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
+  Result.EnableFindOverrides := True;
+  Result.EnableFindImplementations := True;
   Result.EnableBlockCompletion := True;
   Result.EnableClassComplete := True;
   Result.EnableLogging := True;
@@ -302,6 +318,11 @@ begin
         ReadFlag(LReg, cValueDeclImplToggle, Result.OverrideDeclImplToggle);
       Result.EnableRename :=
         ReadFlag(LReg, cValueRename, Result.EnableRename);
+      Result.EnableFindOverrides :=
+        ReadFlag(LReg, cValueFindOverrides, Result.EnableFindOverrides);
+      Result.EnableFindImplementations :=
+        ReadFlag(LReg, cValueFindImplementations,
+          Result.EnableFindImplementations);
       Result.EnableBlockCompletion :=
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
       Result.EnableClassComplete :=
@@ -346,6 +367,10 @@ begin
         LReg.WriteInteger(cValueDeclImplToggle,
           Ord(ASettings.OverrideDeclImplToggle));
         LReg.WriteInteger(cValueRename, Ord(ASettings.EnableRename));
+        LReg.WriteInteger(cValueFindOverrides,
+          Ord(ASettings.EnableFindOverrides));
+        LReg.WriteInteger(cValueFindImplementations,
+          Ord(ASettings.EnableFindImplementations));
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
         LReg.WriteInteger(cValueClassComplete,
@@ -397,6 +422,16 @@ end;
 function RenameEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableRename;
+end;
+
+function FindOverridesEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableFindOverrides;
+end;
+
+function FindImplementationsEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableFindImplementations;
 end;
 
 function BlockCompletionEnabled: Boolean;

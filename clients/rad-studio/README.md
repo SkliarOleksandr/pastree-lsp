@@ -82,9 +82,45 @@ unofficial/community API surface.
 
 ### Menu
 
-"Find Type Declaration", "Find References" and "Rename..." live in the
-editor's right-click menu under the plugin's own category, ALONGSIDE the
-native items - they replace nothing and unregister cleanly at unload.
+"Find Type Declaration", "Find References", "Find Overrides", "Find
+Implementations" and "Rename..." live in the editor's right-click menu under
+the plugin's own category, ALONGSIDE the native items - they replace nothing
+and unregister cleanly at unload.
+
+### Find Overrides / Find Implementations
+
+Two commands for two identities, as PasTree draws the line (its
+`docs/editor-features.md`, sections 4 and 5):
+
+- **Find Overrides** on a CLASS method: its VMT chain across the closure -
+  the declaration that introduced the slot (`root`), every `override` below
+  it, a `reintroduce` (reported so a reader does not mistake it for an
+  override) and a `message` handler (implicitly virtual). No call site is a
+  row. Works from the declaration or the implementation header, from any link
+  of the chain. A method nothing overrides answers with its own single root
+  row - the honest "nothing overrides this".
+- **Find Implementations** on an INTERFACE method: every class listing the
+  interface or a descendant of it; a class that satisfies the method through
+  an ancestor is reported on the ancestor's declaration (the code that runs)
+  with the listing class named beside it - `TGreeterBase (inherited via
+  TInheritedGreeter)`.
+
+Both run across the project group like Find References, and each reports into
+a tab of its own ("Find Overrides", "Find Implementations") shaped exactly like
+the Find References tab - the label after the snippet is the declaring type
+and the row's kind, and the title carries the unit count (`5 declaration(s) in
+3 unit(s)`) so "did it only search this file?" has an answer on screen.
+
+**The menu items are not gated on the caret.** PasTree gates its demo's items
+on `MethodAt`/`InterfaceMethodAt`; this package cannot - the verdict lives in
+the server and a menu is drawn before any answer arrives. A caret that is not
+the right kind of method gets a one-line message box instead, the same shape
+Find References uses for "no identifier under the cursor". Each command has its
+own switch on the Navigation tab of Tools > PasTree > Settings; off hides the
+item, the Rename way (the dialog grew tabs - Navigation, Editing, Diagnostics -
+in 0.33.1, when the seventh switch stopped fitting). Server side these are
+`pastree/findOverrides` and `pastree/findImplementations` (SPEC.md, the
+Implemented table).
 
 **"Find Declaration" is the one native item we replace** (again, since
 2026-09-01): our own action takes over the `Identifier` category, in the
@@ -609,6 +645,9 @@ what lets `tests/` drive them against a real server outside the IDE:
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,
   snippet highlighting).
+- `PasTreeIdePlugin.FindHierarchy.pas` - Find Overrides and Find
+  Implementations: the two group-wide requests and their result tabs, over
+  the same ResultRows the references tab uses.
 - `PasTreeIdePlugin.GotoDeclaration.pas` - the Ctrl+Click override plus the
   shared `ResolveAndNavigate`/`ExecuteGotoDeclaration` used by both Go to
   Declaration entry points: mouse event interception, cursor

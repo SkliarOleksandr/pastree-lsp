@@ -108,7 +108,13 @@ const
   /// types, and an older sibling answers nothing while every request still
   /// succeeds. That is the shape this floor exists for: a silent absence
   /// rather than a compile error.
-  cMinPasTreeVersion = '0.17.0';
+  ///
+  /// 0.20.1 (2026-09-08): MethodAt/FindOverrides and InterfaceMethodAt/
+  /// FindImplementations, behind pastree/findOverrides and
+  /// pastree/findImplementations. An older sibling fails to COMPILE here
+  /// rather than silently, so the floor is documentation as much as a check -
+  /// but a floor that names the real requirement is the one worth having.
+  cMinPasTreeVersion = '0.20.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

@@ -52,6 +52,7 @@ contains
   PasTreeIdePlugin.LspDocuments in 'PasTreeIdePlugin.LspDocuments.pas',
   PasTreeIdePlugin.LspSession in 'PasTreeIdePlugin.LspSession.pas',
   PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
+  PasTreeIdePlugin.FindHierarchy in 'PasTreeIdePlugin.FindHierarchy.pas',
   PasTreeIdePlugin.ResultRows in 'PasTreeIdePlugin.ResultRows.pas',
   PasTreeIdePlugin.WaitDialog in 'PasTreeIdePlugin.WaitDialog.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',

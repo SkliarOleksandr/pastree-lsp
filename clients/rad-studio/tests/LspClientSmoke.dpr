@@ -413,6 +413,121 @@ begin
     'the uses item resolves to the unit itself');
 end;
 
+{ 2b. pastree/findOverrides and pastree/findImplementations over
+  fixtures\DemoHierarchy.pas - the two hierarchy commands of the RAD client.
+
+  What is checked is the ROW SET, by kind and declaring type: the chain
+  answers from any link (an override in the middle names the root and every
+  sibling), a hiding declaration in an unrelated class is never a row, a
+  reintroduce and a message handler are rows of their own kind, an interface
+  method reaches an implementor through a descendant interface, and a class
+  that inherits its implementation is reported on the ancestor's declaration
+  with the listing class named. And the two refusals, because they are what
+  the menu items cannot decide for themselves: overrides on an interface
+  method and implementations on a class method both answer null. }
+procedure TestHierarchy;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  function CountOf(const ASub: string): Integer;
+  var
+    LPos: Integer;
+  begin
+    Result := 0;
+    LPos := Pos(ASub, GResultJson);
+    while LPos > 0 do
+    begin
+      Inc(Result);
+      LPos := Pos(ASub, GResultJson, LPos + Length(ASub));
+    end;
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 2b. findOverrides / findImplementations ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoHierarchy.pas');
+  DidOpen(LFile);
+
+  // From the MIDDLE of the chain: TCircle.Paint's `override`.
+  FindPos(LFile, 'procedure Paint; override;', 'Paint', LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on an override');
+  Check(GOk and GResultJson.Contains('"name":"Paint"'), 'it names the method');
+  Check(GOk and GResultJson.Contains('"kind":"root"') and
+    GResultJson.Contains('"typeName":"TShape"'),
+    'the chain is answered from the root, TShape.Paint');
+  Check(GOk and GResultJson.Contains('"typeName":"TCircle"') and
+    GResultJson.Contains('"typeName":"TSquare"') and
+    GResultJson.Contains('"typeName":"TRoundedSquare"'),
+    'every override down the chain is a row, siblings included');
+  Check(GOk and not GResultJson.Contains('TUnrelated'),
+    'a same-named method of an unrelated class is not a row');
+  Check(GOk and (CountOf('"kind":') = 4), 'exactly four rows');
+  Check(GOk and GResultJson.Contains('"snippet":') and
+    GResultJson.Contains('"hiFrom":'),
+    'rows carry the server''s snippet and highlight span');
+
+  // The same chain, asked from the implementation header.
+  FindPos(LFile, 'procedure TRoundedSquare.Paint;', 'Paint', LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on an implementation header');
+  Check(GOk and (CountOf('"kind":') = 4) and
+    GResultJson.Contains('"typeName":"TShape"'),
+    'and it is the same four-row chain');
+
+  FindPos(LFile, 'procedure Describe; virtual;', 'Describe', LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on Describe');
+  Check(GOk and GResultJson.Contains('"kind":"reintroduce"') and
+    GResultJson.Contains('"typeName":"TSquare"'),
+    'a reintroduce is reported, as its own kind');
+
+  FindPos(LFile, 'procedure OnDemo(var AMsg: TDemoMessage); message WM_DEMO;',
+    'OnDemo', LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on a message handler');
+  Check(GOk and GResultJson.Contains('"kind":"message"') and
+    GResultJson.Contains('"typeName":"TRoundedSquare"'),
+    'a descendant''s message handler is in the chain, as kind message');
+
+  // Implementations of IGreeter.Greet - the first `procedure Greet;` in the
+  // file is the interface's own.
+  FindPos(LFile, 'procedure Greet;', 'Greet', LLine, LChar);
+  Check(Ask('pastree/findImplementations',
+    PositionParams(LFile, LLine, LChar)),
+    'findImplementations answered on an interface method');
+  Check(GOk and GResultJson.Contains('"name":"Greet"'), 'it names the method');
+  Check(GOk and GResultJson.Contains('"kind":"root"') and
+    GResultJson.Contains('"typeName":"IGreeter"'),
+    'the interface''s own declaration is the root row');
+  Check(GOk and GResultJson.Contains('"typeName":"TPoliteGreeter"'),
+    'a class listing the interface is an implementor');
+  Check(GOk and GResultJson.Contains('"typeName":"TLoudGreeter"'),
+    'and so is a class listing a DESCENDANT interface');
+  Check(GOk and GResultJson.Contains('"kind":"inherited"') and
+    GResultJson.Contains('"typeName":"TGreeterBase"') and
+    GResultJson.Contains('"viaTypeName":"TInheritedGreeter"'),
+    'a class satisfying it through its ancestor is reported on the ancestor, via the class');
+  Check(GOk and (CountOf('"kind":') = 4), 'exactly four rows');
+
+  // The refusals: the wrong identity answers null, not an empty list.
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on an interface method');
+  Check(GOk and ((GResultJson = '') or (GResultJson = 'null')),
+    'and declines it - an interface method has no override chain');
+  FindPos(LFile, 'procedure Paint; virtual;', 'Paint', LLine, LChar);
+  Check(Ask('pastree/findImplementations',
+    PositionParams(LFile, LLine, LChar)),
+    'findImplementations answered on a class method');
+  Check(GOk and ((GResultJson = '') or (GResultJson = 'null')),
+    'and declines it - a class method has no implementors');
+  FindPos(LFile, 'WM_DEMO = 1024', 'WM_DEMO', LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on a constant');
+  Check(GOk and ((GResultJson = '') or (GResultJson = 'null')), 'and declines it');
+end;
+
 { 3. Lazy restart: no timer, the next request revives the server. }
 procedure TestLazyRestart;
 var
@@ -2263,6 +2378,7 @@ begin
       TestNavigation;
       TestNonAsciiPositions;
       TestBareInherited;
+      TestHierarchy;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
       TestIncrementalPath;

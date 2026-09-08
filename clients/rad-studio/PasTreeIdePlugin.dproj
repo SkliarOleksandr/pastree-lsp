@@ -110,6 +110,7 @@
         <DCCReference Include="PasTreeIdePlugin.LspDocuments.pas"/>
         <DCCReference Include="PasTreeIdePlugin.LspSession.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.FindHierarchy.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ResultRows.pas"/>
         <DCCReference Include="PasTreeIdePlugin.WaitDialog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>

@@ -29,9 +29,10 @@ unit PasTreeIdePlugin.Wizard;
       back. So it happens at load, only if the override is switched on. See
       the long comment in TMenuManager.Create.
 
-  Our other three items - "Find Type Declaration", "Find References" and
-  "Rename..." - replace nothing and live under cMenuCategory, registered
-  alongside the native ones and unregistered cleanly at unload.
+  Our other items - "Find Type Declaration", "Find References", "Find
+  Overrides", "Find Implementations" and "Rename..." - replace nothing and
+  live under cMenuCategory, registered alongside the native ones and
+  unregistered cleanly at unload.
 
   Modelled on the official samples shipped with RAD Studio:
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Local Menu Demo
@@ -47,7 +48,8 @@ implementation
 uses
   System.SysUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
-  PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
+  PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
+  PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
@@ -80,6 +82,10 @@ type
     procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure OnFindReferencesExecute(Sender: TObject);
     procedure OnFindReferencesUpdate(Sender: TObject);
+    procedure OnFindOverridesExecute(Sender: TObject);
+    procedure OnFindOverridesUpdate(Sender: TObject);
+    procedure OnFindImplementationsExecute(Sender: TObject);
+    procedure OnFindImplementationsUpdate(Sender: TObject);
     procedure OnRenameExecute(Sender: TObject);
     procedure OnRenameUpdate(Sender: TObject);
     procedure OnFindTypeDeclarationExecute(Sender: TObject);
@@ -183,6 +189,29 @@ begin
   LAction.Category := 'PasTreeFindReferences';
   LAction.OnUpdate := OnFindReferencesUpdate;
   LAction.OnExecute := OnFindReferencesExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
+
+  // The two hierarchy commands, next to Find References and shaped like it.
+  // Enabled wherever an editor is (whether the caret is on the right kind of
+  // method is the server's verdict, which cannot gate a menu drawn before the
+  // answer arrives - see PasTreeIdePlugin.FindHierarchy's header), and
+  // hidden by their settings switches, the Rename way.
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeFindOverrides';
+  LAction.Caption := 'Find Overrides';
+  LAction.Category := 'PasTreeFindOverrides';
+  LAction.OnUpdate := OnFindOverridesUpdate;
+  LAction.OnExecute := OnFindOverridesExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
+
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeFindImplementations';
+  LAction.Caption := 'Find Implementations';
+  LAction.Category := 'PasTreeFindImplementations';
+  LAction.OnUpdate := OnFindImplementationsUpdate;
+  LAction.OnExecute := OnFindImplementationsExecute;
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
 
@@ -339,6 +368,29 @@ begin
   ExecuteFindReferences(FEditorServices.TopView);
 end;
 
+procedure TMenuManager.OnFindOverridesExecute(Sender: TObject);
+begin
+  ExecuteFindOverrides(FEditorServices.TopView);
+end;
+
+// Hidden rather than greyed when switched off - the Rename rule, same reason.
+procedure TMenuManager.OnFindOverridesUpdate(Sender: TObject);
+begin
+  TAction(Sender).Visible := FindOverridesEnabled;
+  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+end;
+
+procedure TMenuManager.OnFindImplementationsExecute(Sender: TObject);
+begin
+  ExecuteFindImplementations(FEditorServices.TopView);
+end;
+
+procedure TMenuManager.OnFindImplementationsUpdate(Sender: TObject);
+begin
+  TAction(Sender).Visible := FindImplementationsEnabled;
+  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+end;
+
 procedure TMenuManager.OnRenameUpdate(Sender: TObject);
 begin
   // HIDDEN rather than greyed when the feature is off: a disabled item
@@ -447,6 +499,7 @@ begin
     // stands there afterwards is a record of edits that never happened.
     CloseRenameResults;
     CloseFindReferencesResults;
+    CloseFindHierarchyResults;
   end;
 end;
 
@@ -566,6 +619,7 @@ begin
   FinalizeErrorPaint;
   FinalizeRename;
   FinalizeFindReferencesMessageGroup;
+  FinalizeFindHierarchyMessageGroups;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
   // inside this package's code when the BPL unloads is an immediate crash, so

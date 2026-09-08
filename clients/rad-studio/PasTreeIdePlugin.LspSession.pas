@@ -80,6 +80,39 @@ type
     AProjectsSearched, AProjectsInGroup: Integer; const AError: string);
 
   /// <summary>
+  /// One row of a Find Overrides / Find Implementations answer
+  /// (pastree/findOverrides, pastree/findImplementations): a navigation
+  /// target plus what the results panel shows beside the snippet. Kind is the
+  /// server's word - `root`, `override`, `message`, `reintroduce` for a chain;
+  /// `root`, `implementor`, `inherited` for implementors - kept as text so a
+  /// kind this client has not heard of still paints. TypeName is the type
+  /// DECLARING the row; ViaTypeName, for an inherited implementor, the class
+  /// that listed the interface ('' otherwise). Snippet/HiFrom/HiTo are the
+  /// server's own line and 0-based highlight span: the row may be in a unit
+  /// this IDE never opened, so there is no local text to read it from.
+  /// </summary>
+  TLspHierarchyRow = record
+    Hit: TLspHit;
+    Kind: string;
+    TypeName: string;
+    ViaTypeName: string;
+    Snippet: string;
+    HiFrom, HiTo: Integer;
+  end;
+
+  /// <summary>
+  /// Delivered on the main thread, once. AIsSubject is False when the server
+  /// answered null - the position is not the kind of method the command is
+  /// about (no class method under the caret for overrides, no interface method
+  /// for implementations) - which is a different answer from "found only the
+  /// declaration itself" (AIsSubject True, one root row). AName is the method's
+  /// name as the server read it, for the report title.
+  /// </summary>
+  TLspHierarchyProc = reference to procedure(ASuccess, AIsSubject: Boolean;
+    const AName: string; const ARows: TArray<TLspHierarchyRow>;
+    AProjectsSearched, AProjectsInGroup: Integer; const AError: string);
+
+  /// <summary>
   /// One completion item, already in IDE coordinates. The replace span
   /// (Row/ColFrom..ColTo, 1-based, ColTo exclusive) is the partially-typed
   /// token the item replaces - the server always answers with a textEdit, so
@@ -382,6 +415,21 @@ procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
 
 /// <summary>
+/// Find Overrides across the project group: every project whose analysis is
+/// already running is asked (the owner of the file first and unconditionally),
+/// the answers are merged and de-duplicated by position, with the owner's
+/// name and subject verdict standing for the whole. The group matters here as
+/// much as for references: a descendant class in a unit only ANOTHER project
+/// compiles is invisible to the owner's closure.
+/// </summary>
+procedure LspFindOverridesInGroup(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHierarchyProc);
+
+/// <summary>Same contract, for pastree/findImplementations.</summary>
+procedure LspFindImplementationsInGroup(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+
+/// <summary>
 /// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
 /// (AToImpl) or from anywhere inside the body back to its header. AOnDone
 /// receives zero or one hit - zero is a legitimate answer, not a failure: a
@@ -671,6 +719,12 @@ begin
 end;
 
 type
+  // One project's answer to findOverrides/findImplementations - what the
+  // group-wide merge below collects before it speaks as TLspHierarchyProc.
+  TLspHierarchyOneProc = reference to procedure(ASuccess, AIsSubject: Boolean;
+    const AName: string; const ARows: TArray<TLspHierarchyRow>;
+    const AError: string);
+
   TLspSession = class
   private
     FClient: TLspClient;
@@ -762,6 +816,11 @@ type
       const AOnDone: TLspTextEditsProc);
     procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
       const ANewName: string; const AOnDone: TLspRenamePlanProc);
+    // AMethod is 'pastree/findOverrides' or 'pastree/findImplementations':
+    // the two answers have one shape and differ only in what the server was
+    // asked, so one sender serves both.
+    procedure Hierarchy(const AMethod, AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspHierarchyOneProc);
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
@@ -2136,6 +2195,84 @@ begin
     end);
 end;
 
+{ The rows as the server sent them, in the server's order (the root first, then
+  the chain/implementors as PasTree sorted them) - the group merge re-sorts,
+  so nothing here depends on that order. A row without a path or with a
+  non-positive position is dropped rather than shown as a jump to nowhere. }
+function ParseHierarchyRows(AResult: TJSONValue): TArray<TLspHierarchyRow>;
+var
+  LRows: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LRow: TLspHierarchyRow;
+  LCount: Integer;
+begin
+  Result := nil;
+  if not (AResult is TJSONObject) or
+     not AResult.TryGetValue<TJSONArray>('rows', LRows) then
+    Exit;
+  SetLength(Result, LRows.Count);
+  LCount := 0;
+  for LValue in LRows do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LRow := Default(TLspHierarchyRow);
+    LRow.Hit.FilePath := LObj.GetValue<string>('filePath', '');
+    LRow.Hit.Row := LObj.GetValue<Integer>('line', 0);
+    LRow.Hit.Col := LObj.GetValue<Integer>('col', 0);
+    LRow.Kind := LObj.GetValue<string>('kind', '');
+    LRow.TypeName := LObj.GetValue<string>('typeName', '');
+    LRow.ViaTypeName := LObj.GetValue<string>('viaTypeName', '');
+    LRow.Snippet := LObj.GetValue<string>('snippet', '');
+    LRow.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
+    LRow.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    if (LRow.Hit.FilePath = '') or (LRow.Hit.Row < 1) or (LRow.Hit.Col < 1) then
+      Continue;
+    Result[LCount] := LRow;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
+procedure TLspSession.Hierarchy(const AMethod, AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspHierarchyOneProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, False, '', nil, 'no LSP server available');
+    Exit;
+  end;
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  // No supersede slot, as for renamePlan: a menu command, not a stream of
+  // per-keystroke questions.
+  FClient.Request(AMethod, LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if not ASuccess then
+        AOnDone(False, False, '', nil, AError)
+      else if not (AResult is TJSONObject) then
+        // null: the position is not the kind of method this command is about.
+        AOnDone(True, False, '', nil, '')
+      else
+        AOnDone(True, True, AResult.GetValue<string>('name', ''),
+          ParseHierarchyRows(AResult), '');
+    end);
+end;
+
 procedure TLspSession.Completion(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspCompletionProc);
 var
@@ -3152,6 +3289,137 @@ begin
         else
           AOnDone(True, MergeHits(LCollected), LAnswered, LInGroup, '');
       end);
+end;
+
+{ MergeHits for hierarchy rows: same sort, same de-duplication, same reason -
+  a unit two projects compile answers from both servers. The first row at a
+  position keeps its Kind/TypeName; two servers describing the same
+  declaration agree on those anyway. }
+function MergeHierarchyRows(
+  const ARows: TArray<TLspHierarchyRow>): TArray<TLspHierarchyRow>;
+var
+  LSorted: TArray<TLspHierarchyRow>;
+  LIdx: Integer;
+begin
+  Result := nil;
+  LSorted := Copy(ARows);
+  TArray.Sort<TLspHierarchyRow>(LSorted, TComparer<TLspHierarchyRow>.Construct(
+    function(const A, B: TLspHierarchyRow): Integer
+    begin
+      Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Row - B.Hit.Row;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
+    end));
+  for LIdx := 0 to High(LSorted) do
+    if (LIdx = 0) or
+       not SameText(LSorted[LIdx].Hit.FilePath, LSorted[LIdx - 1].Hit.FilePath) or
+       (LSorted[LIdx].Hit.Row <> LSorted[LIdx - 1].Hit.Row) or
+       (LSorted[LIdx].Hit.Col <> LSorted[LIdx - 1].Hit.Col) then
+      Result := Result + [LSorted[LIdx]];
+end;
+
+{ The group-wide shape of LspReferencesInGroup, for the two hierarchy
+  commands. One difference in what is trusted: the OWNER's verdict decides
+  whether the position is a subject at all and what it is called. Another
+  project's server may hold this file too and say the same thing, or not hold
+  it and answer null - and null from a non-owner means "not my file", never
+  "not a method", so it must not override the owner. Rows from every project
+  that did answer are merged. }
+procedure HierarchyInGroup(const AMethod, AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+var
+  LOwner: TLspSession;
+  LTargets: TArray<TLspSession>;
+  LSession: TLspSession;
+  LGroup: IOTAProjectGroup;
+  LOutstanding, LAnswered, LInGroup: Integer;
+  LCollected: TArray<TLspHierarchyRow>;
+  LOwnerName, LOwnerError: string;
+  LOwnerOk, LOwnerIsSubject: Boolean;
+  LOnAny: TLspHierarchyOneProc;
+begin
+  LOwner := SessionForRequest(AFileName);
+  if LOwner = nil then
+  begin
+    AOnDone(False, False, '', nil, 0, 0, 'LSP session not initialized');
+    Exit;
+  end;
+
+  LGroup := GetProjectGroup;
+  if Assigned(LGroup) then
+    LInGroup := LGroup.ProjectCount
+  else
+    LInGroup := 1;
+
+  LTargets := [LOwner];
+  for LSession in GPool.ReadySessions do
+    if LSession <> LOwner then
+      LTargets := LTargets + [LSession];
+
+  LOutstanding := Length(LTargets);
+  LAnswered := 0;
+  LCollected := nil;
+  LOwnerName := '';
+  LOwnerError := '';
+  LOwnerOk := False;
+  LOwnerIsSubject := False;
+
+  // The accounting every answer runs, owner or not. One closure shared by
+  // every target rather than one literal inside the loop: a loop variable
+  // captured by an anonymous method is captured by REFERENCE, so a literal
+  // there would see the last target in every callback, not its own - which
+  // is why the owner is told apart by a wrapper below, never by comparing
+  // the loop variable.
+  LOnAny :=
+    procedure(ASuccess, AIsSubject: Boolean; const AName: string;
+      const ARows: TArray<TLspHierarchyRow>; const AError: string)
+    begin
+      if ASuccess then
+      begin
+        if AIsSubject then
+          Inc(LAnswered);
+        LCollected := LCollected + ARows;
+      end;
+      Dec(LOutstanding);
+      if LOutstanding > 0 then
+        Exit;
+      if not LOwnerOk then
+        AOnDone(False, False, '', nil, 0, LInGroup, LOwnerError)
+      else if not LOwnerIsSubject then
+        AOnDone(True, False, '', nil, LAnswered, LInGroup, '')
+      else
+        AOnDone(True, True, LOwnerName, MergeHierarchyRows(LCollected),
+          LAnswered, LInGroup, '');
+    end;
+
+  LOwner.Hierarchy(AMethod, AFileName, ARow, ACol,
+    procedure(ASuccess, AIsSubject: Boolean; const AName: string;
+      const ARows: TArray<TLspHierarchyRow>; const AError: string)
+    begin
+      LOwnerOk := ASuccess;
+      LOwnerIsSubject := AIsSubject;
+      LOwnerName := AName;
+      LOwnerError := AError;
+      LOnAny(ASuccess, AIsSubject, AName, ARows, AError);
+    end);
+  for LSession in LTargets do
+    if LSession <> LOwner then
+      LSession.Hierarchy(AMethod, AFileName, ARow, ACol, LOnAny);
+end;
+
+procedure LspFindOverridesInGroup(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHierarchyProc);
+begin
+  HierarchyInGroup('pastree/findOverrides', AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspFindImplementationsInGroup(const AFileName: string;
+  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+begin
+  HierarchyInGroup('pastree/findImplementations', AFileName, ARow, ACol,
+    AOnDone);
 end;
 
 procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;
