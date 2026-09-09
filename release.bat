@@ -132,11 +132,18 @@ rem changes git's working directory, so a relative -o resolves inside the
 rem repository being exported rather than inside this one. The first export
 rem here passes "." and so appeared to work; the second wrote into PasTree's
 rem tree and failed with git's own message swallowed by the pipeline.
+rem
+rem tar IS CALLED BY FULL PATH for the same reason `find` is avoided in
+rem scripts\ide.bat: run from Git Bash, its PATH comes first, and `tar` is then
+rem GNU tar, which reads an absolute Windows path as a REMOTE HOST because of
+rem the colon - "Cannot execute remote shell". Windows ships its own tar
+rem (bsdtar) in System32 and that one takes C:\... as a path. Same script, same
+rem behaviour, whichever shell started it.
 :export
 mkdir "%~2" 2>nul
 git -C "%~1" archive --format=tar -o "%CD%\out\release\export.tar" HEAD
 if errorlevel 1 exit /b 1
-tar -xf "%CD%\out\release\export.tar" -C "%~2"
+"%SystemRoot%\System32\tar.exe" -xf "%CD%\out\release\export.tar" -C "%~2"
 if errorlevel 1 exit /b 1
 del /q "%CD%\out\release\export.tar"
 for %%D in ("%~2") do echo   exported %%~nxD
