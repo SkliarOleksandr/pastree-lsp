@@ -56,7 +56,7 @@ if %LCOUNT%==0 (
   echo.
   echo No suitable RAD Studio installation found.
   if defined LOLD echo Installed but too old:!LOLD!
-  echo This package needs Delphi 12 ^(BDS 29.0^) or newer.
+  echo This package needs Delphi 12 ^(BDS 23.0^) or newer.
   goto :fail
 )
 

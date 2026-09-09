@@ -53,10 +53,12 @@ uses
   Vcl.Controls,
   Winapi.Windows,
   ToolsAPI, ToolsAPI.Editor,
+  PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings;
 
 type
+{$IF Declared(TEditorKeyboardEvent)}
   TPasBlockCloseNotifier = class(TNTACodeEditorNotifier)
   private
     procedure HandleKeyUp(const AEditor: TWinControl; AKey: Word;
@@ -66,10 +68,29 @@ type
   public
     constructor Create;
   end;
+{$ELSE}
+  /// <summary>
+  /// THE PRE-37.0 PATH. Those ToolsAPI versions have no editor keyboard
+  /// events at all - no cevKeyboardEvents, no OnEditorKeyUp - so the key-up
+  /// comes from the shared VCL WindowProc hook instead
+  /// (PasTreeIdePlugin.EditorWindowHook, which also carries Ctrl+Click for
+  /// the same reason). Same observer semantics: the editor sees the key
+  /// first, so the line break has already happened by the time this runs,
+  /// which is what the staleness gates below assume.
+  /// </summary>
+  TPasBlockCloseKeys = class
+  private
+    procedure HandleHookedKeyUp(const AEditor: TWinControl; AKey: Word);
+  end;
+{$ENDIF}
 
 var
+{$IF Declared(TEditorKeyboardEvent)}
   GNotifier: INTACodeEditorEvents;
   GNotifierIndex: Integer = -1;
+{$ELSE}
+  GKeys: TPasBlockCloseKeys;
+{$ENDIF}
   GAlive: Boolean = False;
 
 procedure LogDiagnostic(const AMessage: string);
@@ -165,33 +186,17 @@ begin
   AView.Paint;
 end;
 
-{ TPasBlockCloseNotifier }
-
-constructor TPasBlockCloseNotifier.Create;
-begin
-  inherited Create;
-  // The base class dispatches through event properties, not virtuals -
-  // AllowedEvents is the only override, the handler rides the property
-  // (same shape as TPasErrorPaintNotifier).
-  OnEditorKeyUp := HandleKeyUp;
-end;
-
-function TPasBlockCloseNotifier.AllowedEvents: TCodeEditorEvents;
-begin
-  Result := [cevKeyboardEvents];
-end;
-
-procedure TPasBlockCloseNotifier.HandleKeyUp(const AEditor: TWinControl;
-  AKey: Word; AShift: TShiftState; var AHandled: Boolean);
+/// <summary>
+/// The request itself, once a plain Enter key-up has been recognised.
+/// Shared by both input paths (see the type declarations above), which is
+/// why the chord test lives in each handler and not here.
+/// </summary>
+procedure RequestBlockClose;
 var
   LView: IOTAEditView;
   LFileName: string;
   LRow, LCol, LLenAtRequest: Integer;
 begin
-  // AHandled is never touched: this is an observer, and the key-up has
-  // nothing left to handle anyway - the editor broke the line on key-down.
-  if (AKey <> VK_RETURN) or (AShift * [ssCtrl, ssAlt] <> []) then
-    Exit;
   if not GAlive or not BlockCompletionEnabled then
     Exit;
   LView := TopViewOf('');
@@ -247,6 +252,34 @@ begin
     end);
 end;
 
+{$IF Declared(TEditorKeyboardEvent)}
+
+{ TPasBlockCloseNotifier }
+
+constructor TPasBlockCloseNotifier.Create;
+begin
+  inherited Create;
+  // The base class dispatches through event properties, not virtuals -
+  // AllowedEvents is the only override, the handler rides the property
+  // (same shape as TPasErrorPaintNotifier).
+  OnEditorKeyUp := HandleKeyUp;
+end;
+
+function TPasBlockCloseNotifier.AllowedEvents: TCodeEditorEvents;
+begin
+  Result := [cevKeyboardEvents];
+end;
+
+procedure TPasBlockCloseNotifier.HandleKeyUp(const AEditor: TWinControl;
+  AKey: Word; AShift: TShiftState; var AHandled: Boolean);
+begin
+  // AHandled is never touched: this is an observer, and the key-up has
+  // nothing left to handle anyway - the editor broke the line on key-down.
+  if (AKey <> VK_RETURN) or (AShift * [ssCtrl, ssAlt] <> []) then
+    Exit;
+  RequestBlockClose;
+end;
+
 procedure InitializeBlockClose;
 var
   LServices: INTACodeEditorServices;
@@ -274,5 +307,47 @@ begin
   GNotifierIndex := -1;
   GNotifier := nil;
 end;
+
+{$ELSE}
+
+{ TPasBlockCloseKeys }
+
+procedure TPasBlockCloseKeys.HandleHookedKeyUp(const AEditor: TWinControl;
+  AKey: Word);
+begin
+  // The chord, from the keyboard itself: a WM_KEYUP carries no modifier
+  // state at all, unlike the ToolsAPI event's TShiftState. Shift+Enter is
+  // deliberately still ours (it breaks the line the same way); Ctrl+Enter
+  // and Alt+Enter are commands, not typing.
+  if AKey <> VK_RETURN then
+    Exit;
+  if (GetKeyState(VK_CONTROL) < 0) or (GetKeyState(VK_MENU) < 0) then
+    Exit;
+  RequestBlockClose;
+end;
+
+procedure InitializeBlockClose;
+begin
+  GAlive := True;
+  if Assigned(GKeys) then
+    Exit;
+  GKeys := TPasBlockCloseKeys.Create;
+  RegisterKeyUpHandler(GKeys.HandleHookedKeyUp);
+end;
+
+procedure FinalizeBlockClose;
+begin
+  // GAlive first: it is what makes an answer in flight harmless. The hooks
+  // themselves are the shared registry's to release, from the wizard, after
+  // every feature that registered with it is done - see
+  // FinalizeEditorWindowHooks.
+  GAlive := False;
+  // Unregister BEFORE freeing: the registry holds a method pointer into
+  // GKeys, and the next keystroke would call through a freed object.
+  RegisterKeyUpHandler(nil);
+  FreeAndNil(GKeys);
+end;
+
+{$ENDIF}
 
 end.

@@ -88,6 +88,7 @@ contains
   PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',
   PasTreeIdePlugin.SyncPrototypes in 'PasTreeIdePlugin.SyncPrototypes.pas',
   PasTreeIdePlugin.BlockClose in 'PasTreeIdePlugin.BlockClose.pas',
+  PasTreeIdePlugin.EditorWindowHook in 'PasTreeIdePlugin.EditorWindowHook.pas',
   PasTreeIdePlugin.Rename in 'PasTreeIdePlugin.Rename.pas',
   { The settings store, and the ONE form in this package - the only unit here
     with a .dfm, so that the dialog can be laid out in the Form Designer

@@ -117,6 +117,7 @@
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SyncPrototypes.pas"/>
         <DCCReference Include="PasTreeIdePlugin.BlockClose.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.EditorWindowHook.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Settings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">

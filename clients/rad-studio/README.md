@@ -285,6 +285,24 @@ history:
   resolved the identifier under the cursor and navigated there itself, setting
   `Handled := True` to suppress RAD Studio's own default handling
   (documented as "prevent further processing" - `ToolsAPI.Editor.pas:804-806`).
+  **Two implementations, one per ToolsAPI generation.** The `*Ex` events, and
+  with them the only `var Handled` on a click, arrived in ToolsAPI 37.0
+  (RAD Studio 13). RAD Studio 12 has `OnEditorMouseDown`/`OnEditorMouseUp`
+  with no way to say "handled", and nothing else in that ToolsAPI substitutes:
+  no `INTACodeEditorEvents370`, `IOTAKeyBindingServices` binds keys and menu
+  commands but never mouse chords, and `AsyncGotoDefinitionEx` belongs to the
+  Insight Provider slot - which is all-or-nothing and so cannot take our
+  Ctrl+Click while leaving the rest of Code Insight to DelphiLSP. So on 12 the
+  gesture is claimed one level down, in the VCL (`TEditorWindowHook`): the
+  editor control's `WindowProc` is chained and `Ctrl+WM_LBUTTONDOWN/UP`
+  swallowed there, the technique GExperts and DDevExtensions use. The control
+  comes from `OnEditorMouseMove`, which 12 does have - the mouse crosses the
+  editor before it can click in it. Two silent failure modes to keep in mind
+  when editing that code: a hook must go dead on `WM_NCDESTROY` (the editor
+  window can close under it), and every hook must be freed at package unload,
+  or the next mouse message in that editor calls into unloaded package code.
+  Selected by `{$IF Declared(TEditorMouseExEvent)}`, i.e. on the API's
+  presence rather than a version number.
 
 Every successful jump registers with `IOTAHistoryServices` (the same global
 Backward/Forward stack the IDE's own Alt+Left/Alt+Right toolbar buttons

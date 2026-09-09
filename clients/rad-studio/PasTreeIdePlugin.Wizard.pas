@@ -57,6 +57,7 @@ uses
   PasTreeIdePlugin.ClassComplete,
   PasTreeIdePlugin.SyncPrototypes,
   PasTreeIdePlugin.BlockClose,
+  PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
@@ -610,6 +611,13 @@ begin
   FinalizeClassComplete;
   FinalizeSyncPrototypes;
   FinalizeBlockClose;
+  // AFTER every feature that registers with it has withdrawn (Ctrl+Click in
+  // FinalizeGotoDeclaration, block completion just above): this releases the
+  // VCL WindowProc hooks those two ride on before 37.0, and a hook left in
+  // place would send the next click or keystroke in that editor into an
+  // unloaded BPL. A no-op on 37.0 and later, where both use real ToolsAPI
+  // events.
+  FinalizeEditorWindowHooks;
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;

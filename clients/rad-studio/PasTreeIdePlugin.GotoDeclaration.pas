@@ -30,6 +30,25 @@ unit PasTreeIdePlugin.GotoDeclaration;
     - Any other provider -> the hook claims plain Ctrl+Click when the switch
       is on, and does nothing at all when it is off.
 
+  TWO IMPLEMENTATIONS, ONE PER TOOLSAPI GENERATION (2026-09-09). The `var
+  Handled` that lets a notifier suppress the native click arrived with the
+  *Ex mouse events in ToolsAPI 37.0 (RAD Studio 13). RAD Studio 12's
+  ToolsAPI.Editor has only OnEditorMouseDown/Up, with no way to say "handled",
+  and nothing else in that ToolsAPI substitutes: INTACodeEditorEvents370 does
+  not exist there, IOTAKeyBindingServices binds keys and menu commands but
+  never mouse chords, and AsyncGotoDefinitionEx is a method of the Insight
+  Provider slot - which is all-or-nothing and so cannot serve our Ctrl+Click
+  while leaving the rest of Code Insight to DelphiLSP. So on 12 the same
+  gesture is claimed one level down, in the VCL: the editor control's
+  WindowProc is replaced and Ctrl+WM_LBUTTONDOWN/UP swallowed there (the
+  technique GExperts and DDevExtensions use for the same reason). Selected by
+  a $IF on Declared(TEditorMouseExEvent), i.e. on the presence of the API
+  (spelled without its braces here: this comment is a brace comment, and the
+  directive's own closing brace would end it early - which cost a build)
+  rather than on a version number. The pre-37.0 half lives in
+  PasTreeIdePlugin.EditorWindowHook, shared with block completion, which has
+  no keyboard events on those IDEs for the same reason.
+
   Mechanism: INTACodeEditorServices.AddEditorEventsNotifier with a
   TNTACodeEditorNotifier subclass (ToolsAPI.Editor.pas), hooked on
   OnEditorMouseDownEx/OnEditorMouseUpEx - both carry a `var Handled: Boolean`
@@ -134,8 +153,10 @@ procedure MoveCaretCentred(const AView: IOTAEditView; ARow, ACol: Integer);
 implementation
 
 uses
+  Winapi.Windows, Winapi.Messages,
   System.SysUtils, System.Types, System.Classes, System.UITypes,
   System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
+  PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight,
   PasTreeIdePlugin.Settings;
 
@@ -550,6 +571,7 @@ end;
   alongside the Code Insight manager rather than instead of it. }
 
 type
+{$IF Declared(TEditorMouseExEvent)}
   // AllowedEvents can only be customized by overriding it - there is no
   // event property for it on TNTACodeEditorNotifier, unlike the mouse
   // callbacks below (see the official KeyboardMouse Events Demo, which does
@@ -558,18 +580,27 @@ type
   protected
     function AllowedEvents: TCodeEditorEvents; override;
   end;
+{$ENDIF}
 
   TGotoDeclarationManager = class
   private
     FEditorServices: INTACodeEditorServices;
-    FNotifier: TGotoDeclarationNotifier;
     FNotifierIndex: Integer;
+{$IF Declared(TEditorMouseExEvent)}
+    FNotifier: TGotoDeclarationNotifier;
+{$ELSE}
+    function ClaimsHookedClick: Boolean;
+    procedure DoHookedClick(const AEditor: TWinControl; AX, AY: Integer);
+{$ENDIF}
     function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
       out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
+    procedure HandleClaimedClick(const Editor: TWinControl; X, Y: Integer);
+{$IF Declared(TEditorMouseExEvent)}
     procedure DoMouseDown(const Editor: TWinControl; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
     procedure DoMouseUp(const Editor: TWinControl; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+{$ENDIF}
   public
     constructor Create;
     destructor Destroy; override;
@@ -578,10 +609,12 @@ type
 var
   GManager: TGotoDeclarationManager;
 
+{$IF Declared(TEditorMouseExEvent)}
 function TGotoDeclarationNotifier.AllowedEvents: TCodeEditorEvents;
 begin
   Result := [cevMouseEvents];
 end;
+{$ENDIF}
 
 function TGotoDeclarationManager.TryGetPosition(const Editor: TWinControl;
   X, Y: Integer; out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
@@ -591,6 +624,11 @@ var
   LColumn, LVisibleLine: Integer;
 begin
   Result := False;
+  // Never assumed present: without the services there is no way to turn a
+  // pixel into a row, and reaching this with a nil interface is an AV rather
+  // than a miss - which is exactly how it was found.
+  if not Assigned(FEditorServices) then
+    Exit;
   AView := FEditorServices.GetViewForEditor(Editor);
   if not Assigned(AView) then
     Exit;
@@ -642,6 +680,29 @@ begin
     and not PasTreeIsActiveInsightProvider;
 end;
 
+/// <summary>
+/// The resolve half of a click already decided to be ours, shared by both
+/// implementations. Suppression has happened by the time this runs and is
+/// never undone here: on a miss the point is to have stopped the slow/broken
+/// native path, not to fall back to it.
+/// </summary>
+procedure TGotoDeclarationManager.HandleClaimedClick(const Editor: TWinControl;
+  X, Y: Integer);
+var
+  LView: IOTAEditView;
+  LRow, LCol: Integer;
+begin
+  if not TryGetPosition(Editor, X, Y, LView, LRow, LCol) then
+  begin
+    LogDiagnostic('Goto Declaration: could not resolve click position to a '
+      + 'file/row/col.');
+    Exit;
+  end;
+
+  ResolveAndNavigate(LView.Buffer.FileName, LRow, LCol);
+end;
+
+{$IF Declared(TEditorMouseExEvent)}
 procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
 begin
@@ -653,44 +714,69 @@ end;
 
 procedure TGotoDeclarationManager.DoMouseUp(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
-var
-  LView: IOTAEditView;
-  LRow, LCol: Integer;
 begin
   if not ClaimsClick(Shift, Button) then
     Exit;
-
-  // Always suppress the native handler once the click is ours, even if we end
-  // up resolving nothing below - the whole point is to stop the slow/broken
-  // native path from running, not to fall back to it on a miss.
   Handled := True;
-
-  if not TryGetPosition(Editor, X, Y, LView, LRow, LCol) then
-  begin
-    LogDiagnostic('Goto Declaration: could not resolve click position to a '
-      + 'file/row/col.');
-    Exit;
-  end;
-
-  ResolveAndNavigate(LView.Buffer.FileName, LRow, LCol);
+  HandleClaimedClick(Editor, X, Y);
 end;
+{$ELSE}
+
+/// <summary>
+/// The claim question for the pre-37.0 path. The chord itself is already
+/// decided by the hook (the message carries it), so only the feature's own
+/// two conditions are left - the same ones ClaimsClick asks above.
+/// </summary>
+function TGotoDeclarationManager.ClaimsHookedClick: Boolean;
+begin
+  Result := CtrlClickNavigation and not PasTreeIsActiveInsightProvider;
+end;
+
+procedure TGotoDeclarationManager.DoHookedClick(const AEditor: TWinControl;
+  AX, AY: Integer);
+begin
+  HandleClaimedClick(AEditor, AX, AY);
+end;
+{$ENDIF}
 
 constructor TGotoDeclarationManager.Create;
 begin
   inherited;
   FNotifierIndex := -1;
+  // UNCONDITIONALLY, both paths: TryGetPosition resolves the click position
+  // through these services, so the hook path needs them just as much as the
+  // notifier path - it merely does not need a notifier of its own. Leaving
+  // this to the 37.0 branch made the first Ctrl+Click on Delphi 12 a call
+  // through a nil interface (Alex, 2026-09-09).
   if not Supports(BorlandIDEServices, INTACodeEditorServices, FEditorServices) then
     Exit;
+{$IF Declared(TEditorMouseExEvent)}
   FNotifier := TGotoDeclarationNotifier.Create;
   FNotifier.OnEditorMouseDownEx := DoMouseDown;
   FNotifier.OnEditorMouseUpEx := DoMouseUp;
   FNotifierIndex := FEditorServices.AddEditorEventsNotifier(FNotifier);
+{$ELSE}
+  // No notifier of our own here: on this ToolsAPI the click comes from the
+  // VCL WindowProc hook, and PasTreeIdePlugin.EditorWindowHook owns both the
+  // hooks and the notifier that discovers the controls (it is shared with
+  // block completion, which has no keyboard events either). Registering is
+  // unconditional; whether a given click is claimed is decided per click, so
+  // toggling the setting takes effect on the next click.
+  RegisterCtrlClickHandler(ClaimsHookedClick, DoHookedClick);
+{$ENDIF}
 end;
 
 destructor TGotoDeclarationManager.Destroy;
 begin
   if Assigned(FEditorServices) and (FNotifierIndex >= 0) then
     FEditorServices.RemoveEditorEventsNotifier(FNotifierIndex);
+{$IF not Declared(TEditorMouseExEvent)}
+  // Withdraw BEFORE this object goes: the hook registry holds method
+  // pointers into it, and the next Ctrl+Click would call through freed
+  // memory. The hooks themselves outlive this - they are released once, from
+  // the wizard, by FinalizeEditorWindowHooks.
+  RegisterCtrlClickHandler(nil, nil);
+{$ENDIF}
   inherited;
 end;
 
