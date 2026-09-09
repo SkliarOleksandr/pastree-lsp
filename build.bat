@@ -29,6 +29,17 @@ rem ask, and a question is worth nothing after a five-minute build. See
 rem scripts\ide.bat for why one place decides this.
 call "%~dp0scripts\ide.bat" %*
 if errorlevel 1 exit /b 1
+
+rem THE IDE MUST BE CLOSED, and it is now CHECKED rather than only stated
+rem above. A running RAD Studio holds the .bpl, and what msbuild then reports
+rem is "F2039 Could not create output file" naming a path - which says nothing
+rem about the IDE and reads like a permissions or disk problem. That message
+rem cost time three separate times while this script was being written, and
+rem once more from release.bat, which reached the same failure through here
+rem because only install.bat was checking.
+call "%~dp0scripts\ide-closed.bat"
+if errorlevel 1 exit /b 1
+
 call "%BDSROOT%\bin\rsvars.bat"
 
 rem DCUS: every compilation in this repository writes its .dcu files under
