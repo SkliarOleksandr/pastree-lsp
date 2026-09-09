@@ -1280,6 +1280,39 @@ later:
 6. Group-wide Rename - see item 3. Waiting on the rename's own rework, not on
    the group machinery.
 
+## The product mark, and the sizes it still needs
+
+One bitmap serves everything today: `PasTreeIdePlugin.Logo.bmp`, 24x24, linked
+through `PasTreeIdePlugin.Logo.rc` and used by the splash line
+(`PasTreeIdePlugin.Splash.pas`) and the settings dialog's header.
+
+**24x24 is not a design choice - it is what
+`IOTASplashScreenServices.AddPluginBitmap` documents**, along with reading the
+lower-left pixel as the transparent colour. Everything else about the image
+follows from that: magenta in that corner, and antialiasing off, since blended
+edge pixels are not exactly the transparent colour and would show as a halo.
+
+**Still to do: the other sizes.** One 24x24 bitmap is already being asked to do
+work it is the wrong size for, and each of these wants its own drawing rather
+than a scale of this one - a bitmap scaled up is visibly soft, and scaled down
+loses the shapes entirely at this weight:
+
+- **32x32 and 48x48** for the settings dialog and anywhere else a dialog header
+  appears. 24x24 next to a 19px bold title is noticeably small.
+- **16x16** for a menu item or a tab, where the current drawing's 7px nodes and
+  2px strokes will not survive; that size needs a simplified figure, not the
+  same one shrunk.
+- **High-DPI variants.** RAD Studio scales its forms, and a 24x24 bitmap on a
+  150% display is both small and soft. `TImage` will not help by itself.
+- **An `.ico`** if a size ever has to be handed to something that wants an icon
+  handle rather than a bitmap.
+
+Whatever produces them should produce ALL of them from one description, or the
+sizes will drift apart the first time the mark is adjusted - which is the same
+argument that keeps the current bitmap out of the `.dfm`. `.ico` and `.bmp` are
+declared binary in `.gitattributes`, so committed artwork is safe from line-end
+translation either way.
+
 ## Non-goals
 
 - **A formatter.** Needs a printer; PasTree parses and analyzes but does not

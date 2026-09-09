@@ -29,11 +29,6 @@
         <CfgParent>Base</CfgParent>
         <Base>true</Base>
     </PropertyGroup>
-    <PropertyGroup Condition="('$(Platform)'=='WinARM64EC' and '$(Base)'=='true') or '$(Base_WinARM64EC)'!=''">
-        <Base_WinARM64EC>true</Base_WinARM64EC>
-        <CfgParent>Base</CfgParent>
-        <Base>true</Base>
-    </PropertyGroup>
     <PropertyGroup Condition="'$(Config)'=='Release' or '$(Cfg_1)'!=''">
         <Cfg_1>true</Cfg_1>
         <CfgParent>Base</CfgParent>
@@ -51,13 +46,15 @@
         <DCC_N>false</DCC_N>
         <DCC_S>false</DCC_S>
         <DCC_ImageBase>00400000</DCC_ImageBase>
-        <!-- .dcu files go to the repository's one throwaway directory, with
-             every other build's, rather than next to the sources they came
-             from. See the DCUS note in build.bat: intermediate output, nothing
-             reads it between runs, and it exists to be deletable. The .bpl and
-             .dcp still go where the IDE expects them - a designtime package
-             has to be findable by RAD Studio. -->
+        <!-- Output paths for a build started INSIDE THE IDE only; build.bat
+             overrides all three with per-RAD-Studio-version directories. Why,
+             and why the IDE cannot pick the version itself, is in
+             README.md under "Where the build puts things" - not here, because
+             the IDE strips XML comments from this file every time it saves
+             it, and it has already eaten this explanation once. -->
         <DCC_DcuOutput>..\..\out\dcu\win32</DCC_DcuOutput>
+        <DCC_BplOutput>..\..\out</DCC_BplOutput>
+        <DCC_DcpOutput>..\..\out</DCC_DcpOutput>
         <GenDll>true</GenDll>
         <GenPackage>true</GenPackage>
         <SanitizedProjectName>PasTreeIdePlugin</SanitizedProjectName>
@@ -77,9 +74,6 @@
         <DCC_UsePackage>vcl;rtl;$(DCC_UsePackage)</DCC_UsePackage>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win64x)'!=''">
-        <DCC_UsePackage>vcl;rtl;$(DCC_UsePackage)</DCC_UsePackage>
-    </PropertyGroup>
-    <PropertyGroup Condition="'$(Base_WinARM64EC)'!=''">
         <DCC_UsePackage>vcl;rtl;$(DCC_UsePackage)</DCC_UsePackage>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
@@ -120,7 +114,6 @@
         <DCCReference Include="PasTreeIdePlugin.IdleSync.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Timing.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
-        <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SyncPrototypes.pas"/>
         <DCCReference Include="PasTreeIdePlugin.BlockClose.pas"/>
@@ -129,6 +122,9 @@
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">
             <Form>PasTreeSettingsForm</Form>
         </DCCReference>
+        <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.Splash.pas"/>
+        <RcCompile Include="PasTreeIdePlugin.Logo.rc"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
@@ -154,7 +150,6 @@
                 <Platform value="Win32">True</Platform>
                 <Platform value="Win64">False</Platform>
                 <Platform value="Win64x">True</Platform>
-                <Platform value="WinARM64EC">False</Platform>
             </Platforms>
         </BorlandProject>
         <ProjectFileVersion>12</ProjectFileVersion>

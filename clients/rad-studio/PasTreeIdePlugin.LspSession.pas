@@ -1475,8 +1475,13 @@ begin
         LogDiagnostic(Format('%s points at "%s", which does not exist.',
           [cLspServerEnvVar, ServerExeOverride]))
       else
-        LogDiagnostic(Format('%s not found next to the package''s BPL (%s) - '
-          + 'put it there or point %s at it.',
+        // Both searched directories are named, because the answer differs by
+        // which one the reader expected: a normal build puts the exe in the
+        // parent (the BPL is one level down, under its RAD Studio version),
+        // and naming only the BPL's own directory would send someone to copy a
+        // file into a place nothing writes.
+        LogDiagnostic(Format('%s not found next to the package''s BPL (%s) '
+          + 'nor in the directory above it - build it there, or point %s at it.',
           [cLspServerExeName, PackageDir, cLspServerEnvVar]));
       Exit;
     end;

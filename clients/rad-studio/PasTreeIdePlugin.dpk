@@ -27,6 +27,29 @@ package PasTreeIdePlugin;
 {$ENDIF IMPLICITBUILDING}
 {$IMPLICITBUILD ON}
 
+{ This is the name RAD Studio shows for the package in Component > Install
+  Packages. Without it the list falls back to the full path of the .bpl, which
+  is both ugly and useless for telling one entry from another - and now that
+  the file lives under out\<version>\, that path is longer still. The IDE reads
+  it from the compiled package, not from the registry, so the description
+  written into Known Packages by install.bat is a separate string; keep the two
+  saying the same thing. }
+{$DESCRIPTION 'PasTree LSP - Object Pascal code intelligence'}
+
+{ Design-time only, and this is a statement of fact rather than a preference:
+  the package requires designide and consists of ToolsAPI wizards, so there is
+  nothing in it a compiled application could use. Marking it says so to the
+  IDE, which then keeps it out of the Runtime Packages a project can be built
+  against - where adding it would produce a link against designide and a
+  program that cannot run outside the IDE. }
+{$DESIGNONLY}
+
+{ The product mark, used by the splash line and the settings dialog. Separate
+  from the $R *.res above, which is the version-info resource msbuild
+  generates; this one is compiled from a tracked .rc so the image survives a
+  fresh clone. See PasTreeIdePlugin.Logo.rc. }
+{$R PasTreeIdePlugin.Logo.res}
+
 requires
   rtl,
   vcl,
@@ -72,6 +95,9 @@ contains
   PasTreeIdePlugin.Settings in 'PasTreeIdePlugin.Settings.pas',
   PasTreeIdePlugin.SettingsForm in 'PasTreeIdePlugin.SettingsForm.pas' {PasTreeSettingsForm},
   { Every AV in the IDE, with a stack, beside the server log - see the unit. }
-  PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas';
+  PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas',
+  { The startup splash line. Nothing uses this unit - it acts from its own
+    initialization section - so it is here purely to be linked. }
+  PasTreeIdePlugin.Splash in 'PasTreeIdePlugin.Splash.pas';
 
 end.

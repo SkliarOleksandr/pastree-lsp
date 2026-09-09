@@ -24,6 +24,18 @@
 # an LF-only file, and every build in this repo goes through one.
 *.bat   text eol=crlf
 
+# PowerShell, called from those batch files for the few things cmd cannot do.
+# CRLF for the same reason and one of its own: a here-string or a line
+# continuation in a script Windows PowerShell reads as LF-only is a class of
+# parse error that reads as a logic bug.
+*.ps1   text eol=crlf
+
+# Resource scripts, compiled by brcc32 - a Windows tool, like the rest.
+*.rc    text eol=crlf
+
+# The splash bitmap: an image, never line-ending translated.
+*.bmp   binary
+
 # Documentation and the VS Code client - LF, which is what their own tooling
 # and every diff viewer expect.
 *.md    text eol=lf

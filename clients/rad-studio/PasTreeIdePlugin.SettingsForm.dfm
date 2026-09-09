@@ -32,8 +32,15 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     BevelOuter = bvNone
     ParentBackground = False
     TabOrder = 0
-    object lblProduct: TLabel
+    object imgLogo: TImage
       Left = 16
+      Top = 16
+      Width = 24
+      Height = 24
+      Transparent = True
+    end
+    object lblProduct: TLabel
+      Left = 48
       Top = 14
       Width = 106
       Height = 25
@@ -46,14 +53,14 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       ParentFont = False
     end
     object lblVersion: TLabel
-      Left = 18
+      Left = 50
       Top = 45
       Width = 38
       Height = 15
       Caption = 'Version'
     end
     object lblBuilt: TLabel
-      Left = 18
+      Left = 50
       Top = 64
       Width = 24
       Height = 15

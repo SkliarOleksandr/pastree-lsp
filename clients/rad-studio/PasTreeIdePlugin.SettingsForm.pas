@@ -55,6 +55,7 @@ uses
 type
   TPasTreeSettingsForm = class(TForm)
     pnlHeader: TPanel;
+    imgLogo: TImage;
     lblProduct: TLabel;
     lblVersion: TLabel;
     lblBuilt: TLabel;
@@ -169,6 +170,23 @@ begin
   try
     if LThemed then
       LTheming.ApplyTheme(LForm);
+
+    // LOADED FROM THE RESOURCE RATHER THAN STORED IN THE .dfm, which is what
+    // dropping a TImage in the Form Designer would have done: the same bitmap
+    // is already linked for the splash screen, and a second copy inside the
+    // .dfm is a copy that can be updated on its own and then disagree. This
+    // way there is one image in the package and no way to change only half of
+    // it. Transparent uses the bitmap's bottom-left pixel, the same convention
+    // the splash screen reads - see PasTreeIdePlugin.Logo.rc.
+    try
+      LForm.imgLogo.Picture.Bitmap.LoadFromResourceName(HInstance,
+        'PASTREE_LOGO');
+      LForm.imgLogo.Transparent := True;
+    except
+      // Decoration. A dialog that refuses to open because its logo is missing
+      // would be a worse bug than the missing logo.
+      LForm.imgLogo.Visible := False;
+    end;
 
     LForm.lblVersion.Caption := 'Version ' + PasTreeLspVersion;
     // ThisBinaryPath inside a package is the BPL, which is the binary this

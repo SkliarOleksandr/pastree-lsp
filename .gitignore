@@ -14,6 +14,7 @@
 *.projdata
 *.tvsconfig
 *.dsk
+*.dsv
 *.stat
 __history/
 __recovery/

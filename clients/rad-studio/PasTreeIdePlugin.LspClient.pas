@@ -298,10 +298,12 @@ type
 /// <summary>
 /// Locates pastree-server.exe: PASTREE_LSP_SERVER wins (the development
 /// override), otherwise it is looked for in ANearDir - normally the directory
-/// the package's own BPL sits in. '' if neither exists; callers report that
-/// rather than guessing further. A set-but-wrong override deliberately does
-/// NOT fall back, so a typo shows up as an error instead of silently running
-/// some other build.
+/// the package's own BPL sits in - and then in that directory's parent, which
+/// is where a normal build leaves it, the BPL being one level down in a
+/// directory named for the RAD Studio version that compiled it. '' if none
+/// exists; callers report that rather than guessing further. A set-but-wrong
+/// override deliberately does NOT fall back, so a typo shows up as an error
+/// instead of silently running some other build.
 /// </summary>
 function FindServerExe(const ANearDir: string): string;
 
@@ -370,6 +372,18 @@ begin
   if ANearDir <> '' then
   begin
     LCandidate := TPath.Combine(ANearDir, cLspServerExeName);
+    if TFile.Exists(LCandidate) then
+      Exit(LCandidate);
+    // THEN ONE LEVEL UP, which is where the build actually puts it. The BPL
+    // lives in a directory named for the RAD Studio version that compiled it
+    // (out\23.0\, out\37.0\ ...) because two IDE versions cannot share one
+    // designtime package; the server can, being a separate Win64 process, so
+    // there is one of it in out\ serving every version. Looking only beside
+    // the BPL would mean a copy of the exe per installed IDE - copies that go
+    // stale independently, which is the whole failure this product's version
+    // handshake exists to catch.
+    LCandidate := TPath.Combine(TPath.GetDirectoryName(
+      ExcludeTrailingPathDelimiter(ANearDir)), cLspServerExeName);
     if TFile.Exists(LCandidate) then
       Exit(LCandidate);
   end;

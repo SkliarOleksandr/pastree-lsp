@@ -99,20 +99,46 @@ must end with `all built, all harnesses passed`; anything else is a real
 failure.** Use it rather than building halves separately - the version check
 only means something if one build produces both.
 
+`install.bat` is that plus the IDE registration, `uninstall.bat` its inverse,
+`release.bat` packs the user-facing archive (both working trees must be clean;
+it exports from the last commit). All four take the same optional arguments -
+a RAD Studio version and `--yes` - resolved in `scripts\ide.bat`, which is the
+only place that decides which IDE is meant. Keep it that way: a BPL loads only
+in the Delphi that compiled it, so a second opinion about the version produces
+a package the IDE silently declines to load.
+
 - **RAD Studio must be closed.** A running IDE holds the `.bpl`, its LSP
   session holds `pastree-server.exe`; either gives a confusing "could not
   create output file".
-- Requires `../object-pascal-tree` as a sibling. That checkout may be under
-  edit by another session - check `git status` there before touching it, and
-  never `git add -A`.
+- Requires `../object-pascal-tree` as a sibling; `build.bat` clones it if it is
+  absent and prints the directory, commit and version it compiled against.
+  Read that line - the checkout may be under edit by another session, so
+  "uncommitted changes" there means this build is not reproducible from the
+  hash beside it. Check `git status` there before touching it, and never
+  `git add -A`.
 - After a rebuild, **restart the IDE** rather than Uninstall/Install; hot
   reload is unreliable and the symptom is a change that appears not to work.
-- **Every `.dcu` goes to `out\dcu\win32` or `out\dcu\win64`**, never next to a
-  source: the same units compile for both platforms and the names collide. A
-  new compilation needs `-N0` (or `DCC_DcuOutput`) pointing there. A stray
-  `.dcu` beside a `.pas` means something was built outside the scripts.
+- **Every `.dcu` goes to `out\dcu\<RAD Studio version>\win32` or `...\win64`**,
+  never next to a source. Split by platform because the same units compile for
+  both and the names collide; split by IDE version because .dcu files are not
+  portable between compilers, and a shared directory turns switching versions
+  into "unit was compiled with a different version of ..." in a build that
+  changed nothing. A new compilation needs `-N0` (or `DCC_DcuOutput`) pointing
+  there. A stray `.dcu` beside a `.pas` means something was built outside the
+  scripts.
+- **The BPL goes to `out\<RAD Studio version>\`, the server exe to `out\`.**
+  A designtime package loads only in the compiler that built it, so each
+  installed IDE needs its own; the server is a separate Win64 process and one
+  serves all of them, which is why the package looks for it beside its own BPL
+  *and* one level up (`FindServerExe`).
 - The IDE builds this server differently from `build.bat` - see
   `docs/diagnosing.md` if it works one way and not the other.
+- **RAD Studio strips XML comments from a `.dproj` every time it saves it**,
+  and it saves on merely opening the project. So a reason recorded there is
+  gone after the next IDE session, silently and in a diff that looks like
+  unrelated churn (it also adds a BOM and rewrites the platform list). Put the
+  reasoning in `clients/rad-studio/README.md` and leave only a pointer in the
+  project file.
 
 ## The package's one hard invariant
 

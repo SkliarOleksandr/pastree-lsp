@@ -422,7 +422,7 @@ things:
 
 ## Pointing the plugin at the server
 
-No path is hardcoded. `FindServerExe` looks in two places, in order:
+No path is hardcoded. `FindServerExe` looks in three places, in order:
 
 1. `%PASTREE_LSP_SERVER%`, if set - the development override, so the IDE runs
    whatever was last built into the repository's own `out\`. A value that is set
@@ -430,40 +430,75 @@ No path is hardcoded. `FindServerExe` looks in two places, in order:
    run some other build, and a typo would cost an afternoon.
 2. `pastree-server.exe` next to the package's own BPL, so a matched pair can be
    deployed together.
+3. `pastree-server.exe` one directory up from the BPL, which is where a normal
+   build leaves it - the BPL sits one level down, in a directory named for the
+   RAD Studio version that compiled it.
 
-Note where the BPL actually lands - with no `DCC_BplOutput` in the `.dproj` it
-is the IDE default, e.g.
-`C:\Users\Public\Documents\Embarcadero\Studio\37.0\Bpl\` - which is *not* next
-to this repo. So one of these has to happen before the plugin can do anything:
+**Neither normally has to be arranged, because the build puts the BPL in
+`out\<RAD Studio version>\` and `pastree-server.exe` in `out\` directly above
+it.** Case 2 is therefore satisfied by where the build writes its output: one
+build produces both files, and the pair the IDE loads cannot come from two
+different builds. `install.bat` registers the BPL's full path with the IDE; a
+designtime package is loaded by path, so it need not live in the IDE's own
+`Bpl` directory.
 
-```
-copy ..\..\out\pastree-server.exe "%PUBLIC%\Documents\Embarcadero\Studio\37.0\Bpl"
-```
+The per-version subdirectory is what lets several RAD Studio versions have the
+plugin installed at the same time: a designtime BPL loads only in the compiler
+that produced it, so each needs its own file, while the server - a separate
+Win64 process - is shared. That is why case 2 searches the BPL's directory
+*and* its parent.
 
-or, better for a development loop because it never goes stale:
+This was not always so. Without `DCC_BplOutput` the BPL landed in the IDE
+default, e.g. `C:\Users\Public\Documents\Embarcadero\Studio\37.0\Bpl\`, which
+is *not* next to this repo - and the server had to be copied there after every
+build, or `PASTREE_LSP_SERVER` pointed at `out\` instead. Both worked; both
+were a step that could be forgotten or go stale, which is the class of problem
+this product spends a version-equality check on. `install.bat` removes the old
+registration and the file it named, so an installation from that era does not
+leave a second, older BPL for the IDE to load in preference.
 
-```
-setx PASTREE_LSP_SERVER "C:\Repos\pastree-lsp\out\pastree-server.exe"
-```
-
-The environment variable is only picked up on the next IDE start - a process's
-environment is captured when it launches. Copying the exe next to the BPL, by
-contrast, needs no restart: the session re-looks for the server on every
-request until it finds one, precisely so that fixing this does not cost an IDE
-restart on top of everything else.
-
-**The environment variable is the setup in actual use**, with the server left
-in its own `out\` directory and never copied anywhere. That keeps one binary in
-one place: `build.bat` writes it, the IDE runs it, `pastree-server --version`
-identifies it, and there is no second copy to go stale behind a rebuild.
+`PASTREE_LSP_SERVER` remains, and remains case 1: it is how you run a server
+from somewhere other than the built pair - a different build, a different
+branch. It is read at IDE start, since a process's environment is captured when
+it launches.
 
 If neither is in place, both features log to the Build tab and do nothing else -
 naming which case it is, since the two need different fixes:
 
 ```
 [pastree-lsp] PASTREE_LSP_SERVER points at "C:\...\out\pastree-server.exe", which does not exist.
-[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\Bpl\) - put it there or point PASTREE_LSP_SERVER at it.
+[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\out\37.0\) nor in the directory above it - build it there, or point PASTREE_LSP_SERVER at it.
 ```
+
+## Where the build puts things
+
+```
+out\
+  pastree-server.exe        one Win64 process, shared by every IDE version
+  <RAD Studio version>\     PasTreeIdePlugin.bpl, .dcp - one set per version
+  dcu\<version>\win32|win64
+```
+
+**Split by IDE version because neither a `.bpl` nor a `.dcu` is portable
+between compilers.** A designtime package loads only in the version that built
+it, so several installed RAD Studios each need their own; shared `.dcu` output
+produces "unit was compiled with a different version of ..." in a build that
+changed nothing. The server is the exception - a separate Win64 process - so
+one build of it serves all of them, and the package looks for it beside its own
+BPL *and* one level up.
+
+**`build.bat` passes those three output paths to msbuild**; the values in the
+`.dproj` are a fallback for a build started inside the IDE, which lands in
+`out\` and is deliberately not what `install.bat` registers. The project file
+cannot work the version out for itself: msbuild exposes no property naming the
+RAD Studio that is running it (`$(ProductVersion)` expands to nothing, and the
+build then fails on a path ending in a bare separator).
+
+**This explanation lives here rather than in the `.dproj` because RAD Studio
+strips XML comments from that file every time it saves it** - it ate this one
+once already, along with the note on `DCC_DcuOutput` that had been there far
+longer. Anything about the project file that has to survive belongs in this
+README; leave a pointer in the `.dproj`, not the reasoning.
 
 ## Building and testing
 
@@ -473,6 +508,21 @@ and not merely a convenience: the package and the server share one version and
 check each other for equality at the handshake, which only means anything if a
 normal build produces both halves from the same commit. RAD Studio must be
 closed (a running IDE holds the `.bpl`, a live LSP session holds the exe).
+
+**`install.bat` is `build.bat` plus the registry entry** that makes the IDE
+load the package, and it always builds - there is no register-only mode,
+because that would be a way to point the IDE at a stale BPL. It refuses to run
+while RAD Studio is open for two independent reasons: the loaded package holds
+its own `.bpl`, and the IDE rewrites its package list on exit, which would
+discard a registration made while it ran. `uninstall.bat` removes the entry and
+leaves `out\` alone.
+
+Which RAD Studio both target is decided in one place, `scripts\ide.bat`, and
+decided once per run: a designtime BPL loads only in the version that compiled
+it, so "which Delphi builds it" and "which Delphi registers it" cannot be
+allowed to be different answers. It takes an explicit version (`build.bat
+37.0`), asks only when several suitable installations exist, and `--yes` takes
+the newest.
 
 The individual commands, for when only one piece needs rebuilding - from a shell
 with `rsvars.bat` sourced (`LspProjectSmoke` needs `%BDS%` to find the

@@ -1,0 +1,22 @@
+/* The product mark: a tree growing downwards from its root, in the same teal
+   the rest of the plugin uses. Compiled by msbuild (an <RcCompile> item in the
+   .dproj) and linked by the .dpk.
+
+   ONE BITMAP, TWO USES - the startup splash line
+   (PasTreeIdePlugin.Splash.pas) and the settings dialog's header
+   (PasTreeIdePlugin.SettingsForm). It is named for the product rather than for
+   either of them so that neither reads as owning it, and so a third use needs
+   no second copy to drift from this one.
+
+   THE BITMAP IS TRACKED AND THE .res IS NOT: *.res is generated output here
+   (see .gitignore), so the source of the image has to be something a build can
+   turn into one.
+
+   24x24 IS FIXED BY IOTASplashScreenServices.AddPluginBitmap, which documents
+   that size and reads the LOWER-LEFT PIXEL AS THE TRANSPARENT COLOUR. It is
+   magenta here, which is why the artwork must never touch that corner - and
+   why the image is drawn with antialiasing off, since blended edge pixels are
+   not exactly the transparent colour and would show as a halo around every
+   shape. VCL's TBitmap.Transparent uses the same bottom-left convention, which
+   is what lets the settings dialog show it without a second, masked copy. */
+PASTREE_LOGO BITMAP "PasTreeIdePlugin.Logo.bmp"

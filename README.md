@@ -7,6 +7,27 @@ three pieces: a Win64 analysis server speaking the
 over JSON-RPC 2.0, a RAD Studio IDE package, and a VS Code extension - both
 clients of the same server and the same protocol.
 
+## Installing it
+
+Unpack the release archive and run `install.bat` in it, with RAD Studio
+closed. It builds both halves from source and registers the IDE package;
+`pastree-lsp\uninstall.bat` takes it back out.
+
+The archive holds two directories side by side - `pastree-lsp` and
+`object-pascal-tree` - which is the same arrangement this repository is
+developed in, so the build script users run is the one that is tested here
+rather than a release-only variant. Keep them beside each other.
+
+**Nothing in it is prebuilt.** Shipping a compiled `pastree-server.exe` would
+mean shipping an unsigned binary - GitHub neither scans release assets for
+malware nor signs them - and the IDE package has to be compiled locally in any
+case, since a designtime BPL loads only in the Delphi version that produced
+it. Building from source removes that question rather than answering it.
+
+Working from a clone instead: the same `install.bat`, and `build.bat` fetches
+PasTree beside the repository if it is not already there. `release.bat` packs
+the archive.
+
 ## The server (`pastree-server.exe`)
 
 - Analyzes an Object Pascal project (`.dproj`/`.dpr`) out of process and
@@ -18,14 +39,15 @@ clients of the same server and the same protocol.
 
 **Install / requirements**
 
-- Delphi 12+ (Win64 target), and the PasTree repo checked out as a sibling:
-  `..\object-pascal-tree`, at `cMinPasTreeVersion` or newer.
+- Delphi 12+ (Win64 target). The PasTree repo must sit beside this one as
+  `..\object-pascal-tree`; `build.bat` clones it there if it is missing, and
+  prints the directory, commit and version it compiled against.
 - `build.bat` at the repository root builds the server (and the RAD Studio
   package and test harnesses in the same pass - one script produces both
   halves of the product, which is what makes the version-equality check
   between them meaningful). RAD Studio must be closed while it runs.
-- No separate install step: `pastree-server.exe` lands in `out\` and is run
-  by whichever client is configured to find it.
+- No separate install step for the server: it lands in `out\`, next to the
+  IDE package built alongside it.
 
 **Status / docs**
 
@@ -47,11 +69,21 @@ costs, and the incremental-reanalysis mechanism are in
 
 **Install / requirements**
 
-- Built by the same `build.bat` as the server (Win32 designtime BPL).
-- The IDE must be pointed at a `pastree-server.exe`: either
-  `setx PASTREE_LSP_SERVER "C:\path\to\out\pastree-server.exe"` (picked up on
-  the next IDE start - the usual development setup), or copy the exe next to
-  the package's own `.bpl` (no restart needed, picked up on the next request).
+- **`install.bat`** at the repository root, with RAD Studio closed: it builds
+  both halves and registers the package with the IDE. It asks which RAD Studio
+  only when more than one suitable installation is present; `install.bat 37.0`
+  or `install.bat --yes` answers in advance. `uninstall.bat` unregisters it
+  again without deleting anything built.
+- Nothing is copied anywhere and no environment variable is needed. The BPL is
+  built into `out\<RAD Studio version>\` and `pastree-server.exe` into `out\`
+  above it, and the plugin looks for its server in both places - so the matched
+  pair is where the build put it rather than something a deployment step has to
+  arrange. `PASTREE_LSP_SERVER` still overrides that, for running a server from
+  somewhere else.
+- **Several RAD Studio versions can have it installed at once.** Each gets its
+  own BPL directory, since a designtime package loads only in the compiler that
+  built it; they share the one server, which is a separate Win64 process. Run
+  `install.bat` once per version.
 - Restart RAD Studio after every rebuild of the package - hot reload
   (Uninstall/Install) is unreliable here; see
   [docs/diagnosing.md](docs/diagnosing.md).
