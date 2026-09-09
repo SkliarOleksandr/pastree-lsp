@@ -124,10 +124,20 @@ const
 /// </summary>
 function PasLspVersionBanner: string;
 
+/// <summary>
+/// One line naming the CPU model, logical core count and total physical RAM -
+/// the log's second line, next to the version banner. A report from someone
+/// else's machine needs this before "is it slow because of the hardware or
+/// because of a regression" is answerable at all.
+/// </summary>
+function PasLspHardwareBanner: string;
+
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  System.Win.Registry,
+  Winapi.Windows;
 
 { Compile-time gate on the sibling PasTree checkout, in spirit. A string
   comparison cannot run in a $IF, so this is checked at unit initialization
@@ -153,6 +163,80 @@ begin
     LBuilt := ', built ' + LBuilt;
   Result := Format('pastree-lsp-server %s (PasTree %s%s)',
     [PasTreeLspVersion, PasTreeVersion, LBuilt]);
+end;
+
+// GlobalMemoryStatusEx reports what Windows can actually hand out, which is
+// short of the DIMM total by whatever the BIOS/UEFI, integrated graphics and
+// the like carve out first - a 32 GB kit reports as 31.9. That is correct,
+// not a rounding bug, but it reads as one, so this snaps to the nearest
+// stick of RAM a human would say they bought rather than printing the raw
+// figure.
+function NearestInstalledRamGb(ARawGb: Double): Integer;
+const
+  // Every capacity a DIMM actually ships in, so a real total lands within
+  // rounding distance of exactly one of these - no arbitrary tolerance band
+  // that could snap a genuinely odd total to the wrong neighbour.
+  cRamSteps: array [0 .. 13] of Integer = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32,
+    48, 64, 96, 128);
+var
+  I, LBest: Integer;
+begin
+  LBest := cRamSteps[0];
+  for I := 0 to High(cRamSteps) do
+    if Abs(cRamSteps[I] - ARawGb) < Abs(LBest - ARawGb) then
+      LBest := cRamSteps[I];
+  Result := LBest;
+end;
+
+function PasLspHardwareBanner: string;
+var
+  LSysInfo: TSystemInfo;
+  LMemStatus: TMemoryStatusEx;
+  LReg: TRegistry;
+  LCpuName: string;
+  LRamGb: Integer;
+  LMhz: Integer;
+  LSpeed: string;
+begin
+  GetSystemInfo(LSysInfo);
+
+  FillChar(LMemStatus, SizeOf(LMemStatus), 0);
+  LMemStatus.dwLength := SizeOf(LMemStatus);
+  LRamGb := 0;
+  if GlobalMemoryStatusEx(LMemStatus) then
+    LRamGb := NearestInstalledRamGb(LMemStatus.ullTotalPhys /
+      (1024 * 1024 * 1024));
+
+  // The core count comes from GetSystemInfo, not the registry - the registry
+  // key below is one entry per logical processor and only ever describes the
+  // model name and rated speed, never the count.
+  LCpuName := '';
+  LMhz := 0;
+  LReg := TRegistry.Create(KEY_READ);
+  try
+    LReg.RootKey := HKEY_LOCAL_MACHINE;
+    if LReg.OpenKeyReadOnly('HARDWARE\DESCRIPTION\System\CentralProcessor\0')
+    then
+    begin
+      LCpuName := Trim(LReg.ReadString('ProcessorNameString'));
+      // "~MHz" is the nominal (rated/base) clock Windows recorded at boot,
+      // not the current, boost- and throttle-dependent speed - the number
+      // that names the chip, which is what belongs next to its model.
+      if LReg.ValueExists('~MHz') then
+        LMhz := LReg.ReadInteger('~MHz');
+    end;
+  finally
+    LReg.Free;
+  end;
+  if LCpuName = '' then
+    LCpuName := 'unknown CPU';
+
+  LSpeed := '';
+  if LMhz > 0 then
+    LSpeed := Format(' @ %.1f GHz', [LMhz / 1000]);
+
+  Result := Format('hardware: %s%s, %d cores, %d GB RAM',
+    [LCpuName, LSpeed, LSysInfo.dwNumberOfProcessors, LRamGb]);
 end;
 
 initialization

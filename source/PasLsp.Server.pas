@@ -630,7 +630,10 @@ begin
   // one that does - especially across a rebuild, where "did my fix even get
   // into the exe the IDE is running" is the first question worth asking.
   Log(PasLspVersionBanner);
-  // SECOND line, next to the build that produced the log: the pair "which exe"
+  // SECOND line, next to the version: CPU, cores, RAM - a report from someone
+  // else's machine needs this before "is it slow" is even askable.
+  Log(PasLspHardwareBanner);
+  // THIRD line, next to the build that produced the log: the pair "which exe"
   // and "which IDE ran it" is what a report from someone else's machine has to
   // answer before anything else is worth reading.
   if LHost <> '' then
