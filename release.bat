@@ -127,12 +127,17 @@ rem POSIX path like /c/Users/... , which git's -o and tar's -f each interpret
 rem differently from cmd - a difference that shows up as a release script that
 rem works in one shell and not the other, for no visible reason. out\ is ours,
 rem it is ignored, and it means the same thing from every shell.
+rem THE TARBALL PATH IS ABSOLUTE, and that is not tidiness: `git -C <dir>`
+rem changes git's working directory, so a relative -o resolves inside the
+rem repository being exported rather than inside this one. The first export
+rem here passes "." and so appeared to work; the second wrote into PasTree's
+rem tree and failed with git's own message swallowed by the pipeline.
 :export
 mkdir "%~2" 2>nul
-git -C "%~1" archive --format=tar -o "out\release\export.tar" HEAD
+git -C "%~1" archive --format=tar -o "%CD%\out\release\export.tar" HEAD
 if errorlevel 1 exit /b 1
-tar -xf "out\release\export.tar" -C "%~2"
+tar -xf "%CD%\out\release\export.tar" -C "%~2"
 if errorlevel 1 exit /b 1
-del /q "out\release\export.tar"
+del /q "%CD%\out\release\export.tar"
 for %%D in ("%~2") do echo   exported %%~nxD
 exit /b 0
