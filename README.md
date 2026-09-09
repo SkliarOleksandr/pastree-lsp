@@ -7,6 +7,9 @@ three pieces: a Win64 analysis server speaking the
 over JSON-RPC 2.0, a RAD Studio IDE package, and a VS Code extension - both
 clients of the same server and the same protocol.
 
+**[What the RAD Studio plugin does](clients/rad-studio/features.md)** - every
+feature it adds to the IDE, one paragraph each.
+
 ## Installing it
 
 Unpack the release archive and run `install.bat` in it, with RAD Studio

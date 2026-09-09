@@ -5,6 +5,9 @@ companion to this file: what the package COULD present and what each option
 costs, mapped over the ToolsAPI surface. This README is what it does today; the
 repository root README covers the server and the product as a whole.
 
+**[features.md](features.md)** is the user-facing list: every feature this
+package adds to the IDE, one paragraph each.
+
 ## Where this lives, and the one rule that protects it
 
 Two moves brought it here: out of `object-pascal-tree`'s `ide-plugin/` directory
