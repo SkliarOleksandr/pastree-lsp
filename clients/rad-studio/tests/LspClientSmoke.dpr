@@ -419,7 +419,9 @@ end;
   What is checked is the ROW SET, by kind and declaring type: the chain
   answers from any link (an override in the middle names the root and every
   sibling), a hiding declaration in an unrelated class is never a row, a
-  reintroduce and a message handler are rows of their own kind, an interface
+  reintroduce and a message handler are rows of their own kind, a class
+  PROPERTY answers its redeclaration chain while a redeclaration with a type
+  is excluded from it, an interface
   method reaches an implementor through a descendant interface, and a class
   that inherits its implementation is reported on the ancestor's declaration
   with the listing class named. And the two refusals, because they are what
@@ -490,6 +492,30 @@ begin
   Check(GOk and GResultJson.Contains('"kind":"message"') and
     GResultJson.Contains('"typeName":"TRoundedSquare"'),
     'a descendant''s message handler is in the chain, as kind message');
+
+  { A class PROPERTY, whose chain is its redeclarations rather than a VMT
+    slot. Asked from the MIDDLE link, as the method chain is above: a bare
+    `property Items;` is the same property, so the root is the declaration
+    that writes the type. The negative half is the point of the case - a
+    redeclaration WITH a type (TTypedHider) is a different property hiding
+    this one, and a chain that swallowed it would rename across two unrelated
+    properties. }
+  FindPos(LFile, 'property Items: Integer read FItems write FItems;', 'Items',
+    LLine, LChar);
+  Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
+    'findOverrides answered on a class property');
+  Check(GOk and GResultJson.Contains('"name":"Items"'),
+    'it names the property');
+  Check(GOk and GResultJson.Contains('"kind":"root"') and
+    GResultJson.Contains('"typeName":"TPropBase"'),
+    'the declaration writing the type is the root row');
+  Check(GOk and GResultJson.Contains('"kind":"redeclared"') and
+    GResultJson.Contains('"typeName":"TPropPublisher"') and
+    GResultJson.Contains('"typeName":"TPropDeeper"'),
+    'every bare redeclaration is a row, as kind redeclared');
+  Check(GOk and not GResultJson.Contains('TTypedHider'),
+    'a redeclaration WITH a type hides rather than continues: not a row');
+  Check(GOk and (CountOf('"kind":') = 3), 'exactly three rows');
 
   // Implementations of IGreeter.Greet - the first `procedure Greet;` in the
   // file is the interface's own.

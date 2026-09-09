@@ -3186,14 +3186,28 @@ end;
   implementation is already taken by the toggle, which is why this is a
   custom method rather than an overload of a standard one.
 
-  `null` when the position is not a class method at all - a routine, a record
-  or interface method, a field - so the client can say "not a method" rather
+  A CLASS PROPERTY is the same request, and answers a different chain: a bare
+  redeclaration (`property Items;`, republishing an inherited property with no
+  type written) is the SAME property, so the rows are its declarations, kind
+  `redeclared` below the one that writes the type. There is no VMT slot
+  involved - PasTree owns that distinction and the rule that a redeclaration
+  WITH a type hides rather than continues; see TPasOverrideKind. The client
+  needs no branch: MethodAt accepts both identities and the rows carry their
+  own kind word.
+
+  `null` when the position is neither - a plain routine, a record or interface
+  method, a field - so the client can say "not a method or property" rather
   than "nothing overrides this". The two are different answers: a method
   nothing overrides still comes back with its own single `root` row. }
 function TLspServer.HandleFindOverrides(const AMsg: TLspIncoming): string;
 const
+  { One word per TPasOverrideKind, in the enum's own order. Typed as
+    array[TPasOverrideKind] ON PURPOSE rather than as a loose array of string:
+    a value added to PasTree's enum then fails THIS declaration to compile
+    (E2072, the element count) instead of running with an out-of-range read.
+    pokRedeclared arrived in PasTree 0.21.0 and is exactly what that caught. }
   cKindWord: array[TPasOverrideKind] of string =
-    ('root', 'override', 'message', 'reintroduce');
+    ('root', 'override', 'message', 'reintroduce', 'redeclared');
 var
   LPath, LName: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
@@ -3216,7 +3230,7 @@ begin
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   if not FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
   begin
-    Log(Format('findOverrides: %s -> not a class method',
+    Log(Format('findOverrides: %s -> not a class method or property',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;

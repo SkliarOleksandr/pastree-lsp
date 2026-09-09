@@ -99,6 +99,14 @@ Two commands for two identities, as PasTree draws the line (its
   row. Works from the declaration or the implementation header, from any link
   of the chain. A method nothing overrides answers with its own single root
   row - the honest "nothing overrides this".
+- **Find Overrides on a CLASS PROPERTY**, where the same item answers a
+  different chain: a bare `property Items;` republishing an inherited property
+  is the SAME property, so the rows are its declarations - `TPropBase (root)`
+  for the one that writes the type, `TPropPublisher (redeclared)` below it. A
+  redeclaration WITH a type hides the inherited property and starts its own
+  chain, so it is not a row. PasTree 0.21.0 owns that distinction (it is
+  dcc-probed); nothing in this package branches on it, since a row's kind word
+  is painted as it arrives.
 - **Find Implementations** on an INTERFACE method: every class listing the
   interface or a descendant of it; a class that satisfies the method through
   an ancestor is reported on the ancestor's declaration (the code that runs)

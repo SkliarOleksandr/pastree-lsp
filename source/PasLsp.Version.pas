@@ -114,7 +114,17 @@ const
   /// pastree/findImplementations. An older sibling fails to COMPILE here
   /// rather than silently, so the floor is documentation as much as a check -
   /// but a floor that names the real requirement is the one worth having.
-  cMinPasTreeVersion = '0.20.1';
+  ///
+  /// 0.21.0 (2026-09-09): pokRedeclared, the property half of an override
+  /// chain - a bare `property Items;` republishing an inherited property is
+  /// the same property, so Find Overrides answers its declarations. Half of
+  /// this is loud: cKindWord in PasLsp.Server is typed over the enum, so the
+  /// new value failed the element count and the build stopped. The other half
+  /// is not, and is the reason the floor moves: against 0.20.3 MethodAt says
+  /// False on a property, so the command is simply DISABLED on one, and Find
+  /// References and Rename see each declaration in the chain as an unrelated
+  /// property - a rename that touches one link and silently leaves the others.
+  cMinPasTreeVersion = '0.21.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

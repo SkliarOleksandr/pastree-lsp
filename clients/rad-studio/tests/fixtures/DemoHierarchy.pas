@@ -50,6 +50,39 @@ type
     procedure Paint;
   end;
 
+  { The PROPERTY chain, which Find Overrides answers as `redeclared` rows.
+    A bare redeclaration - no type written - is the SAME property with
+    different visibility or accessors, so every link is a declaration of one
+    property. A redeclaration WITH a type hides it and starts its own chain,
+    which is why TTypedHider must not be a row of TPropBase.Items. }
+  TPropBase = class
+  strict private
+    FItems: Integer;
+  protected
+    // Writes the type: the root of the chain.
+    property Items: Integer read FItems write FItems;
+  end;
+
+  TPropPublisher = class(TPropBase)
+  public
+    // Bare: republished, nothing but visibility changed.
+    property Items;
+  end;
+
+  TPropDeeper = class(TPropPublisher)
+  public
+    // Bare again, two levels down - still the same property.
+    property Items;
+  end;
+
+  TTypedHider = class(TPropBase)
+  public
+    function GetItems: string;
+    // WITH a type: a different property that hides the inherited one. Never a
+    // row of the chain above, and neither is anything redeclaring it.
+    property Items: string read GetItems;
+  end;
+
   IGreeter = interface
     ['{5E1F0A8C-9C4B-4B9F-8E3A-2D6B7C1F0A11}']
     procedure Greet;
@@ -134,6 +167,11 @@ end;
 
 procedure TGreeterBase.Greet;
 begin
+end;
+
+function TTypedHider.GetItems: string;
+begin
+  Result := '';
 end;
 
 end.

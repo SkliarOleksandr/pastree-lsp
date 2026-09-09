@@ -12,6 +12,13 @@ unit PasTreeIdePlugin.FindHierarchy;
       (root), every override below it, a reintroduce (reported so a reader
       does not mistake it for an override) and a message handler (implicitly
       virtual). No call site is a row: this is not a reference search.
+
+      Also a CLASS PROPERTY, where the same command answers a different
+      chain: a bare `property Items;` republishing an inherited property is
+      the same property, so the rows are its declarations and carry the kind
+      `redeclared`. Nothing here branches on that - the row's kind word is
+      painted as it arrives (see RowTag), which is why supporting it needed
+      no code, only a message that stops saying "no class method".
     - Find Implementations: the caret is on an INTERFACE method. The answer
       is every class listing that interface or a descendant of it, with a
       class that satisfies the method through an ANCESTOR reported on the
@@ -88,9 +95,10 @@ const
   cWaitText: array[THierarchyCommand] of string =
     ('Searching overrides...', 'Searching implementations...');
   cNotSubject: array[THierarchyCommand] of string =
-    ('No class method under the cursor.' + sLineBreak + sLineBreak +
+    ('No class method or property under the cursor.' + sLineBreak + sLineBreak +
      'Find Overrides works on a method of a class - the declaration or its ' +
-     'implementation header.',
+     'implementation header - and on a class property, whose chain is its ' +
+     'redeclarations.',
      'No interface method under the cursor.' + sLineBreak + sLineBreak +
      'Find Implementations works on a method declared in an interface type.');
 
