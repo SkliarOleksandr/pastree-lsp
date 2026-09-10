@@ -624,7 +624,20 @@ begin
     'a child is depth 1 with the root named');
   Check(GOk and not GResultJson.Contains('TStone'),
     'an unrelated class is not a row');
-  Check(GOk and (CountOf('"kind":') = 4), 'exactly four rows');
+  Check(GOk and GResultJson.Contains(
+    '"typeName":"TAliasedDog","viaTypeName":"","parentTypeName":"TAnimal","depth":1'),
+    'a class over a type ALIAS of the root is a child of the root itself');
+  Check(GOk and (CountOf('"kind":') = 6),
+    'exactly six rows - TAbstractPet and TAliasedDog beside the three');
+  // The same tree asked from the ALIAS, at its declaration: the alias is the
+  // class it names (0.38.1, PasTree 0.25.2 - before, a caret on
+  // `TVTBaseAncestor` greyed every type-shaped item).
+  FindPos(LFile, 'TAnimalAlias = TAnimal;', 'TAnimalAlias', LLine, LChar);
+  Check(Ask('pastree/findDescendants', PositionParams(LFile, LLine, LChar)),
+    'findDescendants answered on a type alias');
+  Check(GOk and GResultJson.Contains('"typeName":"TAnimal"') and
+    GResultJson.Contains('"depth":0') and (CountOf('"kind":') = 6),
+    'and it is the aliased class''s own tree');
 
   // Descendants of an interface: the interfaces extending it, NOT the classes
   // implementing it - one axis per command.
@@ -692,6 +705,20 @@ begin
     'the class declaration is pinned');
   Check(GOk and (CountOf('"kind":"creation"') = 2),
     'two `TDog.Create` sites - `TPuppy.Create` is not one');
+  // The root, whose only creation is written through the alias: found from
+  // the class (0.38.1, PasTree 0.25.2), and from the alias the same.
+  FindPos(LFile, 'TAnimal = class', 'TAnimal', LLine, LChar);
+  Check(Ask('pastree/findCreations', PositionParams(LFile, LLine, LChar)),
+    'findCreations answered on the aliased class');
+  Check(GOk and (CountOf('"kind":"creation"') = 1) and
+    GResultJson.Contains('TAnimalAlias.Create'),
+    '`TAnimalAlias.Create` is a creation of TAnimal');
+  FindPos(LFile, 'TAnimalAlias = TAnimal;', 'TAnimalAlias', LLine, LChar);
+  Check(Ask('pastree/findCreations', PositionParams(LFile, LLine, LChar)),
+    'findCreations answered on the alias');
+  Check(GOk and (CountOf('"kind":"creation"') = 1),
+    'and answers the same one row');
+  FindPos(LFile, 'TDog = class(TAnimal)', 'TDog', LLine, LChar);
   Check(Ask('pastree/findDestructions', PositionParams(LFile, LLine, LChar)),
     'findDestructions answered on a class');
   Check(GOk and (CountOf('"kind":"destruction"') = 2),
@@ -717,6 +744,37 @@ begin
     GResultJson.Contains('"implementations":false') and
     GResultJson.Contains('"assignments":false'),
     'and no overrides, implementations or assignments');
+  // The ANCESTOR name inside the heritage list is the same class: the gate
+  // must say so there too (0.38.1: it answered as if the caret were on
+  // nothing type-shaped).
+  FindPos(LFile, 'TDog = class(TAnimal)', 'TAnimal', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on an ancestor name');
+  Check(GOk and GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":true') and
+    GResultJson.Contains('"destructions":true'),
+    'the ancestor in a heritage list is a class like any other');
+  FindPos(LFile, 'TAbstractPet = class abstract(TAnimal)', 'TAnimal', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on the ancestor of an abstract class');
+  Check(GOk and GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":true'),
+    'and `class abstract(` changes nothing');
+  FindPos(LFile, 'TFarShape = class(TShape)', 'TShape', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on an ancestor from another unit');
+  Check(GOk and GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":true'),
+    'a cross-unit ancestor is a class too');
+  FindPos(LFile, 'TAliasedDog = class abstract(TAnimalAlias)', 'TAnimalAlias',
+    LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on an ancestor written through a type alias');
+  Check(GOk and GResultJson.Contains('"references":true') and
+    GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":true') and
+    GResultJson.Contains('"destructions":true'),
+    'the alias of a class is the class - the VirtualTrees shape');
   FindPos(LFile, 'GCounter: Integer;', 'GCounter', LLine, LChar);
   Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
     'findAllAt answered on a variable');

@@ -14,6 +14,9 @@ unit DemoFindAll;
 
 interface
 
+uses
+  DemoHierarchy;
+
 type
   // Its own Create, Destroy and Free: the fixture closure has no System.pas,
   // so TObject's never resolve here - the same shape PasTree's own NavCD
@@ -38,6 +41,21 @@ type
   end;
 
   TPuppy = class(TDog)
+  end;
+
+  // An abstract class, a class over an ancestor from ANOTHER unit, and a
+  // class over a type ALIAS of its ancestor (VirtualTrees: `TVTBaseAncestor
+  // = TVTBaseAncestorVcl;` then `class abstract(TVTBaseAncestor)`): the
+  // shapes the findAllAt gate is checked on beside the plain one.
+  TAbstractPet = class abstract(TAnimal)
+  end;
+
+  TFarShape = class(TShape)
+  end;
+
+  TAnimalAlias = TAnimal;
+
+  TAliasedDog = class abstract(TAnimalAlias)
   end;
 
   // No common ancestor with TAnimal: never a descendant row.
@@ -114,6 +132,7 @@ procedure Run;
 var
   LDog: TDog;
   LPuppy: TPuppy;
+  LAnimal: TAnimal;
   I: Integer;
 begin
   GCounter := 0;
@@ -127,6 +146,9 @@ begin
   FreeAndNil(LPuppy);
   LDog := TDog.Create;
   LDog.Destroy;
+  // A creation through the type ALIAS: a TAnimal, found from TAnimal.
+  LAnimal := TAnimalAlias.Create;
+  LAnimal.Free;
 end;
 
 end.

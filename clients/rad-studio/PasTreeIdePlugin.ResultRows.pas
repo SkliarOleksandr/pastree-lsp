@@ -60,7 +60,9 @@ unit PasTreeIdePlugin.ResultRows;
   deliberately NOT in the list: they are only keywords in context, and
   half of them are the most common identifier names in existence -
   coloring every `Name` as a keyword is worse than coloring no directive
-  at all.
+  at all. They are painted by CONTEXT instead, in a second pass over the
+  line's runs (PromoteDirectives, 0.38.1 - `class abstract(TBase)` came
+  out with a plain `abstract` where the editor paints it as a keyword).
 
   Rows are inserted through IOTAMessageServices.AddCustomMessagePtr (a root
   row in a group, returns the Pointer used as Parent) and
@@ -143,6 +145,9 @@ function IsIdentChar(AChar: Char): Boolean; inline;
 begin
   Result := CharInSet(AChar, ['A' .. 'Z', 'a' .. 'z', '0' .. '9', '_']);
 end;
+
+procedure PromoteDirectives(const AText: string;
+  var ARuns: TArray<TTokenRun>); forward;
 
 function TokenizeLine(const AText: string): TArray<TTokenRun>;
 var
@@ -341,7 +346,231 @@ begin
     end;
   end;
   SetLength(LRuns, LCount);
+  PromoteDirectives(AText, LRuns);
   Result := LRuns;
+end;
+
+{ Directives, painted by CONTEXT - the editor's rule, over one line. An
+  identifier run becomes a reserved-word run when it stands where only a
+  directive can:
+
+  - after `class` / `record` / `interface`: abstract, sealed, helper,
+    operator (`class abstract(TBase)`, `record helper for string`);
+  - in the TAIL of a routine heading - after the first `;` at paren depth 0
+    that follows procedure/function/constructor/destructor, up to the next
+    reserved word that is not itself a directive (`begin` ends it, so a
+    one-line body's `Name := 1` stays an identifier): virtual, override,
+    abstract, message, stdcall, deprecated, external ... name ..., etc.;
+  - on a `property` line, past the property's own name: read, write,
+    stored, default, index, implements, ... (`property Index: Integer read
+    FIndex` keeps its Index);
+  - a visibility word alone on the line, with or without `strict`;
+  - `out` opening a parameter (`(out X` / `; out X`), `reference to`,
+    `on E: Exception do`, `raise ... at`, `X: T absolute Y`, and a trailing
+    deprecated / experimental / platform on a type or const declaration.
+
+  Anything else that spells a directive - a field named Name, a method
+  called Index, a variable Default - keeps the identifier color, which was
+  the reason the flat list (cReservedWords) leaves directives out. }
+procedure PromoteDirectives(const AText: string; var ARuns: TArray<TTokenRun>);
+const
+  cStructModifiers: array [0 .. 3] of string = ('abstract', 'sealed',
+    'helper', 'operator');
+  cRoutineDirectives: array [0 .. 33] of string = ('abstract', 'assembler',
+    'cdecl', 'delayed', 'deprecated', 'dispid', 'dynamic', 'experimental',
+    'export', 'external', 'far', 'final', 'forward', 'index', 'local',
+    'message', 'name', 'near', 'overload', 'override', 'pascal', 'platform',
+    'register', 'reintroduce', 'resident', 'safecall', 'static', 'stdcall',
+    'unsafe', 'varargs', 'virtual', 'winapi', 'inline',
+    'library');
+  cPropertyDirectives: array [0 .. 9] of string = ('default', 'dispid',
+    'implements', 'index', 'nodefault', 'read', 'readonly', 'stored',
+    'write', 'writeonly');
+  cVisibility: array [0 .. 4] of string = ('automated', 'private',
+    'protected', 'public', 'published');
+  cDeclTail: array [0 .. 3] of string = ('deprecated', 'experimental',
+    'library', 'platform');
+var
+  LSig: TArray<Integer>;   // indexes of the runs that are not blank/comment
+  LCount, I, J, K, LDepth: Integer;
+  LHasRoutine, LHasProperty: Boolean;
+
+  function WordAt(ASig: Integer): string;
+  begin
+    if (ASig < 0) or (ASig >= LCount) or
+       not (ARuns[LSig[ASig]].Code in [atIdentifier, atReservedWord]) then
+      Exit('');
+    Result := LowerCase(Copy(AText, ARuns[LSig[ASig]].Start,
+      ARuns[LSig[ASig]].Len));
+  end;
+
+  function IsIdent(ASig: Integer): Boolean;
+  begin
+    Result := (ASig >= 0) and (ASig < LCount) and
+      (ARuns[LSig[ASig]].Code = atIdentifier);
+  end;
+
+  function IsReserved(ASig: Integer): Boolean;
+  begin
+    Result := (ASig >= 0) and (ASig < LCount) and
+      (ARuns[LSig[ASig]].Code = atReservedWord);
+  end;
+
+  // The symbol run ASig ends with / starts with AChar. Symbol runs merge
+  // (`);` is one run), so a neighbour is asked for its edge character.
+  function EndsWith(ASig: Integer; AChar: Char): Boolean;
+  begin
+    Result := (ASig >= 0) and (ASig < LCount) and
+      (ARuns[LSig[ASig]].Code = atSymbol) and
+      (AText[ARuns[LSig[ASig]].Start + ARuns[LSig[ASig]].Len - 1] = AChar);
+  end;
+
+  function StartsWith(ASig: Integer; AChar: Char): Boolean;
+  begin
+    Result := (ASig >= 0) and (ASig < LCount) and
+      (ARuns[LSig[ASig]].Code = atSymbol) and
+      (AText[ARuns[LSig[ASig]].Start] = AChar);
+  end;
+
+  // Paren/bracket depth change over a symbol run.
+  function DepthDelta(ASig: Integer): Integer;
+  var
+    P: Integer;
+  begin
+    Result := 0;
+    if ARuns[LSig[ASig]].Code <> atSymbol then
+      Exit;
+    for P := ARuns[LSig[ASig]].Start to
+             ARuns[LSig[ASig]].Start + ARuns[LSig[ASig]].Len - 1 do
+      case AText[P] of
+        '(', '[': Inc(Result);
+        ')', ']': Dec(Result);
+      end;
+  end;
+
+  procedure Promote(ASig: Integer);
+  begin
+    ARuns[LSig[ASig]].Code := atReservedWord;
+  end;
+
+  function LineHas(const AWords: array of string): Boolean;
+  var
+    S: Integer;
+  begin
+    for S := 0 to LCount - 1 do
+      if IsReserved(S) and MatchText(WordAt(S), AWords) then
+        Exit(True);
+    Result := False;
+  end;
+
+begin
+  LCount := 0;
+  SetLength(LSig, Length(ARuns));
+  for I := 0 to High(ARuns) do
+    if not (ARuns[I].Code in [atWhiteSpace, atComment, atPreproc]) then
+    begin
+      LSig[LCount] := I;
+      Inc(LCount);
+    end;
+  if LCount = 0 then
+    Exit;
+
+  // A visibility line: `private`, `strict protected`, nothing else.
+  if (LCount = 1) and IsIdent(0) and MatchText(WordAt(0), cVisibility) then
+    Promote(0)
+  else if (LCount = 2) and (WordAt(0) = 'strict') and IsIdent(1) and
+          MatchText(WordAt(1), cVisibility) then
+  begin
+    Promote(0);
+    Promote(1);
+  end;
+
+  LHasRoutine := LineHas(['procedure', 'function', 'constructor',
+    'destructor']);
+  LHasProperty := LineHas(['property']);
+
+  for I := 0 to LCount - 1 do
+  begin
+    if not IsIdent(I) then
+      Continue;
+    // After a struct keyword.
+    if (I > 0) and IsReserved(I - 1) and
+       MatchText(WordAt(I - 1), ['class', 'record', 'interface']) and
+       MatchText(WordAt(I), cStructModifiers) then
+      Promote(I)
+    // `reference to`, `helper for`.
+    else if (WordAt(I) = 'reference') and (WordAt(I + 1) = 'to') then
+      Promote(I)
+    else if (WordAt(I) = 'helper') and (WordAt(I + 1) = 'for') then
+      Promote(I)
+    // `on E: Exception do` - the handler opener, first on its line.
+    else if (I = 0) and (WordAt(0) = 'on') and LineHas(['do']) then
+      Promote(I)
+    // `raise E at Addr`.
+    else if (WordAt(I) = 'at') and (WordAt(0) = 'raise') then
+      Promote(I)
+    // `X: T absolute Y`.
+    else if (WordAt(I) = 'absolute') and IsIdent(I - 1) and IsIdent(I + 1) then
+      Promote(I)
+    // `(out X` / `; out X` in a routine heading.
+    else if LHasRoutine and (WordAt(I) = 'out') and IsIdent(I + 1) and
+            (EndsWith(I - 1, '(') or EndsWith(I - 1, ';')) then
+      Promote(I)
+    // A trailing hint directive on any declaration: `= Integer deprecated;`
+    else if MatchText(WordAt(I), cDeclTail) and
+            ((I = LCount - 1) or StartsWith(I + 1, ';') or
+             (ARuns[LSig[I + 1]].Code = atString)) then
+      Promote(I);
+  end;
+
+  // The routine heading's tail.
+  if LHasRoutine then
+  begin
+    J := 0;
+    while (J < LCount) and not (IsReserved(J) and MatchText(WordAt(J),
+      ['procedure', 'function', 'constructor', 'destructor'])) do
+      Inc(J);
+    LDepth := 0;
+    K := J + 1;
+    while (K < LCount) and not ((LDepth = 0) and EndsWith(K, ';')) do
+    begin
+      Inc(LDepth, DepthDelta(K));
+      Inc(K);
+    end;
+    // K is the `;` run (or past the end); the tail runs from K + 1 to the
+    // first reserved word that is not a directive in its own right.
+    for I := K + 1 to LCount - 1 do
+    begin
+      if IsReserved(I) and not MatchText(WordAt(I), cRoutineDirectives) then
+        Break;
+      if IsIdent(I) and MatchText(WordAt(I), cRoutineDirectives) then
+        Promote(I);
+    end;
+  end;
+
+  // The property line, past the property's own name.
+  if LHasProperty then
+  begin
+    J := 0;
+    while (J < LCount) and not (IsReserved(J) and (WordAt(J) = 'property')) do
+      Inc(J);
+    LDepth := 0;
+    for I := J + 2 to LCount - 1 do
+    begin
+      if IsReserved(I) and not MatchText(WordAt(I), cPropertyDirectives) then
+        Break;
+      // Only at bracket depth 0 (`Items[Index: Integer]` keeps its Index),
+      // not the member after a dot (`read FObj.Index`), and not the name a
+      // directive takes (`read Index` - a method called Index).
+      if IsIdent(I) and (LDepth = 0) and
+         MatchText(WordAt(I), cPropertyDirectives) and
+         not EndsWith(I - 1, '.') and
+         not MatchText(WordAt(I - 1), ['read', 'write', 'implements', 'index',
+           'stored', 'default', 'dispid']) then
+        Promote(I);
+      Inc(LDepth, DepthDelta(I));
+    end;
+  end;
 end;
 
 { ------------------------------------------------------------------------- }

@@ -142,7 +142,13 @@ const
   /// 0.24.x the two-argument call compiles (the parameter had a default) and
   /// answers rows SPEC.md now says are not rows, on a base interface by the
   /// hundred.
-  cMinPasTreeVersion = '0.25.0';
+  ///
+  /// 0.25.2 (2026-09-10): TypeAt/ClassAt/InterfaceAt and the heritage index
+  /// follow a type ALIAS to the class it names. Entirely silent otherwise:
+  /// against 0.25.1 everything compiles, and a caret on `TVTBaseAncestor`
+  /// (VirtualTrees: `= TVTBaseAncestorVcl;`) greys every type-shaped Find
+  /// All item while Find Descendants of the class misses every tree.
+  cMinPasTreeVersion = '0.25.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
