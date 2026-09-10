@@ -40,34 +40,71 @@ same closure the rest of the analysis sees, including routines the native toggle
 loses track of. Switched off, the keystroke is handed straight back to the IDE
 and you get the native behaviour with nothing to unbind.
 
-### Find References
+### The Find All submenu
 
-Finds every use of the symbol under the caret across the whole project group -
-not just the open unit and not just the active project. Results go to a
-dedicated "Find References" tab in the Messages panel, grouped by file: one
-header row per file with a hit count, then one row per hit showing the source
-line in your live editor syntax colors with the match highlighted. Every row
-navigates on double-click, Enter and F8/Shift+F8, and the snippet text comes
-from the same snapshot the server analyzed, so unsaved buffers still line up.
+Seven searches under one editor-menu entry, "Find All": References, Overrides,
+Implementations, Descendants, Assignments, Creations, Destructions. All of them
+run across the whole project group - not just the open unit and not just the
+active project - and each reports into a Messages tab of its own, shaped alike:
+one row per hit showing the source line in your live editor syntax colors with
+the match highlighted, navigable on double-click, Enter and F8/Shift+F8, and a
+title that counts the units searched so "did it only look at this file?" has an
+answer on screen.
 
-### Find Overrides
+The items are greyed per caret, the way PasTree's own demo greys them: opening
+the menu asks the server which of the seven apply where the caret is, with a
+short time budget. If the server is busy or not up yet, every item stays
+enabled and a wrong pick answers with a one-line message instead. One switch
+on the Navigation tab of the settings covers the whole submenu.
 
-With the caret on a class method, this reports its whole VMT chain: the
-declaration that introduced the slot, every override below it, any `reintroduce`
-(labelled as such so it is not mistaken for an override) and any message
-handler. Call sites are deliberately not rows - this is a hierarchy, not a
-reference search. On a class property the same command answers the property's
-redeclaration chain instead, since a bare `property Items;` republishing an
-inherited property is the same property.
+#### References
 
-### Find Implementations
+Every use of the symbol under the caret, grouped by file: one header row per
+file with a hit count, then the hits. The snippet text comes from the same
+snapshot the server analyzed, so unsaved buffers still line up.
 
-With the caret on an interface method, this reports every class that lists that
-interface or a descendant of it. A class that satisfies the method through an
-ancestor is reported on the *ancestor's* declaration - the code that actually
-runs - with the listing class named beside it. Results share the Find References
-tab layout, with each row labelled by the declaring type and its kind, for
-example `TDerived (override)`.
+#### Overrides
+
+With the caret on a class method, its whole VMT chain: the declaration that
+introduced the slot, every override below it, any `reintroduce` (labelled as
+such so it is not mistaken for an override) and any message handler. Call sites
+are deliberately not rows - this is a hierarchy, not a reference search. On a
+class property the same command answers the property's redeclaration chain
+instead, since a bare `property Items;` republishing an inherited property is
+the same property.
+
+#### Implementations
+
+With the caret on an interface method, every class that lists that interface.
+A class that satisfies the method through an ancestor is reported on the
+*ancestor's* declaration - the code that actually runs - with the listing class
+named beside it. With the caret on the interface's own name, the answer is the
+classes listing it, one row each. A class that lists an interface *extending*
+this one is not a row: the interfaces below one are Descendants' answer, and
+that class is Implementations' answer asked on the child.
+
+#### Descendants
+
+With the caret on a class or interface name, every type below it - and the tab
+shows it as a tree: the type itself at the top, each descendant nested under
+its direct ancestor, to any depth, every row naming its unit and line. For an
+interface the rows are the interfaces extending it; the classes implementing
+it are Implementations' answer.
+
+#### Assignments
+
+With the caret on a variable, field, parameter or a property with a `write`
+specifier, every place it is written: the left side of `:=`, the counter of a
+`for`, through a member chain or an index. The declaration is pinned first, as
+in the References tab. A `var`/`out` argument and `Inc`/`Dec` are not rows yet.
+
+#### Creations and Destructions
+
+With the caret on a class name: every `TFoo.Create(...)` constructing exactly
+that class, and every `X.Free`, `X.Destroy` or `FreeAndNil(X)` where X is
+declared as exactly that class. Both are about the static type, so an instance
+created through a descendant, or freed through an ancestor-typed variable or by
+an owner, is not a row.
 
 ### IDE Insight symbol search (Ctrl+.)
 

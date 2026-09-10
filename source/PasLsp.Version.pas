@@ -124,7 +124,25 @@ const
   /// False on a property, so the command is simply DISABLED on one, and Find
   /// References and Rename see each declaration in the chain as an unrelated
   /// property - a rename that touches one link and silently leaves the others.
-  cMinPasTreeVersion = '0.21.0';
+  ///
+  /// 0.23.0 (2026-09-10): the rest of the Find All family - TypeAt/
+  /// FindDescendants, AssignableAt/FindAssignments, ClassAt/FindCreations/
+  /// FindDestructions and InterfaceAt/FindInterfaceImplementors, behind
+  /// pastree/findDescendants, findAssignments, findCreations,
+  /// findDestructions, the interface-name half of findImplementations and
+  /// the findAllAt gate. Loud again - a missing method does not compile -
+  /// and the floor moves so the line beside the version says which sibling
+  /// the six methods need.
+  ///
+  /// 0.25.0 (2026-09-10): FindImplementations/FindInterfaceImplementors stop
+  /// at the classes that spell THIS interface's name - a class listing a
+  /// descendant interface is no longer a row - and the AIncludeIndirect
+  /// parameter 0.24.x put on them and on FindDescendants is gone. The
+  /// second half is loud; the first is exactly the silent shape: against
+  /// 0.24.x the two-argument call compiles (the parameter had a default) and
+  /// answers rows SPEC.md now says are not rows, on a base interface by the
+  /// hundred.
+  cMinPasTreeVersion = '0.25.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

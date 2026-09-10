@@ -421,10 +421,11 @@ end;
   sibling), a hiding declaration in an unrelated class is never a row, a
   reintroduce and a message handler are rows of their own kind, a class
   PROPERTY answers its redeclaration chain while a redeclaration with a type
-  is excluded from it, an interface
-  method reaches an implementor through a descendant interface, and a class
-  that inherits its implementation is reported on the ancestor's declaration
-  with the listing class named. And the two refusals, because they are what
+  is excluded from it, an interface method does NOT reach a class listing
+  only a descendant interface (PasTree 0.25.0 - that is Find Descendants'
+  axis), and a class that inherits its implementation is reported on the
+  ancestor's declaration with the listing class named. And the two refusals,
+  because they are what
   the menu items cannot decide for themselves: overrides on an interface
   method and implementations on a class method both answer null. }
 procedure TestHierarchy;
@@ -529,13 +530,22 @@ begin
     'the interface''s own declaration is the root row');
   Check(GOk and GResultJson.Contains('"typeName":"TPoliteGreeter"'),
     'a class listing the interface is an implementor');
-  Check(GOk and GResultJson.Contains('"typeName":"TLoudGreeter"'),
-    'and so is a class listing a DESCENDANT interface');
+  Check(GOk and not GResultJson.Contains('TLoudGreeter'),
+    'a class listing only a DESCENDANT interface is not - findDescendants'' axis');
   Check(GOk and GResultJson.Contains('"kind":"inherited"') and
     GResultJson.Contains('"typeName":"TGreeterBase"') and
     GResultJson.Contains('"viaTypeName":"TInheritedGreeter"'),
     'a class satisfying it through its ancestor is reported on the ancestor, via the class');
-  Check(GOk and (CountOf('"kind":') = 4), 'exactly four rows');
+  Check(GOk and (CountOf('"kind":') = 3), 'exactly three rows');
+
+  // Asked on the DESCENDANT interface's own method, its implementor is the row.
+  FindPos(LFile, 'procedure Shout;', 'Shout', LLine, LChar);
+  Check(Ask('pastree/findImplementations',
+    PositionParams(LFile, LLine, LChar)),
+    'findImplementations answered on the descendant interface''s method');
+  Check(GOk and GResultJson.Contains('"typeName":"TLoudGreeter"') and
+    (CountOf('"kind":') = 2),
+    'the child''s implementor is a row when asked on the child');
 
   // The refusals: the wrong identity answers null, not an empty list.
   Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
@@ -552,6 +562,193 @@ begin
   Check(Ask('pastree/findOverrides', PositionParams(LFile, LLine, LChar)),
     'findOverrides answered on a constant');
   Check(GOk and ((GResultJson = '') or (GResultJson = 'null')), 'and declines it');
+end;
+
+{ 2c. The rest of the Find All family over fixtures\DemoFindAll.pas -
+  pastree/findDescendants, findAssignments, findCreations, findDestructions,
+  the interface-NAME half of findImplementations, and the findAllAt gate the
+  RAD client greys its submenu on.
+
+  What is checked is the ROW SET again, plus the two fields that make the
+  descendants answer a tree (depth and parentTypeName), the pinned
+  `declaration` row of a site search, and the gate's flags at a class name and
+  at a variable. And the refusals: descendants on a constant, assignments on a
+  read-only property, creations on an interface. }
+procedure TestFindAll;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  function CountOf(const ASub: string): Integer;
+  var
+    LPos: Integer;
+  begin
+    Result := 0;
+    LPos := Pos(ASub, GResultJson);
+    while LPos > 0 do
+    begin
+      Inc(Result);
+      LPos := Pos(ASub, GResultJson, LPos + Length(ASub));
+    end;
+  end;
+
+  function IsNull: Boolean;
+  begin
+    Result := GOk and ((GResultJson = '') or (GResultJson = 'null'));
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 2c. findDescendants / findAssignments / findCreations / ' +
+    'findDestructions / findAllAt ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoFindAll.pas');
+  DidOpen(LFile);
+
+  // Descendants of a class, from its declaration: a tree of three.
+  FindPos(LFile, 'TAnimal = class', 'TAnimal', LLine, LChar);
+  Check(Ask('pastree/findDescendants', PositionParams(LFile, LLine, LChar)),
+    'findDescendants answered on a class declaration');
+  Check(GOk and GResultJson.Contains('"name":"TAnimal"'), 'it names the type');
+  Check(GOk and GResultJson.Contains('"kind":"root"') and
+    GResultJson.Contains('"typeName":"TAnimal"') and
+    GResultJson.Contains('"depth":0'),
+    'the type itself is the root row, depth 0');
+  Check(GOk and GResultJson.Contains('"typeName":"TDog"') and
+    GResultJson.Contains('"typeName":"TCat"'),
+    'both direct descendants are rows');
+  Check(GOk and GResultJson.Contains(
+    '"typeName":"TPuppy","viaTypeName":"","parentTypeName":"TDog","depth":2'),
+    'a grandchild is depth 2 with its direct ancestor named');
+  Check(GOk and GResultJson.Contains(
+    '"typeName":"TDog","viaTypeName":"","parentTypeName":"TAnimal","depth":1'),
+    'a child is depth 1 with the root named');
+  Check(GOk and not GResultJson.Contains('TStone'),
+    'an unrelated class is not a row');
+  Check(GOk and (CountOf('"kind":') = 4), 'exactly four rows');
+
+  // Descendants of an interface: the interfaces extending it, NOT the classes
+  // implementing it - one axis per command.
+  FindPos(LFile, 'IShape = interface', 'IShape', LLine, LChar);
+  Check(Ask('pastree/findDescendants', PositionParams(LFile, LLine, LChar)),
+    'findDescendants answered on an interface');
+  Check(GOk and GResultJson.Contains('"typeName":"IRoundShape"'),
+    'an extending interface is a descendant row');
+  Check(GOk and not GResultJson.Contains('TCircle') and
+    not GResultJson.Contains('TBox'),
+    'an implementing class is not - that is findImplementations'' axis');
+  Check(GOk and (CountOf('"kind":') = 2), 'exactly two rows');
+
+  // The same interface NAME asked for implementations: the classes.
+  Check(Ask('pastree/findImplementations',
+    PositionParams(LFile, LLine, LChar)),
+    'findImplementations answered on an interface NAME');
+  Check(GOk and GResultJson.Contains('"name":"IShape"'), 'it names the interface');
+  Check(GOk and GResultJson.Contains('"kind":"root"') and
+    GResultJson.Contains('"typeName":"IShape"'),
+    'the interface''s own declaration is the root row');
+  Check(GOk and GResultJson.Contains('"typeName":"TBox"'),
+    'a class listing the interface is an implementor');
+  Check(GOk and not GResultJson.Contains('TCircle'),
+    'a class listing only an interface that EXTENDS it is not - ask on IRoundShape');
+  Check(GOk and (CountOf('"kind":') = 2), 'exactly two rows');
+
+  // Assignments to a global: the declaration pinned, then the two writes;
+  // the read inside `GCounter + I` is not a row.
+  FindPos(LFile, 'GCounter: Integer;', 'GCounter', LLine, LChar);
+  Check(Ask('pastree/findAssignments', PositionParams(LFile, LLine, LChar)),
+    'findAssignments answered on a variable');
+  Check(GOk and GResultJson.Contains('"name":"GCounter"'),
+    'it names the variable');
+  Check(GOk and (CountOf('"kind":"declaration"') = 1),
+    'the declaration is pinned as its own row');
+  Check(GOk and (CountOf('"kind":"assignment"') = 2),
+    'two assignments: `:= 0` and `:= GCounter + I` - the read is not one');
+  Check(GOk and GResultJson.Contains('"snippet":"  GCounter := 0;"'),
+    'a row carries the server''s snippet');
+
+  // A for counter is assigned by the for.
+  FindPos(LFile, 'for I := 1 to cLimit do', 'I', LLine, LChar);
+  Check(Ask('pastree/findAssignments', PositionParams(LFile, LLine, LChar)),
+    'findAssignments answered on a for counter');
+  Check(GOk and (CountOf('"kind":"assignment"') = 1),
+    'the for header is its one assignment');
+
+  // A property with a write specifier: the write through the property syntax.
+  FindPos(LFile, 'property Name: string read FName write SetName;', 'Name',
+    LLine, LChar);
+  Check(Ask('pastree/findAssignments', PositionParams(LFile, LLine, LChar)),
+    'findAssignments answered on a writable property');
+  Check(GOk and GResultJson.Contains('LDog.Name := ''Rex'''),
+    '`LDog.Name := ...` is its assignment');
+  Check(GOk and (CountOf('"kind":"assignment"') = 1), 'exactly one');
+
+  // Creations and destructions of TDog: two of each, and the descendant's
+  // own creation and FreeAndNil are TPuppy's, not TDog's.
+  FindPos(LFile, 'TDog = class(TAnimal)', 'TDog', LLine, LChar);
+  Check(Ask('pastree/findCreations', PositionParams(LFile, LLine, LChar)),
+    'findCreations answered on a class');
+  Check(GOk and GResultJson.Contains('"name":"TDog"'), 'it names the class');
+  Check(GOk and (CountOf('"kind":"declaration"') = 1),
+    'the class declaration is pinned');
+  Check(GOk and (CountOf('"kind":"creation"') = 2),
+    'two `TDog.Create` sites - `TPuppy.Create` is not one');
+  Check(Ask('pastree/findDestructions', PositionParams(LFile, LLine, LChar)),
+    'findDestructions answered on a class');
+  Check(GOk and (CountOf('"kind":"destruction"') = 2),
+    '`LDog.Free` and `LDog.Destroy` - `FreeAndNil(LPuppy)` is not one');
+  FindPos(LFile, 'TPuppy = class(TDog)', 'TPuppy', LLine, LChar);
+  Check(Ask('pastree/findDestructions', PositionParams(LFile, LLine, LChar)),
+    'findDestructions answered on the descendant');
+  Check(GOk and (CountOf('"kind":"destruction"') = 1) and
+    GResultJson.Contains('FreeAndNil(LPuppy)'),
+    'FreeAndNil through the unit''s own FreeAndNil is TPuppy''s destruction');
+
+  // The gate: one request, seven flags. Every request above waited the
+  // analysis out, so the model stands and the gate can answer.
+  FindPos(LFile, 'TDog = class(TAnimal)', 'TDog', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on a class name');
+  Check(GOk and GResultJson.Contains('"references":true') and
+    GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":true') and
+    GResultJson.Contains('"destructions":true'),
+    'a class has references, descendants, creations and destructions');
+  Check(GOk and GResultJson.Contains('"overrides":false') and
+    GResultJson.Contains('"implementations":false') and
+    GResultJson.Contains('"assignments":false'),
+    'and no overrides, implementations or assignments');
+  FindPos(LFile, 'GCounter: Integer;', 'GCounter', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on a variable');
+  Check(GOk and GResultJson.Contains('"references":true') and
+    GResultJson.Contains('"assignments":true') and
+    GResultJson.Contains('"descendants":false') and
+    GResultJson.Contains('"creations":false'),
+    'a variable has references and assignments, nothing type-shaped');
+  FindPos(LFile, 'IShape = interface', 'IShape', LLine, LChar);
+  Check(Ask('pastree/findAllAt', PositionParams(LFile, LLine, LChar)),
+    'findAllAt answered on an interface name');
+  Check(GOk and GResultJson.Contains('"implementations":true') and
+    GResultJson.Contains('"descendants":true') and
+    GResultJson.Contains('"creations":false'),
+    'an interface has implementations and descendants, no creations');
+
+  // The refusals: the wrong identity answers null, not an empty list.
+  FindPos(LFile, 'cLimit = 3', 'cLimit', LLine, LChar);
+  Check(Ask('pastree/findDescendants', PositionParams(LFile, LLine, LChar)),
+    'findDescendants answered on a constant');
+  Check(IsNull, 'and declines it - a constant has no descendants');
+  Check(Ask('pastree/findAssignments', PositionParams(LFile, LLine, LChar)),
+    'findAssignments answered on a constant');
+  Check(IsNull, 'and declines it - a constant is not assignable');
+  FindPos(LFile, 'property Legs: Integer read FLegs;', 'Legs', LLine, LChar);
+  Check(Ask('pastree/findAssignments', PositionParams(LFile, LLine, LChar)),
+    'findAssignments answered on a read-only property');
+  Check(IsNull, 'and declines it - nothing can assign it');
+  FindPos(LFile, 'IShape = interface', 'IShape', LLine, LChar);
+  Check(Ask('pastree/findCreations', PositionParams(LFile, LLine, LChar)),
+    'findCreations answered on an interface');
+  Check(IsNull, 'and declines it - an interface has no instances to create');
 end;
 
 { 3. Lazy restart: no timer, the next request revives the server. }
@@ -2405,6 +2602,7 @@ begin
       TestNonAsciiPositions;
       TestBareInherited;
       TestHierarchy;
+      TestFindAll;
       TestBomIsNotContent;
       TestOverlayBeatsDisk;
       TestIncrementalPath;

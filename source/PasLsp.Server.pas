@@ -95,6 +95,11 @@ type
     Edits: TArray<TPasRenameEdit>;
   end;
 
+  { The three filtered reference searches of the Find All family that share
+    one handler (HandleFindSites): same answer shape, same gate-then-search
+    shape, only the PasTree call differs. }
+  TFindSitesKind = (fskAssignments, fskCreations, fskDestructions);
+
   TLspServer = class
   private
     FInitialized: Boolean;
@@ -275,6 +280,13 @@ type
     function HandleRenamePlan(const AMsg: TLspIncoming): string;
     function HandleFindOverrides(const AMsg: TLspIncoming): string;
     function HandleFindImplementations(const AMsg: TLspIncoming): string;
+    function HandleFindDescendants(const AMsg: TLspIncoming): string;
+    function HandleFindSites(const AMsg: TLspIncoming;
+      AKind: TFindSitesKind): string;
+    function HandleFindAllAt(const AMsg: TLspIncoming): string;
+    function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
+      out APath: string; out AMid, APasLine, APasCol: Integer;
+      out AReply: string): Boolean;
     function PlanRenameAt(const APath: string; APasLine, APasCol: Integer;
       const ANewName: string; out APlan: TLspRenamePlanned;
       out AError: string): Boolean;
@@ -2482,6 +2494,7 @@ var
   LKind: string;
 begin
   LPath := DocPathOf(AMsg.Params);
+  Log('textDocument/references: ' + LPath);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
      not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
@@ -2526,7 +2539,11 @@ begin
     LHits := FNav.FindBuiltinReferences(LName);
   end
   else
+  begin
+    Log(Format('textDocument/references: %s -> no identity',
+      [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
 
   Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits',
     [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits)]));
@@ -3158,23 +3175,104 @@ begin
   end;
 end;
 
-{ One row of a Find Overrides / Find Implementations answer. A Location plus
-  what a Location cannot carry and the results panel shows: the row's KIND
-  (which side of the chain it is), the type declaring it, and - for an
-  inherited implementor - the class that listed the interface. `snippet`/
-  `hiFrom`/`hiTo` ride along as in renamePlan, so a host that has no text for
-  a file it never opened can still paint the line. `filePath` is the same
-  path the uri encodes, spelled for a host that does not want to decode. }
+{ ------------------------------------------------------------------------- }
+{ The Find All family - pastree/find*: OURS, not LSP                          }
+{ ------------------------------------------------------------------------- }
+
+{ One row of any Find All answer (overrides, implementations, descendants,
+  assignments, creations, destructions). A Location plus what a Location
+  cannot carry and the results panel shows: the row's KIND (which side of a
+  chain it is, or `declaration` against the search's own word), the type
+  declaring it, and - for an inherited implementor - the class that listed
+  the interface. For a descendant the row also carries `parentTypeName` and
+  `depth` (heritage links from the root; 0 on the root), which is the whole
+  tree: PasTree answers a flat array in breadth-first hierarchy order and a
+  host that nests each row under the one named by its parent gets the tree
+  without a second walk. Empty / 0 for every other kind. `snippet`/`hiFrom`/
+  `hiTo` ride along as in renamePlan, so a host that has no text for a file
+  it never opened can still paint the line. `filePath` is the same path the
+  uri encodes, spelled for a host that does not want to decode. }
 function HierarchyRowJson(const AHit: TPasRefHit; const AKind, ATypeName,
-  AViaTypeName: string): string;
+  AViaTypeName: string; const AParentTypeName: string = '';
+  ADepth: Integer = 0): string;
 begin
   Result := Format('{"uri":%s,"filePath":%s,"line":%d,"col":%d,"len":%d,' +
-    '"kind":%s,"typeName":%s,"viaTypeName":%s,"snippet":%s,' +
-    '"hiFrom":%d,"hiTo":%d}',
+    '"kind":%s,"typeName":%s,"viaTypeName":%s,"parentTypeName":%s,' +
+    '"depth":%d,"snippet":%s,"hiFrom":%d,"hiTo":%d}',
     [JsonQuote(PathToUri(AHit.FilePath)), JsonQuote(AHit.FilePath),
      AHit.Line, AHit.Col, AHit.HiTo - AHit.HiFrom, JsonQuote(AKind),
-     JsonQuote(ATypeName), JsonQuote(AViaTypeName), JsonQuote(AHit.Snippet),
-     AHit.HiFrom, AHit.HiTo]);
+     JsonQuote(ATypeName), JsonQuote(AViaTypeName), JsonQuote(AParentTypeName),
+     ADepth, JsonQuote(AHit.Snippet), AHit.HiFrom, AHit.HiTo]);
+end;
+
+{ The envelope every Find All method answers with: an object holding `name`
+  and `rows`, the rows an array of HierarchyRowJson objects. }
+function HierarchyAnswer(const AName: string;
+  const ARows: TArray<string>): string;
+var
+  LSB: TStringBuilder;
+  LIdx: Integer;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    LSB.AppendFormat('{"name":%s,"rows":[', [JsonQuote(AName)]);
+    for LIdx := 0 to High(ARows) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(ARows[LIdx]);
+    end;
+    LSB.Append(']}');
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ The steps every positional Find All request takes before its own gate:
+  parameter check, the wait for the analysis, the navigator, the model of the
+  file, the position in PasTree's numbering. True means "go on"; False means
+  AReply is the response to send - an error, or `null` for a file the closure
+  does not hold (the same contract the individual handlers had when each
+  spelled these lines out, kept in one place since the family grew to six). }
+function TLspServer.FindAllPreamble(const AMsg: TLspIncoming;
+  const ATag: string; out APath: string; out AMid, APasLine, APasCol: Integer;
+  out AReply: string): Boolean;
+var
+  LLine, LChar: Integer;
+begin
+  Result := False;
+  AMid := -1;
+  APasLine := 0;
+  APasCol := 0;
+  APath := DocPathOf(AMsg.Params);
+  if (APath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+  begin
+    AReply := BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      ATag + ': textDocument.uri and position required');
+    Exit;
+  end;
+  if not WaitAnalyzed(APath, AMsg.IdJson) then
+  begin
+    AReply := BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+      'request cancelled');
+    Exit;
+  end;
+  if FNav = nil then
+  begin
+    AReply := BuildResponse(AMsg.IdJson, 'null');
+    Exit;
+  end;
+  AMid := FNav.ModelIdOf(APath);
+  if AMid < 0 then
+  begin
+    AReply := BuildResponse(AMsg.IdJson, 'null');
+    Exit;
+  end;
+  LspToPasTree(LLine, LChar, APasLine, APasCol);
+  Result := True;
 end;
 
 { pastree/findOverrides - OURS, not LSP. The VMT chain of the class method at
@@ -3210,24 +3308,13 @@ const
     ('root', 'override', 'message', 'reintroduce', 'redeclared');
 var
   LPath, LName: string;
-  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
   LRows: TArray<TPasOverrideHit>;
-  LSB: TStringBuilder;
+  LJson: TArray<string>;
 begin
-  LPath := DocPathOf(AMsg.Params);
-  if (LPath = '') or
-     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
-     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
-    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
-      'findOverrides: textDocument.uri and position required'));
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  if FNav = nil then
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
-  LMid := FNav.ModelIdOf(LPath);
-  if LMid < 0 then
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
-  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  if not FindAllPreamble(AMsg, 'findOverrides', LPath, LMid, LPasLine,
+    LPasCol, Result) then
+    Exit;
   if not FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
   begin
     Log(Format('findOverrides: %s -> not a class method or property',
@@ -3237,82 +3324,258 @@ begin
   LRows := FNav.FindOverrides(LTMid, LSym);
   Log(Format('findOverrides: %s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
-  LSB := TStringBuilder.Create;
-  try
-    LSB.AppendFormat('{"name":%s,"rows":[', [JsonQuote(LName)]);
-    for LIdx := 0 to High(LRows) do
-    begin
-      if LIdx > 0 then
-        LSB.Append(',');
-      LSB.Append(HierarchyRowJson(LRows[LIdx].Hit, cKindWord[LRows[LIdx].Kind],
-        LRows[LIdx].TypeName, ''));
-    end;
-    LSB.Append(']}');
-    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
-  finally
-    LSB.Free;
-  end;
+  SetLength(LJson, Length(LRows));
+  for LIdx := 0 to High(LRows) do
+    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
+      cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, '');
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
 end;
 
 { pastree/findImplementations - OURS, not LSP. The interface-side twin of
   findOverrides, and a separate method for a separate identity (PasTree's
-  InterfaceMethodAt against MethodAt): the classes implementing the INTERFACE
-  method at the position, through the interface's own descendants, with an
-  implementor that inherits the method reported on the ancestor's declaration
-  and `viaTypeName` naming the class that listed the interface. Section 5 of
-  PasTree's docs/editor-features.md owns the rows and the documented gaps
-  (method resolution clauses, `implements` delegation, type aliases).
+  InterfaceMethodAt against MethodAt). Two entry points, one command, as
+  PasTree's own demo has it since 0.22.0:
 
-  `null` when the position is not an interface method - same contract as
-  findOverrides, same reason. }
+    - an interface METHOD: the method of every class that lists the
+      interface, with an implementor that inherits the method reported on
+      the ancestor's declaration and `viaTypeName` naming the class that
+      listed the interface (FindImplementations);
+    - the interface TYPE name itself: one row per class that lists the
+      interface (FindInterfaceImplementors), the interface's own declaration
+      as the root.
+
+  Both take ONE hop, to the classes that spell this interface's name: a
+  class listing a DESCENDANT interface is not a row (PasTree 0.25.0 - up to
+  0.24.x it was, and on a base interface the answer had no shape a list
+  could show). The interfaces below one are findDescendants' axis, and the
+  child's implementors are this request on the child.
+
+  Section 5 of PasTree's docs/editor-features.md owns the rows and the
+  documented gaps (method resolution clauses, `implements` delegation, type
+  aliases). The method is tried first: on a method's name both cannot be true,
+  and on the type's name only the second is.
+
+  `null` when the position is neither - same contract as findOverrides, same
+  reason. }
 function TLspServer.HandleFindImplementations(const AMsg: TLspIncoming): string;
 const
   cKindWord: array[TPasImplKind] of string =
     ('root', 'implementor', 'inherited');
 var
-  LPath, LName: string;
-  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LPath, LName, LWhat: string;
+  LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
   LRows: TArray<TPasImplHit>;
-  LSB: TStringBuilder;
+  LJson: TArray<string>;
+begin
+  if not FindAllPreamble(AMsg, 'findImplementations', LPath, LMid, LPasLine,
+    LPasCol, Result) then
+    Exit;
+  if FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    LRows := FNav.FindImplementations(LTMid, LSym);
+    LWhat := 'interface method';
+  end
+  else if FNav.InterfaceAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    LRows := FNav.FindInterfaceImplementors(LTMid, LSym);
+    LWhat := 'interface';
+  end
+  else
+  begin
+    Log(Format('findImplementations: %s -> not an interface or interface method',
+      [PosTag(LPath, LPasLine, LPasCol)]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  Log(Format('findImplementations: %s %s ''%s'' -> %d rows',
+    [PosTag(LPath, LPasLine, LPasCol), LWhat, LName, Length(LRows)]));
+  SetLength(LJson, Length(LRows));
+  for LIdx := 0 to High(LRows) do
+    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
+      cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName,
+      LRows[LIdx].ViaTypeName);
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+end;
+
+{ pastree/findDescendants - OURS, not LSP. Every class below the class (or
+  interface below the interface) at the position, transitively, across the
+  closure (TPasNavigator.TypeAt + FindDescendants; section 6 of PasTree's
+  docs/editor-features.md). Rows are TYPE declarations, never members, and
+  come in breadth-first hierarchy order with `depth` and `parentTypeName` on
+  each - the tree, flattened; the client rebuilds it by nesting each row under
+  the row of depth-1 named by its parent. One axis only, by PasTree's rule:
+  for an interface the rows are interfaces extending it, not the classes
+  implementing it - that is findImplementations on the same name.
+
+  `null` when the position is not a class, `object` or interface type name -
+  a record, a helper, an alias, a variable. A type nothing descends from
+  answers its own single `root` row. Always the WHOLE tree: 0.37.7-0.37.9
+  briefly took an `includeIndirect` flag (PasTree 0.24.x's Ctrl modifier)
+  and the direct answer was a flat list in a panel built to show a tree. }
+function TLspServer.HandleFindDescendants(const AMsg: TLspIncoming): string;
+const
+  cKindWord: array[TPasDescendantKind] of string = ('root', 'descendant');
+var
+  LPath, LName: string;
+  LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LRows: TArray<TPasDescendantHit>;
+  LJson: TArray<string>;
+begin
+  if not FindAllPreamble(AMsg, 'findDescendants', LPath, LMid, LPasLine,
+    LPasCol, Result) then
+    Exit;
+  if not FNav.TypeAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
+  begin
+    Log(Format('findDescendants: %s -> not a class or interface type',
+      [PosTag(LPath, LPasLine, LPasCol)]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LRows := FNav.FindDescendants(LTMid, LSym);
+  Log(Format('findDescendants: %s ''%s'' -> %d rows',
+    [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
+  SetLength(LJson, Length(LRows));
+  for LIdx := 0 to High(LRows) do
+    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
+      cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, '',
+      LRows[LIdx].ParentTypeName, LRows[LIdx].Depth);
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+end;
+
+{ pastree/findAssignments, pastree/findCreations, pastree/findDestructions -
+  OURS, not LSP. Three filtered reference searches with the same answer shape
+  as the hierarchy methods, so one client path paints all six:
+
+    - assignments: the writes to the variable / field / parameter / writable
+      property at the position - the left side of `:=`, the counter of a
+      `for` (AssignableAt + FindAssignments; section 7 of PasTree's
+      docs/editor-features.md, gaps included: a `var`/`out` argument and
+      `Inc`/`Dec` are not rows);
+    - creations: every `TFoo.Create(...)` constructing EXACTLY the class at
+      the position, positioned on the class name in the call (ClassAt +
+      FindCreations; section 8 there - a descendant's constructor and a
+      class-reference variable are not rows);
+    - destructions: every `X.Free` / `X.Destroy` / `FreeAndNil(X)` where X's
+      STATIC type is exactly that class, positioned on X (ClassAt +
+      FindDestructions; same section - an instance freed through an
+      ancestor-typed variable or by an owner is a runtime fact, not a row).
+
+  The declaration site is never one of PasTree's rows (as in FindReferences),
+  so it is prepended here as kind `declaration` when DeclHit has it - a reader
+  of "where is this assigned" wants the declaration pinned first, as the
+  references tab pins it. Every other row carries the search's own word
+  (`assignment`, `creation`, `destruction`).
+
+  `null` when the position fails the gate: a constant, a type or a read-only
+  property for assignments; anything but a class or `object` type name for the
+  other two. A gate that passes with nothing found answers the declaration
+  row alone - "nothing assigns this" is an answer, "not assignable" a refusal. }
+function TLspServer.HandleFindSites(const AMsg: TLspIncoming;
+  AKind: TFindSitesKind): string;
+const
+  cTag: array[TFindSitesKind] of string =
+    ('findAssignments', 'findCreations', 'findDestructions');
+  cRowWord: array[TFindSitesKind] of string =
+    ('assignment', 'creation', 'destruction');
+  cNotSubject: array[TFindSitesKind] of string =
+    ('not an assignable symbol', 'not a class', 'not a class');
+var
+  LPath, LName: string;
+  LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
+  LGate: Boolean;
+  LDecl: TPasRefHit;
+  LRows: TArray<TPasRefHit>;
+  LJson: TArray<string>;
+begin
+  if not FindAllPreamble(AMsg, cTag[AKind], LPath, LMid, LPasLine, LPasCol,
+    Result) then
+    Exit;
+  if AKind = fskAssignments then
+    LGate := FNav.AssignableAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName)
+  else
+    LGate := FNav.ClassAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  if not LGate then
+  begin
+    Log(Format('%s: %s -> %s',
+      [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), cNotSubject[AKind]]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  case AKind of
+    fskAssignments:  LRows := FNav.FindAssignments(LTMid, LSym);
+    fskCreations:    LRows := FNav.FindCreations(LTMid, LSym);
+    fskDestructions: LRows := FNav.FindDestructions(LTMid, LSym);
+  end;
+  Log(Format('%s: %s ''%s'' -> %d rows',
+    [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
+  LJson := nil;
+  if FNav.DeclHit(LTMid, LSym, LDecl) then
+    LJson := LJson + [HierarchyRowJson(LDecl, 'declaration', '', '')];
+  for LIdx := 0 to High(LRows) do
+    LJson := LJson + [HierarchyRowJson(LRows[LIdx], cRowWord[AKind], '', '')];
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+end;
+
+function JsonBool(AValue: Boolean): string;
+begin
+  if AValue then
+    Result := 'true'
+  else
+    Result := 'false';
+end;
+
+{ pastree/findAllAt - OURS, not LSP. Which of the Find All commands apply at
+  the position: the seven gates PasTree's demo greys its submenu on, asked
+  once so a host can grey its own menu the same way. Answers an object with
+  one Boolean per command - `references`, `overrides`, `implementations`,
+  `descendants`, `assignments`, `creations`, `destructions` - and `null`
+  when it cannot say.
+
+  IT NEVER WAITS. A menu is drawn on the main thread of the host, and the
+  host gives this a short budget (the RAD Studio client: a couple of hundred
+  milliseconds, then every item stays enabled and the command itself is the
+  gate, as before). So unlike every other request here this one does not go
+  through WaitAnalyzed: an analysis in flight, or one not yet started, is
+  `null` - "cannot say" - and it starts nothing either, a menu popup being no
+  reason to spin up a closure. Pending edits are not flushed for the same
+  reason: the verdict is over the model as it stands, and a position that
+  moved since is at worst greyed wrong until the next idle rebuild. }
+function TLspServer.HandleFindAllAt(const AMsg: TLspIncoming): string;
+var
+  LPath, LName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym: Integer;
+  LRefs, LOverrides, LImpls, LDesc, LAssign, LClass: Boolean;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
      not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
-      'findImplementations: textDocument.uri and position required'));
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  if FNav = nil then
+      'findAllAt: textDocument.uri and position required'));
+  if (FSession <> nil) or (FNav = nil) then
+  begin
+    Log('findAllAt: cannot say - analysis in flight or none');
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if not FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
-  begin
-    Log(Format('findImplementations: %s -> not an interface method',
-      [PosTag(LPath, LPasLine, LPasCol)]));
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
-  end;
-  LRows := FNav.FindImplementations(LTMid, LSym);
-  Log(Format('findImplementations: %s ''%s'' -> %d rows',
-    [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
-  LSB := TStringBuilder.Create;
-  try
-    LSB.AppendFormat('{"name":%s,"rows":[', [JsonQuote(LName)]);
-    for LIdx := 0 to High(LRows) do
-    begin
-      if LIdx > 0 then
-        LSB.Append(',');
-      LSB.Append(HierarchyRowJson(LRows[LIdx].Hit, cKindWord[LRows[LIdx].Kind],
-        LRows[LIdx].TypeName, LRows[LIdx].ViaTypeName));
-    end;
-    LSB.Append(']}');
-    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
-  finally
-    LSB.Free;
-  end;
+  // The same three identities HandleReferences tries, in its order.
+  LRefs := FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) or
+    FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) or
+    FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName);
+  LOverrides := FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  LImpls := FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName)
+    or FNav.InterfaceAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  LDesc := FNav.TypeAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  LAssign := FNav.AssignableAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  LClass := FNav.ClassAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
+  Log(Format('findAllAt: %s -> refs=%s ovr=%s impl=%s desc=%s asg=%s cls=%s',
+    [PosTag(LPath, LPasLine, LPasCol), JsonBool(LRefs), JsonBool(LOverrides),
+     JsonBool(LImpls), JsonBool(LDesc), JsonBool(LAssign), JsonBool(LClass)]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"references":%s,"overrides":%s,"implementations":%s,"descendants":%s,' +
+    '"assignments":%s,"creations":%s,"destructions":%s}',
+    [JsonBool(LRefs), JsonBool(LOverrides), JsonBool(LImpls), JsonBool(LDesc),
+     JsonBool(LAssign), JsonBool(LClass), JsonBool(LClass)]));
 end;
 
 { textDocument/implementation and textDocument/declaration - the decl<->impl
@@ -4625,6 +4888,16 @@ begin
         Exit(HandleFindOverrides(LMsg));
       if LMsg.Method = 'pastree/findImplementations' then
         Exit(HandleFindImplementations(LMsg));
+      if LMsg.Method = 'pastree/findDescendants' then
+        Exit(HandleFindDescendants(LMsg));
+      if LMsg.Method = 'pastree/findAssignments' then
+        Exit(HandleFindSites(LMsg, fskAssignments));
+      if LMsg.Method = 'pastree/findCreations' then
+        Exit(HandleFindSites(LMsg, fskCreations));
+      if LMsg.Method = 'pastree/findDestructions' then
+        Exit(HandleFindSites(LMsg, fskDestructions));
+      if LMsg.Method = 'pastree/findAllAt' then
+        Exit(HandleFindAllAt(LMsg));
       { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when
         something happens that the server cannot see but a reader of this log
         needs as a boundary: the IDE opening or closing a project. Reopening

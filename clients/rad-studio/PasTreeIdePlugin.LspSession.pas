@@ -80,14 +80,20 @@ type
     AProjectsSearched, AProjectsInGroup: Integer; const AError: string);
 
   /// <summary>
-  /// One row of a Find Overrides / Find Implementations answer
-  /// (pastree/findOverrides, pastree/findImplementations): a navigation
-  /// target plus what the results panel shows beside the snippet. Kind is the
-  /// server's word - `root`, `override`, `message`, `reintroduce` for a chain;
-  /// `root`, `implementor`, `inherited` for implementors - kept as text so a
-  /// kind this client has not heard of still paints. TypeName is the type
-  /// DECLARING the row; ViaTypeName, for an inherited implementor, the class
-  /// that listed the interface ('' otherwise). Snippet/HiFrom/HiTo are the
+  /// One row of a Find All answer (pastree/findOverrides, findImplementations,
+  /// findDescendants, findAssignments, findCreations, findDestructions): a
+  /// navigation target plus what the results panel shows beside the snippet.
+  /// Kind is the server's word - `root`, `override`, `message`, `reintroduce`,
+  /// `redeclared` for a chain; `root`, `implementor`, `inherited` for
+  /// implementors; `root`, `descendant` for a hierarchy; `declaration` plus
+  /// `assignment` / `creation` / `destruction` for the site searches - kept
+  /// as text so a kind this client has not heard of still paints. TypeName
+  /// is the type DECLARING the row; ViaTypeName, for an inherited
+  /// implementor, the class that listed the interface ('' otherwise).
+  /// ParentTypeName and Depth are the descendants tree, flattened: the type
+  /// this row descends from directly and its distance from the root (0 on
+  /// the root, '' for its parent) - the client nests each row under the row
+  /// of Depth-1 that ParentTypeName names. Snippet/HiFrom/HiTo are the
   /// server's own line and 0-based highlight span: the row may be in a unit
   /// this IDE never opened, so there is no local text to read it from.
   /// </summary>
@@ -96,8 +102,27 @@ type
     Kind: string;
     TypeName: string;
     ViaTypeName: string;
+    ParentTypeName: string;
+    Depth: Integer;
     Snippet: string;
     HiFrom, HiTo: Integer;
+  end;
+
+  /// <summary>
+  /// The answer to pastree/findAllAt: which Find All commands apply at a
+  /// position, one flag per editor menu item. Known is False when the server
+  /// could not or did not say in time - the menu then leaves every item
+  /// enabled and the command itself is the gate, as it was before 0.37.0.
+  /// </summary>
+  TLspFindAllGate = record
+    Known: Boolean;
+    References: Boolean;
+    Overrides: Boolean;
+    Implementations: Boolean;
+    Descendants: Boolean;
+    Assignments: Boolean;
+    Creations: Boolean;
+    Destructions: Boolean;
   end;
 
   /// <summary>
@@ -415,19 +440,31 @@ procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
 
 /// <summary>
-/// Find Overrides across the project group: every project whose analysis is
-/// already running is asked (the owner of the file first and unconditionally),
-/// the answers are merged and de-duplicated by position, with the owner's
-/// name and subject verdict standing for the whole. The group matters here as
-/// much as for references: a descendant class in a unit only ANOTHER project
-/// compiles is invisible to the owner's closure.
+/// One Find All request (AMethod is the server's name - pastree/findOverrides,
+/// findImplementations, findDescendants, findAssignments, findCreations,
+/// findDestructions) across the project group: every project whose analysis
+/// is already running is asked (the owner of the file first and
+/// unconditionally), the answers are merged and de-duplicated by position,
+/// with the owner's name and subject verdict standing for the whole. The
+/// group matters here as much as for references: a descendant class in a
+/// unit only ANOTHER project compiles is invisible to the owner's closure.
 /// </summary>
-procedure LspFindOverridesInGroup(const AFileName: string; ARow, ACol: Integer;
-  const AOnDone: TLspHierarchyProc);
-
-/// <summary>Same contract, for pastree/findImplementations.</summary>
-procedure LspFindImplementationsInGroup(const AFileName: string;
+procedure LspFindAllInGroup(const AMethod, AFileName: string;
   ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+
+/// <summary>
+/// Which Find All commands apply at the caret - SYNCHRONOUS, and the only
+/// synchronous question this unit asks. The editor's local menu is built on
+/// the main thread and its OnUpdate runs before it is drawn, so a verdict
+/// that arrives later is no verdict; this waits up to ATimeoutMs for the
+/// owner's server (pumping only the reader thread's queued frames, never the
+/// message loop), and gives up with Known=False - every item stays enabled -
+/// when the server is not ready, has no model yet, or did not answer in time.
+/// A late answer is cancelled and dropped. Only the OWNER is asked: the gate
+/// is about the caret's own file, which only its project holds.
+/// </summary>
+function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;
+  ATimeoutMs: Cardinal): TLspFindAllGate;
 
 /// <summary>
 /// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
@@ -819,6 +856,8 @@ type
     // AMethod is 'pastree/findOverrides' or 'pastree/findImplementations':
     // the two answers have one shape and differ only in what the server was
     // asked, so one sender serves both.
+    function FindAllAt(const AFileName: string; ARow, ACol: Integer;
+      ATimeoutMs: Cardinal): TLspFindAllGate;
     procedure Hierarchy(const AMethod, AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHierarchyOneProc);
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
@@ -1730,6 +1769,7 @@ begin
         AOnDone(False, nil, AError);
     end);
   APendingId := LIssuedId;
+  LogToServer(Format('ask %s id=%d', [AMethod, LIssuedId]));
 end;
 
 /// <summary>
@@ -2230,6 +2270,8 @@ begin
     LRow.Kind := LObj.GetValue<string>('kind', '');
     LRow.TypeName := LObj.GetValue<string>('typeName', '');
     LRow.ViaTypeName := LObj.GetValue<string>('viaTypeName', '');
+    LRow.ParentTypeName := LObj.GetValue<string>('parentTypeName', '');
+    LRow.Depth := LObj.GetValue<Integer>('depth', 0);
     LRow.Snippet := LObj.GetValue<string>('snippet', '');
     LRow.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LRow.HiTo := LObj.GetValue<Integer>('hiTo', 0);
@@ -2239,6 +2281,71 @@ begin
     Inc(LCount);
   end;
   SetLength(Result, LCount);
+end;
+
+{ The one synchronous request of this unit - see LspFindAllAt for why it
+  exists at all. THE WAIT PUMPS CheckSynchronize AND NOTHING ELSE:
+  the reader thread hands frames to the main thread through TThread.Queue
+  (PasTreeIdePlugin.LspTransport), so CheckSynchronize is exactly the door
+  the answer comes through, and unlike Application.ProcessMessages it runs no
+  window message - no repaint, no second menu, no keystroke - from inside an
+  OnUpdate. The document is NOT synced first: a sync would schedule a rebuild
+  the server then reports as "in flight" (null), and the menu would grey
+  nothing right after every keystroke, which is when it is used most. The
+  server answers over the model as it stands; a position an unsent edit moved
+  is greyed wrong once, until the idle sync catches up.
+
+  On timeout the request is cancelled and its late answer - which still
+  arrives, as an error - finds LDone already read and changes nothing. }
+function TLspSession.FindAllAt(const AFileName: string; ARow, ACol: Integer;
+  ATimeoutMs: Cardinal): TLspFindAllGate;
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+  LId: Int64;
+  LDone: Boolean;
+  LGate: TLspFindAllGate;
+  LStarted: Cardinal;
+begin
+  Result := Default(TLspFindAllGate);
+  if not IsReady then
+    Exit;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  LDone := False;
+  LGate := Default(TLspFindAllGate);
+  LId := FClient.Request('pastree/findAllAt', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess and (AResult is TJSONObject) then
+      begin
+        LGate.Known := True;
+        LGate.References := AResult.GetValue<Boolean>('references', False);
+        LGate.Overrides := AResult.GetValue<Boolean>('overrides', False);
+        LGate.Implementations :=
+          AResult.GetValue<Boolean>('implementations', False);
+        LGate.Descendants := AResult.GetValue<Boolean>('descendants', False);
+        LGate.Assignments := AResult.GetValue<Boolean>('assignments', False);
+        LGate.Creations := AResult.GetValue<Boolean>('creations', False);
+        LGate.Destructions := AResult.GetValue<Boolean>('destructions', False);
+      end;
+      LDone := True;
+    end);
+  if LId = 0 then
+    Exit;
+  LStarted := GetTickCount;
+  while not LDone and (GetTickCount - LStarted < ATimeoutMs) do
+    CheckSynchronize(10);
+  if LDone then
+    Exit(LGate);
+  FClient.Cancel(LId);
 end;
 
 procedure TLspSession.Hierarchy(const AMethod, AFileName: string;
@@ -3414,17 +3521,27 @@ begin
       LSession.Hierarchy(AMethod, AFileName, ARow, ACol, LOnAny);
 end;
 
-procedure LspFindOverridesInGroup(const AFileName: string; ARow, ACol: Integer;
-  const AOnDone: TLspHierarchyProc);
-begin
-  HierarchyInGroup('pastree/findOverrides', AFileName, ARow, ACol, AOnDone);
-end;
-
-procedure LspFindImplementationsInGroup(const AFileName: string;
+procedure LspFindAllInGroup(const AMethod, AFileName: string;
   ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
 begin
-  HierarchyInGroup('pastree/findImplementations', AFileName, ARow, ACol,
-    AOnDone);
+  HierarchyInGroup(AMethod, AFileName, ARow, ACol, AOnDone);
+end;
+
+function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;
+  ATimeoutMs: Cardinal): TLspFindAllGate;
+var
+  LOwner: TLspSession;
+begin
+  Result := Default(TLspFindAllGate);
+  // SessionForRequest would Activate the pool - create a session for the
+  // active project if there is none - and a menu popup is no reason to start
+  // a server. The pool is consulted as it stands.
+  if not Assigned(GPool) then
+    Exit;
+  LOwner := GPool.SessionForFile(AFileName);
+  if (LOwner = nil) or not LOwner.IsReady then
+    Exit;
+  Result := LOwner.FindAllAt(AFileName, ARow, ACol, ATimeoutMs);
 end;
 
 procedure LspClassComplete(const AFileName: string; ARow, ACol: Integer;

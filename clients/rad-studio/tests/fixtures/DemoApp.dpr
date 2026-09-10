@@ -14,7 +14,8 @@ uses
   Demo.Dotted in 'Demo.Dotted.pas',
   DemoInherited in 'DemoInherited.pas',
   DemoInference in 'DemoInference.pas',
-  DemoHierarchy in 'DemoHierarchy.pas';
+  DemoHierarchy in 'DemoHierarchy.pas',
+  DemoFindAll in 'DemoFindAll.pas';
 
 var
   LDerived: TDerived;

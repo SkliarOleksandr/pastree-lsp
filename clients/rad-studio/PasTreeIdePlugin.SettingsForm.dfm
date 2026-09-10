@@ -118,27 +118,16 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'aration/implementation jump.'
         WordWrap = True
       end
-      object lblFindOverridesHint: TLabel
+      object lblFindAllHint: TLabel
         Left = 35
         Top = 181
         Width = 405
-        Height = 45
+        Height = 60
         Caption =
-          'The VMT chain of the class method under the cursor, across the w' +
-          'hole project group: the declaration that introduced the slot and' +
-          ' every override, reintroduce and message handler below it. Off h' +
-          'ides the command.'
-        WordWrap = True
-      end
-      object lblFindImplementationsHint: TLabel
-        Left = 35
-        Top = 266
-        Width = 405
-        Height = 45
-        Caption =
-          'Every class implementing the interface method under the cursor, ' +
-          'including classes that list a descendant interface or inherit th' +
-          'e implementation. Off hides the command.'
+          'References, Overrides, Implementations, Descendants, Assignments,' +
+          ' Creations and Destructions of the symbol under the cursor, across' +
+          ' the whole project group, each in its own Messages tab. Items that' +
+          ' do not apply at the cursor are greyed. Off hides the submenu.'
         WordWrap = True
       end
       object chkCtrlClick: TCheckBox
@@ -161,25 +150,15 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 1
       end
-      object chkFindOverrides: TCheckBox
+      object chkFindAll: TCheckBox
         Left = 16
         Top = 160
         Width = 430
         Height = 17
-        Caption = 'Find Overrides (editor menu)'
+        Caption = 'Find All submenu (editor menu)'
         Checked = True
         State = cbChecked
         TabOrder = 2
-      end
-      object chkFindImplementations: TCheckBox
-        Left = 16
-        Top = 245
-        Width = 430
-        Height = 17
-        Caption = 'Find Implementations (editor menu)'
-        Checked = True
-        State = cbChecked
-        TabOrder = 3
       end
     end
     object tsEditing: TTabSheet

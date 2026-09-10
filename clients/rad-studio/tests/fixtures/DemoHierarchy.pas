@@ -5,11 +5,12 @@ unit DemoHierarchy;
 
   A three-level chain with every row kind the override search reports (root,
   override, reintroduce, message) plus a hiding declaration that must NOT be a
-  row; an interface with a direct implementor, an implementor through a
-  descendant interface, and a class that satisfies the method through its
-  ancestor (the `inherited` row, named via the class that listed the
-  interface). Positions are found by text in the test, so the shape matters
-  and the line numbers do not. }
+  row; an interface with a direct implementor, a class listing only a
+  DESCENDANT interface (not a row for the base since PasTree 0.25.0, a row
+  for the child), and a class that satisfies the method through its ancestor
+  (the `inherited` row, named via the class that listed the interface).
+  Positions are found by text in the test, so the shape matters and the line
+  numbers do not. }
 
 interface
 

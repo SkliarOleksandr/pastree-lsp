@@ -70,10 +70,8 @@ type
     lblCtrlClickHint: TLabel;
     chkDeclImplToggle: TCheckBox;
     lblDeclImplToggleHint: TLabel;
-    chkFindOverrides: TCheckBox;
-    lblFindOverridesHint: TLabel;
-    chkFindImplementations: TCheckBox;
-    lblFindImplementationsHint: TLabel;
+    chkFindAll: TCheckBox;
+    lblFindAllHint: TLabel;
     chkRename: TCheckBox;
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
@@ -197,9 +195,7 @@ begin
     LSettings := LoadSettings;
     LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
-    LForm.chkFindOverrides.Checked := LSettings.EnableFindOverrides;
-    LForm.chkFindImplementations.Checked :=
-      LSettings.EnableFindImplementations;
+    LForm.chkFindAll.Checked := LSettings.EnableFindAll;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
@@ -214,9 +210,7 @@ begin
 
     LSettings.CtrlClickNavigation := LForm.chkCtrlClick.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
-    LSettings.EnableFindOverrides := LForm.chkFindOverrides.Checked;
-    LSettings.EnableFindImplementations :=
-      LForm.chkFindImplementations.Checked;
+    LSettings.EnableFindAll := LForm.chkFindAll.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;

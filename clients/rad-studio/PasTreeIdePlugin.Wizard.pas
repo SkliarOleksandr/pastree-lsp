@@ -1,8 +1,8 @@
 unit PasTreeIdePlugin.Wizard;
 
 {
-  Adds "Find Type Declaration" and "Find References" to the editor's
-  right-click menu under OUR OWN category, binds the Ctrl+Shift+Up/Down
+  Adds "Find Type Declaration", the "Find All" submenu and "Rename..." to the
+  editor's right-click menu under OUR OWN category, binds the Ctrl+Shift+Up/Down
   decl<->impl toggle, prewarms the analysis at project open, and registers
   the Code Insight manager (PasTreeIdePlugin.CodeInsight).
 
@@ -29,10 +29,30 @@ unit PasTreeIdePlugin.Wizard;
       back. So it happens at load, only if the override is switched on. See
       the long comment in TMenuManager.Create.
 
-  Our other items - "Find Type Declaration", "Find References", "Find
-  Overrides", "Find Implementations" and "Rename..." - replace nothing and
-  live under cMenuCategory, registered alongside the native ones and
-  unregistered cleanly at unload.
+  Our other items - "Find Type Declaration", the "Find All" submenu
+  (References, Overrides, Implementations, Descendants, Assignments,
+  Creations, Destructions) and "Rename..." - replace nothing and live under
+  cMenuCategory, registered alongside the native ones and unregistered
+  cleanly at unload.
+
+  THE SUBMENU IS A CATEGORY NAME, per ToolsAPI.pas on
+  INTAEditorLocalMenu.RegisterActionList: a child's Category is its parent's
+  with a '.' and any name, and the children must follow their parent in the
+  action list ("if a sub menu is before its parent it will not be shown").
+  The parent action executes nothing - DisableIfNoHandler is switched off so
+  VCL does not grey an action that has no OnExecute, which is precisely what
+  a submenu parent is.
+
+  THE SUBMENU IS GATED ON THE CARET (0.37.0), the way PasTree's demo greys its
+  own: the parent's OnUpdate asks the owner's server once, synchronously,
+  which of the seven apply at the caret (pastree/findAllAt, through
+  LspFindAllAt with a budget of cGateBudgetMs), and every child's OnUpdate
+  reads that one verdict. The budget is what makes this safe to do on a menu
+  popup: past it the verdict is "unknown" and every item stays enabled, so
+  the worst case is the menu as it was in 0.36 - a wrong click answers with
+  a message box - never a menu that waits on an analysis. The verdict is kept
+  for cGateReuseMs so the children, whose OnUpdate the IDE runs right after
+  the parent's, do not each ask again.
 
   Modelled on the official samples shipped with RAD Studio:
     Samples\Object Pascal\ToolsAPI\Editor Demos\Editor Local Menu Demo
@@ -46,7 +66,7 @@ procedure Register;
 implementation
 
 uses
-  System.SysUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
+  System.SysUtils, System.StrUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
   PasTreeIdePlugin.GotoDeclaration,
@@ -64,11 +84,36 @@ uses
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
+  // The submenu's own category and its children's prefix - see the header.
+  cFindAllCategory = 'PasTreeFindAll';
+  // How long a menu popup may wait for the server's verdict on the caret.
+  // Long enough for a ready server on a loaded machine (the gate is seven
+  // positional lookups over a built model, no search), short enough that a
+  // user never sees the menu hesitate.
+  cGateBudgetMs = 250;
+  // How long one verdict serves the children's OnUpdate after the parent's.
+  // Generous on purpose: the IDE runs them within the same popup, but a
+  // slow machine under a debugger has been seen to take its time.
+  cGateReuseMs = 2000;
 
 type
+  { The seven Find All items, in the submenu's order. References is the odd
+    one out - its command lives in PasTreeIdePlugin.FindReferences, the other
+    six in PasTreeIdePlugin.FindHierarchy - which is why the two enums are
+    not one. }
+  TFindAllItem = (faiReferences, faiOverrides, faiImplementations,
+    faiDescendants, faiAssignments, faiCreations, faiDestructions);
+
   TMenuManager = class
   private
     FActionList: TActionList;
+    { The caret verdict the submenu's items are greyed on, and when and where
+      it was taken - see EnsureGate. }
+    FGate: TLspFindAllGate;
+    FGateTick: Cardinal;
+    FGateFile: string;
+    FGateRow, FGateCol: Integer;
+    FItemActions: array[TFindAllItem] of TAction;
     { The SECOND action list, registered under the IDE's own 'Identifier'
       category in place of the native one - see TMenuManager.Create. Separate
       from FActionList because the two lists live under different categories
@@ -81,12 +126,14 @@ type
     procedure AddIdentifierActions;
     procedure OnFindDeclarationExecute(Sender: TObject);
     procedure OnFindDeclarationUpdate(Sender: TObject);
-    procedure OnFindReferencesExecute(Sender: TObject);
-    procedure OnFindReferencesUpdate(Sender: TObject);
-    procedure OnFindOverridesExecute(Sender: TObject);
-    procedure OnFindOverridesUpdate(Sender: TObject);
-    procedure OnFindImplementationsExecute(Sender: TObject);
-    procedure OnFindImplementationsUpdate(Sender: TObject);
+    procedure AddFindAllActions;
+    procedure OnFindAllUpdate(Sender: TObject);
+    procedure OnFindAllItemExecute(Sender: TObject);
+    procedure OnFindAllItemUpdate(Sender: TObject);
+    function EnsureGate: Boolean;
+    function ItemApplies(AItem: TFindAllItem): Boolean;
+    function ItemOf(AAction: TAction; out AItem: TFindAllItem): Boolean;
+    function ActionOf(Sender: TObject): TAction;
     procedure OnRenameExecute(Sender: TObject);
     procedure OnRenameUpdate(Sender: TObject);
     procedure OnFindTypeDeclarationExecute(Sender: TObject);
@@ -184,37 +231,10 @@ begin
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
 
-  LAction := TAction.Create(FActionList);
-  LAction.Name := 'PasTreeFindReferences';
-  LAction.Caption := 'Find References';
-  LAction.Category := 'PasTreeFindReferences';
-  LAction.OnUpdate := OnFindReferencesUpdate;
-  LAction.OnExecute := OnFindReferencesExecute;
-  LAction.Enabled := True;
-  LAction.ActionList := FActionList;
-
-  // The two hierarchy commands, next to Find References and shaped like it.
-  // Enabled wherever an editor is (whether the caret is on the right kind of
-  // method is the server's verdict, which cannot gate a menu drawn before the
-  // answer arrives - see PasTreeIdePlugin.FindHierarchy's header), and
-  // hidden by their settings switches, the Rename way.
-  LAction := TAction.Create(FActionList);
-  LAction.Name := 'PasTreeFindOverrides';
-  LAction.Caption := 'Find Overrides';
-  LAction.Category := 'PasTreeFindOverrides';
-  LAction.OnUpdate := OnFindOverridesUpdate;
-  LAction.OnExecute := OnFindOverridesExecute;
-  LAction.Enabled := True;
-  LAction.ActionList := FActionList;
-
-  LAction := TAction.Create(FActionList);
-  LAction.Name := 'PasTreeFindImplementations';
-  LAction.Caption := 'Find Implementations';
-  LAction.Category := 'PasTreeFindImplementations';
-  LAction.OnUpdate := OnFindImplementationsUpdate;
-  LAction.OnExecute := OnFindImplementationsExecute;
-  LAction.Enabled := True;
-  LAction.ActionList := FActionList;
+  // The "Find All" submenu and its seven items - between Find Type
+  // Declaration and Rename, where the flat Find References / Find Overrides /
+  // Find Implementations items stood until 0.36.
+  AddFindAllActions;
 
   // Also on Ctrl+Shift+E (PasTreeIdePlugin.Rename registers the binding).
   // The menu item is what makes the feature discoverable at all - a rename
@@ -240,6 +260,49 @@ begin
   // inside class completion now (Ctrl+Shift+C - see
   // PasTreeIdePlugin.SyncPrototypes for why the IDE's own broken "Sync
   // Prototypes" item cannot be fixed or replaced safely).
+end;
+
+{ The submenu: one parent action under cFindAllCategory, then the seven items
+  under cFindAllCategory + '.' + their name, in this order, right after it -
+  both the prefix and the adjacency are what ToolsAPI asks for (see the
+  header). Each item action is kept in FItemActions and told apart by
+  IDENTITY, never by Tag: the IDE's local-menu builder writes its own
+  bookkeeping into TAction.Tag (observed live, 0.37.1-0.37.4 - every item
+  came back with the same foreign value, so a Tag-keyed case executed the
+  wrong command or none). Captions lose their "Find " because the parent
+  supplies it - "Find All > Overrides" - exactly as PasTree's demo reads. }
+procedure TMenuManager.AddFindAllActions;
+const
+  cItemName: array[TFindAllItem] of string =
+    ('References', 'Overrides', 'Implementations', 'Descendants',
+     'Assignments', 'Creations', 'Destructions');
+var
+  LAction: TAction;
+  LItem: TFindAllItem;
+begin
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeFindAll';
+  LAction.Caption := 'Find All';
+  LAction.Category := cFindAllCategory;
+  // A parent executes nothing, and VCL greys an action with no OnExecute
+  // unless told not to - which would grey the whole submenu.
+  LAction.DisableIfNoHandler := False;
+  LAction.OnUpdate := OnFindAllUpdate;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
+
+  for LItem := Low(TFindAllItem) to High(TFindAllItem) do
+  begin
+    LAction := TAction.Create(FActionList);
+    LAction.Name := 'PasTreeFindAll' + cItemName[LItem];
+    LAction.Caption := cItemName[LItem];
+    LAction.Category := cFindAllCategory + '.' + cItemName[LItem];
+    FItemActions[LItem] := LAction;
+    LAction.OnUpdate := OnFindAllItemUpdate;
+    LAction.OnExecute := OnFindAllItemExecute;
+    LAction.Enabled := True;
+    LAction.ActionList := FActionList;
+  end;
 end;
 
 { Our "Find Declaration", standing where the native one stood. Same caption,
@@ -268,7 +331,7 @@ begin
   begin
     var LLocalMenuIntf := FEditorServices.GetEditorLocalMenu;
     // Our own category, ALONGSIDE the native items: "Find Type Declaration",
-    // "Find References" and "Rename..." are not Code Insight concepts and
+    // the "Find All" submenu and "Rename..." are not Code Insight concepts and
     // replace nothing, so they need no takeover and unregister cleanly.
     LLocalMenuIntf.RegisterActionList(FActionList, cMenuCategory);
     FRegistered := True;
@@ -359,37 +422,152 @@ begin
   ExecuteTypeDefinition(FEditorServices.TopView);
 end;
 
-procedure TMenuManager.OnFindReferencesUpdate(Sender: TObject);
+{ The caret verdict for the submenu, taken once per popup. True when a verdict
+  is KNOWN; False when the items must stay enabled because the server did not
+  or could not say - not ready, no model yet, over budget.
+
+  Reused rather than re-asked when the same caret was asked within
+  cGateReuseMs: the parent's OnUpdate and its seven children's run in one
+  popup, and eight synchronous questions for one menu would be eight waits.
+  Keyed on the position too, so a verdict from the last popup does not serve
+  a caret that moved - the IDE may run an OnUpdate for a shortcut check
+  without ever showing the menu. }
+function TMenuManager.EnsureGate: Boolean;
+var
+  LView: IOTAEditView;
+  LFile: string;
+  LRow, LCol: Integer;
 begin
-  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+  LView := FEditorServices.TopView;
+  if (LView = nil) or (LView.Buffer = nil) then
+  begin
+    FGate := Default(TLspFindAllGate);
+    Exit(False);
+  end;
+  LFile := LView.Buffer.FileName;
+  LRow := LView.Buffer.EditPosition.Row;
+  LCol := LView.Buffer.EditPosition.Column;
+  if (GetTickCount - FGateTick <= cGateReuseMs) and (FGateRow = LRow) and
+     (FGateCol = LCol) and SameText(FGateFile, LFile) then
+    Exit(FGate.Known);
+  FGate := LspFindAllAt(LFile, LRow, LCol, cGateBudgetMs);
+  LspLogToServer(Format('menu: gate at %s(%d,%d) known=%s',
+    [ExtractFileName(LFile), LRow, LCol, BoolToStr(FGate.Known, True)]));
+  FGateTick := GetTickCount;
+  FGateFile := LFile;
+  FGateRow := LRow;
+  FGateCol := LCol;
+  Result := FGate.Known;
 end;
 
-procedure TMenuManager.OnFindReferencesExecute(Sender: TObject);
+{ Which submenu item an action is - by identity against FItemActions, for the
+  reason AddFindAllActions gives about Tag. False for an action that is not
+  one of the seven (the parent, or a copy the IDE made). }
+function TMenuManager.ItemOf(AAction: TAction; out AItem: TFindAllItem): Boolean;
+var
+  LItem: TFindAllItem;
 begin
-  ExecuteFindReferences(FEditorServices.TopView);
+  for LItem := Low(TFindAllItem) to High(TFindAllItem) do
+    if FItemActions[LItem] = AAction then
+    begin
+      AItem := LItem;
+      Exit(True);
+    end;
+  Result := False;
 end;
 
-procedure TMenuManager.OnFindOverridesExecute(Sender: TObject);
+function TMenuManager.ItemApplies(AItem: TFindAllItem): Boolean;
 begin
-  ExecuteFindOverrides(FEditorServices.TopView);
+  if not EnsureGate then
+    Exit(True);   // unknown: enabled, and the command itself is the gate
+  case AItem of
+    faiReferences:      Result := FGate.References;
+    faiOverrides:       Result := FGate.Overrides;
+    faiImplementations: Result := FGate.Implementations;
+    faiDescendants:     Result := FGate.Descendants;
+    faiAssignments:     Result := FGate.Assignments;
+    faiCreations:       Result := FGate.Creations;
+    faiDestructions:    Result := FGate.Destructions;
+  else
+    Result := True;
+  end;
 end;
 
 // Hidden rather than greyed when switched off - the Rename rule, same reason.
-procedure TMenuManager.OnFindOverridesUpdate(Sender: TObject);
+// Enabled wherever an editor is: the parent greys nothing itself, so the
+// submenu's shape never shifts with the caret - the demo's rule - and a
+// caret nothing applies to opens a submenu of seven greyed items, which is
+// the honest picture.
+{ The action behind a handler's Sender. A TAction when the IDE fires the action
+  itself, its Action when the IDE fires the MENU ITEM built from it - which
+  is how the submenu items were first observed to arrive (0.37.0, live): a
+  hard cast to TAction there reads a TMenuItem's memory as an action's, and
+  the handler quietly does nothing. Nil for anything else, and every caller
+  treats nil as "leave the item alone". }
+function TMenuManager.ActionOf(Sender: TObject): TAction;
 begin
-  TAction(Sender).Visible := FindOverridesEnabled;
-  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+  if Sender is TAction then
+    Result := TAction(Sender)
+  else if (Sender is TMenuItem) and (TMenuItem(Sender).Action is TAction) then
+    Result := TAction(TMenuItem(Sender).Action)
+  else
+    Result := nil;
+  // A shape this has not seen is worth a line; the two known ones are not.
+  if Assigned(Sender) and (Result = nil) then
+    LspLogToServer('menu: unexpected sender ' + Sender.ClassName);
 end;
 
-procedure TMenuManager.OnFindImplementationsExecute(Sender: TObject);
+procedure TMenuManager.OnFindAllUpdate(Sender: TObject);
+var
+  LAction: TAction;
 begin
-  ExecuteFindImplementations(FEditorServices.TopView);
+  LAction := ActionOf(Sender);
+  if LAction = nil then
+    Exit;
+  LAction.Visible := FindAllEnabled;
+  LAction.Enabled := FEditorServices.TopView <> nil;
+  if LAction.Visible and LAction.Enabled then
+    EnsureGate;   // once here, so the children below find it fresh
 end;
 
-procedure TMenuManager.OnFindImplementationsUpdate(Sender: TObject);
+procedure TMenuManager.OnFindAllItemUpdate(Sender: TObject);
+var
+  LAction: TAction;
+  LItem: TFindAllItem;
 begin
-  TAction(Sender).Visible := FindImplementationsEnabled;
-  TAction(Sender).Enabled := FEditorServices.TopView <> nil;
+  LAction := ActionOf(Sender);
+  if LAction = nil then
+    Exit;
+  LAction.Visible := FindAllEnabled;
+  LAction.Enabled := (FEditorServices.TopView <> nil) and
+    ItemOf(LAction, LItem) and ItemApplies(LItem);
+end;
+
+procedure TMenuManager.OnFindAllItemExecute(Sender: TObject);
+var
+  LAction: TAction;
+  LItem: TFindAllItem;
+begin
+  LAction := ActionOf(Sender);
+  if (LAction = nil) or not ItemOf(LAction, LItem) then
+    Exit;
+  LspLogToServer(Format('menu: execute %s, TopView %s', [LAction.Name,
+    IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
+  try
+    case LItem of
+      faiReferences:      ExecuteFindReferences(FEditorServices.TopView);
+      faiOverrides:       ExecuteFindAll(facOverrides, FEditorServices.TopView);
+      faiImplementations: ExecuteFindAll(facImplementations, FEditorServices.TopView);
+      faiDescendants:     ExecuteFindAll(facDescendants, FEditorServices.TopView);
+      faiAssignments:     ExecuteFindAll(facAssignments, FEditorServices.TopView);
+      faiCreations:       ExecuteFindAll(facCreations, FEditorServices.TopView);
+      faiDestructions:    ExecuteFindAll(facDestructions, FEditorServices.TopView);
+    end;
+  except
+    on E: Exception do
+      LspLogToServer(Format('menu: execute raised %s: %s',
+        [E.ClassName, E.Message]));
+  end;
 end;
 
 procedure TMenuManager.OnRenameUpdate(Sender: TObject);

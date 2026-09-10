@@ -176,6 +176,9 @@ procedure LogDiagnostic(const AMessage: string);
 var
   LMessageServices: IOTAMessageServices;
 begin
+  // Into the server's log as well: the Build tab is where the IDE puts it, the
+  // log is where anyone diagnosing a report actually looks (2026-09-10).
+  LspLogToServer(AMessage);
   if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
@@ -437,6 +440,8 @@ begin
     // Short on purpose: the wait dialog does not grow for its text and a
     // long line is clipped (user, 2026-08-31).
     ShowWaitDialog('Searching references...');
+    LspLogToServer(Format('refs: asking %s(%d,%d)',
+      [ExtractFileName(LCursorFile), LRow, LCol]));
     // ACROSS THE GROUP, not just the project owning the file: a unit two
     // projects compile has its uses counted in both closures, and each server
     // sees only its own. LspReferencesInGroup asks every project whose
@@ -449,6 +454,8 @@ begin
         LName: string;
         LRefs: TArray<TLspHit>;
       begin
+        LspLogToServer(Format('refs: answer ok=%s hits=%d searched=%d err=%s',
+          [BoolToStr(ASuccess, True), Length(AHits), AProjectsSearched, AError]));
         if not GAlive then
           Exit;   // package unloading - nothing here may touch the IDE
         if not ASuccess then

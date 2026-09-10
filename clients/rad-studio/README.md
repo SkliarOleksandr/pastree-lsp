@@ -85,10 +85,15 @@ unofficial/community API surface.
 
 ### Menu
 
-"Find Type Declaration", "Find References", "Find Overrides", "Find
-Implementations" and "Rename..." live in the editor's right-click menu under
-the plugin's own category, ALONGSIDE the native items - they replace nothing
-and unregister cleanly at unload.
+"Find Type Declaration", the "Find All" submenu (References, Overrides,
+Implementations, Descendants, Assignments, Creations, Destructions) and
+"Rename..." live in the editor's right-click menu under the plugin's own
+category, ALONGSIDE the native items - they replace nothing and unregister
+cleanly at unload. The submenu is a ToolsAPI category convention: a child
+action's Category is its parent's plus `.name`, listed right after the parent
+(`INTAEditorLocalMenu.RegisterActionList` in ToolsAPI.pas spells it out), and
+the parent has `DisableIfNoHandler` off because VCL would otherwise grey an
+action that has no OnExecute - which a submenu parent never has.
 
 ### Find Overrides / Find Implementations
 
@@ -111,27 +116,71 @@ Two commands for two identities, as PasTree draws the line (its
   dcc-probed); nothing in this package branches on it, since a row's kind word
   is painted as it arrives.
 - **Find Implementations** on an INTERFACE method: every class listing the
-  interface or a descendant of it; a class that satisfies the method through
-  an ancestor is reported on the ancestor's declaration (the code that runs)
-  with the listing class named beside it - `TGreeterBase (inherited via
-  TInheritedGreeter)`.
+  interface; a class that satisfies the method through an ancestor is
+  reported on the ancestor's declaration (the code that runs) with the
+  listing class carried as `viaTypeName`. A class listing a DESCENDANT
+  interface is not a row (PasTree 0.25.0): the interfaces below one are Find
+  Descendants' answer, the child's implementors this command on the child.
 
 Both run across the project group like Find References, and each reports into
 a tab of its own ("Find Overrides", "Find Implementations") shaped exactly like
-the Find References tab - the label after the snippet is the declaring type
-and the row's kind, and the title carries the unit count (`5 declaration(s) in
-3 unit(s)`) so "did it only search this file?" has an answer on screen.
+the Find References tab - the row the search started from is tagged
+`(definition)` and no other row is tagged (0.37.8; the type-and-kind label
+every row used to carry repeated its own snippet), and the title carries the
+unit count (`5 declaration(s) in 3 unit(s)`) so "did it only search this
+file?" has an answer on screen.
 
-**The menu items are not gated on the caret.** PasTree gates its demo's items
-on `MethodAt`/`InterfaceMethodAt`; this package cannot - the verdict lives in
-the server and a menu is drawn before any answer arrives. A caret that is not
-the right kind of method gets a one-line message box instead, the same shape
-Find References uses for "no identifier under the cursor". Each command has its
-own switch on the Navigation tab of Tools > PasTree > Settings; off hides the
-item, the Rename way (the dialog grew tabs - Navigation, Editing, Diagnostics -
-in 0.33.1, when the seventh switch stopped fitting). Server side these are
-`pastree/findOverrides` and `pastree/findImplementations` (SPEC.md, the
-Implemented table).
+### The rest of the Find All family (0.37.0)
+
+PasTree 0.23.0 brought the other four, and the plugin ships all seven under
+one submenu, as its demo does:
+
+- **Implementations from the interface NAME** - the same item, a second entry
+  point: on `IFoo` itself the rows are the classes implementing it
+  (`InterfaceAt`/`FindInterfaceImplementors`), where on `IFoo.Bar` they are the
+  method's implementors. One server method tries the method first.
+- **Descendants** - every class below a class (or interface below an
+  interface), transitively. **Painted as a real tree**: the root at the top
+  level of the tab, each descendant nested under its direct ancestor through
+  the `Pointer` that `AddCustomMessage(msg, Parent)` returns - the Messages
+  panel nests to any depth, and no VirtualTree was needed. No file headers in
+  this tab: a hierarchy grouped by file is two trees fighting over one
+  indentation (PasTree's demo, which indents by depth INSIDE file groups,
+  shows the problem). The tree is rebuilt from each row's `parentTypeName` and
+  `depth` rather than trusted from order, because the group-wide merge sorts
+  rows by path; a row whose parent is not in the answer hangs off the root
+  rather than disappearing.
+- **Assignments** - the writes to a variable, field, parameter or writable
+  property; **Creations** / **Destructions** - `TFoo.Create` sites and
+  `X.Free` / `X.Destroy` / `FreeAndNil(X)` sites for exactly that class. These
+  three are filtered reference searches and paint like the references tab:
+  the declaration pinned first with its `declaration` label, sites unlabelled,
+  the title counting sites (`0 assignment(s)` with one row on screen is the
+  honest "nothing assigns this").
+
+**The menu items ARE gated on the caret since 0.37.0**, the way PasTree's demo
+greys its own, and the 0.34 note above about why they could not be is
+superseded by how: the submenu parent's `OnUpdate` asks the owner project's
+server once, synchronously, `pastree/findAllAt` - seven Booleans, one per
+item - within a budget of 250 ms, pumping only `CheckSynchronize` (the door
+the reader thread's frames come through) and never the message loop. The
+children's `OnUpdate`, which the IDE runs right after the parent's, read that
+one verdict. Past the budget, or with the server not ready or its analysis in
+flight, the verdict is "unknown" and every item stays enabled - the 0.36 menu,
+where the command itself is the gate and a wrong pick answers with a one-line
+message box. The server side never waits for that request: it answers over the
+model as it stands or says `null`, and starts nothing, because a menu popup is
+no reason to build a closure.
+
+**One switch for the whole family** on the Navigation tab of Tools > PasTree >
+Settings ("Find All submenu"), replacing the two of 0.34-0.36 - it is one kind
+of question answered into one kind of tab, and a row per member would grow a
+row every time PasTree learns a new one. Off hides the submenu, the Rename way;
+the old `EnableFindOverrides` / `EnableFindImplementations` registry values are
+left alone and simply no longer read. Server side these are `pastree/find*` and
+`pastree/findAllAt` (SPEC.md, the Implemented table); harness coverage is
+`LspClientSmoke` 2b and 2c over `fixtures\DemoHierarchy.pas` and
+`fixtures\DemoFindAll.pas`.
 
 **"Find Declaration" is the one native item we replace** (again, since
 2026-09-01): our own action takes over the `Identifier` category, in the
@@ -724,9 +773,10 @@ what lets `tests/` drive them against a real server outside the IDE:
   Messages-panel reporting. Its unit header has the fuller architecture
   note and a TODO list for what's next (out-of-process, real defines,
   snippet highlighting).
-- `PasTreeIdePlugin.FindHierarchy.pas` - Find Overrides and Find
-  Implementations: the two group-wide requests and their result tabs, over
-  the same ResultRows the references tab uses.
+- `PasTreeIdePlugin.FindHierarchy.pas` - the Find All family less References:
+  Overrides, Implementations, Descendants (painted as a nested tree),
+  Assignments, Creations, Destructions - six group-wide requests and their
+  result tabs, over the same ResultRows the references tab uses.
 - `PasTreeIdePlugin.GotoDeclaration.pas` - the Ctrl+Click override plus the
   shared `ResolveAndNavigate`/`ExecuteGotoDeclaration` used by both Go to
   Declaration entry points: mouse event interception, cursor

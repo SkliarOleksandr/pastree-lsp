@@ -63,9 +63,11 @@ costs, and the incremental-reanalysis mechanism are in
 
 - A thin LSP client over ToolsAPI, replacing RAD Studio's own DelphiLSP-based
   navigation with the server's answers.
-- Ships Find References, Find Overrides and Find Implementations (the VMT
-  chain of a class method; the implementors of an interface method - both
-  project-wide), Go to Declaration/Ctrl+Click, the decl-impl toggle,
+- Ships the Find All submenu - References, Overrides (the VMT chain of a
+  class method), Implementations (of an interface or one of its methods),
+  Descendants (as a tree), Assignments, Creations, Destructions - all
+  project-group-wide and greyed per caret, Go to Declaration/Ctrl+Click, the
+  decl-impl toggle,
   rename, class completion (Ctrl+Shift+C: missing bodies and property
   accessors), prototype sync, and block completion - each with its own
   on/off switch in Tools > PasTree > Settings.
