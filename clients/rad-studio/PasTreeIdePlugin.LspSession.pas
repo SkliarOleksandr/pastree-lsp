@@ -1551,16 +1551,27 @@ begin
       begin
         LogDiagnostic(AText);
       end);
-    { ONLY THIS PROJECT'S BUFFERS. Every open module is some server's, and
-      exactly one server's: didOpen and didChange schedule an analysis, so a
-      buffer sent to all of them would rebuild all of them on one tab switch.
-      A file no project claims goes to the active session, which is what
-      SessionForFile falls back to - so an RTL unit under the cursor is
-      overlaid on the server the user is actually working in. }
+    { THIS PROJECT'S BUFFERS, PLUS EVERY BUFFER WHILE THIS PROJECT IS ACTIVE.
+      Every open module reaches the server whose .dproj lists it - and, while
+      the user works in this project, this server too, whatever .dproj lists
+      the file. Not every server: didOpen and didChange schedule an analysis,
+      so a buffer sent to all of them would rebuild all of them on one tab
+      switch. Not only the listed owner either: AVImarkServer compiles
+      uaviItem.pas through its search path while only AVImark.dproj lists it,
+      so with owner-only routing an edit made from the server project never
+      reached the server project's analysis (found 2026-09-11). The other
+      servers catch up lazily - TLspDocumentSync.Sync diffs the editor
+      against what each server was last given, so a background project sees
+      the edit as one didChange on its next request, and a buffer once taken
+      is kept until its tab closes (see CollectOpenDocuments). A file no
+      project claims goes to the active session, which is what SessionForFile
+      falls back to - so an RTL unit under the cursor is overlaid on the
+      server the user is actually working in. }
     FDocs := TLspDocumentSync.Create(FClient,
       function(APath: string): Boolean
       begin
-        Result := Assigned(GPool) and (GPool.SessionForFile(APath, False) = Self);
+        Result := Assigned(GPool) and
+          ((GSession = Self) or (GPool.SessionForFile(APath, False) = Self));
       end);
     // A restarted server has no documents; re-open them before anything that
     // was queued behind the handshake gets answered from stale disk text.
@@ -3740,6 +3751,12 @@ begin
     LSession := GPool.SessionForFile(LPath, False);
     if Assigned(LSession) then
       LSession.IdleSync(LPath);
+    // AND THE ACTIVE SESSION, which holds every buffer the user works in
+    // whatever .dproj lists it (see the ownership predicate in EnsureSession):
+    // the project compiling a unit through its search path is the one whose
+    // diagnostics are on screen, and it must see the keystroke too.
+    if Assigned(GSession) and (GSession <> LSession) then
+      GSession.IdleSync(LPath);
   end;
 end;
 

@@ -474,7 +474,16 @@ begin
       LCost := Default(TModuleCost);
       LCost.Name := ExtractFileName(LModule.FileName);
       LT := TimingNowMs;
-      LOwns := not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
+      { ONCE HELD, HELD UNTIL THE TAB CLOSES. The ownership answer moves with
+        the active project (see the predicate in PasTreeIdePlugin.LspSession):
+        a buffer this server took while its project was active stays its
+        business after the user switches away, or the didClose below would
+        make the server fall back to the DISK copy of a file whose unsaved
+        edits it has already been given. So a document in FSent is collected
+        regardless of what FOwnsPath says now; only a module the IDE no longer
+        has open leaves FSent. }
+      LOwns := FSent.ContainsKey(LowerCase(LModule.FileName)) or
+        not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
       LCost.OwnsMs := TimingNowMs - LT;
       if not LOwns then
       begin

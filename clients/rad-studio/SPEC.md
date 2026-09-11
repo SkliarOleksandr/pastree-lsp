@@ -1228,6 +1228,21 @@ the alternative is a wait the user did not ask for.
    mid-session keeps its old route until something clears the cache. Both are
    cheap to correct by switching projects, and neither can produce an answer
    from a project that does not contain the file.
+
+   Amended, 0.38.2: owner-only routing lost edits for a project that compiles
+   a unit through its SEARCH PATH while another project's `.dproj` lists it
+   (AVImarkServer editing `uaviItem.pas`, listed only by AVImark: the server
+   project's analysis never saw a didChange). The predicate is now "listed
+   owner OR the active session", and the idle sync pushes a modified buffer
+   to both, so the project being worked in always has the live text. The
+   other servers catch up lazily: `Sync` diffs the editor against what each
+   server was last given, so a background project receives the edit as one
+   didChange on its next request instead of a broadcast on every keystroke.
+   A buffer a server has once been given stays in its set until the IDE
+   closes the tab, whatever the predicate says after a project switch - a
+   didClose there would revert the server to the disk copy of a file with
+   unsaved edits. Cost accepted: the active server also receives buffers
+   outside its closure, parsed once and then idle.
 3. ~~Group-wide Find References~~ **Done, 0.32.0.** `LspReferencesInGroup`
    asks every session whose server is already up - the owning one first, since
    it is the only one allowed to start - and merges the answers through
