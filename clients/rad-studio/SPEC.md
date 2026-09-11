@@ -1229,20 +1229,24 @@ the alternative is a wait the user did not ask for.
    cheap to correct by switching projects, and neither can produce an answer
    from a project that does not contain the file.
 
-   Amended, 0.38.2: owner-only routing lost edits for a project that compiles
-   a unit through its SEARCH PATH while another project's `.dproj` lists it
-   (AVImarkServer editing `uaviItem.pas`, listed only by AVImark: the server
-   project's analysis never saw a didChange). The predicate is now "listed
-   owner OR the active session", and the idle sync pushes a modified buffer
-   to both, so the project being worked in always has the live text. The
-   other servers catch up lazily: `Sync` diffs the editor against what each
-   server was last given, so a background project receives the edit as one
-   didChange on its next request instead of a broadcast on every keystroke.
-   A buffer a server has once been given stays in its set until the IDE
-   closes the tab, whatever the predicate says after a project switch - a
-   didClose there would revert the server to the disk copy of a file with
-   unsaved edits. Cost accepted: the active server also receives buffers
-   outside its closure, parsed once and then idle.
+   Superseded, 0.38.4: per-file routing of the DOCUMENT SYNC is gone; the
+   route cache still decides which server answers a request. Owner-only sync
+   lost edits for a project that compiles a unit through its SEARCH PATH
+   while another project's `.dproj` lists it (AVImarkServer compiles
+   `uaviItem.pas`, listed only by AVImark). 0.38.2 tried "listed owner or the
+   active project", which fixed the edit made from AVImarkServer and not the
+   one made from AVImark: with AVImark active, an edit to `uaviItem` never
+   reached AVImarkServer, and navigation from `frmImport` into it answered
+   from stale text. The client cannot know a project's closure, so it no
+   longer guesses: every open buffer goes to every server, and the idle sync
+   pushes a modified buffer to every ready server. The server filters
+   (`TLspServer.AffectsAnalysis`): a buffer outside its closure is kept as an
+   overlay - a later `uses` edit may pull it in - but schedules no rebuild,
+   does not count in the overlay signature (where it would defeat the
+   one-file fast path), and cannot make a finished result stale. A didOpen
+   whose text matches the disk never scheduled anything, so a tab switch
+   still costs no server a rebuild. What the broadcast costs is the JSON and
+   the pipe per server for a real edit.
 3. ~~Group-wide Find References~~ **Done, 0.32.0.** `LspReferencesInGroup`
    asks every session whose server is already up - the owning one first, since
    it is the only one allowed to start - and merges the answers through

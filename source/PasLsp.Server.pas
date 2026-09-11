@@ -223,6 +223,7 @@ type
     function FileMatches(const APath, AText, ADiskText: string): Boolean;
     function OverlaySignature: string;
     function OverlayParts: TArray<string>;
+    function AffectsAnalysis(const APath: string): Boolean;
     function SingleChangedDoc(out APath: string): Boolean;
     function TryStartModuleAnalysis: Boolean;
     procedure StartProgress(const ATitle: string);
@@ -1137,7 +1138,10 @@ begin
       // (opened after the build started, no rebuild scheduled) - comparing
       // its version against the missing overlay's -1 would spin a rebuild
       // loop out of plain tab switching.
-      if LDoc.Differs and
+      // Nor can a document outside this closure (AffectsAnalysis): it is
+      // an overlay nothing read, so its version moving mid-build changes
+      // nothing about the result.
+      if LDoc.Differs and AffectsAnalysis(LDoc.Path) and
          (FProject.BufferVersion(LDoc.Path) <> LDoc.Version) then
       begin
         LStale := True;
@@ -1236,6 +1240,29 @@ end;
   churn this exists to stop. The overlay is still handed to the analysis for
   them; what it buys there is the editor's own decoding of the bytes, which is
   not worth a rebuild on its own. }
+{ IS THIS DOCUMENT ONE OF OURS - a file the last completed analysis loaded?
+
+  The RAD Studio client runs one server per project of a group and sends every
+  open buffer to every server (see PasTreeIdePlugin.LspSession), because the
+  client cannot know which project compiles a file: the .dproj lists some of
+  them, and the search path supplies the rest, silently. AVImarkServer
+  compiles uaviItem.pas that way while only AVImark.dproj lists it, and the
+  two routing rules the client tried before this ("the listed owner", then
+  "the listed owner or the active project") each left a real edit unseen by
+  a server that compiled the file (2026-09-11).
+
+  So the SERVER decides, since it is the only party that knows its closure. A
+  buffer outside it is kept as an overlay - a later edit may pull it in, and
+  the rebuild that edit schedules reads every overlay - but it schedules
+  nothing and does not count in the overlay signature, where it would turn the
+  next one-file edit into a two-document change and cost the module fast path.
+  Without a completed project the answer is True: nothing is known yet, and
+  the first buffer is what starts the initial build. }
+function TLspServer.AffectsAnalysis(const APath: string): Boolean;
+begin
+  Result := (FProject = nil) or (FProject.ModelIdOf(APath) >= 0);
+end;
+
 function TLspServer.OverlayParts: TArray<string>;
 var
   LDoc: TLspDocument;
@@ -1255,7 +1282,7 @@ begin
     LParts.CaseSensitive := True;
     LParts.Sorted := True;   // dictionary order is not stable; this is
     for LDoc in FDocs.All do
-      if LDoc.Differs then
+      if LDoc.Differs and AffectsAnalysis(LDoc.Path) then
         LParts.Add(Format('%s|%d|%.8x', [LowerCase(LDoc.Path),
           Length(LDoc.Text), THashFNV1a32.GetHashValue(LDoc.Text)]));
     Result := LParts.ToStringArray;
@@ -1919,8 +1946,11 @@ begin
   // when nothing has been analyzed yet - the first file opened is what starts
   // the initial build, and without this clause a workspace whose files all
   // match their disk contents would sit unanalyzed until the first request.
-  if LDiffers or ((FProject = nil) and (FSession = nil)) then
-    ScheduleAnalysis(LPath);
+  if (LDiffers and AffectsAnalysis(LPath)) or
+     ((FProject = nil) and (FSession = nil)) then
+    ScheduleAnalysis(LPath)
+  else if LDiffers then
+    Log('  outside this closure: kept as an overlay, no rebuild');
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -1990,7 +2020,10 @@ begin
   // Rebuild only on a real text change - the version always bumps, but a
   // no-op edit must not cost a build.
   if not LHadDoc or (LText <> LOld.Text) then
-    ScheduleAnalysis(LPath);
+    if AffectsAnalysis(LPath) then
+      ScheduleAnalysis(LPath)
+    else
+      Log('  outside this closure: kept as an overlay, no rebuild');
 end;
 
 procedure TLspServer.HandleDidClose(AParams: TJSONValue);
@@ -2002,7 +2035,8 @@ begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
     Exit;
-  LDiffered := FDocs.TryGet(LPath, LDoc) and LDoc.Differs;
+  LDiffered := FDocs.TryGet(LPath, LDoc) and LDoc.Differs and
+    AffectsAnalysis(LPath);
   FDocs.Close(LPath);
   PublishEmptyDiagnostics(LPath);
   Log('textDocument/didClose ' + LPath);

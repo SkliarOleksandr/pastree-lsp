@@ -82,13 +82,14 @@ type
     FClient: TLspClient;
     FSent: TObjectDictionary<string, TSentDocument>;   // key: lowercase path
     { WHICH OPEN BUFFERS ARE THIS SERVER'S, asked per module on every sync.
+      nil = take everything.
 
-      A project group runs one server per project, and a buffer belongs to
-      exactly one of them. Broadcasting all of them to all servers would not
-      just waste memory: didOpen and didChange call ScheduleAnalysis on the
-      server, so one tab switch would schedule a rebuild in every live server
-      in the group. nil = take everything, which is what a single-project
-      client wants and what the VS Code side does. }
+      Since 0.38.4 the RAD Studio client passes nil too: it cannot tell which
+      projects compile a file (the search path supplies units the .dproj does
+      not list), so every buffer goes to every server and the SERVER ignores
+      a change outside its closure - see TLspServer.AffectsAnalysis and the
+      history in PasTreeIdePlugin.LspSession.EnsureSession. The hook stays
+      for a client that does know. }
     FOwnsPath: TFunc<string, Boolean>;
     function CollectOpenDocuments: TArray<TSentDocument>;
     procedure SendDidOpen(const APath, AText: string; AVersion: Integer;
@@ -474,16 +475,7 @@ begin
       LCost := Default(TModuleCost);
       LCost.Name := ExtractFileName(LModule.FileName);
       LT := TimingNowMs;
-      { ONCE HELD, HELD UNTIL THE TAB CLOSES. The ownership answer moves with
-        the active project (see the predicate in PasTreeIdePlugin.LspSession):
-        a buffer this server took while its project was active stays its
-        business after the user switches away, or the didClose below would
-        make the server fall back to the DISK copy of a file whose unsaved
-        edits it has already been given. So a document in FSent is collected
-        regardless of what FOwnsPath says now; only a module the IDE no longer
-        has open leaves FSent. }
-      LOwns := FSent.ContainsKey(LowerCase(LModule.FileName)) or
-        not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
+      LOwns := not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
       LCost.OwnsMs := TimingNowMs - LT;
       if not LOwns then
       begin

@@ -1551,28 +1551,21 @@ begin
       begin
         LogDiagnostic(AText);
       end);
-    { THIS PROJECT'S BUFFERS, PLUS EVERY BUFFER WHILE THIS PROJECT IS ACTIVE.
-      Every open module reaches the server whose .dproj lists it - and, while
-      the user works in this project, this server too, whatever .dproj lists
-      the file. Not every server: didOpen and didChange schedule an analysis,
-      so a buffer sent to all of them would rebuild all of them on one tab
-      switch. Not only the listed owner either: AVImarkServer compiles
-      uaviItem.pas through its search path while only AVImark.dproj lists it,
-      so with owner-only routing an edit made from the server project never
-      reached the server project's analysis (found 2026-09-11). The other
-      servers catch up lazily - TLspDocumentSync.Sync diffs the editor
-      against what each server was last given, so a background project sees
-      the edit as one didChange on its next request, and a buffer once taken
-      is kept until its tab closes (see CollectOpenDocuments). A file no
-      project claims goes to the active session, which is what SessionForFile
-      falls back to - so an RTL unit under the cursor is overlaid on the
-      server the user is actually working in. }
-    FDocs := TLspDocumentSync.Create(FClient,
-      function(APath: string): Boolean
-      begin
-        Result := Assigned(GPool) and
-          ((GSession = Self) or (GPool.SessionForFile(APath, False) = Self));
-      end);
+    { EVERY OPEN BUFFER, TO EVERY SERVER. The client cannot tell which
+      projects compile a file: the .dproj lists some of a project's units and
+      the search path supplies the rest, silently. AVImarkServer compiles
+      uaviItem.pas that way while only AVImark.dproj lists it, and two
+      routing rules tried here - "the .dproj that lists the file" (0.31.1),
+      then "that, or the active project" (0.38.2) - each left an edit unseen
+      by a server that compiled the file: with the second, an edit to
+      uaviItem made from AVImark never reached AVImarkServer, and navigation
+      from frmImport (its own unit) into uaviItem answered from stale text
+      (2026-09-11). Only the server knows its closure, so the server filters:
+      a buffer outside it is kept as an overlay and schedules nothing (see
+      TLspServer.AffectsAnalysis), and a didOpen whose text matches the disk
+      never scheduled anything. What the broadcast costs is therefore the
+      JSON and the pipe per server, not a rebuild per server. }
+    FDocs := TLspDocumentSync.Create(FClient);
     // A restarted server has no documents; re-open them before anything that
     // was queued behind the handshake gets answered from stale disk text.
     FClient.OnReady :=
@@ -3739,25 +3732,16 @@ var
   LPath: string;
   LSession: TLspSession;
 begin
-  // The session that OWNS each modified buffer, not every live session: a
-  // module of a background project being typed in keeps ITS server current,
-  // and no server is asked about a file that is not its own. A file no
-  // project claims goes where SessionForFile sends it - the active session.
-  // Passive throughout: TLspSession.IdleSync starts nothing.
+  // EVERY READY SESSION, for the same reason every buffer goes to every
+  // server (see EnsureSession): the client does not know which projects
+  // compile the file, and each server ignores a change outside its closure.
+  // Passive throughout: TLspSession.IdleSync starts nothing, and
+  // ReadySessions lists only servers already up and past the handshake.
   if not Assigned(GPool) then
     Exit;
-  for LPath in APaths do
-  begin
-    LSession := GPool.SessionForFile(LPath, False);
-    if Assigned(LSession) then
+  for LSession in GPool.ReadySessions do
+    for LPath in APaths do
       LSession.IdleSync(LPath);
-    // AND THE ACTIVE SESSION, which holds every buffer the user works in
-    // whatever .dproj lists it (see the ownership predicate in EnsureSession):
-    // the project compiling a unit through its search path is the one whose
-    // diagnostics are on screen, and it must see the keystroke too.
-    if Assigned(GSession) and (GSession <> LSession) then
-      GSession.IdleSync(LPath);
-  end;
 end;
 
 procedure LspWorkspaceSymbols(const AQuery: string;
