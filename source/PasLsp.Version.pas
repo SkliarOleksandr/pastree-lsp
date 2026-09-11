@@ -148,7 +148,14 @@ const
   /// against 0.25.1 everything compiles, and a caret on `TVTBaseAncestor`
   /// (VirtualTrees: `= TVTBaseAncestorVcl;`) greys every type-shaped Find
   /// All item while Find Descendants of the class misses every tree.
-  cMinPasTreeVersion = '0.25.2';
+  ///
+  /// 0.26.4 (2026-09-11): a BARE reference to a type name that a same-unit
+  /// GENERIC shadows now records the imported arity-0 class as its identity
+  /// (`TUINotification<T> = class(TUINotification)` with the plain class in
+  /// another unit). Silent otherwise: against 0.26.3 the heritage ctrl+click
+  /// lands on the generic's own line and Find References / Descendants on the
+  /// plain class miss every bare use in that unit, with nothing in the log.
+  cMinPasTreeVersion = '0.26.4';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
