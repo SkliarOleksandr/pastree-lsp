@@ -119,14 +119,17 @@ dialog is what kicks the prefetch off.
 
 ### Rename (Ctrl+Shift+E)
 
-Renames a routine, type, field, variable or parameter across the project,
-applying the server's plan as text edits in the open buffers. Afterwards it
-lists every edit it made in a Messages tab shaped like Find References, except
-each line shows the source line *as it now reads* - because a rename that
-touched fourteen places is otherwise indistinguishable from one that touched the
-wrong fourteen. The new name is asked for through the server's `prepareRename`,
-not read off the caret, so a dotted unit name is offered whole rather than one
-segment of it.
+Renames a routine, type, field, variable or parameter across every project of
+the group whose server is running, applied and saved at once - files you have
+open change in their buffers (Ctrl+Z works there), files nobody has open are
+written on disk in their own encoding - without opening a tab for any of them.
+Afterwards it lists every edit it made in a Messages tab shaped like Find
+References, except each line shows the source line *as it now reads* - because
+a rename that touched fourteen places is otherwise indistinguishable from one
+that touched the wrong fourteen. Above the rows, one button: **Revert** puts
+every site back and saves again. The new name is asked for through the server's
+`prepareRename`, not read off the caret, so a dotted unit name is offered whole
+rather than one segment of it.
 
 Renaming a *unit* is deliberately refused with a message pointing at the Project
 Manager. The server produces a correct plan for it, but the IDE performs a

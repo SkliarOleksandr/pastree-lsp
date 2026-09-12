@@ -314,6 +314,9 @@ type
     NewFilePath: string;
     StaleInPaths: TArray<string>;
     Edits: TArray<TLspRenameEdit>;
+    // How far across the group the plan reached: the projects whose server
+    // answered, out of the projects in the group. See LspRenamePlan.
+    ProjectsAnswered, ProjectsInGroup: Integer;
   end;
 
   /// <summary>Same delivery contract as TLspHitsProc.</summary>
@@ -670,6 +673,18 @@ procedure LspProjectOpened;
 procedure LspProjectClosed;
 
 /// <summary>
+/// Tells the server owning each path that the file changed ON DISK, outside
+/// any buffer - which is what a rename does at Save to a unit nobody has open.
+/// Sent as workspace/didChangeWatchedFiles, whose whole purpose is this: the
+/// client says what moved, the server decides whether a rebuild is due (a
+/// file it holds an overlay for is left alone; anything else schedules one).
+/// Without it a disk edit is INVISIBLE to the analysis - every later answer
+/// about that file describes text that is no longer there. Per owning session
+/// in the pool, the active one for a path no project claims.
+/// </summary>
+procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
+
+/// <summary>
 /// Pushes the current editor buffers to the server now, instead of waiting for
 /// the next request to do it on the way past.
 ///
@@ -829,6 +844,8 @@ type
     procedure Prewarm;
     procedure ProjectOpened;
     procedure ProjectClosed;
+    /// <summary>workspace/didChangeWatchedFiles for APaths - see LspFilesChangedOnDisk.</summary>
+    procedure FilesChangedOnDisk(const APaths: TArray<string>);
     procedure SyncDocuments;
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
@@ -2889,6 +2906,29 @@ end;
   records the boundary, on both sides, while there is still a project to
   name. }
 
+procedure TLspSession.FilesChangedOnDisk(const APaths: TArray<string>);
+var
+  LParams: TJSONObject;
+  LChanges: TJSONArray;
+  LChange: TJSONObject;
+  LPath: string;
+begin
+  if not Assigned(FClient) or not FClient.IsReady or (Length(APaths) = 0) then
+    Exit;
+  LChanges := TJSONArray.Create;
+  for LPath in APaths do
+  begin
+    LChange := TJSONObject.Create;
+    LChange.AddPair('uri', PathToLspUri(LPath));
+    // FileChangeType 2 is Changed - what a rewritten file is.
+    LChange.AddPair('type', TJSONNumber.Create(2));
+    LChanges.AddElement(LChange);
+  end;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('changes', LChanges);
+  FClient.Notify('workspace/didChangeWatchedFiles', LParams);
+end;
+
 procedure TLspSession.ProjectClosed;
 begin
   // FIRST, and unconditionally: the next open of this project is entitled to
@@ -3205,6 +3245,39 @@ begin
     LSession.ProjectOpened;
 end;
 
+procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
+var
+  LBySession: TDictionary<TLspSession, TList<string>>;
+  LPair: TPair<TLspSession, TList<string>>;
+  LSession: TLspSession;
+  LPath: string;
+  LList: TList<string>;
+begin
+  if not Assigned(GPool) or (Length(APaths) = 0) then
+    Exit;
+  LBySession := TDictionary<TLspSession, TList<string>>.Create;
+  try
+    for LPath in APaths do
+    begin
+      LSession := GPool.SessionForFile(LPath);
+      if LSession = nil then
+        Continue;
+      if not LBySession.TryGetValue(LSession, LList) then
+      begin
+        LList := TList<string>.Create;
+        LBySession.Add(LSession, LList);
+      end;
+      LList.Add(LPath);
+    end;
+    for LPair in LBySession do
+      LPair.Key.FilesChangedOnDisk(LPair.Value.ToArray);
+  finally
+    for LPair in LBySession do
+      LPair.Value.Free;
+    LBySession.Free;
+  end;
+end;
+
 procedure LspSyncDocuments;
 begin
   // No session means nothing has been told anything yet, and the didOpen
@@ -3236,8 +3309,20 @@ end;
 
 
 function LspLogToServer(const AText: string): Boolean;
+var
+  LSession: TLspSession;
 begin
   Result := Assigned(GSession) and GSession.LogToServer(AText);
+  if Result or not Assigned(GPool) then
+    Exit;
+  { GSession is the ACTIVE project's session and is legitimately nil or not
+    yet ready at moments when another session in the pool is up - and a line
+    that could be written somewhere must not be dropped because the pointer
+    happened to be empty. Found on 2026-09-11: a rename's whole trace, which
+    the unit calls "always on", had never once reached a log. }
+  for LSession in GPool.ReadySessions do
+    if LSession.LogToServer(AText) then
+      Exit(True);
 end;
 
 procedure LspPrewarm;
@@ -3591,18 +3676,152 @@ begin
   LSession.OnTypeFormatting(AFileName, ARow, ACol, AOnDone);
 end;
 
+{ The edits of several projects' plans as ONE plan: sorted by (file, line,
+  column), which is the order the applier relies on, and de-duplicated at a
+  position - a unit two projects compile is planned by both servers and the
+  two edits are the same edit. }
+function MergeRenameEdits(
+  const AEdits: TArray<TLspRenameEdit>): TArray<TLspRenameEdit>;
+var
+  LSorted: TArray<TLspRenameEdit>;
+  LIdx: Integer;
+begin
+  Result := nil;
+  LSorted := Copy(AEdits);
+  TArray.Sort<TLspRenameEdit>(LSorted, TComparer<TLspRenameEdit>.Construct(
+    function(const A, B: TLspRenameEdit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Row - B.Row;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+  for LIdx := 0 to High(LSorted) do
+    if (LIdx = 0) or
+       not SameText(LSorted[LIdx].FilePath, LSorted[LIdx - 1].FilePath) or
+       (LSorted[LIdx].Row <> LSorted[LIdx - 1].Row) or
+       (LSorted[LIdx].Col <> LSorted[LIdx - 1].Col) then
+      Result := Result + [LSorted[LIdx]];
+end;
+
+{ THE WHOLE GROUP, the shape of LspReferencesInGroup: the owning session
+  first and unconditionally - the position is in a file of its project, so
+  it is the one that can answer, and the one allowed to start a server - and
+  then every other project's server that is already running, asked the same
+  question at the same position. A unit shared between projects is in the
+  closure of each, so each plans the rename of the symbol declared there
+  across ITS closure, and the union is the rename across the group. A server
+  without that file answers with an error, which is the ordinary case here
+  and is not reported unless the owner failed too.
+
+  The OWNER decides what is being renamed: its OldName/NewName and its
+  IsUnit verdict stand, and its refusal (a reserved word, a builtin) is the
+  refusal. Another project's edits are merged in; its verdict is not
+  consulted. A unit rename is not merged at all - it is refused downstream
+  anyway, and its file half would not survive merging.
+
+  Servers not yet running are NOT started: a rename on a cold group would
+  pay a full analysis per project up front, and a project the user has not
+  touched this session is unlikely to be where the symbol is used. The
+  plan's ProjectsAnswered/ProjectsInGroup say how far it reached, and the
+  results tab shows them. (User, 2026-09-12: "it must rename everywhere".) }
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
   const ANewName: string; const AOnDone: TLspRenamePlanProc);
 var
-  LSession: TLspSession;
+  LOwner, LSession: TLspSession;
+  LTargets: TArray<TLspSession>;
+  LGroup: IOTAProjectGroup;
+  LInGroup, LOutstanding, LAnswered: Integer;
+  LOwnerPlan: TLspRenamePlan;
+  LOwnerOk, LOwnerDone: Boolean;
+  LOwnerError: string;
+  LCollected: TArray<TLspRenameEdit>;
+  LFinish: TProc;
 begin
-  LSession := SessionForRequest(AFileName);
-  if LSession = nil then
+  LOwner := SessionForRequest(AFileName);
+  if LOwner = nil then
   begin
     AOnDone(False, Default(TLspRenamePlan), 'LSP session not initialized');
     Exit;
   end;
-  LSession.RenamePlan(AFileName, ARow, ACol, ANewName, AOnDone);
+
+  LGroup := GetProjectGroup;
+  if Assigned(LGroup) then
+    LInGroup := LGroup.ProjectCount
+  else
+    LInGroup := 1;
+
+  LTargets := [LOwner];
+  for LSession in GPool.ReadySessions do
+    if LSession <> LOwner then
+      LTargets := LTargets + [LSession];
+
+  LOutstanding := Length(LTargets);
+  LAnswered := 0;
+  LCollected := nil;
+  LOwnerOk := False;
+  LOwnerDone := False;
+  LOwnerError := '';
+  LOwnerPlan := Default(TLspRenamePlan);
+
+  // One finish for every answer, reached when the owner AND every other
+  // target have spoken. A local TProc rather than a nested routine because
+  // the callbacks below are anonymous methods, and those capture variables,
+  // not nested procedures.
+  LFinish := procedure
+    var
+      LMerged: TLspRenamePlan;
+    begin
+      if (LOutstanding > 0) or not LOwnerDone then
+        Exit;
+      if not LOwnerOk then
+      begin
+        AOnDone(False, Default(TLspRenamePlan), LOwnerError);
+        Exit;
+      end;
+      LMerged := LOwnerPlan;
+      if not LMerged.IsUnit then
+        LMerged.Edits := MergeRenameEdits(LCollected);
+      LMerged.ProjectsAnswered := LAnswered;
+      LMerged.ProjectsInGroup := LInGroup;
+      AOnDone(True, LMerged, '');
+    end;
+
+  // The owner's answer is the verdict - see above.
+  LOwner.RenamePlan(AFileName, ARow, ACol, ANewName,
+    procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
+      const AError: string)
+    begin
+      LOwnerDone := True;
+      LOwnerOk := ASuccess;
+      LOwnerError := AError;
+      if ASuccess then
+      begin
+        LOwnerPlan := APlan;
+        Inc(LAnswered);
+        LCollected := LCollected + APlan.Edits;
+      end;
+      Dec(LOutstanding);
+      LFinish();
+    end);
+
+  // The others only contribute edits; a refusal from one of them is the
+  // ordinary "not my file" and is not reported.
+  for LSession in LTargets do
+    if LSession <> LOwner then
+      LSession.RenamePlan(AFileName, ARow, ACol, ANewName,
+        procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
+          const AError: string)
+        begin
+          if ASuccess and not APlan.IsUnit then
+          begin
+            Inc(LAnswered);
+            LCollected := LCollected + APlan.Edits;
+          end;
+          Dec(LOutstanding);
+          LFinish();
+        end);
 end;
 
 procedure LspRenameTarget(const AFileName: string; ARow, ACol: Integer;

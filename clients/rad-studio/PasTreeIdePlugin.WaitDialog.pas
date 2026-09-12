@@ -42,6 +42,13 @@ procedure ShowWaitDialog(const ADescription: string);
 /// Closes the dialog IF this unit opened it; silently does nothing
 /// otherwise. Safe on any path, including shutdown.
 /// </summary>
+/// <summary>
+/// The "current work" line under the description - one file name at a time
+/// during a long synchronous loop (a rename saving fifty files on a slow
+/// disk, user 2026-09-12). No-op unless this unit opened the dialog.
+/// </summary>
+procedure UpdateWaitDialogWork(const AWork: string);
+
 procedure CloseWaitDialog;
 
 implementation
@@ -64,6 +71,20 @@ begin
     Exit;   // someone else's dialog - see the unit header
   LDialog.Show('PasTree', ADescription);
   GShown := True;
+end;
+
+procedure UpdateWaitDialogWork(const AWork: string);
+var
+  LDialog: IOTAIDEWaitDialogServices;
+begin
+  if not GShown then
+    Exit;
+  try
+    if Supports(BorlandIDEServices, IOTAIDEWaitDialogServices, LDialog) then
+      LDialog.UpdateCurrentWork(AWork);
+  except
+    // Cosmetic, like Close: a progress line must never become the error.
+  end;
 end;
 
 procedure CloseWaitDialog;

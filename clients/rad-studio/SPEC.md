@@ -882,6 +882,24 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    ascending needs no shifting arithmetic; offsets are resolved before the
    first write, for `ApplyClassComplete`'s hard-won reason.
 
+   Since 0.39.1 no tab is opened for any of it and nothing waits: a file the
+   user has open is edited through `IOTASourceEditor.CreateUndoableWriter`
+   (no view needed) and saved through its module; a file nobody has open is
+   read, edited in memory and written back by `PasLsp.SourceText` in its own
+   encoding - never loaded as a module, because loading a form unit brings
+   its designer and saving the module rewrites the untouched `.dfm`. Sites
+   are addressed as UTF-8 byte offsets computed from the plan's line and
+   character column. The plan is the union of every RUNNING project server's
+   answer (`LspRenamePlan`, the References-in-group shape; the owner's
+   verdict decides, others contribute edits, merged by position). Disk
+   writes reach the server as `workspace/didChangeWatchedFiles`. The results
+   tab carries one button, Revert - the same applier run backwards over the
+   files as they now stand, skipping a site that already reads the old name
+   (Ctrl+Z in an open file), then saved again - on a VCL `TToolBar` parented
+   into the Messages window's own form (`PasTreeIdePlugin.RenameToolbar`),
+   because the ToolsAPI offers no place for one; the README records the
+   search, the fallback dump and the three shapes tried before this one.
+
    **And then it shows what it did**, in a "PasTree Rename" Messages tab
    shaped exactly like Find References - grouped by file, one navigable line
    per site, the declaration labelled - where each line is the source AS IT

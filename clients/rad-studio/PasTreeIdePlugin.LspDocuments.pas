@@ -164,6 +164,17 @@ type
 procedure NoteBufferModified(const APath: string);
 
 /// <summary>
+/// The live UTF-8 bytes of an open module's edit buffer, BOM and all if the
+/// buffer carries one - the exact byte sequence an IOTAEditWriter's offsets
+/// address. Through IOTAEditorContent, never IOTAEditReader (see
+/// ReadBufferText's note on the corruption that reader caused). Empty when
+/// the module has no edit buffer. Needs no view: a module OpenModule loaded
+/// without Show has a buffer all the same, which is what lets
+/// PasTreeIdePlugin.Rename edit files it never put on screen.
+/// </summary>
+function ReadModuleBufferUtf8(const AModule: IOTAModule): UTF8String;
+
+/// <summary>
 /// Whether NoteBufferModified is actually being fed - True while the
 /// EditorViewModified notifier is registered. False makes Sync read every
 /// buffer, as it did before there was any tracking: a plugin whose notifier
@@ -354,18 +365,20 @@ type
     EditorMs, ContentMs, DecodeMs: Double;
   end;
 
-function ReadBufferText(const AModule: IOTAModule;
-  out ACost: TReadCost): string;
+{ The bytes behind both readers below. One place for the IOTAEditorContent
+  technique, so the warning in ReadBufferText's header guards it once. }
+function ReadBufferBytes(const AModule: IOTAModule; out ACost: TReadCost;
+  out AText: UTF8String): Boolean;
 var
   LBuffer: IOTAEditBuffer;
   LEditorContent: IOTAEditorContent;
   LIStream: IStream;
   LIMemStream: TIMemoryStream;
   LMemStream: TMemoryStream;
-  LFileContent: UTF8String;
   LT: Double;
 begin
-  Result := '';
+  Result := False;
+  AText := '';
   ACost := Default(TReadCost);
   LT := TimingNowMs;
   if not Supports(AModule.GetModuleFileEditor(0), IOTAEditBuffer, LBuffer) then
@@ -381,11 +394,31 @@ begin
   LIMemStream := LIStream as TIMemoryStream;
   LMemStream := LIMemStream.MemoryStream;
   ACost.ContentMs := TimingNowMs - LT;
-  LT := TimingNowMs;
-  SetLength(LFileContent, LMemStream.Size);
+  SetLength(AText, LMemStream.Size);
   LMemStream.Position := 0;
   if LMemStream.Size <> 0 then
-    LMemStream.Read(LFileContent[1], Length(LFileContent));
+    LMemStream.Read(AText[1], Length(AText));
+  Result := True;
+end;
+
+function ReadModuleBufferUtf8(const AModule: IOTAModule): UTF8String;
+var
+  LCost: TReadCost;
+begin
+  if not ReadBufferBytes(AModule, {out} LCost, {out} Result) then
+    Result := '';
+end;
+
+function ReadBufferText(const AModule: IOTAModule;
+  out ACost: TReadCost): string;
+var
+  LFileContent: UTF8String;
+  LT: Double;
+begin
+  Result := '';
+  if not ReadBufferBytes(AModule, {out} ACost, {out} LFileContent) then
+    Exit;
+  LT := TimingNowMs;
   Result := UTF8ToString(LFileContent);
 
   // A leading BOM must never reach the server - see PasLsp.SourceText for what

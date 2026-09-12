@@ -54,8 +54,9 @@ editor itself. Four features so far:
   Ctrl+Click;
 - **the decl↔impl jump** on Ctrl+Shift+Up/Down, the IDE's own keys for it,
   taken over the same way;
-- **Rename** on Ctrl+Shift+E and in the editor's menu - every use of a symbol across the
-  project, then a results tab showing each changed line as it now reads.
+- **Rename** on Ctrl+Shift+E and in the editor's menu - every use of a symbol
+  across the project group, applied and saved at once, then a results tab
+  showing each changed line as it now reads, with a Revert button above it.
 
 The analysis starts when a project finishes opening rather than on the first
 navigation, so the closure is usually already built by the time anyone asks it
@@ -231,20 +232,60 @@ the other half is rewritten to match, in its own undo step.
 
 Ctrl+Shift+E, or "Rename..." in the editor's right-click menu. A dialog
 prefilled with the identifier under the caret, then the server plans every
-site and the plugin applies it through the editor - one undo step per file.
+site and the plugin applies it - across the whole project group, saved at
+once, with one button to take it back.
 
-- **Nothing is ever written to disk.** Every file a rename touches is opened
-  in the editor and changed through its buffer, so the change is an ordinary
-  IDE undo step: Ctrl+Z in a tab undoes it, and closing the tabs without
-  saving throws the whole rename away. The cost is the tabs themselves - a
-  rename with a dozen references opens a dozen of them, all unsaved, so the
-  IDE asks about each at the next close. The results tab says how many were
-  opened.
+- **Applied and saved immediately, no tab opened for anything** (0.39.1). A
+  file you have open is changed in its edit buffer - an ordinary Ctrl+Z step
+  in its tab - and saved through its module; a file nobody has open is read,
+  edited in memory and written back in the encoding it came in (UTF-8 with or
+  without BOM, or ANSI), never loaded into the IDE. The IDE's wait dialog
+  shows "Renaming..." from the request onward, with the file being saved on
+  its work line. The results tab says how many files were open and how many
+  were written on disk.
+- **Across the group.** The plan is the union of the answers of every
+  running project server: the project owning the file under the caret
+  decides what is being renamed, and every other project whose server is
+  already up plans the same symbol across its own closure; edits are merged
+  by position. Servers not yet running are not started for this, so the tab
+  title says how far it reached - `in 2 of 5 project(s)`. Open a file in a
+  project first if you need its server up.
+- **Revert** - the one button on the tab's toolbar - runs the same two-pass
+  applier backwards over the files as they now stand and saves again. It
+  skips a site that already reads the old name, so after Ctrl+Z in the one
+  file you had open, Revert is how the other files follow. It refuses, naming
+  the file and line, if a site reads neither name, and stays available for
+  another try. A site whose line moved is found again by the line's
+  post-rename text if exactly one line reads that way.
+- **Why this shape.** Four were tried. Writing closed files on disk (to
+  0.27) had no way back. A tab per file (0.28 to 0.38) had Ctrl+Z but walked
+  a dozen tabs across the screen per rename. Loading closed files as
+  invisible modules (`OpenModule` without `Show`, 0.39.0 for a day) opened
+  no tabs - but saving a form unit's module rewrote its untouched `.dfm`, and
+  `Save(False, False)` asked about every file instead. A separate Save step
+  after the rename was dropped as a click that only confirmed what the tab
+  showed, and because a rename applied to buffers but not to disk left the
+  server seeing open files renamed and closed ones not.
+- **The toolbar sits inside the IDE's Messages window**, which the ToolsAPI
+  does not provide for: `PasTreeIdePlugin.RenameToolbar` finds the Messages
+  form (`TMessageViewForm`) among the VCL forms, parents a `TToolBar` into
+  it top-aligned (the window is one tree per group, all `alClient`, so they
+  give way), and shows it only while the selected tab of the window's
+  `TTabSet` - the strip of group names at the bottom - is ours, polled four
+  times a second rather than by chaining the IDE's own event. The glyph is
+  the IDE's own Undo icon, taken from its `EditUndoCommand` action; themed
+  through `IOTAIDEThemingServices`. Two things learned the hard way: the
+  toolbar needs its `Parent` before any button, image list or style is set
+  (`EInvalidOperation: has no parent window` otherwise), and nothing else
+  names an IDE class. If the form or the tab set is not found there is no
+  toolbar, one Build-tab line says so, and the log has the form's whole
+  control tree (always in that case, and under Advanced Logging otherwise) -
+  that dump is what a fix for a new IDE layout starts from; the unit header
+  carries the 13.0 tree it was written against.
 - **Nothing is written unless everything can be.** Every site is checked
-  against the buffer that is about to be rewritten; if any has moved since
-  the analysis the whole rename is refused, naming the file and line, with
-  nothing changed. Files opened for a refused rename stay open with their
-  buffers untouched.
+  against the text that is about to be rewritten; if any has moved since the
+  analysis the whole rename is refused, naming the file and line, with
+  nothing changed.
 - **RTL, VCL and third-party sources are refused.** Anything under one of the
   IDE's own Library or Browsing paths is not yours to rewrite, and neither is
   a read-only file; one such file among the references refuses the whole
