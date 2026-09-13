@@ -342,6 +342,35 @@ end;
   module loaded behind the scenes has none. A module with no file editor at
   all (a .dfm-only or a form the IDE has not materialised) is likewise not
   shown. }
+{ The Pascal source a module's editor holds, or '' when it holds none. For a
+  unit this is the module's own FileName. For a PROJECT it is not: the
+  project module's FileName is the .dproj, and its Pascal source - the .dpr,
+  or the .dpk - is what its first file editor edits. Testing the module's
+  FileName alone skipped every open .dpr on every sync ("sync: 0 docs" with
+  the program source on screen, 2026-09-13), so the server answered about
+  the .dpr from disk while the editor showed something else. }
+function ModuleSourcePath(const AModule: IOTAModule): string;
+var
+  LEditor: IOTAEditor;
+begin
+  Result := AModule.FileName;
+  if IsPascalSourceFile(Result) then
+    Exit;
+  Result := '';
+  if not Supports(AModule, IOTAProject) then
+    Exit;
+  try
+    if AModule.GetModuleFileCount > 0 then
+    begin
+      LEditor := AModule.GetModuleFileEditor(0);
+      if Assigned(LEditor) and IsPascalSourceFile(LEditor.FileName) then
+        Result := LEditor.FileName;
+    end;
+  except
+    Result := '';
+  end;
+end;
+
 function ModuleIsShown(const AModule: IOTAModule): Boolean;
 var
   LEditor: IOTASourceEditor;
@@ -478,12 +507,12 @@ var
   LModule: IOTAModule;
   LList: TObjectList<TSentDocument>;
   LDoc: TSentDocument;
-  LActive, LKey: string;
+  LActive, LKey, LSourcePath: string;
   I, J, LSkipped, LReused: Integer;
   LStart, LT: Double;
   LCost: TModuleCost;
   LCosts: TList<TModuleCost>;
-  LOwns: Boolean;
+  LOwns, LDup: Boolean;
   LKnown: TSentDocument;
 begin
   Result := nil;
@@ -503,12 +532,25 @@ begin
       LModule := LModuleServices.Modules[I];
       if not Assigned(LModule) then
         Continue;
-      if not IsPascalSourceFile(LModule.FileName) then
+      LSourcePath := ModuleSourcePath(LModule);
+      if LSourcePath = '' then
+        Continue;
+      // Once per source, whichever module hands it over: a .dpr opened on
+      // its own AND reached through its project module would otherwise be
+      // sent twice under one path.
+      LDup := False;
+      for J := 0 to LList.Count - 1 do
+        if SameText(LList[J].Path, LSourcePath) then
+        begin
+          LDup := True;
+          Break;
+        end;
+      if LDup then
         Continue;
       LCost := Default(TModuleCost);
-      LCost.Name := ExtractFileName(LModule.FileName);
+      LCost.Name := ExtractFileName(LSourcePath);
       LT := TimingNowMs;
-      LOwns := not Assigned(FOwnsPath) or FOwnsPath(LModule.FileName);
+      LOwns := not Assigned(FOwnsPath) or FOwnsPath(LSourcePath);
       LCost.OwnsMs := TimingNowMs - LT;
       if not LOwns then
       begin
@@ -522,7 +564,7 @@ begin
       try
         LDoc := TSentDocument.Create;
         try
-          LDoc.Path := LModule.FileName;
+          LDoc.Path := LSourcePath;
           LKey := LowerCase(LDoc.Path);
           LDoc.ReadStamp := ModCountOf(LKey);
           LDoc.DiskStamp := DiskStampOf(LDoc.Path);
@@ -593,7 +635,7 @@ begin
     // whole point of starting the analysis at project open.
     if Assigned(LModuleServices.CurrentModule) then
     begin
-      LActive := LModuleServices.CurrentModule.FileName;
+      LActive := ModuleSourcePath(LModuleServices.CurrentModule);
       for I := 0 to LList.Count - 2 do
         if SameText(LList[I].Path, LActive) then
         begin

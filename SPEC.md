@@ -203,11 +203,11 @@ IDE plugin first, VS Code second), not by protocol order.
 |---|---|
 | `initialize`, `initialized`, `shutdown`, `exit` | project config via `initializationOptions`; `initialized` starts the first analysis when a project was configured |
 | `textDocument/didOpen`, `didChange`, `didClose` | incremental sync, versioned overlays; `pastreeShown: false` on the TextDocumentItem marks a document the IDE loaded but is not showing (logged as `(background)`) |
-| `textDocument/definition` | |
+| `textDocument/definition` | symbol / unit / builtin, plus a CONDITIONAL SYMBOL (0.40.0, PasTree 0.27.0): the name in `$IFDEF`/`$IFNDEF`/`$DEFINE`/`$UNDEF`/`Defined()` goes to the nearest preceding active `$DEFINE` in the same unit; a project or platform define lands on the main module's header (PasTree 0.27.2 - the project is its home, as System.pas is a builtin's) |
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
-| `textDocument/references` | symbol / unit / builtin identities |
+| `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four |
 | `textDocument/documentSymbol` | outline, types with members |
-| `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page |
+| `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page; a conditional symbol gets a `{$DEFINE X}` card noting the `$DEFINE` it sees, or that the project defines it |
 | `textDocument/publishDiagnostics` | push, open documents |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |

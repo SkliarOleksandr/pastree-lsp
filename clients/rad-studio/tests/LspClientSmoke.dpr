@@ -413,6 +413,66 @@ begin
     'the uses item resolves to the unit itself');
 end;
 
+{ 2c. Conditional symbols - the FOURTH identity (PasTree 0.27.0), through
+  fixtures\DemoDefines.pas. Pinned: definition on the name in an $IFDEF
+  lands on the nearest PRECEDING $DEFINE (line 11, not the later one on
+  line 21); references list every mention including the $DEFINE sites and
+  the Defined() argument; a platform define (MSWINDOWS) answers its
+  mentions but no definition; hover names the kind; rename is refused. The
+  name sits inside a comment as far as the lexer is concerned, so every one
+  of these was a silent miss before DefineAt. }
+procedure TestDefines;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 2c. conditional symbols ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoDefines.pas');
+  DidOpen(LFile);
+
+  FindPos(LFile, '{$IFDEF DEMO_FEATURE}', 'DEMO_FEATURE', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition on the $IFDEF name answered');
+  Check(GOk and GResultJson.Contains('DemoDefines.pas') and
+    GResultJson.Contains('"line":10,'),
+    'and lands on the preceding $DEFINE (line 11), not the later one');
+
+  Check(Ask('textDocument/references',
+    PositionParams(LFile, LLine, LChar, True)),
+    'references on the $IFDEF name answered');
+  Check(GOk and (GResultJson.CountChar('{') >= 4 * 3),
+    'four mentions: two $DEFINE, the $IFDEF and the Defined()');
+
+  FindPos(LFile, 'Defined(MSWINDOWS)', 'MSWINDOWS', LLine, LChar);
+  Check(Ask('textDocument/references',
+    PositionParams(LFile, LLine, LChar, True)),
+    'references on a Defined() argument answered');
+  Check(GOk and GResultJson.Contains('DemoDefines.pas'),
+    'and the platform define has its mention listed');
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition on the platform define answered');
+  Check(GOk and GResultJson.Contains('DemoApp.dpr') and
+    GResultJson.Contains('"line":0,'),
+    'and lands on the program header - the project is where it comes from');
+
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on the platform define answered');
+  Check(GOk and GResultJson.Contains('defined by the project (DemoApp.dpr)'),
+    'and says where it comes from');
+
+  FindPos(LFile, '{$IFDEF DEMO_FEATURE}', 'DEMO_FEATURE', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on the $IFDEF name answered');
+  Check(GOk and GResultJson.Contains('conditional symbol - DemoDefines.pas:11'),
+    'and points at the $DEFINE it sees');
+
+  Check(Ask('textDocument/rename',
+    PositionParams(LFile, LLine, LChar).AddPair('newName', 'OTHER')),
+    'rename on a conditional symbol answered');
+  Check(not GOk and GError.Contains('conditional symbol'),
+    'and is refused, naming the reason');
+end;
 { 2b. pastree/findOverrides and pastree/findImplementations over
   fixtures\DemoHierarchy.pas - the two hierarchy commands of the RAD client.
 
@@ -1593,7 +1653,6 @@ begin
     RenameParams(LUnitFile, LLine, LChar, '2bad')), 'rename to a non-identifier answered');
   Check(not GOk, 'and refused that too');
 
-
   // pastree/renamePlan: the same plan, plus what a host that applies it
   // itself needs - the old text to verify against its buffer, and the line
   // as it will READ afterwards.
@@ -2657,6 +2716,7 @@ begin
 
       TestQueuedBeforeReady(GExe);
       TestNavigation;
+      TestDefines;
       TestNonAsciiPositions;
       TestBareInherited;
       TestHierarchy;
@@ -2704,4 +2764,4 @@ begin
       ExitCode := 2;
     end;
   end;
-end.
+end.

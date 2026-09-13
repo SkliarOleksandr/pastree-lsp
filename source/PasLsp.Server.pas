@@ -2049,8 +2049,8 @@ end;
 
 function TLspServer.HandleDefinition(const AMsg: TLspIncoming): string;
 var
-  LPath: string;
-  LLine, LChar, LPasLine, LPasCol, LMid: Integer;
+  LPath, LDefName: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LRawTok: Integer;
   LIdent: TPasNavIdent;
   LTarget, LImplTarget, LDeclTarget: TPasNavTarget;
   LResolved, LOwnHeader: Boolean;
@@ -2073,6 +2073,31 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  // A conditional symbol FIRST: the name in `{$IFDEF X}` sits inside what
+  // IdentAt sees as a comment, so it is a miss there, while DefineAt reads
+  // the preprocessor's own record of the directive (PasTree 0.27.0). The
+  // target is the nearest preceding active `$DEFINE X` in this model - a
+  // project or platform define has no source site, which the log says.
+  if FNav.DefineAt(LMid, LPasLine, LPasCol, LDefName, LRawTok) then
+  begin
+    if FNav.GotoDefine(LMid, LPasLine, LPasCol, LTarget) then
+    begin
+      Log(Format(AMsg.Method + ': %s define ''%s'' -> %s',
+        [PosTag(LPath, LPasLine, LPasCol), LDefName,
+         PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
+      Exit(BuildResponse(AMsg.IdJson,
+        LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+          Length(LTarget.Name))));
+    end;
+    if FNav.IsProjectDefined(LDefName) then
+      Log(Format(AMsg.Method + ': %s define ''%s'' comes from the project '
+        + 'or platform - no source site to go to',
+        [PosTag(LPath, LPasLine, LPasCol), LDefName]))
+    else
+      Log(Format(AMsg.Method + ': %s define ''%s'' has no preceding active '
+        + '$DEFINE in this unit', [PosTag(LPath, LPasLine, LPasCol), LDefName]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
   // Failures answer null to the client (per protocol) but SAY WHY in the
   // log - "F12 did nothing" is otherwise undebuggable from the outside.
   if FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
@@ -2506,6 +2531,19 @@ begin
     AHit.HiTo - AHit.HiFrom);
 end;
 
+{ The rows of FindDefineReferences as plain reference hits. Kind and Active
+  are dropped: an LSP Location carries neither, and a `$DEFINE` site is a
+  reference like any other (PasTree's own rule - the name can have several
+  or none, so there is no one "declaration" to set apart). }
+function DefineHitsToRefs(const AHits: TArray<TPasDefineHit>): TArray<TPasRefHit>;
+var
+  LIdx: Integer;
+begin
+  SetLength(Result, Length(AHits));
+  for LIdx := 0 to High(AHits) do
+    Result[LIdx] := AHits[LIdx].Hit;
+end;
+
 { textDocument/references - the three-identity model, straight from the
   navigator (see PasTree.Sema.Nav's own comments for why three): a SYMBOL
   (unit, symbol id - the normal case), a UNIT (header/uses click: each
@@ -2519,7 +2557,7 @@ end;
 function TLspServer.HandleReferences(const AMsg: TLspIncoming): string;
 var
   LPath, LName: string;
-  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym: Integer;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
   LInclDecl: Boolean;
   LHits: TArray<TPasRefHit>;
   LDecl: TPasRefHit;
@@ -2571,6 +2609,14 @@ begin
   begin
     LKind := 'builtin';
     LHits := FNav.FindBuiltinReferences(LName);
+  end
+  else if FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok) then
+  begin
+    // The FOURTH identity (PasTree 0.27.0): the name in a $DEFINE / $UNDEF /
+    // $IFDEF / $IFNDEF / Defined(). The $DEFINE sites are among the hits -
+    // there is no separate declaration to include.
+    LKind := 'define';
+    LHits := DefineHitsToRefs(FNav.FindDefineReferences(LName));
   end
   else
   begin
@@ -2811,7 +2857,7 @@ function TLspServer.PlanRenameAt(const APath: string;
   APasLine, APasCol: Integer; const ANewName: string;
   out APlan: TLspRenamePlanned; out AError: string): Boolean;
 var
-  LMid, LTMid, LSym: Integer;
+  LMid, LTMid, LSym, LRawTok: Integer;
   LOther: string;
   LDecl: TPasRefHit;
 begin
@@ -2872,6 +2918,13 @@ begin
     if FNav.BuiltinNameAt(LMid, APasLine, APasCol, LOther) then
       AError := Format('''%s'' is a compiler builtin - it has no ' +
         'declaration to rename.', [LOther])
+    else if FNav.DefineAt(LMid, APasLine, APasCol, LOther, LRawTok) then
+      // Refused like a builtin, for PasTree's own reason: the .dproj and the
+      // command line own part of a conditional symbol's identity, so a
+      // source-only rename would silently split it.
+      AError := Format('''%s'' is a conditional symbol - part of its ' +
+        'identity lives in the project options, so it cannot be renamed ' +
+        'from source.', [LOther])
     else
       AError := 'There is nothing renameable at that position.';
     Exit;
@@ -3574,7 +3627,7 @@ end;
 function TLspServer.HandleFindAllAt(const AMsg: TLspIncoming): string;
 var
   LPath, LName: string;
-  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym: Integer;
+  LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
   LRefs, LOverrides, LImpls, LDesc, LAssign, LClass: Boolean;
 begin
   LPath := DocPathOf(AMsg.Params);
@@ -3592,10 +3645,11 @@ begin
   if LMid < 0 then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  // The same three identities HandleReferences tries, in its order.
+  // The same four identities HandleReferences tries, in its order.
   LRefs := FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) or
     FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) or
-    FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName);
+    FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) or
+    FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok);
   LOverrides := FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
   LImpls := FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName)
     or FNav.InterfaceAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
@@ -4108,7 +4162,10 @@ function TLspServer.HandleHover(const AMsg: TLspIncoming): string;
 var
   LPath, LName, LCode, LNote, LMd, LDoc, LRawDoc, LDeclFile: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx: Integer;
-  LDeclLine, LDeclCol: Integer;
+  LDeclLine, LDeclCol, LRawTok, LIdx: Integer;
+  LIsDefine: Boolean;
+  LDefHits: TArray<TPasDefineHit>;
+  LTarget: TPasNavTarget;
   LIdent: TPasNavIdent;
   LHit: TPasRefHit;
   LStartLine, LStartChar, LEndLine, LEndChar: Integer;
@@ -4130,7 +4187,34 @@ begin
   // No identifier under the cursor is the COMMON case for a hover (any
   // keyword, any whitespace) - answered with null and NOT logged, or a
   // session log becomes unreadable from mouse movement alone.
-  if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
+  //
+  // A conditional symbol is not an identifier to IdentAt (its directive is
+  // a comment to the lexer), so it is asked first, and its span is taken
+  // from its own reference row on this line - DefineAt reports only the
+  // whole `{$...}` token, and the card should underline the name alone.
+  LIsDefine := FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok);
+  if LIsDefine then
+  begin
+    LDefHits := FNav.FindDefineReferences(LName);
+    LIdent := Default(TPasNavIdent);
+    LIdent.Name := LName;
+    LIdent.Line := LPasLine;
+    LIdent.ColFrom := LPasCol;
+    LIdent.ColTo := LPasCol;
+    for LIdx := 0 to High(LDefHits) do
+      if (LDefHits[LIdx].Hit.Line = LPasLine) and
+         (LPasCol >= LDefHits[LIdx].Hit.Col) and
+         (LPasCol <= LDefHits[LIdx].Hit.Col
+           + LDefHits[LIdx].Hit.HiTo - LDefHits[LIdx].Hit.HiFrom) and
+         SameText(LDefHits[LIdx].Hit.FilePath, LPath) then
+      begin
+        LIdent.ColFrom := LDefHits[LIdx].Hit.Col;
+        LIdent.ColTo := LDefHits[LIdx].Hit.Col
+          + LDefHits[LIdx].Hit.HiTo - LDefHits[LIdx].Hit.HiFrom;
+        Break;
+      end;
+  end
+  else if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
   LCode := '';
@@ -4140,7 +4224,33 @@ begin
   LDeclFile := '';
   LDeclLine := 0;
   LDeclCol := 0;
-  if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
+  if LIsDefine then
+  begin
+    // What it is, then where it comes from: the `$DEFINE` this directive
+    // sees, the project/platform, or nowhere (a name that is never on).
+    LCode := '{$DEFINE ' + LName + '}';
+    // Where it comes from: a project/platform define lands on the main
+    // module's header (PasTree 0.27.2 - the project is its home, as
+    // System.pas is a builtin's), a unit-local one on the $DEFINE this
+    // directive sees; a name that is never on has neither.
+    if FNav.GotoDefine(LMid, LPasLine, LPasCol, LTarget) then
+    begin
+      if FNav.IsProjectDefined(LName) then
+        LNote := Format('conditional symbol - defined by the project (%s)',
+          [TPath.GetFileName(LTarget.FilePath)])
+      else
+        LNote := Format('conditional symbol - %s:%d',
+          [TPath.GetFileName(LTarget.FilePath), LTarget.Line]);
+      LDeclFile := LTarget.FilePath;
+      LDeclLine := LTarget.Line;
+      LDeclCol := LTarget.Col;
+    end
+    else if FNav.IsProjectDefined(LName) then
+      LNote := 'conditional symbol - defined by the project or platform'
+    else
+      LNote := 'conditional symbol - not defined here';
+  end
+  else if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LCode := 'unit ' + LName + ';';
     if FNav.UnitDeclHit(LTMid, LHit) then
@@ -4695,6 +4805,7 @@ function TLspServer.HandleDocumentHighlight(const AMsg: TLspIncoming): string;
 var
   LPath, LName, LKey: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSymIdx, LIdx: Integer;
+  LRawTok: Integer;
   LHits: TArray<TPasRefHit>;
   LDecl: TPasRefHit;
   LSB: TStringBuilder;
@@ -4730,6 +4841,8 @@ begin
   end
   else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
     LHits := FNav.FindBuiltinReferences(LName)
+  else if FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok) then
+    LHits := DefineHitsToRefs(FNav.FindDefineReferences(LName))
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 

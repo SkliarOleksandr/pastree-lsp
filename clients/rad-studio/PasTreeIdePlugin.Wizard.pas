@@ -125,6 +125,7 @@ type
     procedure AddActions;
     procedure AddIdentifierActions;
     procedure OnFindDeclarationExecute(Sender: TObject);
+    procedure EnsureIdentifierTakeover(const ALocalMenu: INTAEditorLocalMenu);
     procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure AddFindAllActions;
     procedure OnFindAllUpdate(Sender: TObject);
@@ -322,6 +323,25 @@ begin
   LAction.ActionList := FIdentifierActionList;
 end;
 
+{ The takeover itself. Opening the door is allowed at any time - it is only
+  CLOSING it that a session cannot do - so this also runs from the Find All
+  items' OnUpdate when the switch was OFF at load and is turned on later:
+  before that, switching on mid-session left the native item in the slot
+  until the next IDE start, and the user saw a "Find Declaration" that never
+  reached this package (Alex, 2026-09-13, on a directive - the native item
+  cannot navigate those at all). }
+procedure TMenuManager.EnsureIdentifierTakeover(
+  const ALocalMenu: INTAEditorLocalMenu);
+begin
+  if FIdentifierRegistered or (ALocalMenu = nil) then
+    Exit;
+  FIdentifierActionList := TActionList.Create(nil);
+  ALocalMenu.UnregisterActionList(cEdMenuCatIdentifier);
+  ALocalMenu.RegisterActionList(FIdentifierActionList, cEdMenuCatIdentifier);
+  FIdentifierRegistered := True;
+  AddIdentifierActions;
+end;
+
 constructor TMenuManager.Create;
 begin
   inherited;
@@ -360,14 +380,7 @@ begin
       against the setting. It comes back native at the next IDE start. The
       settings dialog says so. }
     if CtrlClickNavigation then
-    begin
-      FIdentifierActionList := TActionList.Create(nil);
-      LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
-      LLocalMenuIntf.RegisterActionList(FIdentifierActionList,
-        cEdMenuCatIdentifier);
-      FIdentifierRegistered := True;
-      AddIdentifierActions;
-    end;
+      EnsureIdentifierTakeover(LLocalMenuIntf);
   end
   else
     FRegistered := False;
@@ -409,6 +422,10 @@ end;
 
 procedure TMenuManager.OnFindDeclarationExecute(Sender: TObject);
 begin
+  // Logged like the Find All items: the one way to tell from a log that OUR
+  // item ran and not the native one (the takeover is decided at load).
+  LspLogToServer(Format('menu: execute PasTreeFindDeclaration, TopView %s',
+    [IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
   ExecuteGotoDeclaration(FEditorServices.TopView);
 end;
 
@@ -536,6 +553,12 @@ var
   LItem: TFindAllItem;
 begin
   LAction := ActionOf(Sender);
+  // The switch turned ON after load: take the Identifier slot over now (see
+  // EnsureIdentifierTakeover) - this fires on every menu open, so the first
+  // menu after the change is the last one to show the native item.
+  if CtrlClickNavigation and not FIdentifierRegistered and
+     Assigned(FEditorServices) then
+    EnsureIdentifierTakeover(FEditorServices.GetEditorLocalMenu);
   if LAction = nil then
     Exit;
   LAction.Visible := FindAllEnabled;

@@ -73,7 +73,7 @@ type
   /// swallowed and OnClick fires on the up. Asked identically on down and
   /// up, so the two can never disagree about who owns the click.
   /// </summary>
-  TEditorClickClaim = function: Boolean of object;
+  TEditorClickClaim = function(const AEditor: TWinControl; AX, AY: Integer): Boolean of object;
 
   /// <summary>Client coordinates within the editor control.</summary>
   TEditorClickEvent = procedure(const AEditor: TWinControl;
@@ -178,7 +178,8 @@ type
     procedure DoMouseMove(const AEditor: TWinControl; AShift: TShiftState;
       AX, AY: Integer);
     procedure EnsureHooked(const AEditor: TWinControl);
-    function ClaimsClick(AWParam: WPARAM): Boolean;
+    function ClaimsClick(AWParam: WPARAM; const AControl: TWinControl;
+      AX, AY: Integer): Boolean;
   public
     constructor Create;
     destructor Destroy; override;
@@ -219,7 +220,8 @@ procedure TEditorWindowHook.HookedWndProc(var AMessage: TMessage);
 begin
   case AMessage.Msg of
     WM_LBUTTONDOWN, WM_LBUTTONUP:
-      if FRegistry.ClaimsClick(AMessage.WParam) then
+      if FRegistry.ClaimsClick(AMessage.WParam, FControl,
+        SmallInt(AMessage.LParamLo), SmallInt(AMessage.LParamHi)) then
       begin
         // Swallowed, not forwarded: this is the stand-in for the 37.0
         // `Handled := True`. The down goes nowhere (it would start a
@@ -328,13 +330,14 @@ end;
 /// taking that chord from the IDE or another plugin. Exactly Ctrl, nothing
 /// else.
 /// </summary>
-function TEditorHookRegistry.ClaimsClick(AWParam: WPARAM): Boolean;
+function TEditorHookRegistry.ClaimsClick(AWParam: WPARAM;
+  const AControl: TWinControl; AX, AY: Integer): Boolean;
 begin
   Result := Assigned(FOnClick) and Assigned(FClaims)
     and ((AWParam and MK_CONTROL) <> 0)
     and ((AWParam and MK_SHIFT) = 0)
     and (GetKeyState(VK_MENU) >= 0)
-    and FClaims;
+    and FClaims(AControl, AX, AY);
 end;
 
 { registration }

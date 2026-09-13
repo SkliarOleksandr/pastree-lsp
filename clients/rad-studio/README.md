@@ -352,7 +352,9 @@ history:
 >   cannot be undone within a session (there is no handle to the native action
 >   list). With the switch off at load, nothing is taken over and the native
 >   item behaves exactly as it always did. Switched off mid-session, our item
->   hides and the slot stays empty until the IDE restarts.
+>   hides and the slot stays empty until the IDE restarts. Switched ON
+>   mid-session (off at load), the takeover happens at the next menu open -
+>   opening the door is allowed at any time, only closing it is not (0.40.0).
 >
 > A menu item cannot be intercepted the way a click can - it never reaches
 > the package at all - which is why the takeover is the only mechanism
@@ -401,6 +403,25 @@ across our jumps too. Every history item handed to the IDE is tracked and
 removed via `RemoveHistoryItem` at package unload (`ClearHistoryItems`) -
 left registered, a stale entry would call `.Execute` on an object living in
 already-unloaded package code the next time the user pressed Alt-Left/Right.
+
+**Conditional symbols (0.40.0).** The name in `{$IFDEF X}`, `{$IFNDEF X}`,
+`{$DEFINE X}`, `{$UNDEF X}` and `Defined(X)` is navigable like any
+identifier: Ctrl+Click goes to the nearest preceding `{$DEFINE X}` in the
+unit, a project define (`DEBUG`, `MSWINDOWS`) lands on the `.dpr` header
+the way a builtin lands in System.pas, Find References lists every mention
+(the `$DEFINE` sites included), hover names where the symbol comes from, and
+Rename refuses (the `.dproj` owns part of the identity). The server does the
+resolving off PasTree 0.27.2's `DefineAt`. On the IDE side the only addition
+is in the click override: the IDE's tokenizer sees a comment there, so with
+PasTree selected as Insight Provider its own click chain never asks
+`AsyncGotoDefinitionEx` about the position - that click is claimed by the
+override under every provider (`PointOnDefine`, a syntactic test over the
+line text in `PasTreeIdePlugin.DirectiveText`, covered by `LspTextSmoke`).
+The Ctrl+hover underline is the IDE's own, drawn over the directive token; a
+painted overlay of ours was built and withdrawn the same day (2026-09-13) -
+it doubled the IDE's line. Found on the way: with PasTree selected nothing
+jumped until the line was edited, because the IDE's "current manager"
+flips during a reparse and briefly let the gated override through.
 
 ### Shared analysis pipeline
 
@@ -764,6 +785,7 @@ log anything leaves its last words.
   `..\..\source\PasLsp.ProductVersion.pas` and
   `..\..\source\PasLsp.SourceText.pas` - no PasTree, ever (see the top of
   this file).
+- `PasTreeIdePlugin.DirectiveText.pas` - which word of a line is a conditional  symbol (the click override's PointOnDefine test), RTL-only for the harness.
 - `PasTreeIdePlugin.SyncPrototypes.pas` - prototype sync, the first step of
   Ctrl+Shift+C: the replacement edit (CopyTo / DeleteTo / Insert through one
   undoable writer - the first edit in this package that deletes rather than

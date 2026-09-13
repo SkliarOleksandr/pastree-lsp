@@ -158,7 +158,7 @@ uses
   System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
   PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight,
-  PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.Settings, PasTreeIdePlugin.DirectiveText;
 
 /// <summary>
 /// Goes to the IDE's own default Messages tab (nil group = the "Build" tab)
@@ -589,9 +589,11 @@ type
 {$IF Declared(TEditorMouseExEvent)}
     FNotifier: TGotoDeclarationNotifier;
 {$ELSE}
-    function ClaimsHookedClick: Boolean;
+    function ClaimsHookedClick(const AEditor: TWinControl;
+      AX, AY: Integer): Boolean;
     procedure DoHookedClick(const AEditor: TWinControl; AX, AY: Integer);
 {$ENDIF}
+    function PointOnDefine(const Editor: TWinControl; X, Y: Integer): Boolean;
     function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
       out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
     procedure HandleClaimedClick(const Editor: TWinControl; X, Y: Integer);
@@ -652,6 +654,36 @@ begin
   Result := True;
 end;
 
+{ True when the editor pixel sits on a CONDITIONAL SYMBOL - the name in
+  $IFDEF / $IFNDEF / $DEFINE / $UNDEF / Defined(), located syntactically in
+  the line's own text (PasTreeIdePlugin.DirectiveText). Why the click needs
+  to know: the IDE's tokenizer sees a comment there, so with PasTree as the
+  Insight Provider its click chain never asks AsyncGotoDefinitionEx about the
+  position and the click would do nothing - that one click is ours under
+  every provider. (The IDE does draw its own Ctrl+hover underline over the
+  directive token, so no painting of ours is needed; a painted overlay was
+  tried and withdrawn on 2026-09-13.) }
+function TGotoDeclarationManager.PointOnDefine(const Editor: TWinControl;
+  X, Y: Integer): Boolean;
+var
+  LState: INTACodeEditorState;
+  LLineState: INTACodeEditorLineState;
+  LColumn, LVisibleLine, LFrom, LTo: Integer;
+begin
+  Result := False;
+  if not Assigned(FEditorServices) then
+    Exit;
+  LState := FEditorServices.EditorState[Editor];
+  if not Assigned(LState) then
+    Exit;
+  if not LState.PointToCharacterPos(Point(X, Y), LColumn, LVisibleLine) then
+    Exit;
+  LLineState := LState.LineState[LVisibleLine];
+  if not Assigned(LLineState) then
+    Exit;
+  Result := DirectiveSymbolAt(LLineState.Text, LColumn, LFrom, LTo);
+end;
+
 /// <summary>
 /// True only for a left click whose keyboard chord is EXACTLY Ctrl - masking
 /// to the modifier keys first, because in mouse events Shift also carries
@@ -670,14 +702,19 @@ end;
 /// <summary>
 /// Whether THIS click is ours: the right chord, the feature switched on, and
 /// PasTree not already serving the IDE's own click chain as the selected
-/// Insight Provider. Asked identically on down and up, so the two events can
-/// never disagree about who owns the click.
+/// Insight Provider - EXCEPT on a conditional symbol, which the IDE's chain
+/// never reaches in any mode (its tokenizer sees a comment there and does not
+/// ask AsyncGotoDefinitionEx), so that click is ours under every provider.
+/// Asked identically on down and up, so the two events can never disagree
+/// about who owns the click.
 /// </summary>
-function ClaimsClick(Shift: TShiftState; Button: TMouseButton): Boolean;
+function ClaimsClick(Shift: TShiftState; Button: TMouseButton;
+  const AEditor: TWinControl; X, Y: Integer): Boolean;
 begin
   Result := IsPlainCtrlLeftClick(Shift, Button)
     and CtrlClickNavigation
-    and not PasTreeIsActiveInsightProvider;
+    and (not PasTreeIsActiveInsightProvider
+      or (Assigned(GManager) and GManager.PointOnDefine(AEditor, X, Y)));
 end;
 
 /// <summary>
@@ -708,14 +745,14 @@ procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
 begin
   // Suppress default down-side handling only (e.g. starting a text selection
   // drag) - the actual navigation happens on mouse-up, below.
-  if ClaimsClick(Shift, Button) then
+  if ClaimsClick(Shift, Button, Editor, X, Y) then
     Handled := True;
 end;
 
 procedure TGotoDeclarationManager.DoMouseUp(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
 begin
-  if not ClaimsClick(Shift, Button) then
+  if not ClaimsClick(Shift, Button, Editor, X, Y) then
     Exit;
   Handled := True;
   HandleClaimedClick(Editor, X, Y);
@@ -727,9 +764,11 @@ end;
 /// decided by the hook (the message carries it), so only the feature's own
 /// two conditions are left - the same ones ClaimsClick asks above.
 /// </summary>
-function TGotoDeclarationManager.ClaimsHookedClick: Boolean;
+function TGotoDeclarationManager.ClaimsHookedClick(const AEditor: TWinControl;
+  AX, AY: Integer): Boolean;
 begin
-  Result := CtrlClickNavigation and not PasTreeIsActiveInsightProvider;
+  Result := CtrlClickNavigation and (not PasTreeIsActiveInsightProvider
+    or PointOnDefine(AEditor, AX, AY));
 end;
 
 procedure TGotoDeclarationManager.DoHookedClick(const AEditor: TWinControl;

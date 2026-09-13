@@ -24,7 +24,8 @@ program LspTextSmoke;
 uses
   System.SysUtils,
   PasLsp.Protocol,
-  PasLsp.XmlDoc;
+  PasLsp.XmlDoc,
+  PasTreeIdePlugin.DirectiveText;
 
 var
   GFailures: Integer;
@@ -180,12 +181,61 @@ begin
   Check((LLine = 0) and (LChar = 0), 'and back again');
 end;
 
+
+{ The conditional-symbol locator behind the plugin's Ctrl+hover underline
+  (PasTreeIdePlugin.DirectiveText). Covered here because its only other
+  observer is a mouse over an IDE editor. }
+procedure TestDirectiveSymbol;
+
+  procedure CheckHit(const ALine: string; ACol: Integer;
+    const AWant: string; const AName: string);
+  var
+    LFrom, LTo: Integer;
+    LGot: string;
+  begin
+    if DirectiveSymbolAt(ALine, ACol, LFrom, LTo) then
+      LGot := Copy(ALine, LFrom, LTo - LFrom)
+    else
+      LGot := '';
+    CheckEq(LGot, AWant, AName);
+  end;
+
+const
+  cIfDef = '  {$IFDEF DEBUG_FOO} // x';
+  cIf = '{$IF Defined(MSWINDOWS) and not Declared(TFoo) and Defined( X_1 )}';
+begin
+  Writeln;
+  Writeln('directive symbols');
+
+  CheckHit(cIfDef, 11, 'DEBUG_FOO', '{$IFDEF X}: first char of the symbol');
+  CheckHit(cIfDef, 19, 'DEBUG_FOO', '{$IFDEF X}: last char of the symbol');
+  CheckHit(cIfDef, 20, '', '{$IFDEF X}: the closing brace is not the symbol');
+  CheckHit(cIfDef, 6, '', '{$IFDEF X}: the keyword is not the symbol');
+  CheckHit(cIfDef, 24, '', 'outside the directive');
+  CheckHit('{$ifndef foo}', 11, 'foo', 'lower-case keyword');
+  CheckHit('{$DEFINE A}{$UNDEF B}', 10, 'A', 'two directives on a line: first');
+  CheckHit('{$DEFINE A}{$UNDEF B}', 20, 'B', 'two directives on a line: second');
+  CheckHit('(*$IFDEF PAREN*) x', 12, 'PAREN', '(*$ ... *) spelling');
+  CheckHit('{$I foo.inc}', 5, '', '{$I} is not a conditional');
+  CheckHit('{$IFOPT R+}', 8, '', '{$IFOPT} is not a conditional');
+  CheckHit('{$ENDIF}', 4, '', '{$ENDIF} is not a conditional');
+  CheckHit('{$ELSE}', 4, '', '{$ELSE} is not a conditional');
+  CheckHit('{$IFDEF FOO', 10, '', 'unterminated on this line');
+  CheckHit('{ $IFDEF FOO }', 9, '', 'a comment that is not a directive');
+  CheckHit(cIf, 16, 'MSWINDOWS', '{$IF Defined(X)}');
+  CheckHit(cIf, 42, '', '{$IF ...} Declared(T) is not a conditional');
+  CheckHit(cIf, 61, 'X_1', '{$IF ...} Defined( X ) with spaces');
+  CheckHit(cIf, 8, '', '{$IF ...} the word Defined itself is not one');
+  CheckHit('{$ELSEIF Defined(B)}', 18, 'B', '{$ELSEIF Defined(X)}');
+  CheckHit('{$IF FOO > 1}', 6, '', '{$IF} a bare constant is not one');
+end;
 begin
   GFailures := 0;
   TestUri;
   TestXmlDocEntities;
   TestXmlDocProse;
   TestPositions;
+  TestDirectiveSymbol;
 
   Writeln;
   if GFailures = 0 then

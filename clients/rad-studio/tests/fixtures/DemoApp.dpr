@@ -15,7 +15,8 @@ uses
   DemoInherited in 'DemoInherited.pas',
   DemoInference in 'DemoInference.pas',
   DemoHierarchy in 'DemoHierarchy.pas',
-  DemoFindAll in 'DemoFindAll.pas';
+  DemoFindAll in 'DemoFindAll.pas',
+  DemoDefines in 'DemoDefines.pas';
 
 var
   LDerived: TDerived;

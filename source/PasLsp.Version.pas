@@ -155,7 +155,17 @@ const
   /// another unit). Silent otherwise: against 0.26.3 the heritage ctrl+click
   /// lands on the generic's own line and Find References / Descendants on the
   /// plain class miss every bare use in that unit, with nothing in the log.
-  cMinPasTreeVersion = '0.26.4';
+  ///
+  /// 0.27.0 (2026-09-12): conditional symbols as the fourth identity -
+  /// DefineAt / FindDefineReferences / GotoDefine / IsProjectDefined. Loud
+  /// rather than silent (the methods do not exist before it), pinned so the
+  /// floor says what the definition/references/hover handlers rely on.
+  ///
+  /// 0.27.2 (2026-09-13): GotoDefine on a project/platform define lands on the
+  /// main module's header instead of answering False. Silent otherwise:
+  /// against 0.27.0 Ctrl+Click on `DEBUG` does nothing and the log says
+  /// "no preceding $DEFINE", which is true and not the point.
+  cMinPasTreeVersion = '0.27.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
