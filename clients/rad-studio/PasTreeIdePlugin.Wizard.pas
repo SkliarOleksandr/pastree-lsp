@@ -69,6 +69,7 @@ uses
   System.SysUtils, System.StrUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
+  PasTreeIdePlugin.FindDefines,
   PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
@@ -97,12 +98,17 @@ const
   cGateReuseMs = 2000;
 
 type
-  { The seven Find All items, in the submenu's order. References is the odd
-    one out - its command lives in PasTreeIdePlugin.FindReferences, the other
-    six in PasTreeIdePlugin.FindHierarchy - which is why the two enums are
-    not one. }
+  { The Find All items, in the submenu's order. References is the odd one
+    out among the first seven - its command lives in
+    PasTreeIdePlugin.FindReferences, the other six in
+    PasTreeIdePlugin.FindHierarchy - which is why the two enums are not one.
+    The last two, Defines and DefinesAtCursor (PasTree 0.28.0), are a third
+    family of their own in PasTreeIdePlugin.FindDefines: unlike the other
+    seven they need NO IDENTITY at the caret - ItemApplies always answers
+    True for them, there being no findAllAt gate to ask. }
   TFindAllItem = (faiReferences, faiOverrides, faiImplementations,
-    faiDescendants, faiAssignments, faiCreations, faiDestructions);
+    faiDescendants, faiAssignments, faiCreations, faiDestructions,
+    faiDefines, faiDefinesAtCursor);
 
   TMenuManager = class
   private
@@ -263,7 +269,7 @@ begin
   // Prototypes" item cannot be fixed or replaced safely).
 end;
 
-{ The submenu: one parent action under cFindAllCategory, then the seven items
+{ The submenu: one parent action under cFindAllCategory, then the items
   under cFindAllCategory + '.' + their name, in this order, right after it -
   both the prefix and the adjacency are what ToolsAPI asks for (see the
   header). Each item action is kept in FItemActions and told apart by
@@ -274,9 +280,18 @@ end;
   supplies it - "Find All > Overrides" - exactly as PasTree's demo reads. }
 procedure TMenuManager.AddFindAllActions;
 const
+  // Identifier-safe - used for the action Name and the Category suffix,
+  // neither of which may contain a space.
   cItemName: array[TFindAllItem] of string =
     ('References', 'Overrides', 'Implementations', 'Descendants',
-     'Assignments', 'Creations', 'Destructions');
+     'Assignments', 'Creations', 'Destructions',
+     'Defines', 'DefinesAtCursor');
+  // What the menu actually shows - "Defines at cursor" reads as PasTree's
+  // own demo has it, a space its Name/Category may not carry.
+  cItemCaption: array[TFindAllItem] of string =
+    ('References', 'Overrides', 'Implementations', 'Descendants',
+     'Assignments', 'Creations', 'Destructions',
+     'Defines', 'Defines at cursor');
 var
   LAction: TAction;
   LItem: TFindAllItem;
@@ -294,9 +309,34 @@ begin
 
   for LItem := Low(TFindAllItem) to High(TFindAllItem) do
   begin
+    { A RULE IN FRONT OF THE DEFINE INVENTORIES. The seven above answer
+      about the caret and grey themselves when it is not their subject;
+      these two answer about the PROJECT and are always enabled, which is a
+      different kind of command and reads as one with a line between them
+      (Alex, 2026-09-14).
+
+      Caption '-' is VCL's own spelling of a separator (TMenuItem.Caption),
+      and the IDE builds its menu items from these actions - so the worst
+      case, if a future builder ever stops honouring it, is a disabled item
+      that reads as a dash. It carries no OnExecute for that reason, and
+      OnFindAllItemUpdate leaves it alone: ItemOf answers False for it (it
+      is in no FItemActions slot), which disables it - exactly what a
+      separator wants to be. }
+    if LItem = faiDefines then
+    begin
+      LAction := TAction.Create(FActionList);
+      LAction.Name := 'PasTreeFindAllSeparator';
+      LAction.Caption := '-';
+      LAction.Category := cFindAllCategory + '.Separator';
+      LAction.DisableIfNoHandler := False;
+      LAction.OnUpdate := OnFindAllItemUpdate;
+      LAction.Enabled := False;
+      LAction.ActionList := FActionList;
+    end;
+
     LAction := TAction.Create(FActionList);
     LAction.Name := 'PasTreeFindAll' + cItemName[LItem];
-    LAction.Caption := cItemName[LItem];
+    LAction.Caption := cItemCaption[LItem];
     LAction.Category := cFindAllCategory + '.' + cItemName[LItem];
     FItemActions[LItem] := LAction;
     LAction.OnUpdate := OnFindAllItemUpdate;
@@ -505,6 +545,11 @@ begin
     faiAssignments:     Result := FGate.Assignments;
     faiCreations:       Result := FGate.Creations;
     faiDestructions:    Result := FGate.Destructions;
+    // Defines and DefinesAtCursor need no identity at the caret - PasTree's
+    // FindDefines/DefinesAt need no cursor at all - so findAllAt has no gate
+    // for them and they are always offered, exactly as PasTree's own demo
+    // greys nothing on these two.
+    faiDefines, faiDefinesAtCursor: Result := True;
   else
     Result := True;
   end;
@@ -585,6 +630,8 @@ begin
       faiAssignments:     ExecuteFindAll(facAssignments, FEditorServices.TopView);
       faiCreations:       ExecuteFindAll(facCreations, FEditorServices.TopView);
       faiDestructions:    ExecuteFindAll(facDestructions, FEditorServices.TopView);
+      faiDefines:         ExecuteFindDefines(FEditorServices.TopView);
+      faiDefinesAtCursor: ExecuteDefinesAtCursor(FEditorServices.TopView);
     end;
   except
     on E: Exception do
@@ -702,6 +749,7 @@ begin
     CloseRenameResults;
     CloseFindReferencesResults;
     CloseFindHierarchyResults;
+    CloseFindDefinesResults;
   end;
 end;
 
@@ -829,6 +877,7 @@ begin
   FinalizeRename;
   FinalizeFindReferencesMessageGroup;
   FinalizeFindHierarchyMessageGroups;
+  FinalizeFindDefinesMessageGroup;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
   // inside this package's code when the BPL unloads is an immediate crash, so

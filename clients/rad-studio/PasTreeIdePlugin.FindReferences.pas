@@ -434,9 +434,11 @@ begin
 
     // Visible progress: on a cold big project the first of these requests
     // waits for the whole analysis, and until now nothing on screen said
-    // anything was happening (user, 2026-08-31). Every terminal path below
-    // closes the dialog FIRST - it disables input, and a message box on
-    // top of disabled input is a stuck IDE.
+    // anything was happening (user, 2026-08-31). Every terminal path that
+    // TALKS to the user closes the dialog FIRST - it disables input, and a
+    // message box on top of disabled input is a stuck IDE. The one path
+    // that does not is the report into the panel, which is not modal and
+    // which the dialog deliberately covers (ReportUnderWaitDialog).
     // Short on purpose: the wait dialog does not grow for its text and a
     // long line is clipped (user, 2026-08-31).
     ShowWaitDialog('Searching references...');
@@ -484,7 +486,6 @@ begin
           begin
             if not GAlive then
               Exit;   // as above, and this is the path that reached a user
-            CloseWaitDialog;
             // No declaration is a legitimate answer, not a failure: a compiler
             // builtin has none anywhere. The references are worth reporting
             // either way - but a FAILED request is not the same statement as
@@ -493,12 +494,19 @@ begin
             if not ADeclOk then
               LogDiagnostic('Find References: the declaration request failed: '
                 + ADeclError);
-            if ADeclOk and (Length(ADeclHits) > 0) then
-              ReportHits(LName, AProjectsSearched, AProjectsInGroup,
-                True, ADeclHits[0], LRefs)
-            else
-              ReportHits(LName, AProjectsSearched, AProjectsInGroup,
-                False, Default(TLspHit), LRefs);
+            // The dialog stays up ACROSS the report - see
+            // ReportUnderWaitDialog - because building a reference list is
+            // the slow half, and this is the report it was worst on.
+            ReportUnderWaitDialog(Length(LRefs),
+              procedure
+              begin
+                if ADeclOk and (Length(ADeclHits) > 0) then
+                  ReportHits(LName, AProjectsSearched, AProjectsInGroup,
+                    True, ADeclHits[0], LRefs)
+                else
+                  ReportHits(LName, AProjectsSearched, AProjectsInGroup,
+                    False, Default(TLspHit), LRefs);
+              end);
           end);
       end);
   except

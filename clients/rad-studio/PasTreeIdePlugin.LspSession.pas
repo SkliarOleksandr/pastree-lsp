@@ -138,6 +138,31 @@ type
     AProjectsSearched, AProjectsInGroup: Integer; const AError: string);
 
   /// <summary>
+  /// One row of pastree/findDefines or pastree/definesAt: a DEFINITION of a
+  /// conditional symbol (PasTree 0.28.0, TPasDefineSite). Origin is the
+  /// server's word - 'unit' (a live $DEFINE in a unit or its include, Hit
+  /// on the name), 'project' (a .dproj/command-line define) or 'platform'
+  /// (MSWINDOWS, CPUX64, VERnnn...) - the latter two with no source site of
+  /// their own: Hit.FilePath is '' when the analysis has no main module, a
+  /// row to list rather than to jump to. Active is False for a $DEFINE in a
+  /// dead branch (findDefines only - definesAt never returns one).
+  /// </summary>
+  TLspDefineRow = record
+    Hit: TLspHit;
+    Name: string;
+    Origin: string;
+    Active: Boolean;
+    Snippet: string;
+    HiFrom, HiTo: Integer;
+  end;
+
+  /// <summary>
+  /// Delivered on the main thread, once, for LspFindDefines/LspDefinesAt.
+  /// </summary>
+  TLspDefinesProc = reference to procedure(ASuccess: Boolean;
+    const ARows: TArray<TLspDefineRow>; const AError: string);
+
+  /// <summary>
   /// One completion item, already in IDE coordinates. The replace span
   /// (Row/ColFrom..ColTo, 1-based, ColTo exclusive) is the partially-typed
   /// token the item replaces - the server always answers with a textEdit, so
@@ -468,6 +493,28 @@ procedure LspFindAllInGroup(const AMethod, AFileName: string;
 /// </summary>
 function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;
   ATimeoutMs: Cardinal): TLspFindAllGate;
+
+/// <summary>
+/// The project-wide inventory of every $DEFINE, project define and platform
+/// define (PasTree 0.28.0, FindDefines) - needs no cursor. Deliberately NOT
+/// group-wide, unlike LspReferencesInGroup/LspFindAllInGroup: AFileName only
+/// picks which project's server answers (SessionForRequest), because a
+/// conditional symbol is a project-local fact - a name one project of a
+/// group defines is not in effect in another's compile at all - so "every
+/// project this file belongs to" would answer a question nobody asked.
+/// </summary>
+procedure LspFindDefines(const AFileName: string;
+  const AOnDone: TLspDefinesProc);
+
+/// <summary>
+/// The set of conditional-symbol names in effect at an IDE position
+/// (PasTree 0.28.0, DefinesAt) - what an $IFDEF written there would see, one
+/// row per name. Project-scoped like LspFindDefines, for the same reason.
+/// AFileName need not have a model of its own (an opened .inc): the answer
+/// is then the project's base set alone.
+/// </summary>
+procedure LspDefinesAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspDefinesProc);
 
 /// <summary>
 /// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
@@ -877,6 +924,12 @@ type
       ATimeoutMs: Cardinal): TLspFindAllGate;
     procedure Hierarchy(const AMethod, AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHierarchyOneProc);
+    { AMethod is 'pastree/findDefines' (AHasPosition False, ARow/ACol
+      ignored) or 'pastree/definesAt' (AHasPosition True). One method
+      because both answer the same bare array of rows - only the request
+      shape differs. }
+    procedure Defines(const AMethod, AFileName: string; AHasPosition: Boolean;
+      ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
@@ -2304,6 +2357,53 @@ begin
   SetLength(Result, LCount);
 end;
 
+{ pastree/findDefines and pastree/definesAt both answer a bare array (unlike
+  the hierarchy family's name/rows envelope), one TLspDefineRow per
+  element. A row with no filePath (a project/platform define with no main
+  module) is KEPT, not dropped - ParseHierarchyRows drops such a row because
+  every hierarchy kind always has a real site, but here it is the documented
+  shape (TPasDefineSite): a row to list, nothing to jump to. Only a row with
+  no name at all is skipped, as malformed. }
+function ParseDefineRows(AResult: TJSONValue): TArray<TLspDefineRow>;
+var
+  LItems: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LRow: TLspDefineRow;
+  LCount: Integer;
+  LUri: string;
+begin
+  Result := nil;
+  if not (AResult is TJSONArray) then
+    Exit;
+  LItems := TJSONArray(AResult);
+  SetLength(Result, LItems.Count);
+  LCount := 0;
+  for LValue in LItems do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LRow := Default(TLspDefineRow);
+    LRow.Name := LObj.GetValue<string>('name', '');
+    if LRow.Name = '' then
+      Continue;
+    LUri := LObj.GetValue<string>('uri', '');
+    if LUri <> '' then
+      LRow.Hit.FilePath := LspUriToPath(LUri);
+    LRow.Hit.Row := LObj.GetValue<Integer>('line', 0);
+    LRow.Hit.Col := LObj.GetValue<Integer>('col', 0);
+    LRow.Origin := LObj.GetValue<string>('origin', 'unit');
+    LRow.Active := LObj.GetValue<Boolean>('active', True);
+    LRow.Snippet := LObj.GetValue<string>('snippet', '');
+    LRow.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
+    LRow.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    Result[LCount] := LRow;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
 { The one synchronous request of this unit - see LspFindAllAt for why it
   exists at all. THE WAIT PUMPS CheckSynchronize AND NOTHING ELSE:
   the reader thread hands frames to the main thread through TThread.Queue
@@ -2403,6 +2503,42 @@ begin
       else
         AOnDone(True, True, AResult.GetValue<string>('name', ''),
           ParseHierarchyRows(AResult), '');
+    end);
+end;
+
+procedure TLspSession.Defines(const AMethod, AFileName: string;
+  AHasPosition: Boolean; ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+  FDocs.Sync;
+  LParams := TJSONObject.Create;
+  // findDefines needs no cursor - it is a project-wide inventory - so the
+  // request carries a position only for definesAt.
+  if AHasPosition then
+  begin
+    IdeToLsp(ARow, ACol, LLine, LChar);
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFileName));
+    LParams.AddPair('textDocument', LDoc);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+  end;
+  FClient.Request(AMethod, LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if not ASuccess then
+        AOnDone(False, nil, AError)
+      else
+        AOnDone(True, ParseDefineRows(AResult), '');
     end);
 end;
 
@@ -3386,6 +3522,36 @@ begin
     Exit;
   end;
   LSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+end;
+
+procedure LspFindDefines(const AFileName: string;
+  const AOnDone: TLspDefinesProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Defines('pastree/findDefines', AFileName, {AHasPosition} False,
+    0, 0, AOnDone);
+end;
+
+procedure LspDefinesAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspDefinesProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Defines('pastree/definesAt', AFileName, {AHasPosition} True,
+    ARow, ACol, AOnDone);
 end;
 
 { Sorted by file, then row, then column, with exact duplicates dropped.

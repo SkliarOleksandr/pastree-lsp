@@ -285,6 +285,8 @@ type
     function HandleFindSites(const AMsg: TLspIncoming;
       AKind: TFindSitesKind): string;
     function HandleFindAllAt(const AMsg: TLspIncoming): string;
+    function HandleFindDefines(const AMsg: TLspIncoming): string;
+    function HandleDefinesAt(const AMsg: TLspIncoming): string;
     function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
       out APath: string; out AMid, APasLine, APasCol: Integer;
       out AReply: string): Boolean;
@@ -3666,6 +3668,92 @@ begin
      JsonBool(LAssign), JsonBool(LClass), JsonBool(LClass)]));
 end;
 
+{ One row of pastree/findDefines or pastree/definesAt: a TPasDefineSite. A
+  project or platform origin has no source site (PasTree leaves Hit.FilePath
+  empty when the analysis has no main module) - uri and filePath come back
+  as '' rather than a bogus file:// for an empty path, so a client can tell
+  "nothing to jump to" from a real location without parsing the path. }
+function DefineSiteJson(const ASite: TPasDefineSite): string;
+const
+  cOrigin: array[TPasDefineOrigin] of string = ('unit', 'project', 'platform');
+var
+  LUri: string;
+begin
+  if ASite.Hit.FilePath = '' then
+    LUri := ''
+  else
+    LUri := PathToUri(ASite.Hit.FilePath);
+  Result := Format('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
+    '"name":%s,"origin":%s,"active":%s,"snippet":%s,"hiFrom":%d,"hiTo":%d}',
+    [JsonQuote(LUri), JsonQuote(ASite.Hit.FilePath), ASite.Hit.Line,
+     ASite.Hit.Col, JsonQuote(ASite.Name), JsonQuote(cOrigin[ASite.Origin]),
+     JsonBool(ASite.Active), JsonQuote(ASite.Hit.Snippet), ASite.Hit.HiFrom,
+     ASite.Hit.HiTo]);
+end;
+
+function DefineSitesJson(const ASites: TArray<TPasDefineSite>): string;
+var
+  LJson: TArray<string>;
+  LIdx: Integer;
+begin
+  LJson := nil;
+  for LIdx := 0 to High(ASites) do
+    LJson := LJson + [DefineSiteJson(ASites[LIdx])];
+  Result := '[' + string.Join(',', LJson) + ']';
+end;
+
+{ pastree/findDefines - OURS, not LSP. The project-wide inventory of every
+  conditional-symbol DEFINITION (PasTree 0.28.0, TPasNavigator.FindDefines):
+  every $DEFINE site across the closure (dead branches included, flagged
+  `active: false`), then the .dproj/command-line defines and the platform's
+  predefined ones, each a row with no source site of its own. Needs NO
+  cursor - it is always offered, unlike the seven findAllAt commands, and
+  since one server serves exactly one project (TLspSessionPool on the IDE
+  side), this is naturally project-scoped: there is no group-wide variant to
+  build, unlike Find References. }
+function TLspServer.HandleFindDefines(const AMsg: TLspIncoming): string;
+var
+  LSites: TArray<TPasDefineSite>;
+begin
+  if not WaitAnalyzed('', AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LSites := FNav.FindDefines;
+  Log(Format('pastree/findDefines: %d rows', [Length(LSites)]));
+  Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
+end;
+
+{ pastree/definesAt - OURS, not LSP. What DefinesAt(PasTree 0.28.0) is: the
+  set of names in effect at the cursor of a model's main file, one row per
+  name, the last definition (unit, then project, then platform) winning - an
+  $IFDEF written right there would see exactly this. AMid < 0 (the file has
+  no model of its own, e.g. an opened .inc) is not an error: DefinesAt
+  answers the base set alone, so the command works in every editor. }
+function TLspServer.HandleDefinesAt(const AMsg: TLspIncoming): string;
+var
+  LPath: string;
+  LLine, LChar, LPasLine, LPasCol, LMid: Integer;
+  LSites: TArray<TPasDefineSite>;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'definesAt: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  LSites := FNav.DefinesAt(LMid, LPasLine, LPasCol);
+  Log(Format('pastree/definesAt: %s -> %d names',
+    [PosTag(LPath, LPasLine, LPasCol), Length(LSites)]));
+  Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
+end;
+
 { textDocument/implementation and textDocument/declaration - the decl<->impl
   toggle, a Pascal-specific navigation the navigator implements as pure CST
   walks (GotoImplementation/GotoDeclaration; they never cross units, because
@@ -5043,6 +5131,10 @@ begin
         Exit(HandleFindSites(LMsg, fskCreations));
       if LMsg.Method = 'pastree/findDestructions' then
         Exit(HandleFindSites(LMsg, fskDestructions));
+      if LMsg.Method = 'pastree/findDefines' then
+        Exit(HandleFindDefines(LMsg));
+      if LMsg.Method = 'pastree/definesAt' then
+        Exit(HandleDefinesAt(LMsg));
       if LMsg.Method = 'pastree/findAllAt' then
         Exit(HandleFindAllAt(LMsg));
       { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when

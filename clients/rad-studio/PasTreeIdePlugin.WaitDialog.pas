@@ -20,8 +20,10 @@ unit PasTreeIdePlugin.WaitDialog;
     dialog), Close only what we opened.
 
   - EVERY callback that can be the end of the operation closes the dialog
-    FIRST, before any TellUser/report - the wait dialog disables input, and
-    a modal message box on top of disabled input is a stuck IDE.
+    FIRST, before any MODAL report - the wait dialog disables input, and a
+    modal message box on top of disabled input is a stuck IDE. Filling a
+    docked panel is not modal and is the exception: see
+    ReportUnderWaitDialog, which deliberately keeps the dialog up for it.
 
   - Close never throws. It can run during package unload (the same territory
     as FinalizeFindReferencesMessageGroup's shutdown guard), where the
@@ -30,6 +32,9 @@ unit PasTreeIdePlugin.WaitDialog;
 }
 
 interface
+
+uses
+  System.SysUtils;   // TProc, for ReportUnderWaitDialog
 
 /// <summary>
 /// Shows the IDE wait dialog with the given description under the fixed
@@ -51,10 +56,27 @@ procedure UpdateWaitDialogWork(const AWork: string);
 
 procedure CloseWaitDialog;
 
+/// <summary>
+/// Runs AReport - the step that fills a results tab - with the wait dialog
+/// STILL UP, saying how many rows it is laying out, and closes it afterwards
+/// (in a finally: a report that raises must not leave the IDE with input
+/// disabled).
+///
+/// Closing the dialog the moment the answer arrived left a gap in which the
+/// dialog was gone and the tab still empty - 200-300 ms on a few dozen rows,
+/// far more on a real reference list - which reads as the command having
+/// done nothing (Alex, 2026-09-14). Building the rows is the slow half:
+/// each one is an owner-drawn message the panel then lays out and paints.
+///
+/// For a PANEL only. A modal report - MessageDlg, "no identifier under the
+/// cursor" - still closes the dialog first, per the rule in the unit header.
+/// </summary>
+procedure ReportUnderWaitDialog(ARowCount: Integer; const AReport: TProc);
+
 implementation
 
 uses
-  System.SysUtils, ToolsAPI;
+  ToolsAPI;   // System.SysUtils is in the interface, for TProc
 
 var
   GShown: Boolean = False;
@@ -99,6 +121,16 @@ begin
       LDialog.CloseDialog;
   except
     // Never let a cosmetic close take anything down - see the unit header.
+  end;
+end;
+
+procedure ReportUnderWaitDialog(ARowCount: Integer; const AReport: TProc);
+begin
+  UpdateWaitDialogWork(Format('Listing %d result(s)...', [ARowCount]));
+  try
+    AReport();
+  finally
+    CloseWaitDialog;
   end;
 end;
 

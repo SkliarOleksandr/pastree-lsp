@@ -165,7 +165,12 @@ const
   /// main module's header instead of answering False. Silent otherwise:
   /// against 0.27.0 Ctrl+Click on `DEBUG` does nothing and the log says
   /// "no preceding $DEFINE", which is true and not the point.
-  cMinPasTreeVersion = '0.27.2';
+  ///
+  /// 0.28.0 (2026-09-13): FindDefines / DefinesAt / TPasDefineSite /
+  /// TPasSemaProject.BaseDefineNames. Loud rather than silent - pastree/
+  /// findDefines and pastree/definesAt call methods that do not exist before
+  /// it.
+  cMinPasTreeVersion = '0.28.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

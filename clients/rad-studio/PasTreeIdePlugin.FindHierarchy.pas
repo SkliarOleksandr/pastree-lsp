@@ -532,9 +532,11 @@ begin
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
 
-    // Visible progress, closed FIRST on every terminal path below: the
-    // dialog disables input, and a message box over disabled input is a
-    // stuck IDE (the Find References lesson of 2026-08-31).
+    // Visible progress, closed FIRST on every terminal path that TALKS to
+    // the user: the dialog disables input, and a message box over disabled
+    // input is a stuck IDE (the Find References lesson of 2026-08-31). The
+    // report into the panel is the exception - it is not modal, and the
+    // dialog deliberately covers it (ReportUnderWaitDialog).
     ShowWaitDialog(cWaitText[ACommand]);
     LspFindAllInGroup(cMethod[ACommand], LCursorFile, LRow, LCol,
       procedure(ASuccess, AIsSubject: Boolean; const AName: string;
@@ -543,23 +545,29 @@ begin
       begin
         if not GAlive then
           Exit;   // package unloading - nothing here may touch the IDE
-        CloseWaitDialog;
         if not ASuccess then
         begin
+          CloseWaitDialog;
           LogDiagnostic(cCommandName[ACommand] + ': ' + AError);
           Exit;
         end;
         if not AIsSubject then
         begin
+          CloseWaitDialog;   // a MODAL box follows - close first, always
           (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
             cNotSubject[ACommand], mtInformation, [mbOK], -1);
           Exit;
         end;
-        if ACommand = facDescendants then
-          ReportTree(ACommand, AName, ARows, AProjectsSearched, AProjectsInGroup)
-        else
-          ReportGrouped(ACommand, AName, ARows, AProjectsSearched,
-            AProjectsInGroup);
+        ReportUnderWaitDialog(Length(ARows),
+          procedure
+          begin
+            if ACommand = facDescendants then
+              ReportTree(ACommand, AName, ARows, AProjectsSearched,
+                AProjectsInGroup)
+            else
+              ReportGrouped(ACommand, AName, ARows, AProjectsSearched,
+                AProjectsInGroup);
+          end);
       end);
   except
     on E: Exception do
