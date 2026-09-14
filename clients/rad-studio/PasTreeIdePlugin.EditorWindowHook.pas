@@ -173,6 +173,16 @@ type
     FClaims: TEditorClickClaim;
     FOnClick: TEditorClickEvent;
     FOnKeyUp: TEditorKeyUpEvent;
+    // The pending claim: decided on the button-down and honoured on the
+    // matching up, so the two halves of one click can never disagree. See
+    // BeginClaim.
+    FClaimed: Boolean;
+    FClaimControl: TWinControl;
+    FClaimX, FClaimY: Integer;
+    procedure BeginClaim(const AControl: TWinControl; AX, AY: Integer);
+    procedure CancelClaim;
+    function TakeClaim(const AControl: TWinControl; AX, AY: Integer;
+      out ADragged: Boolean): Boolean;
     procedure DoBeginPaint(const AEditor: TWinControl;
       const AForceFullRepaint: Boolean);
     procedure DoMouseMove(const AEditor: TWinControl; AShift: TShiftState;
@@ -217,19 +227,42 @@ begin
 end;
 
 procedure TEditorWindowHook.HookedWndProc(var AMessage: TMessage);
+var
+  LDragged: Boolean;
 begin
   case AMessage.Msg of
-    WM_LBUTTONDOWN, WM_LBUTTONUP:
+    // WM_LBUTTONDBLCLK is here because the second click of a double-click
+    // arrives as THAT message instead of WM_LBUTTONDOWN: left out, it went
+    // to the editor natively while its WM_LBUTTONUP was still swallowed
+    // here, leaving the control mid-drag with the button already up - one
+    // of the two ways a stray selection appeared (Alex, 2026-09-14).
+    WM_LBUTTONDOWN, WM_LBUTTONDBLCLK:
       if FRegistry.ClaimsClick(AMessage.WParam, FControl,
         SmallInt(AMessage.LParamLo), SmallInt(AMessage.LParamHi)) then
       begin
         // Swallowed, not forwarded: this is the stand-in for the 37.0
-        // `Handled := True`. The down goes nowhere (it would start a
-        // selection drag), the up runs the handler. Suppression is
-        // unconditional once the chord is claimed, even if the handler
-        // resolves nothing - the point is to stop the native path, not to
-        // fall back to it on a miss.
-        if AMessage.Msg = WM_LBUTTONUP then
+        // `Handled := True`. The down goes nowhere - it would start a
+        // selection drag - and the matching up is bound to this decision.
+        FRegistry.BeginClaim(FControl,
+          SmallInt(AMessage.LParamLo), SmallInt(AMessage.LParamHi));
+        AMessage.Result := 0;
+        Exit;
+      end
+      else
+        // A down the editor is about to handle itself must not leave an
+        // older claim standing, or its up would be eaten too.
+        FRegistry.CancelClaim;
+    WM_LBUTTONUP:
+      // Never asked again whether THIS message is a Ctrl+Click: only whether
+      // a down was swallowed for it. Re-deciding here is what let the pair
+      // split when Ctrl was released before the button.
+      if FRegistry.TakeClaim(FControl, SmallInt(AMessage.LParamLo),
+        SmallInt(AMessage.LParamHi), LDragged) then
+      begin
+        // Suppression is unconditional once the down was claimed, even when
+        // nothing runs - the point is to stop the native path, not to fall
+        // back to it. A drag means the gesture was not a click.
+        if not LDragged then
           FRegistry.FOnClick(FControl,
             SmallInt(AMessage.LParamLo), SmallInt(AMessage.LParamHi));
         AMessage.Result := 0;
@@ -324,6 +357,49 @@ begin
 end;
 
 /// <summary>
+/// Remember that a button-down was swallowed here, so the matching up can be
+/// swallowed without asking the chord question a second time - the answer
+/// can have changed by then (Ctrl let go first, the mouse moved off the
+/// token), and one half of a click going native while the other is eaten is
+/// what leaves the editor selecting with no button held.
+/// </summary>
+procedure TEditorHookRegistry.BeginClaim(const AControl: TWinControl;
+  AX, AY: Integer);
+begin
+  FClaimed := True;
+  FClaimControl := AControl;
+  FClaimX := AX;
+  FClaimY := AY;
+end;
+
+procedure TEditorHookRegistry.CancelClaim;
+begin
+  FClaimed := False;
+  FClaimControl := nil;
+end;
+
+/// <summary>
+/// Consume the pending claim, if it belongs to this control. ADragged tells
+/// the caller the pointer travelled further than the system drag threshold
+/// between down and up: the gesture was a drag, not a click, so nothing is
+/// resolved (the down is long gone either way). FClaimControl is only ever
+/// compared, never dereferenced, so a control destroyed under a pending
+/// claim is harmless.
+/// </summary>
+function TEditorHookRegistry.TakeClaim(const AControl: TWinControl;
+  AX, AY: Integer; out ADragged: Boolean): Boolean;
+begin
+  ADragged := False;
+  Result := FClaimed and (AControl = FClaimControl);
+  FClaimed := False;
+  FClaimControl := nil;
+  if not Result then
+    Exit;
+  ADragged := (Abs(AX - FClaimX) > GetSystemMetrics(SM_CXDRAG))
+    or (Abs(AY - FClaimY) > GetSystemMetrics(SM_CYDRAG));
+end;
+
+/// <summary>
 /// The chord test. WM_LBUTTON* carries MK_CONTROL and MK_SHIFT in wParam
 /// but has no Alt bit at all, so Alt comes from GetKeyState - without it,
 /// Ctrl+Alt+Click would look like plain Ctrl+Click and be claimed, silently
@@ -359,6 +435,9 @@ begin
     Exit;
   Registry.FClaims := AClaims;
   Registry.FOnClick := AHandler;
+  // A claim pending across a withdrawal would fire its up into a handler
+  // that is no longer there.
+  Registry.CancelClaim;
 end;
 
 procedure RegisterKeyUpHandler(const AHandler: TEditorKeyUpEvent);

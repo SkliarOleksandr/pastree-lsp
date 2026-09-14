@@ -60,6 +60,18 @@ unit PasTreeIdePlugin.GotoDeclaration;
   even if nothing resolves - the point is to stop the native path, not to fall
   back to it on a miss.
 
+  ONE DECISION PER CLICK, AND NOT ON A DRAG (2026-09-14). Both halves of a
+  click must be claimed together or not at all, so the claim is taken on the
+  down and merely honoured on the up - both here and in the window hook. Two
+  independent tests looked equivalent (the same predicate) but are not: the
+  modifiers and the pointer position it reads can change between down and up,
+  and half a claimed click leaves the editor extending a selection with no
+  button held - Alex's "as if a key were stuck". For the same reason a click
+  INSIDE the current selection is never claimed: that gesture is the IDE's
+  Ctrl+drag-copy, and swallowing its down made copying silently do nothing.
+  A claimed press that travels past the system drag threshold before release
+  resolves nothing either.
+
   ASYNCHRONOUS: each entry point returns immediately and the jump happens on
   a later main-thread turn, when the server answers. By then the cursor may
   have moved, so the "jumped from" history position is captured at
@@ -588,12 +600,19 @@ type
     FNotifierIndex: Integer;
 {$IF Declared(TEditorMouseExEvent)}
     FNotifier: TGotoDeclarationNotifier;
+    // The pending claim, decided on mouse-down and honoured on mouse-up.
+    // The pre-37.0 path keeps the same state inside the window hook.
+    FDownClaimed: Boolean;
+    FDownEditor: TWinControl;
+    FDownX, FDownY: Integer;
 {$ELSE}
     function ClaimsHookedClick(const AEditor: TWinControl;
       AX, AY: Integer): Boolean;
     procedure DoHookedClick(const AEditor: TWinControl; AX, AY: Integer);
 {$ENDIF}
     function PointOnDefine(const Editor: TWinControl; X, Y: Integer): Boolean;
+    function PointInSelection(const Editor: TWinControl;
+      X, Y: Integer): Boolean;
     function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
       out AView: IOTAEditView; out ARow, ACol: Integer): Boolean;
     procedure HandleClaimedClick(const Editor: TWinControl; X, Y: Integer);
@@ -684,6 +703,56 @@ begin
   Result := DirectiveSymbolAt(LLineState.Text, LColumn, LFrom, LTo);
 end;
 
+{ True when the editor pixel sits INSIDE the current selection. Such a click
+  is not ours under any chord: Ctrl+drag of a selected block is how the IDE
+  copies text, and it begins with a plain Ctrl+left-down on the block. We
+  used to swallow that down to stop a selection drag from starting, which
+  killed drag-copy outright - it simply did nothing (Alex, 2026-09-14).
+  Inside a selection the down goes to the editor untouched; the navigation
+  gesture is a Ctrl+Click anywhere else. }
+function TGotoDeclarationManager.PointInSelection(const Editor: TWinControl;
+  X, Y: Integer): Boolean;
+var
+  LView: IOTAEditView;
+  LBlock: IOTAEditBlock;
+  LRow, LCol, LTopRow, LTopCol, LBottomRow, LBottomCol, LSwap: Integer;
+begin
+  Result := False;
+  if not TryGetPosition(Editor, X, Y, LView, LRow, LCol) then
+    Exit;
+  LBlock := LView.Block;
+  if not Assigned(LBlock) or not LBlock.IsValid or (LBlock.Size = 0) then
+    Exit;
+
+  // Selected upwards, Starting* is the LATER position - normalise rather
+  // than trust an order the API does not promise.
+  LTopRow := LBlock.StartingRow;
+  LTopCol := LBlock.StartingColumn;
+  LBottomRow := LBlock.EndingRow;
+  LBottomCol := LBlock.EndingColumn;
+  if (LTopRow > LBottomRow)
+    or ((LTopRow = LBottomRow) and (LTopCol > LBottomCol)) then
+  begin
+    LSwap := LTopRow; LTopRow := LBottomRow; LBottomRow := LSwap;
+    LSwap := LTopCol; LTopCol := LBottomCol; LBottomCol := LSwap;
+  end;
+
+  Result := ((LRow > LTopRow) or ((LRow = LTopRow) and (LCol >= LTopCol)))
+    and ((LRow < LBottomRow)
+      or ((LRow = LBottomRow) and (LCol < LBottomCol)));
+end;
+
+/// <summary>
+/// True when the pointer travelled further between button-down and
+/// button-up than the system's own drag threshold: the gesture was a drag,
+/// not a click, so nothing is resolved.
+/// </summary>
+function DraggedAway(AFromX, AFromY, AToX, AToY: Integer): Boolean;
+begin
+  Result := (Abs(AToX - AFromX) > GetSystemMetrics(SM_CXDRAG))
+    or (Abs(AToY - AFromY) > GetSystemMetrics(SM_CYDRAG));
+end;
+
 /// <summary>
 /// True only for a left click whose keyboard chord is EXACTLY Ctrl - masking
 /// to the modifier keys first, because in mouse events Shift also carries
@@ -705,16 +774,19 @@ end;
 /// Insight Provider - EXCEPT on a conditional symbol, which the IDE's chain
 /// never reaches in any mode (its tokenizer sees a comment there and does not
 /// ask AsyncGotoDefinitionEx), so that click is ours under every provider.
-/// Asked identically on down and up, so the two events can never disagree
-/// about who owns the click.
+/// Plus: never inside the current selection, which belongs to Ctrl+drag-copy
+/// (PointInSelection). ASKED ONCE PER CLICK, on the button-down only - the
+/// up follows that decision, see DoMouseUp.
 /// </summary>
 function ClaimsClick(Shift: TShiftState; Button: TMouseButton;
   const AEditor: TWinControl; X, Y: Integer): Boolean;
 begin
   Result := IsPlainCtrlLeftClick(Shift, Button)
     and CtrlClickNavigation
+    and Assigned(GManager)
+    and not GManager.PointInSelection(AEditor, X, Y)
     and (not PasTreeIsActiveInsightProvider
-      or (Assigned(GManager) and GManager.PointOnDefine(AEditor, X, Y)));
+      or GManager.PointOnDefine(AEditor, X, Y));
 end;
 
 /// <summary>
@@ -743,18 +815,40 @@ end;
 procedure TGotoDeclarationManager.DoMouseDown(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
 begin
-  // Suppress default down-side handling only (e.g. starting a text selection
-  // drag) - the actual navigation happens on mouse-up, below.
-  if ClaimsClick(Shift, Button, Editor, X, Y) then
+  // THE ONLY PLACE THE CLAIM IS DECIDED. Suppressing here stops default
+  // down-side handling (starting a selection drag); the navigation happens
+  // on mouse-up, which follows this decision rather than re-taking it.
+  if Button <> mbLeft then
+    Exit;
+  FDownClaimed := ClaimsClick(Shift, Button, Editor, X, Y);
+  FDownEditor := Editor;
+  FDownX := X;
+  FDownY := Y;
+  if FDownClaimed then
     Handled := True;
 end;
 
 procedure TGotoDeclarationManager.DoMouseUp(const Editor: TWinControl;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer; var Handled: Boolean);
+var
+  LClaimed: Boolean;
 begin
-  if not ClaimsClick(Shift, Button, Editor, X, Y) then
+  if Button <> mbLeft then
     Exit;
+  // NOT ClaimsClick again: by mouse-up the chord and the position may have
+  // changed (Ctrl released before the button, the pointer moved off the
+  // directive), and an up that goes native over a down that was swallowed -
+  // or the reverse - leaves the editor extending a selection with no button
+  // held. That was the stray-selection symptom (Alex, 2026-09-14).
+  LClaimed := FDownClaimed and (Editor = FDownEditor);
+  FDownClaimed := False;
+  FDownEditor := nil;
+  if not LClaimed then
+    Exit;
+  // Swallowed unconditionally, the pair kept whole even when nothing runs.
   Handled := True;
+  if DraggedAway(FDownX, FDownY, X, Y) then
+    Exit;
   HandleClaimedClick(Editor, X, Y);
 end;
 {$ELSE}
@@ -767,8 +861,10 @@ end;
 function TGotoDeclarationManager.ClaimsHookedClick(const AEditor: TWinControl;
   AX, AY: Integer): Boolean;
 begin
-  Result := CtrlClickNavigation and (not PasTreeIsActiveInsightProvider
-    or PointOnDefine(AEditor, AX, AY));
+  Result := CtrlClickNavigation
+    and not PointInSelection(AEditor, AX, AY)
+    and (not PasTreeIsActiveInsightProvider
+      or PointOnDefine(AEditor, AX, AY));
 end;
 
 procedure TGotoDeclarationManager.DoHookedClick(const AEditor: TWinControl;
