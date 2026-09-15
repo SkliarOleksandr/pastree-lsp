@@ -113,6 +113,7 @@ begin
   Read(S);
   Gateway(S, S);
   Hook(M);
+  Outer(True, M);
   Open({AFileName:} S, M, {AHandle:} H);
   M := 0;
 end;

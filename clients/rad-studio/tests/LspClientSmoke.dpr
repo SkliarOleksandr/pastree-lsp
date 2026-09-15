@@ -2335,6 +2335,11 @@ begin
   Check(GOk and GResultJson.Contains('"count":2')
     and not GResultJson.Contains('"newText":"{AName:} "'),
     'the identifier S names itself and is left alone');
+  Check(AskAt('Outer(True, M);', 'Outer', 'anonymous'),
+    'answered with mode=anonymous over a constant and a variable');
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"newText":"{AValue:} "'),
+    'True is a constant - a literal in disguise - and gets its name; M does not');
 
   Check(AskAt('Open(S, M, H);', 'Open', 'none'),
     'answered with mode=none');

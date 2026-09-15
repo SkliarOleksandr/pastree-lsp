@@ -745,9 +745,42 @@ end;
 { An argument that does not name itself: anything but a plain identifier or
   a member chain (`Count`, `Self.FCount`, `Rec.Field`), which read as their
   own annotation. }
-function IsAnonymousArg(const ATree: TPasTree; AArg: Integer): Boolean;
+function IsAnonymousArg(AModel: TPasSemaModel; AProject: TPasSemaProject;
+  AArg: Integer): Boolean;
+var
+  LNode: Integer;
+  LExt: TPasExtRef;
+  LText: string;
+  LKind: TSemaSymbolKind;
 begin
-  Result := not (ATree.Nodes[AArg].Kind in [nkIdent, nkMember]);
+  if not (AModel.Tree.Nodes[AArg].Kind in [nkIdent, nkMember]) then
+    Exit(True);
+  { A name that is a CONSTANT reads as a literal, not as a name: `True`,
+    `False`, `nil`, `MaxInt`, an enum value, a declared const
+    (ActiveRoutineTarget(True, ...) - Alex, 2026-09-15). The binding says
+    which; an unbound True/False/nil is caught by its spelling. }
+  LNode := AArg;
+  if AModel.Tree.Nodes[LNode].Kind = nkMember then
+  begin
+    LNode := AModel.Tree.Nodes[LNode].FirstChild;
+    while (LNode <> NIL_NODE) and
+          (AModel.Tree.Nodes[LNode].NextSibling <> NIL_NODE) do
+      LNode := AModel.Tree.Nodes[LNode].NextSibling;
+    if LNode = NIL_NODE then
+      Exit(False);
+  end;
+
+  if (LNode <= High(AModel.RefMap)) and (AModel.RefMap[LNode] <> NIL_SYM) then
+    LKind := AModel.Symbols[AModel.RefMap[LNode]].Kind
+  else if (AProject <> nil) and AModel.ExtRefMap.TryGetValue(LNode, LExt) and
+          (AProject.Model(LExt.UnitId) <> nil) then
+    LKind := AProject.Model(LExt.UnitId).Symbols[LExt.Sym].Kind
+  else
+  begin
+    LText := AModel.Tree.NodeNameLower(LNode);
+    Exit((LText = 'true') or (LText = 'false') or (LText = 'nil'));
+  end;
+  Result := LKind in [skConst, skEnumValue];
 end;
 
 function DefaultAnnotateOptions: TLspAnnotateOptions;
@@ -1012,7 +1045,8 @@ begin
       begin
         LComments := LeadingBraceComments(LTree, LFirst);
         if (AOptions.Mode <> amNone) and
-           ((AOptions.Mode <> amAnonymous) or IsAnonymousArg(LTree, LArg)) and
+           ((AOptions.Mode <> amAnonymous) or
+            IsAnonymousArg(AModel, AProject, LArg)) and
            not HasNameComment(LComments) then
           LText := '{' + LParams[LArgIdx].Name + ':} ';
         if AOptions.MarkByRef and (LParams[LArgIdx].Modifier <> '') and
