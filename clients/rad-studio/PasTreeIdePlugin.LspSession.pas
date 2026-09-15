@@ -123,6 +123,11 @@ type
     Assignments: Boolean;
     Creations: Boolean;
     Destructions: Boolean;
+    /// The eighth gate, a SCOPE rather than a Boolean: 'one' when the caret
+    /// is inside a call's arguments, 'all' when it is on a call's name, ''
+    /// when there is no call - the "Annotate argument(s)" item shows itself
+    /// and spells its caption from this (PasTreeIdePlugin.AnnotateArgs).
+    Annotate: string;
   end;
 
   /// <summary>
@@ -286,6 +291,40 @@ type
 
   TLspSyncPrototypesProc = reference to procedure(ASuccess: Boolean;
     const AAnswer: TLspSyncPrototypes; const AError: string);
+
+  /// <summary>
+  /// The answer to pastree/annotateArgs: zero-length INSERTIONS (Row/Col and
+  /// EndRow/EndCol equal) of `{Name:} ` and `{var} `/`{out} ` in front of a
+  /// call's arguments, ascending, IDE coordinates. Scope is 'one' (the caret
+  /// was in the arguments) or 'all' (on the routine's name); '' means no call
+  /// at the caret and Provider says so. Routine is the resolved signature for
+  /// the report. No edits with Success is "already annotated" or a refusal -
+  /// Provider tells which (PasLsp.AnnotateArgs).
+  /// </summary>
+  TLspAnnotateArgs = record
+    Edits: TArray<TLspTextEdit>;
+    Scope: string;
+    Routine: string;
+    Provider: string;
+  end;
+
+  /// <summary>
+  /// What pastree/annotateArgs is asked to write. Mode is the request's own
+  /// word - '' or 'auto' (the caret decides), 'all', 'anonymous' (literals
+  /// and expressions only), 'current' (the argument at the caret; refused
+  /// by the server when the caret is on the name). MarkByRef adds `{var}` /
+  /// `{out}`; OneArgPerLine lays the whole call out one argument per line,
+  /// which makes the edits REPLACEMENTS of the whitespace in front of each
+  /// argument rather than insertions (PasLsp.AnnotateArgs).
+  /// </summary>
+  TLspAnnotateOptions = record
+    Mode: string;
+    MarkByRef: Boolean;
+    OneArgPerLine: Boolean;
+  end;
+
+  TLspAnnotateArgsProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspAnnotateArgs; const AError: string);
 
   /// <summary>
   /// One replacement from a rename plan (pastree/renamePlan), already in IDE
@@ -643,6 +682,16 @@ procedure LspSyncPrototypes(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspSyncPrototypesProc);
 
 /// <summary>
+/// Argument annotation at a caret: `{Name:}` and `{var}`/`{out}` in front of
+/// the argument the caret is in, or of every argument when the caret is on
+/// the routine's name (pastree/annotateArgs - OURS). The document is synced
+/// first, since the call may have been typed a second ago; the server
+/// decides the scope and the overload (PasLsp.AnnotateArgs).
+/// </summary>
+procedure LspAnnotateArgs(const AFileName: string; ARow, ACol: Integer;
+  const AOptions: TLspAnnotateOptions; const AOnDone: TLspAnnotateArgsProc);
+
+/// <summary>
 /// textDocument/onTypeFormatting after Enter (the one trigger character the
 /// server registers): the caret's NEW position goes in, zero or more
 /// insertions come back - in practice zero or one, the missing block closer.
@@ -913,6 +962,9 @@ type
       const AOnDone: TLspClassCompleteProc);
     procedure SyncPrototypes(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspSyncPrototypesProc);
+    procedure AnnotateArgs(const AFileName: string; ARow, ACol: Integer;
+      const AOptions: TLspAnnotateOptions;
+      const AOnDone: TLspAnnotateArgsProc);
     procedure OnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspTextEditsProc);
     procedure RenamePlan(const AFileName: string; ARow, ACol: Integer;
@@ -2083,6 +2135,81 @@ begin
     end);
 end;
 
+{ The answer to pastree/annotateArgs: insertions only, so the end of each
+  range is its start - read anyway and kept, in case a later server sends a
+  replacement (the applier handles both through one TLspTextEdit). }
+function ParseAnnotateArgs(AResult: TJSONValue): TLspAnnotateArgs;
+var
+  LEdits: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LEdit: TLspTextEdit;
+  LLine, LChar: Integer;
+begin
+  Result := Default(TLspAnnotateArgs);
+  if not (AResult is TJSONObject) then
+    Exit;
+  Result.Scope := AResult.GetValue<string>('scope', '');
+  Result.Routine := AResult.GetValue<string>('routine', '');
+  Result.Provider := AResult.GetValue<string>('provider', '');
+  if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
+    Exit;
+  for LValue in LEdits do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LLine := LObj.GetValue<Integer>('range.start.line', -1);
+    LChar := LObj.GetValue<Integer>('range.start.character', -1);
+    LEdit.Text := LObj.GetValue<string>('newText', '');
+    if (LLine < 0) or (LChar < 0) or (LEdit.Text = '') then
+      Continue;
+    LspToIde(LLine, LChar, LEdit.Row, LEdit.Col);
+    LLine := LObj.GetValue<Integer>('range.end.line', LLine);
+    LChar := LObj.GetValue<Integer>('range.end.character', LChar);
+    LspToIde(LLine, LChar, LEdit.EndRow, LEdit.EndCol);
+    Result.Edits := Result.Edits + [LEdit];
+  end;
+end;
+
+procedure TLspSession.AnnotateArgs(const AFileName: string;
+  ARow, ACol: Integer; const AOptions: TLspAnnotateOptions;
+  const AOnDone: TLspAnnotateArgsProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspAnnotateArgs), 'no LSP server available');
+    Exit;
+  end;
+  // Sync first, as class completion does: the call under the caret may be
+  // the one just typed, and the names must go in front of THESE arguments.
+  FDocs.Sync;
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+  if AOptions.Mode <> '' then
+    LParams.AddPair('mode', AOptions.Mode);
+  LParams.AddPair('byRef', TJSONBool.Create(AOptions.MarkByRef));
+  LParams.AddPair('multiline', TJSONBool.Create(AOptions.OneArgPerLine));
+  FClient.Request('pastree/annotateArgs', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseAnnotateArgs(AResult), '')
+      else
+        AOnDone(False, Default(TLspAnnotateArgs), AError);
+    end);
+end;
+
 { The IDE's own Block Indent and Use Tab Character, for a request that has to
   state them. Defaults 2 / spaces when the options cannot be read, which is
   what this used to send unconditionally. }
@@ -2456,6 +2583,7 @@ begin
         LGate.Assignments := AResult.GetValue<Boolean>('assignments', False);
         LGate.Creations := AResult.GetValue<Boolean>('creations', False);
         LGate.Destructions := AResult.GetValue<Boolean>('destructions', False);
+        LGate.Annotate := AResult.GetValue<string>('annotate', '');
       end;
       LDone := True;
     end);
@@ -3826,6 +3954,20 @@ begin
     Exit;
   end;
   LSession.SyncPrototypes(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspAnnotateArgs(const AFileName: string; ARow, ACol: Integer;
+  const AOptions: TLspAnnotateOptions; const AOnDone: TLspAnnotateArgsProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspAnnotateArgs), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.AnnotateArgs(AFileName, ARow, ACol, AOptions, AOnDone);
 end;
 
 procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;

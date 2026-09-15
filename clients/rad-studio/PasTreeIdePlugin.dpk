@@ -89,6 +89,8 @@ contains
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
   PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',
   PasTreeIdePlugin.SyncPrototypes in 'PasTreeIdePlugin.SyncPrototypes.pas',
+  PasTreeIdePlugin.AnnotateArgs in 'PasTreeIdePlugin.AnnotateArgs.pas',
+  PasTreeIdePlugin.AnnotateArgsForm in 'PasTreeIdePlugin.AnnotateArgsForm.pas' {PasTreeAnnotateArgsForm},
   PasTreeIdePlugin.BlockClose in 'PasTreeIdePlugin.BlockClose.pas',
   PasTreeIdePlugin.EditorWindowHook in 'PasTreeIdePlugin.EditorWindowHook.pas',
   PasTreeIdePlugin.Rename in 'PasTreeIdePlugin.Rename.pas',

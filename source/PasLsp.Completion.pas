@@ -39,7 +39,8 @@ uses
   PasTree.Preprocessor,
   PasTree.Sema.Project,
   PasLsp.ClassComplete,
-  PasLsp.SyncPrototypes;
+  PasLsp.SyncPrototypes,
+  PasLsp.AnnotateArgs;
 
 type
   TLspCompletionEntry = record
@@ -140,6 +141,15 @@ type
       reason: the signature it is asked about was edited a keystroke ago. }
     function SyncPrototypeAt(const AFileName, AText: string;
       APasLine, APasCol: Integer): TLspSyncAnswer;
+    (* Argument annotation for the call at the caret - `{Name:}` and
+      `{var}`/`{out}` in front of the arguments (PasLsp.AnnotateArgs has the
+      rules). The signature-help pipeline exactly: the LIVE text, resolved
+      through the overlay+bridge, so the call typed a second ago answers,
+      and the overload is the one the resolver bound. *)
+    function AnnotateArgsAt(const AFileName, AText: string;
+      APasLine, APasCol: Integer; AProject: TPasSemaProject;
+      AProjectMid: Integer;
+      const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
   end;
 
 implementation
@@ -850,6 +860,33 @@ begin
     Exit;
   end;
   Result := PasLsp.SyncPrototypes.SyncPrototypeAt(LTree, APasLine, APasCol);
+end;
+
+function TLspCompletionEngine.AnnotateArgsAt(const AFileName, AText: string;
+  APasLine, APasCol: Integer; AProject: TPasSemaProject;
+  AProjectMid: Integer;
+  const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+  LModel: TPasSemaModel;
+  LCompletion: TPasCompletion;
+begin
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+  try
+    LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
+    try
+      Result := PasLsp.AnnotateArgs.AnnotateArgsAt(LCompletion, LModel,
+        AProject, APasLine, APasCol, AOptions);
+    finally
+      LCompletion.Free;
+    end;
+  finally
+    LModel.Free;
+  end;
 end;
 
 end.

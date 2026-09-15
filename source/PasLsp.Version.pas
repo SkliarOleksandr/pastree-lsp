@@ -170,7 +170,12 @@ const
   /// TPasSemaProject.BaseDefineNames. Loud rather than silent - pastree/
   /// findDefines and pastree/definesAt call methods that do not exist before
   /// it.
-  cMinPasTreeVersion = '0.28.0';
+  ///
+  /// 0.29.0 (2026-09-14): TPasCallInfo.CallNode / BoundMid / BoundSym /
+  /// BoundExact - which overload the resolver bound a call to. Loud rather
+  /// than silent - PasLsp.AnnotateArgs reads fields that do not exist
+  /// before it.
+  cMinPasTreeVersion = '0.29.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

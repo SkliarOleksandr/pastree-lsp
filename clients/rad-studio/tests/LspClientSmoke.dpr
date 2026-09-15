@@ -2148,6 +2148,227 @@ begin
     'and a caret in no routine is a refusal that names itself');
 end;
 
+(* 5m. pastree/annotateArgs: `{Name:}` and `{var}`/`{out}` in front of a
+  call's arguments - the ONE argument the caret is in, or EVERY argument when
+  the caret is on the routine's name. The overload must be the resolver's
+  (PasTree 0.29.0 BoundExact), which is why cMinPasTreeVersion moved with
+  this section. See the fixture's header for the call-per-rule list. *)
+procedure TestAnnotateArgs;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  { The caret on the line containing ALineHint, at AToken. AMode '' sends no
+    options at all - the pre-dialog shape of the request, which must keep
+    answering by the caret alone; otherwise mode/byRef/multiline go along as
+    the IDE's dialog sends them. }
+  function AskAt(const ALineHint, AToken: string; const AMode: string = '';
+    AByRef: Boolean = True; AMultiline: Boolean = False): Boolean;
+  var
+    LParams, LDoc, LPos: TJSONObject;
+  begin
+    FindPos(LFile, ALineHint, AToken, LLine, LChar);
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LFile));
+    LParams.AddPair('textDocument', LDoc);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+    if AMode <> '' then
+    begin
+      LParams.AddPair('mode', AMode);
+      LParams.AddPair('byRef', TJSONBool.Create(AByRef));
+      LParams.AddPair('multiline', TJSONBool.Create(AMultiline));
+    end;
+    Result := Ask('pastree/annotateArgs', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5m. annotateArgs writes parameter names into a call ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoAnnotateArgs.pas');
+
+  // The caret INSIDE the arguments: that one argument only.
+  Check(AskAt('Open(S, M, H);', 'M'), 'answered with the caret on an argument');
+  Check(GOk and GResultJson.Contains('"scope":"one"'),
+    'the caret in the list means ONE argument');
+  Check(GOk and GResultJson.Contains('"count":1'), 'and one edit');
+  Check(GOk and GResultJson.Contains('"newText":"{AMode:} {var} "'),
+    'a var parameter gets `{var}` after its name');
+  Check(GOk and GResultJson.Contains('"routine":"Open('),
+    'the answer names the routine it resolved');
+
+  // The caret ON THE NAME: every argument.
+  Check(AskAt('Open(S, M, H);', 'Open'), 'answered with the caret on the name');
+  Check(GOk and GResultJson.Contains('"scope":"all"'),
+    'the caret on the name means ALL arguments');
+  Check(GOk and GResultJson.Contains('"count":3'),
+    'three arguments, three edits - the omitted default gets nothing');
+  Check(GOk and GResultJson.Contains('"newText":"{AFileName:} "'),
+    'a const parameter gets its name and NO `{const}`');
+  Check(GOk and GResultJson.Contains('"newText":"{AHandle:} {out} "'),
+    'an out parameter gets `{out}`');
+
+  // Idempotence: only what is missing.
+  Check(AskAt('Open({AFileName:} S, {var} {AMode:} M, H);', 'Open'),
+    'answered over a half-annotated call');
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"newText":"{AHandle:} {out} "'),
+    'the two annotated arguments are left alone, the third is written');
+
+  // Overloads by arity.
+  Check(AskAt('Twin(1);', 'Twin'), 'answered for the one-argument overload');
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"routine":"Twin(A: Integer)"'),
+    'one argument picks the one-parameter Twin');
+  Check(AskAt('Twin(1, 2);', 'Twin'), 'answered for the two-argument overload');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{B:} "'),
+    'two arguments pick the two-parameter Twin');
+
+  // Overloads by type - the resolver's choice, same arity.
+  Check(AskAt('Same(5);', 'Same'), 'answered for Same(Integer)');
+  Check(GOk and GResultJson.Contains('"newText":"{A:} "'),
+    'an Integer argument picks Same(A: Integer)');
+  Check(AskAt('Same(''x'');', 'Same'), 'answered for Same(string)');
+  Check(GOk and GResultJson.Contains('"newText":"{S:} "'),
+    'a string argument picks Same(const S: string)');
+
+  // Nested calls: the caret decides which call.
+  Check(AskAt('Outer(Inner(3), 4);', 'Inner'), 'answered on the inner name');
+  Check(GOk and GResultJson.Contains('"scope":"all"')
+    and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"newText":"{X:} "'),
+    'the caret on Inner annotates Inner''s argument, not Outer''s');
+  Check(AskAt('Outer(Inner(3), 4);', '4'), 'answered on the outer''s second');
+  Check(GOk and GResultJson.Contains('"scope":"one"')
+    and GResultJson.Contains('"newText":"{AExtra:} "'),
+    'the caret on 4 is Outer''s second argument');
+
+  // A member call, and a parameter group `AFirst, ASecond: Integer`.
+  Check(AskAt('W.Method(1, 2, S);', 'Method'), 'answered for a member call');
+  Check(GOk and GResultJson.Contains('"count":3')
+    and GResultJson.Contains('"newText":"{AFirst:} "')
+    and GResultJson.Contains('"newText":"{ASecond:} "')
+    and GResultJson.Contains('"newText":"{AName:} "'),
+    'a two-name parameter group is two parameters');
+
+  // Refusals that name themselves.
+  Check(AskAt('Write(S);', 'Write'), 'answered for a variadic intrinsic');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('variable argument list'),
+    'Write''s arguments are all "the arguments" - nothing to name, said so');
+
+  // Intrinsics with real parameter names, from the engine's signature table.
+  Check(AskAt('Inc(M);', 'Inc'), 'answered for Inc with one argument');
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"newText":"{X:} {var} "'),
+    'Inc(X[; N]) with one argument names X, var-marked, and no N');
+  Check(AskAt('Inc(M, 2);', 'Inc'), 'answered for Inc with two arguments');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{N:} "'),
+    'the second argument takes the optional N');
+  Check(AskAt('Val(S, M, H);', 'Val'), 'answered for Val');
+  Check(GOk and GResultJson.Contains('"count":3')
+    and GResultJson.Contains('"newText":"{S:} "')
+    and GResultJson.Contains('"newText":"{V:} {var} "')
+    and GResultJson.Contains('"newText":"{Code:} {var} "'),
+    'Val(const S: string; var V; var Code: Integer) - const unmarked, var marked');
+  Check(AskAt('Read(S);', 'Read'), 'answered for Read with one argument');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('variable argument list'),
+    'Read([var F: Text;] Args) with one argument is the variadic tail alone');
+
+  // Procedural values: the type's parameters, through an alias and inline.
+  Check(AskAt('Gateway(S, S);', 'Gateway'), 'answered for a procedural var');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ARequest:} "')
+    and GResultJson.Contains('"newText":"{AReply:} {out} "'),
+    'a var of an aliased procedural type takes the type''s names');
+  Check(AskAt('Hook(M);', 'Hook'), 'answered for an inline proc type');
+  Check(GOk and GResultJson.Contains('"newText":"{ACount:} "'),
+    'an inline `procedure(...)` variable too');
+
+  // ONE ORDER: name, then mark - whichever was there first.
+  Check(AskAt('Open(S, M, H);', 'Open'), 'answered for the plain call again');
+  Check(GOk and GResultJson.Contains('"newText":"{AMode:} {var} "')
+    and GResultJson.Contains('"newText":"{AHandle:} {out} "'),
+    'a fresh annotation reads name first, mark second');
+  Check(AskAt('Open({AFileName:} S, M, {AHandle:} H);', 'Open'),
+    'answered over a call with names but no marks');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{AMode:} {var} "')
+    and GResultJson.Contains('"newText":"{out} "'),
+    'the missing mark goes after the existing name, not in front of it');
+  Check(GOk and GResultJson.Contains(
+    '"range":{"start":{"line":' + IntToStr(LLine) + ',"character":37},'
+    + '"end":{"line":' + IntToStr(LLine) + ',"character":37}}'),
+    'placed at the argument itself, past the name comment');
+  Check(AskAt('M := 0;', 'M'), 'answered outside any call');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('"scope":""'),
+    'no call at the caret: empty scope, nothing written');
+
+  // The dialog's options. An explicit mode overrides the caret's reading.
+  Check(AskAt('Open(S, M, H);', 'M', 'all'),
+    'answered with mode=all and the caret on an argument');
+  Check(GOk and GResultJson.Contains('"count":3'),
+    'mode=all annotates every argument wherever the caret is');
+  Check(AskAt('Open(S, M, H);', 'M', 'all', False),
+    'answered with byRef off');
+  Check(GOk and GResultJson.Contains('"newText":"{AMode:} "')
+    and not GResultJson.Contains('{var}'),
+    'byRef=false writes the name and no `{var}`');
+  Check(AskAt('Open(S, M, H);', 'Open', 'current'),
+    'answered with mode=current and the caret on the name');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('needs the caret inside'),
+    'current with no current argument is a refusal that says so');
+  Check(AskAt('Outer(Inner(3), 4);', 'Outer', 'anonymous'),
+    'answered with mode=anonymous');
+  Check(GOk and GResultJson.Contains('"count":2'),
+    'a call and a literal are anonymous - both named');
+  Check(AskAt('W.Method(1, 2, S);', 'Method', 'anonymous'),
+    'answered with mode=anonymous over a call with an identifier');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and not GResultJson.Contains('"newText":"{AName:} "'),
+    'the identifier S names itself and is left alone');
+
+  Check(AskAt('Open(S, M, H);', 'Open', 'none'),
+    'answered with mode=none');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{var} "')
+    and GResultJson.Contains('"newText":"{out} "')
+    and not GResultJson.Contains(':}'),
+    'mode=none writes the marks alone - no names anywhere');
+  Check(AskAt('Open(S, M, H);', 'Open', 'none', False),
+    'answered with mode=none and byRef off');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('already annotated'),
+    'nothing asked for, nothing written');
+
+  // One argument per line: the whitespace in front of each argument is
+  // REPLACED by a line break and the call line's indent plus two, and the
+  // range has a real end - the client must honour it.
+  Check(AskAt('Twin(1, 2);', 'Twin', 'all', True, True),
+    'answered with multiline');
+  Check(GOk and GResultJson.Contains('"count":2'), 'two arguments, two edits');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n    {A:} "'),
+    'the first argument moves to its own line, indented under the call');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n    {B:} "'),
+    'and so does the second');
+  Check(GOk and GResultJson.Contains(
+    '"range":{"start":{"line":' + IntToStr(LLine) + ',"character":9},'
+    + '"end":{"line":' + IntToStr(LLine) + ',"character":10}}'),
+    'the second edit replaces the one space after the comma');
+  Check(AskAt('Twin(1, 2);', 'Twin', 'anonymous', True, True),
+    'answered with multiline over a mode that names nothing new');
+  Check(GOk and GResultJson.Contains('"count":2'),
+    'the layout applies to every argument, whatever the mode names');
+end;
+
 { 5l. Two PasTree 0.17 typings, through THIS server's seam: an inline
   `var L := Expr` (0.17.0) and a promoted `property Items;` whose type comes
   from its ancestor (0.17.1). cMinPasTreeVersion names 0.17.0 because of this
@@ -2737,6 +2958,7 @@ begin
       TestClassCompleteOrphanCaret;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;
+      TestAnnotateArgs;
       TestWorkspaceSymbol;
       TestOnTypeFormatting;
       TestCancelHygiene;

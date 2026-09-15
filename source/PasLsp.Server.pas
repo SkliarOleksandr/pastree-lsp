@@ -67,6 +67,7 @@ uses
   PasLsp.Completion,
   PasLsp.ClassComplete,
   PasLsp.SyncPrototypes,
+  PasLsp.AnnotateArgs,
   PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
@@ -275,6 +276,10 @@ type
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
     function HandleClassComplete(const AMsg: TLspIncoming): string;
     function HandleSyncPrototypes(const AMsg: TLspIncoming): string;
+    function AnnotateArgsAtPath(const APath: string;
+      APasLine, APasCol: Integer;
+      const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
+    function HandleAnnotateArgs(const AMsg: TLspIncoming): string;
     function HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
@@ -3628,7 +3633,7 @@ end;
   moved since is at worst greyed wrong until the next idle rebuild. }
 function TLspServer.HandleFindAllAt(const AMsg: TLspIncoming): string;
 var
-  LPath, LName: string;
+  LPath, LName, LAnnotate: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
   LRefs, LOverrides, LImpls, LDesc, LAssign, LClass: Boolean;
 begin
@@ -3658,14 +3663,23 @@ begin
   LDesc := FNav.TypeAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
   LAssign := FNav.AssignableAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
   LClass := FNav.ClassAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
-  Log(Format('findAllAt: %s -> refs=%s ovr=%s impl=%s desc=%s asg=%s cls=%s',
+  // The eighth gate is a different kind of question - about the LIVE buffer,
+  // not the model - and answers a scope, not a Boolean: "one" (the caret is
+  // in a call's arguments), "all" (on a call's name), "" (no call). The menu
+  // captions its item from it; the command re-asks and applies.
+  LAnnotate := AnnotateArgsAtPath(LPath, LPasLine, LPasCol,
+    DefaultAnnotateOptions).Scope;
+  Log(Format('findAllAt: %s -> refs=%s ovr=%s impl=%s desc=%s asg=%s cls=%s '
+    + 'annotate=%s',
     [PosTag(LPath, LPasLine, LPasCol), JsonBool(LRefs), JsonBool(LOverrides),
-     JsonBool(LImpls), JsonBool(LDesc), JsonBool(LAssign), JsonBool(LClass)]));
+     JsonBool(LImpls), JsonBool(LDesc), JsonBool(LAssign), JsonBool(LClass),
+     LAnnotate]));
   Result := BuildResponse(AMsg.IdJson, Format(
     '{"references":%s,"overrides":%s,"implementations":%s,"descendants":%s,' +
-    '"assignments":%s,"creations":%s,"destructions":%s}',
+    '"assignments":%s,"creations":%s,"destructions":%s,"annotate":%s}',
     [JsonBool(LRefs), JsonBool(LOverrides), JsonBool(LImpls), JsonBool(LDesc),
-     JsonBool(LAssign), JsonBool(LClass), JsonBool(LClass)]));
+     JsonBool(LAssign), JsonBool(LClass), JsonBool(LClass),
+     JsonQuote(LAnnotate)]));
 end;
 
 { One row of pastree/findDefines or pastree/definesAt: a TPasDefineSite. A
@@ -4091,6 +4105,112 @@ begin
     + '"provider":%s}',
     [LEdits, LCaretLine, LCaretChar, Length(LAnswer.Edits),
      JsonQuote(LAnswer.Provider)]));
+end;
+
+{ The annotation answer for a position, over the live text - shared by the
+  request proper and by findAllAt's menu gate, so the menu and the command
+  cannot disagree about whether the caret is in a call. }
+function TLspServer.AnnotateArgsAtPath(const APath: string;
+  APasLine, APasCol: Integer;
+  const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
+var
+  LText: string;
+  LDoc: TLspDocument;
+  LMid: Integer;
+begin
+  Result := Default(TLspAnnotateAnswer);
+  if FDocs.TryGet(APath, LDoc) then
+    LText := LDoc.Text
+  else if not TryReadTextNoBom(APath, LText) then
+    LText := '';
+  if LText = '' then
+  begin
+    Result.Provider := 'pastree/annotateArgs: no text';
+    Exit;
+  end;
+  if FCompletion = nil then
+    FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+      FDefines);
+  SyncCompletionOverlays;
+  LMid := -1;
+  if FNav <> nil then
+    LMid := FNav.ModelIdOf(APath);
+  if (FProject <> nil) and (LMid >= 0) then
+    Result := FCompletion.AnnotateArgsAt(APath, LText, APasLine, APasCol,
+      FProject, LMid, AOptions)
+  else
+    Result := FCompletion.AnnotateArgsAt(APath, LText, APasLine, APasCol,
+      nil, -1, AOptions);
+end;
+
+(* pastree/annotateArgs - OUR request, the server half of "Annotate
+  argument(s)": `{Name:}` and `{var}`/`{out}` written in front of a call's
+  arguments (PasLsp.AnnotateArgs has every rule). Same shape as classComplete
+  - zero-length insertion edits in ascending order - and the same reason for
+  NO WaitAnalyzed: the call under the caret may have been typed a second ago,
+  and only the live buffer resolved through the overlay knows it. `scope` says
+  what the caret meant: "one" (inside the arguments - that argument) or "all"
+  (on the routine's name - every argument); "" when there is no call. *)
+function TLspServer.HandleAnnotateArgs(const AMsg: TLspIncoming): string;
+var
+  LPath, LEdits, LMode: string;
+  LAnswer: TLspAnnotateAnswer;
+  LOptions: TLspAnnotateOptions;
+  LIdx, LLine, LChar, LPasLine, LPasCol: Integer;
+  LStartLine, LStartChar, LEndLine, LEndChar: Integer;
+  LStart: UInt64;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'annotateArgs: textDocument.uri and position required'));
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  { The options, every one OPTIONAL: a client that sends only the position
+    gets the caret's own reading, by-reference marks, and the layout left
+    alone - the shape this request had before the dialog (0.42.0). `mode` is
+    "auto" | "all" | "anonymous" | "current" | "none" (marks and layout only); an
+    unknown word reads as auto. }
+  LOptions := DefaultAnnotateOptions;
+  LMode := AMsg.Params.GetValue<string>('mode', 'auto');
+  if LMode = 'all' then
+    LOptions.Mode := amAll
+  else if LMode = 'anonymous' then
+    LOptions.Mode := amAnonymous
+  else if LMode = 'current' then
+    LOptions.Mode := amCurrent;
+  if LMode = 'none' then
+    LOptions.Mode := amNone;
+  LOptions.MarkByRef := AMsg.Params.GetValue<Boolean>('byRef', True);
+  LOptions.OneArgPerLine := AMsg.Params.GetValue<Boolean>('multiline', False);
+  LStart := GetTickCount64;
+  LAnswer := AnnotateArgsAtPath(LPath, LPasLine, LPasCol, LOptions);
+  LEdits := '';
+  for LIdx := 0 to High(LAnswer.Edits) do
+  begin
+    if LEdits <> '' then
+      LEdits := LEdits + ',';
+    // A REAL end, as syncPrototypes sends: with `multiline` the edit
+    // replaces the whitespace in front of the argument. Zero-length
+    // otherwise, so a client that already applies insertions is unchanged.
+    PasTreeToLsp(LAnswer.Edits[LIdx].Line, LAnswer.Edits[LIdx].Col,
+      LStartLine, LStartChar);
+    PasTreeToLsp(LAnswer.Edits[LIdx].EndLine, LAnswer.Edits[LIdx].EndCol,
+      LEndLine, LEndChar);
+    LEdits := LEdits + Format(
+      '{"range":{"start":{"line":%d,"character":%d},'
+      + '"end":{"line":%d,"character":%d}},"newText":%s}',
+      [LStartLine, LStartChar, LEndLine, LEndChar,
+       JsonQuote(LAnswer.Edits[LIdx].Text)]);
+  end;
+  Log(Format('annotateArgs: %s -> scope %s, %d edit(s), %s in %d ms (%s)',
+    [PosTag(LPath, LPasLine, LPasCol), LAnswer.Scope, Length(LAnswer.Edits),
+     LAnswer.Routine, GetTickCount64 - LStart, LAnswer.Provider]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"edits":[%s],"count":%d,"scope":%s,"routine":%s,"provider":%s}',
+    [LEdits, Length(LAnswer.Edits), JsonQuote(LAnswer.Scope),
+     JsonQuote(LAnswer.Routine), JsonQuote(LAnswer.Provider)]));
 end;
 
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
@@ -5104,6 +5224,8 @@ begin
         Exit(HandleClassComplete(LMsg));
       if LMsg.Method = 'pastree/syncPrototypes' then
         Exit(HandleSyncPrototypes(LMsg));
+      if LMsg.Method = 'pastree/annotateArgs' then
+        Exit(HandleAnnotateArgs(LMsg));
       if LMsg.Method = 'textDocument/onTypeFormatting' then
         Exit(HandleOnTypeFormatting(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then

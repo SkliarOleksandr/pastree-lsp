@@ -158,6 +158,25 @@ writing a missing body and the other keeping an existing pair aligned. The edit
 is a single undoable replacement, and the server decides what "mirrored" means,
 including when to refuse.
 
+### Annotate Arguments...
+
+A right-click item that writes a call's parameter names into the call as
+comments - `Open({AFileName:} S, {var} {AMode:} M, {out} {AHandle:} H)` - the
+inlay hint other IDEs paint, spelled out as text because the RAD Studio editor
+shows nothing that is not in the buffer. The item appears when the caret is in
+a call - on the routine's name or inside the argument list - and opens a small
+dialog: annotate every argument, only the anonymous ones (literals,
+expressions, calls - an identifier such as `Count` names itself and is left
+alone), or only the argument at the caret (offered when the caret was inside
+the list); mark `var`/`out` parameters with `{var}`/`{out}` (`const` is never
+marked); put each argument on its own line, indented under the call. The
+dialog remembers its last choices for the session. The overload is the one the
+resolver bound the call to, and a call whose overload cannot be told from its
+arguments is refused rather than guessed - the reason lands in the Build tab.
+Running it again adds only what is missing; an argument already carrying a
+`{...:}` comment is left alone, and one already on its own line stays there.
+One undoable step per call.
+
 ### Block completion
 
 Pressing Enter after an unclosed block opener inserts the matching closer on the

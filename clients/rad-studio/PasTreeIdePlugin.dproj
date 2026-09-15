@@ -118,6 +118,10 @@
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SyncPrototypes.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.AnnotateArgs.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.AnnotateArgsForm.pas">
+            <Form>PasTreeAnnotateArgsForm</Form>
+        </DCCReference>
         <DCCReference Include="PasTreeIdePlugin.BlockClose.pas"/>
         <DCCReference Include="PasTreeIdePlugin.EditorWindowHook.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>

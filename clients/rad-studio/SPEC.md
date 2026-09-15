@@ -405,7 +405,7 @@ file-trait question above).
 | Rename | **DELIVERED 2026-08-30** | `IOTAEditWriter` via `CreateUndoableWriter` (`2551`) | apply edits front-to-back - the writer cannot move backward (`1690`), and a plain writer flushes undo (`1693`) |
 | Rename, in-place multi-caret | Server | `IOTASyncEditPoints` (`2158`) + `IOTAEditBlock.SyncEditBlock` (`2226`) | drives the editor's own sync-edit mode from positions we supply |
 | Rename, from the outline | Server | `IOTAEditableStructureNode` (`245`) | F2 on an outline node, `SetValue` comes back to us - a rename UI for free |
-| Quick fixes / code actions | Server | menu, plus `stSurroundsWith`/`stRefactoring` templates (`CodeTemplateAPI.pas:57`) | the IDE already stores surround-with templates we could expose as actions |
+| Quick fixes / code actions | **First one DELIVERED 2026-09-14 (0.42.0): Annotate argument(s)** - the rest still Server | our own local-menu item beside Rename (`PasTreeIdePlugin.AnnotateArgs`), plus `stSurroundsWith`/`stRefactoring` templates (`CodeTemplateAPI.pas:57`) for later | `{Name:}` and `{var}`/`{out}` written in front of a call's arguments - the inlay hint other IDEs paint, as text, because this editor shows nothing that is not in the buffer. One item ("Annotate Arguments..."), one modal dialog with a .dfm (`PasTreeIdePlugin.AnnotateArgsForm` - the package's second designed form): all / anonymous only / the argument at the caret, `{var}`/`{out}` on or off, one argument per line; last choices kept for the session. The item is HIDDEN when the caret is in no call, and the dialog offers "at the caret" only when the caret was in the list - the verdict rides `pastree/findAllAt` as `annotate`, so it costs the popup no second request. Edits through one undoable writer - insertions, or replacements of the whitespace in front of each argument when laid out one per line (prototype sync's applier shape). The server owns every rule (`PasLsp.AnnotateArgs`): the resolver's overload or a refusal by count, idempotence, intrinsics named from the engine's signature table. The IDE already stores surround-with templates we could expose as further actions |
 | Completion | **DELIVERED 2026-08-21** | Code Insight (`PasTreeIdePlugin.CodeInsight`) | the position-in-invalid-text block below is gone - PasTree's completion engine answers it |
 | Signature help | **DELIVERED** | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | shipped with completion, same manager |
 | Semantic tokens | Server | `PaintText` with `AllowDefaultPainting := False` | `IOTAHighlighter` (`1801`) is the other route but is synchronous per line; either way it must paint from a cache. `INTACodeEditorOptions` (`881`) is read-only - a new named colour cannot be registered, only painted |
@@ -1317,6 +1317,47 @@ later:
    session; the notification for it is not yet identified.
 6. Group-wide Rename - see item 3. Waiting on the rename's own rework, not on
    the group machinery.
+
+## Use Unit over the real closure (queued 2026-09-14, not started)
+
+**The ask.** File > Use Unit (Alt+F11) and Refactor > Find Unit
+(Ctrl+Shift+A, the "Search for units" dialog) offer only the units the
+`.dproj` lists - `IOTAProject.GetModuleCount/GetModule`, across the group
+with the checkbox - plus, for Find Unit, `.dcu` files on the Library Path.
+A unit that the project reaches implicitly, through the search path and a
+`uses` chain, never appears, and in AVImark that is most of the codebase.
+The server already knows exactly that set: it is the closure it resolved.
+
+**Why it cannot be an extension.** Checked against 22.0, 23.0 and 37.0: both
+dialogs live inside `refactoride`/`coreide` and neither has a ToolsAPI
+surface. There is no interface that takes rows for them, no notifier that
+fires when they open, and no service that returns their model. Three routes
+were weighed:
+
+1. **Our own dialog behind the same keys - the route to take.** Bind Alt+F11
+   and Ctrl+Shift+A through `IOTAKeyboardBindingServices`, as the existing
+   bindings do, show a form in the native style, fill it from a new server
+   request ("the closure: unit name, file, resolved from search path or
+   listed in the project"), and write the `uses` line ourselves through
+   `IOTAEditWriter`, with the same Interface/Implementation choice as the
+   original. Shape and size roughly Find All > Defines. The stock dialogs stay
+   reachable from the menu; whether to hide those two items is a decision for
+   when it is built.
+2. **Injecting rows into the stock form** - `Screen.OnActiveFormChange`, find
+   the form by class name, find its list control, append. Rejected: the class
+   and control names differ per IDE version, and the dialog's OK handler
+   expects its own objects in `Items.Objects[]`, so a foreign row is an access
+   violation waiting for a click. Not a product technique.
+3. **Adding the units to `IOTAProject`** so the stock dialog lists them.
+   Rejected: it rewrites the `.dproj`, which is a side effect no navigation
+   feature may have.
+
+**Pieces when it starts.** A server method returning the closure with paths
+(the pool routes it to the project owning the current file, as everything
+else); a form; two keyboard bindings; the `uses` insertion, which must handle
+a missing `uses` clause in either section and respect the file's line ending
+and BOM through `PasLsp.SourceText`. Cover the insertion with a harness
+request and test in AVImark, where the implicit set is the large one.
 
 ## The product mark, and the sizes it still needs
 

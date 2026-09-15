@@ -77,6 +77,7 @@ uses
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ClassComplete,
   PasTreeIdePlugin.SyncPrototypes,
+  PasTreeIdePlugin.AnnotateArgs,
   PasTreeIdePlugin.BlockClose,
   PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.Rename,
@@ -143,6 +144,8 @@ type
     function ActionOf(Sender: TObject): TAction;
     procedure OnRenameExecute(Sender: TObject);
     procedure OnRenameUpdate(Sender: TObject);
+    procedure OnAnnotateArgsExecute(Sender: TObject);
+    procedure OnAnnotateArgsUpdate(Sender: TObject);
     procedure OnFindTypeDeclarationExecute(Sender: TObject);
     procedure OnFindTypeDeclarationUpdate(Sender: TObject);
   public
@@ -260,6 +263,26 @@ begin
   LAction.ShortCut := ShortCut(Ord('E'), [ssCtrl, ssShift]);
   LAction.OnUpdate := OnRenameUpdate;
   LAction.OnExecute := OnRenameExecute;
+  LAction.Enabled := True;
+  LAction.ActionList := FActionList;
+
+  (* "Annotate Arguments..." - `{Name:}` and `{var}`/`{out}` written in front
+    of a call's arguments, after a dialog asking which and how
+    (PasTreeIdePlugin.AnnotateArgs, PasTreeIdePlugin.AnnotateArgsForm).
+    SHOWN ONLY WHERE IT APPLIES: the caret in a call's argument list or on a
+    call's name - the verdict rides the Find All gate as `annotate`, so it
+    costs no second request, and the dialog reads it to offer "the argument
+    at the caret" only when there is one. When the gate cannot say (analysis
+    in flight), the item stays visible and the command itself is the gate. *)
+  LAction := TAction.Create(FActionList);
+  LAction.Name := 'PasTreeAnnotateArgs';
+  LAction.Caption := 'Annotate Arguments...';
+  LAction.Category := 'PasTreeAnnotateArgs';
+  // A LABEL, NOT A BINDING - Rename's note above: the key itself is
+  // delivered by TPasAnnotateArgsBinding (PasTreeIdePlugin.AnnotateArgs).
+  LAction.ShortCut := ShortCut(Ord('A'), [ssCtrl, ssShift]);
+  LAction.OnUpdate := OnAnnotateArgsUpdate;
+  LAction.OnExecute := OnAnnotateArgsExecute;
   LAction.Enabled := True;
   LAction.ActionList := FActionList;
 
@@ -654,6 +677,45 @@ begin
   ExecuteRename(FEditorServices.TopView);
 end;
 
+procedure TMenuManager.OnAnnotateArgsUpdate(Sender: TObject);
+var
+  LAction: TAction;
+begin
+  LAction := ActionOf(Sender);
+  if LAction = nil then
+    Exit;
+  LAction.Enabled := FEditorServices.TopView <> nil;
+  if not LAction.Enabled then
+  begin
+    LAction.Visible := False;
+    Exit;
+  end;
+  // The gate is shared with the Find All items - one request per popup.
+  // Visible wherever the caret is in a call - on the name or in the list -
+  // and when the gate cannot say; the dialog takes the scope from there.
+  LAction.Visible := (not EnsureGate) or (FGate.Annotate <> '');
+end;
+
+procedure TMenuManager.OnAnnotateArgsExecute(Sender: TObject);
+var
+  LScope: string;
+begin
+  LspLogToServer(Format('menu: execute PasTreeAnnotateArgs, TopView %s',
+    [IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
+  try
+    // The verdict the popup was drawn on, re-taken if the caret moved since
+    // (a shortcut, say): '' when the server could not say.
+    LScope := '';
+    if EnsureGate then
+      LScope := FGate.Annotate;
+    ExecuteAnnotateArgs(FEditorServices.TopView, LScope);
+  except
+    on E: Exception do
+      LspLogToServer(Format('menu: execute raised %s: %s',
+        [E.ClassName, E.Message]));
+  end;
+end;
+
 { TToggleKeyBinding }
 
 function TToggleKeyBinding.GetBindingType: TBindingType;
@@ -803,6 +865,9 @@ begin
   // the only way to take it over).
   InitializeClassComplete;
   InitializeSyncPrototypes;
+  // "Annotate argument(s)" - a menu item (AddActions), so only the
+  // teardown guard to arm here.
+  InitializeAnnotateArgs;
   // Enter after an unclosed block opener: the server (standard LSP
   // onTypeFormatting) answers with the closer - see
   // PasTreeIdePlugin.BlockClose. An editor-events OBSERVER, not a key
@@ -859,6 +924,7 @@ begin
   // closures gated off - see the GAlive flags in each unit).
   FinalizeClassComplete;
   FinalizeSyncPrototypes;
+  FinalizeAnnotateArgs;
   FinalizeBlockClose;
   // AFTER every feature that registers with it has withdrawn (Ctrl+Click in
   // FinalizeGotoDeclaration, block completion just above): this releases the
