@@ -481,6 +481,15 @@ procedure LspDefinition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 
 /// <summary>
+/// Asks for the actual declaration site of the identifier at an IDE position -
+/// unlike LspDefinition, never redirected to a routine's implementation. Used
+/// for the "declaration" row in a Find References report, which must land on
+/// the declaration and not, for a routine, on its body.
+/// </summary>
+procedure LspDeclarationAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHitsProc);
+
+/// <summary>
 /// Asks for every reference to the identifier at an IDE position. The
 /// declaration site is included only if AIncludeDeclaration is set - the
 /// server's own FindReferences never includes it on its own.
@@ -907,6 +916,7 @@ type
     FStartedLogDetail: Boolean;
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
+    FPendingDeclarationAt: Int64;
     FPendingReferences: Int64;
     // Both directions of the decl<->impl toggle share one slot: they are the
     // same gesture, so a jump the other way supersedes an unanswered one.
@@ -945,6 +955,11 @@ type
     procedure SyncDocuments;
     function LogToServer(const AText: string): Boolean;
     procedure Definition(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspHitsProc);
+    /// <summary>The actual declaration site of the name at the cursor - unlike
+    /// Definition, never redirected to a routine's implementation (the
+    /// server's HandleDefinition with ADeclarationOnly set).</summary>
+    procedure DeclarationAt(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
       AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
@@ -3226,6 +3241,13 @@ begin
     FPendingDefinition, AOnDone);
 end;
 
+procedure TLspSession.DeclarationAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHitsProc);
+begin
+  Ask('pastree/declarationAt', AFileName, ARow, ACol, False,
+    FPendingDeclarationAt, AOnDone);
+end;
+
 procedure TLspSession.References(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 begin
@@ -3636,6 +3658,20 @@ begin
     Exit;
   end;
   LSession.Definition(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspDeclarationAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.DeclarationAt(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspReferences(const AFileName: string; ARow, ACol: Integer;

@@ -262,7 +262,8 @@ type
     procedure PublishEmptyDiagnostics(const APath: string);
     function DocPathOf(AParams: TJSONValue): string;
     function HandleInitialize(const AMsg: TLspIncoming): string;
-    function HandleDefinition(const AMsg: TLspIncoming): string;
+    function HandleDefinition(const AMsg: TLspIncoming;
+      ADeclarationOnly: Boolean): string;
     function HandleReferences(const AMsg: TLspIncoming): string;
     function HandleToggle(const AMsg: TLspIncoming;
       AToImpl: Boolean): string;
@@ -2054,7 +2055,13 @@ begin
     ScheduleAnalysis('');
 end;
 
-function TLspServer.HandleDefinition(const AMsg: TLspIncoming): string;
+{ ADeclarationOnly skips the redirect to a routine's implementation below.
+  textDocument/definition wants the body (F12 behavior); pastree/declarationAt
+  wants the declaration site itself - Find References labels a row
+  "declaration", and asking definition for it put that row's target on the
+  body of a routine (2026-09-15). Everything before the redirect is shared. }
+function TLspServer.HandleDefinition(const AMsg: TLspIncoming;
+  ADeclarationOnly: Boolean): string;
 var
   LPath, LDefName: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LRawTok: Integer;
@@ -2158,7 +2165,7 @@ begin
   // half, or an unresolved position): that is not an error, just nothing to
   // redirect to. Not from the implementation's own header (LOwnHeader
   // above): there the declaration IS the answer.
-  if not LOwnHeader and
+  if not ADeclarationOnly and not LOwnHeader and
      FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
        LImplTarget) then
     LTarget := LImplTarget;
@@ -5203,7 +5210,9 @@ begin
       if LMsg.Method = 'textDocument/didSave' then
         Exit;   // we advertise no save interest; harmless if sent anyway
       if LMsg.Method = 'textDocument/definition' then
-        Exit(HandleDefinition(LMsg));
+        Exit(HandleDefinition(LMsg, {ADeclarationOnly} False));
+      if LMsg.Method = 'pastree/declarationAt' then
+        Exit(HandleDefinition(LMsg, {ADeclarationOnly} True));
       if LMsg.Method = 'textDocument/references' then
         Exit(HandleReferences(LMsg));
       if LMsg.Method = 'textDocument/implementation' then

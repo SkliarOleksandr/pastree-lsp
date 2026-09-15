@@ -418,7 +418,13 @@ end;
   cache lookups (measured at 0-16ms against this package's own .dproj).
 
   Sequential rather than parallel because the report needs both answers and
-  sequencing two callbacks is easier to follow than counting completions. }
+  sequencing two callbacks is easier to follow than counting completions.
+
+  The declaration comes from LspDeclarationAt, not LspDefinition: definition
+  deliberately redirects a routine name to its implementation (F12 behavior -
+  see TLspServer.HandleDefinition), which put this row's target one hop away
+  from what it says on the label (found 2026-09-15). LspDeclarationAt shares
+  the same name resolution without that redirect. }
 procedure ExecuteFindReferences(const AView: IOTAEditView);
 var
   LCursorFile: string;
@@ -480,7 +486,7 @@ begin
         end;
 
         LRefs := AHits;
-        LspDefinition(LCursorFile, LRow, LCol,
+        LspDeclarationAt(LCursorFile, LRow, LCol,
           procedure(ADeclOk: Boolean; const ADeclHits: TArray<TLspHit>;
             const ADeclError: string)
           begin
