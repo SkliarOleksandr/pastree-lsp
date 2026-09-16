@@ -914,6 +914,16 @@ type
     // anything if it restarts - which is what including them here does.
     FStartedLogFile: string;
     FStartedLogDetail: Boolean;
+    // The .dproj's last-write stamp when the server was started for it. The
+    // server reads search paths, defines and the unit list from the .dproj
+    // ONCE, at initialize, and only logs a note when the file changes on
+    // disk; the IDE saves the .dproj the moment Project Options closes with
+    // OK or a unit is added. Without this, "add a patched copy of a library
+    // unit and put its folder on the search path" kept answering from the
+    // old closure - the ORIGINAL - until the IDE was restarted, and looked
+    // like the shadowing did not work at all (2026-09-16). One stat per
+    // request is the price; a restart is one closure analysis.
+    FStartedProjectStamp: string;
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingDeclarationAt: Int64;
@@ -1627,7 +1637,20 @@ function TLspSession.EnsureSession: Boolean;
 var
   LProject: IOTAProject;
   LOptions: TLspInitOptions;
-  LPlatform, LConfig: string;
+  LPlatform, LConfig, LStamp: string;
+
+  // The .dproj's last-write time as text, '' when it cannot be read (an
+  // unsaved project has no file). See FStartedProjectStamp.
+  function ProjectFileStamp(const APath: string): string;
+  var
+    LWritten: TDateTime;
+  begin
+    if (APath <> '') and FileAge(APath, LWritten) then
+      Result := FloatToStr(LWritten)
+    else
+      Result := '';
+  end;
+
 begin
   Result := False;
 
@@ -1733,17 +1756,30 @@ begin
 
   // A different project, platform or configuration means a different server:
   // the server fixes its configuration at initialize and cannot be retargeted.
+  // A re-saved .dproj counts as a different configuration for the same
+  // reason - see FStartedProjectStamp.
+  LStamp := ProjectFileStamp(LOptions.ProjectFile);
   if (FClient.State = lcsStopped) or
      not SameText(FStartedProject, LOptions.ProjectFile) or
      not SameText(FStartedPlatform, LPlatform) or
      not SameText(FStartedConfig, LConfig) or
      not SameText(FStartedLogFile, LOptions.LogFile) or
-     (FStartedLogDetail <> not LOptions.SuppressLogDetail) then
+     (FStartedLogDetail <> not LOptions.SuppressLogDetail) or
+     (FStartedProjectStamp <> LStamp) then
   begin
     if FClient.State <> lcsStopped then
-      LogDiagnostic(Format('project configuration changed (%s %s %s) - '
-        + 'restarting the server.',
-        [ExtractFileName(LOptions.ProjectFile), LPlatform, LConfig]));
+    begin
+      if (FStartedProjectStamp <> LStamp) and
+         SameText(FStartedProject, LOptions.ProjectFile) then
+        LogDiagnostic(Format('%s was saved - restarting the server to read'
+          + ' its search paths, defines and unit list again.',
+          [ExtractFileName(LOptions.ProjectFile)]))
+      else
+        LogDiagnostic(Format('project configuration changed (%s %s %s) - '
+          + 'restarting the server.',
+          [ExtractFileName(LOptions.ProjectFile), LPlatform, LConfig]));
+    end;
+    FStartedProjectStamp := LStamp;
     FDocs.Forget;   // the old server's documents die with it
     { RECORDED BEFORE THE START, NOT AFTER IT, and the difference is a whole
       restart policy.

@@ -175,7 +175,13 @@ const
   /// BoundExact - which overload the resolver bound a call to. Loud rather
   /// than silent - PasLsp.AnnotateArgs reads fields that do not exist
   /// before it.
-  cMinPasTreeVersion = '0.29.0';
+  ///
+  /// 0.31.0 (2026-09-16): TPasAsyncSession.PinUnitFile / SetProjectDir - the
+  /// project's own unit list and directory outrank the search paths, so a
+  /// patched copy of a library unit shadows the original for every importer.
+  /// Loud rather than silent - the server calls methods that do not exist
+  /// before it.
+  cMinPasTreeVersion = '0.31.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

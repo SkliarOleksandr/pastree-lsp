@@ -522,8 +522,13 @@ All four shipped. Two notes worth keeping:
   What remains here is `workspaceSymbol/resolve`, the lazy-detail split.
 - **`workspace/didChangeConfiguration` (+ `workspace/configuration`).**
   Reconfigure without a restart. Today a changed `.dproj` only prints a note
-  from the watched-files handler, because search paths, defines and namespaces
-  are read once at `initialize`.
+  from the watched-files handler, because search paths, defines, namespaces
+  and the project's unit list are read once at `initialize`. The RAD Studio
+  client compensates since 0.43.0: it compares the `.dproj`'s last-write time
+  against the one its server started with, in front of every request, and
+  restarts the server on a difference (the IDE saves the `.dproj` when
+  Project Options closes or a unit is added - exactly when the closure
+  changes). A protocol-level reconfigure would make that restart a rebuild.
 - **`textDocument/foldingRange`.** From the CST: unit sections, type bodies,
   `begin`/`end` blocks, `$REGION`.
 - **`textDocument/documentLink`.** A `uses` item and an `$I` include name are

@@ -137,6 +137,15 @@ type
     // file-level refusal at all, which is the right default for a client that
     // says nothing: the symbol-level gates still stand.
     FLibraryPaths: TArray<string>;
+    // The project's OWN unit list (.dproj DCCReference rows, resolved) and
+    // its directory. Both pin unit resolution ahead of every search path,
+    // PasTree 0.31.0: a patched copy of a library unit that the project
+    // carries in its tree - listed in the project, or just sitting beside the
+    // .dproj - must SHADOW the library's original for every importer, as the
+    // IDE compiles it. Before this, only the .dpr's own import saw the copy;
+    // every library unit importing the same name resolved the original.
+    FProjectFiles: TArray<string>;
+    FProjectDir: string;
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
     // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
@@ -675,6 +684,14 @@ begin
         FPlatform := LDProj.Platform;
         FSearchPaths := LDProj.SearchPaths;
         FDefines := LDProj.Defines;
+        // Every unit the project lists, main source included - see
+        // FProjectFiles. Only .pas rows can name a unit; a .dfm/.res row in
+        // the list would pin a non-unit under a unit's name.
+        FProjectFiles := nil;
+        for LItem in LDProj.Files do
+          if SameText(TPath.GetExtension(LItem), '.pas') then
+            FProjectFiles := FProjectFiles + [LItem];
+        FProjectDir := TPath.GetDirectoryName(TPath.GetFullPath(LProjectFile));
         // Project namespaces first, then the IDE defaults the .dproj file
         // itself never spells out (they live in the IDE's targets file).
         FNamespaces := LDProj.Namespaces + PasDefaultNamespaces(FPlatform);
@@ -703,6 +720,7 @@ begin
     // namespaces/aliases (see PasDefaultNamespaces: dcc itself has none,
     // they come from the project template).
     FMainSource := TPath.GetFullPath(LProjectFile);
+    FProjectDir := TPath.GetDirectoryName(FMainSource);
     FNamespaces := PasDefaultNamespaces(FPlatform);
     FAliases := nil;
     for LDef in PasDefaultUnitAliases(FPlatform) do
@@ -755,9 +773,10 @@ begin
         + ' - ignored, so rename will not refuse library sources', True);
   end;
   Log(Format('configured: platform=%s main=%s paths=%d defines=%d'
-    + ' libraryPaths=%d',
+    + ' libraryPaths=%d projectFiles=%d projectDir=%s',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
-     Length(FDefines), Length(FLibraryPaths)]));
+     Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
+     FProjectDir]));
   // A ZERO HERE IS A REAL CONDITION, not a quiet default, so it says so on
   // the summary line rather than only in the detail block: with no library
   // trees declared, a rename that reaches into the RTL is planned and applied
@@ -805,6 +824,7 @@ var
   LRoots, LPriority: TArray<string>;
   LDoc: TLspDocument;
   LAlias: TPasUnitAlias;
+  LItem: string;
 begin
   if FSession <> nil then
   begin
@@ -890,6 +910,12 @@ begin
   FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
     LRoots, LPriority);
   FSession.SetNamespaces(FNamespaces);
+  // Before Start, like every other piece of configuration: the project's
+  // directory and its own unit list outrank the search paths (FProjectFiles).
+  if FProjectDir <> '' then
+    FSession.SetProjectDir(FProjectDir);
+  for LItem in FProjectFiles do
+    FSession.PinUnitFile(LItem);
   for LAlias in FAliases do
     FSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
   // PARSE REUSE (PasTree's stage A): the last-good project donates the parse
