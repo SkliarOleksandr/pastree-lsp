@@ -302,6 +302,7 @@ type
     function HandleFindAllAt(const AMsg: TLspIncoming): string;
     function HandleFindDefines(const AMsg: TLspIncoming): string;
     function HandleDefinesAt(const AMsg: TLspIncoming): string;
+    function HandleDcuSource(const AMsg: TLspIncoming): string;
     function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
       out APath: string; out AMid, APasLine, APasCol: Integer;
       out AReply: string): Boolean;
@@ -3801,6 +3802,68 @@ begin
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
 end;
 
+{ pastree/dcuSource - OURS, not LSP. The interface text PasTree generates
+  for a compiled unit (PasTree 0.37.0, PasTree.Dcu / PasTree.Dcu.Source),
+  for a host that wants to SHOW the file a navigation answer landed in when
+  that file is a .dcu. The analysis already reads such units this way:
+  TPasSourceManager lists .dcu files on the search paths and falls back to
+  one when no .pas exists for a unit name, so a definition into a
+  third-party unit shipped compiled-only answers a Location whose uri ends
+  in .dcu and whose line is a line of this text. An editor cannot open that
+  path itself, so it asks here and shows what comes back read-only.
+
+  THE SAME TEXT THE ANALYSIS RAN ON, by construction: LoadFileTolerant is
+  the routine ResolveUnit's fallback goes through, so the line the Location
+  names is a line of what the host shows - a second generator would be a
+  second source of truth, and they would disagree exactly on the units that
+  are hardest to print. The text is generated afresh per request (a class
+  function has no cache); it is one unit, on a user action.
+
+  A .dcu the reader refuses - a compiler before Delphi 11, a platform other
+  than Win32/Win64, a truncated file - is an ERROR with the reader's own
+  words (EPasDcuError: "Delphi 10.4 is not supported (Delphi 11 to 13 are)"),
+  so the host can put the reason where the user looks, rather than an empty
+  answer that reads as "nothing here". The importer's F1027 says the same
+  thing in the diagnostics (SF1027_UnitDcuUnreadable); this is its twin for
+  the click. Params: textDocument.uri. Answer: an object with uri, unitName
+  and text. }
+function TLspServer.HandleDcuSource(const AMsg: TLspIncoming): string;
+var
+  LPath, LText: string;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'dcuSource: textDocument.uri required'));
+  if not TPasSourceManager.IsDcuPath(LPath) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'dcuSource: not a .dcu path: ' + LPath));
+  if not TFile.Exists(LPath) then
+  begin
+    Log('pastree/dcuSource: no such file: ' + LPath);
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
+      TPath.GetFileName(LPath) + ': the file does not exist'));
+  end;
+  try
+    LText := TPasSourceManager.LoadFileTolerant(LPath);
+  except
+    on E: Exception do
+    begin
+      Log(Format('pastree/dcuSource: %s could not be read: %s',
+        [LPath, E.Message]));
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
+        Format('%s could not be read: %s',
+          [TPath.GetFileName(LPath), E.Message])));
+    end;
+  end;
+  Log(Format('pastree/dcuSource: %s -> %d chars', [LPath, Length(LText)]));
+  Result := BuildResponse(AMsg.IdJson,
+    Format('{"uri":%s,"unitName":%s,"text":%s}',
+      [JsonQuote(PathToUri(LPath)),
+       JsonQuote(TPath.GetFileNameWithoutExtension(LPath)),
+       JsonQuote(LText)]));
+end;
+
 { textDocument/implementation and textDocument/declaration - the decl<->impl
   toggle, a Pascal-specific navigation the navigator implements as pure CST
   walks (GotoImplementation/GotoDeclaration; they never cross units, because
@@ -5292,6 +5355,8 @@ begin
         Exit(HandleFindDefines(LMsg));
       if LMsg.Method = 'pastree/definesAt' then
         Exit(HandleDefinesAt(LMsg));
+      if LMsg.Method = 'pastree/dcuSource' then
+        Exit(HandleDcuSource(LMsg));
       if LMsg.Method = 'pastree/findAllAt' then
         Exit(HandleFindAllAt(LMsg));
       { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when

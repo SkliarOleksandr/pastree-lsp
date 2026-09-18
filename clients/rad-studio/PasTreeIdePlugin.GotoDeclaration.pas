@@ -170,7 +170,8 @@ uses
   System.Generics.Collections, Vcl.Controls, ToolsAPI.Editor,
   PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.CodeInsight,
-  PasTreeIdePlugin.Settings, PasTreeIdePlugin.DirectiveText;
+  PasTreeIdePlugin.Settings, PasTreeIdePlugin.DirectiveText,
+  PasTreeIdePlugin.DcuNames, PasTreeIdePlugin.DcuSource;
 
 /// <summary>
 /// Goes to the IDE's own default Messages tab (nil group = the "Build" tab)
@@ -196,7 +197,7 @@ end;
 /// replays a position, never re-resolves anything) can call it without
 /// depending on PasTree.Sema.Nav.
 /// </summary>
-procedure NavigateToPosition(const AFileName: string; ARow, ACol: Integer);
+procedure NavigateToModule(const AFileName: string; ARow, ACol: Integer);
 var
   LModuleServices: IOTAModuleServices;
   LModule: IOTAModule;
@@ -208,7 +209,13 @@ begin
     LogDiagnostic('Goto Declaration: IOTAModuleServices unavailable.');
     Exit;
   end;
-  LModule := LModuleServices.OpenModule(AFileName);
+  // FindModule first: a generated .dcu tab (PasTreeIdePlugin.DcuSource)
+  // exists only as an open module, and whether OpenModule finds an
+  // already-open module by name before it looks at the disk is the IDE's
+  // business, not a promise. Costs nothing for a real file that is open.
+  LModule := LModuleServices.FindModule(AFileName);
+  if not Assigned(LModule) then
+    LModule := LModuleServices.OpenModule(AFileName);
   if not Assigned(LModule) then
   begin
     LogDiagnostic(Format('Goto Declaration: OpenModule("%s") returned nil.', [AFileName]));
@@ -245,9 +252,35 @@ begin
   MoveCaretCentred(LSourceEditor.EditViews[0], ARow, ACol);
 end;
 
+procedure NavigateToPosition(const AFileName: string; ARow, ACol: Integer);
+var
+  LDcu: string;
+begin
+  // A COMPILED UNIT, by either of its names: the .dcu a server answer named,
+  // or the generated tab's own module name (what a history entry captured
+  // as "jumped from" when the user was standing in such a tab). The IDE
+  // cannot open a .dcu, so the tab is made - or merely found - first, and
+  // the jump happens once its text is there. Asynchronous the first time
+  // (one pastree/dcuSource request), synchronous after; a refused .dcu has
+  // already put its reason on the Build tab and the jump is a quiet miss.
+  LDcu := DcuPathOfAny(AFileName);
+  if LDcu <> '' then
+  begin
+    EnsureDcuModule(LDcu,
+      procedure(AModuleName: string)
+      begin
+        if AModuleName <> '' then
+          NavigateToModule(AModuleName, ARow, ACol);
+      end);
+    Exit;
+  end;
+  NavigateToModule(AFileName, ARow, ACol);
+end;
+
 procedure MoveCaretCentred(const AView: IOTAEditView; ARow, ACol: Integer);
 var
   LPos: IOTAEditPosition;
+  LCursor: TOTAEditPos;
 begin
   if not Assigned(AView) then
     Exit;
@@ -255,7 +288,15 @@ begin
   if not Assigned(LPos) then
     Exit;
   LPos.GotoLine(ARow);
-  LPos.Move(ARow, ACol);
+  // CursorPos, not IOTAEditPosition.Move: the IDE's own navigation leaves an
+  // undo entry for the caret move, so Ctrl+Z after a native Ctrl+Click steps
+  // back through the jumps. Move bypasses whatever records that entry, and
+  // Ctrl+Z after our jumps went straight to the last edit (a colleague of
+  // Alex, 2026-09-18). SetCursorPos is the view-level path; experimental -
+  // whether it records the entry is only visible in the IDE.
+  LCursor.Col := ACol;
+  LCursor.Line := ARow;
+  AView.CursorPos := LCursor;
   AView.MoveViewToCursor;
 end;
 

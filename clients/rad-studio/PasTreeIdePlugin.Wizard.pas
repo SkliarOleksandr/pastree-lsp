@@ -71,6 +71,7 @@ uses
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
   PasTreeIdePlugin.FindDefines,
   PasTreeIdePlugin.GotoDeclaration,
+  PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
@@ -838,6 +839,11 @@ begin
   // prewarm or the first navigation request, so loading this package costs
   // nothing on its own.
   InitializeLspSession;
+  // Editor tabs for compiled-only units: the interface text the server
+  // generates from a .dcu, through a registered IOTAFileSystem, read-only.
+  // After the session (it registers a restart listener with it), before
+  // anything that navigates.
+  InitializeDcuSource;
   // Registers the Code Insight manager; inert until the user selects
   // "PasTree" as the Insight Provider in Options - and since phase C that
   // selection is what carries ALL declaration navigation.
@@ -918,6 +924,9 @@ begin
   // keystroke or a notification arriving late.
   FinalizeSettings;
   FinalizeGotoDeclaration;
+  // Closes the generated .dcu tabs and unregisters their file system while
+  // the IDE can still call into it; the session it listens to goes last.
+  FinalizeDcuSource;
   // Before FinalizeLspSession, both of these: the session's teardown fails
   // every pending request synchronously, and those callbacks must find the
   // manager and the Insight notifier already unregistered (and their

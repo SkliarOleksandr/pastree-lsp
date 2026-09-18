@@ -313,6 +313,11 @@ function FindServerExe(const ANearDir: string): string;
 /// (lower-cased drive letter, ':' percent-encoded): URIs are compared as
 /// strings on both sides, so two spellings of the same file would silently
 /// look like two different documents. Keep these in step with that unit.
+///
+/// ONE MAPPING ON THE WAY OUT: a generated .dcu tab's module name
+/// (`Foo.dcu.pas`, see PasTreeIdePlugin.DcuNames) leaves here as the .dcu
+/// the server knows the unit by. Nothing maps back on the way in - answers
+/// name the .dcu, and navigation is where that becomes the tab.
 /// </summary>
 function PathToLspUri(const APath: string): string;
 function LspUriToPath(const AUri: string): string;
@@ -336,6 +341,7 @@ implementation
 uses
   System.IOUtils,
   Winapi.Windows,
+  PasTreeIdePlugin.DcuNames,
   PasTreeIdePlugin.Timing;
 
 const
@@ -398,7 +404,7 @@ var
   LSB: TStringBuilder;
   LByte: Byte;
 begin
-  LNorm := APath.Replace('\', '/');
+  LNorm := LspPathOf(APath).Replace('\', '/');
   if (Length(LNorm) >= 2) and (LNorm[2] = ':') then
     LNorm := '/' + LowerCase(LNorm[1]) + Copy(LNorm, 2, MaxInt);
   LSB := TStringBuilder.Create;

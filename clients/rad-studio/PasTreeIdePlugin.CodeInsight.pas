@@ -103,7 +103,9 @@ uses
   ToolsAPI,
   ToolsAPI.UI,
   PasTreeIdePlugin.LspSession,
-  PasTreeIdePlugin.LspDocuments;
+  PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.DcuNames,
+  PasTreeIdePlugin.DcuSource;
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
   callback SYNCHRONOUSLY when the request cannot even be issued (no server
@@ -1367,9 +1369,32 @@ begin
           if not (GAlive and Assigned(ACallBack)) then
             Exit;
           if ASuccess and (Length(AHits) > 0) then
+          begin
+            // A COMPILED UNIT: the IDE will open whatever file name it is
+            // handed, and it cannot open a .dcu. The generated tab is made
+            // first (one more asynchronous hop, only the first time) and
+            // the IDE is handed its module name instead - it finds the open
+            // module by that name and lands on the line like any other.
+            if IsDcuPath(AHits[0].FilePath) then
+            begin
+              EnsureDcuModule(AHits[0].FilePath,
+                procedure(AModuleName: string)
+                begin
+                  if not (GAlive and Assigned(ACallBack)) then
+                    Exit;
+                  if AModuleName <> '' then
+                    ACallBack(Self, LId, AModuleName, AHits[0].Row,
+                      AHits[0].Col - 1, False, '')
+                  else
+                    ACallBack(Self, LId, '', 0, 0, True,
+                      'the .dcu could not be read - see the Build tab');
+                end);
+              Exit;
+            end;
             // Col back to the 0-based char index the callback expects.
             ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row,
-              AHits[0].Col - 1, False, '')
+              AHits[0].Col - 1, False, '');
+          end
           else
             ACallBack(Self, LId, '', 0, 0, True, AError);
         end);

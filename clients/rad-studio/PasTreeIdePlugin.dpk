@@ -80,6 +80,8 @@ contains
   PasTreeIdePlugin.ResultRows in 'PasTreeIdePlugin.ResultRows.pas',
   PasTreeIdePlugin.WaitDialog in 'PasTreeIdePlugin.WaitDialog.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
+  PasTreeIdePlugin.DcuNames in 'PasTreeIdePlugin.DcuNames.pas',
+  PasTreeIdePlugin.DcuSource in 'PasTreeIdePlugin.DcuSource.pas',
   PasTreeIdePlugin.CodeInsight in 'PasTreeIdePlugin.CodeInsight.pas',
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
   PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',

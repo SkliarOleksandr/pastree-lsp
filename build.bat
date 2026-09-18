@@ -158,6 +158,14 @@ rem       EXEs go to %TESTOUT% because each locates its own resources relative
 rem       to its exe: ..\fixtures and ..\.. for the package directory. DCUs go
 rem       to out\dcu\win32 with every other Win32 build's -- see DCUS, above.
 echo === test harnesses (Win32) ===
+rem       One fixture is a unit the server must see ONLY compiled: its source
+rem       sits in tests\dcusrc (on no search path of the harness) and its .dcu
+rem       goes to tests\fixtures\dcu32, which LspClientSmoke adds as a search
+rem       path. Exercises PasTree's .dcu fallback and pastree/dcuSource with
+rem       whichever compiler this build uses - the reader takes Delphi 11 to 13.
+if not exist "%PLUGIN%\tests\fixtures\dcu32" mkdir "%PLUGIN%\tests\fixtures\dcu32"
+dcc32 -B -Q -N0"%PLUGIN%\tests\fixtures\dcu32" "%PLUGIN%\tests\dcusrc\DemoDcuLib.pas"
+if errorlevel 1 goto :fail
 for %%T in (VersionSmoke LspTextSmoke LspTransportSmoke LspClientSmoke LspProjectSmoke) do (
   dcc32 -B -Q -U"%PLUGIN%;source" -E"%TESTOUT%" -N0"%DCU32%" "%PLUGIN%\tests\%%T.dpr"
   if errorlevel 1 goto :fail

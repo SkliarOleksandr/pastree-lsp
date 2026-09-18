@@ -46,6 +46,7 @@ unit PasTreeIdePlugin.LspSession;
 interface
 
 uses
+  System.SysUtils,   // TProc, for LspSetSessionRestartListener
   ToolsAPI;
 
 type
@@ -564,6 +565,36 @@ procedure LspFindDefines(const AFileName: string;
 procedure LspDefinesAt(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspDefinesProc);
 
+type
+  /// <summary>
+  /// Delivered on the main thread, once, for LspDcuSource. On success AText
+  /// is the whole generated unit; on failure AError is the reader's reason
+  /// ("Foo.dcu could not be read: Delphi 10.4 is not supported ...").
+  /// </summary>
+  TLspDcuSourceProc = reference to procedure(ASuccess: Boolean;
+    const AText, AError: string);
+
+/// <summary>
+/// The interface text PasTree generated for a compiled unit - what the
+/// server analyzed a .dcu-only unit from (pastree/dcuSource). ADcuPath is
+/// the .dcu a navigation answer named. Asked of the ACTIVE project's server:
+/// a .dcu lives under a library path, which no project owns, and the
+/// active project is the one whose platform decided which lib directory the
+/// answer came from.
+/// </summary>
+procedure LspDcuSource(const ADcuPath: string;
+  const AOnDone: TLspDcuSourceProc);
+
+/// <summary>
+/// Registers the ONE listener called (main thread) when a project's server
+/// is about to be replaced by one for a different configuration - another
+/// platform, configuration or a re-saved .dproj - or is stopped for good.
+/// What the generated .dcu tabs hang on: their text belongs to the server
+/// that made it, and a Win64 build may name a different .dcu altogether.
+/// nil unregisters. Single for the same reason as the diagnostics listener.
+/// </summary>
+procedure LspSetSessionRestartListener(const AListener: TProc);
+
 /// <summary>
 /// The Pascal decl&lt;-&gt;impl toggle: from a routine's header to its body
 /// (AToImpl) or from anywhere inside the body back to its header. AOnDone
@@ -840,7 +871,6 @@ function LspSourceTextOf(const AFileName: string): string;
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.IOUtils,
   System.JSON,
@@ -853,6 +883,7 @@ uses
   PasLsp.SourceText,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.DcuNames,
   PasTreeIdePlugin.Timing,
   PasTreeIdePlugin.Settings;
 
@@ -1007,6 +1038,8 @@ type
       shape differs. }
     procedure Defines(const AMethod, AFileName: string; AHasPosition: Boolean;
       ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
+    procedure DcuSource(const ADcuPath: string;
+      const AOnDone: TLspDcuSourceProc);
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
@@ -1102,6 +1135,9 @@ var
   // The painted-squiggle layer's repaint trigger; see
   // LspSetDiagnosticsChangedListener.
   GDiagnosticsListener: TLspDiagnosticsChangedProc;
+  // The generated .dcu tabs' teardown trigger; see
+  // LspSetSessionRestartListener.
+  GSessionRestartListener: TProc;
 
 { ---------------------------------------------------------------------------
   ToolsAPI harvesting
@@ -1781,6 +1817,11 @@ begin
     end;
     FStartedProjectStamp := LStamp;
     FDocs.Forget;   // the old server's documents die with it
+    // And so do the generated .dcu tabs' texts - see
+    // LspSetSessionRestartListener. Told BEFORE the new server starts, so a
+    // listener that closes modules does it against a quiet client.
+    if Assigned(GSessionRestartListener) then
+      GSessionRestartListener();
     { RECORDED BEFORE THE START, NOT AFTER IT, and the difference is a whole
       restart policy.
 
@@ -2682,6 +2723,37 @@ begin
       else
         AOnDone(True, True, AResult.GetValue<string>('name', ''),
           ParseHierarchyRows(AResult), '');
+    end);
+end;
+
+procedure TLspSession.DcuSource(const ADcuPath: string;
+  const AOnDone: TLspDcuSourceProc);
+var
+  LParams, LDoc: TJSONObject;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, '', 'no LSP server available');
+    Exit;
+  end;
+  // No FDocs.Sync: the answer is generated from a file on disk that no
+  // editor buffer can have changed.
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(ADcuPath));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  FClient.Request('pastree/dcuSource', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LText: string;
+    begin
+      if not ASuccess then
+        AOnDone(False, '', AError)
+      else if (AResult is TJSONObject) and
+              TJSONObject(AResult).TryGetValue<string>('text', LText) then
+        AOnDone(True, LText, '')
+      else
+        AOnDone(False, '', 'pastree/dcuSource answered without a text');
     end);
 end;
 
@@ -4310,6 +4382,28 @@ begin
   GDiagnosticsListener := AListener;
 end;
 
+procedure LspSetSessionRestartListener(const AListener: TProc);
+begin
+  GSessionRestartListener := AListener;
+end;
+
+procedure LspDcuSource(const ADcuPath: string;
+  const AOnDone: TLspDcuSourceProc);
+var
+  LSession: TLspSession;
+begin
+  // The active project's session, not SessionForFile: no project owns a
+  // file under a library path, and SessionForFile answers the active one for
+  // such a path anyway - saying so here is the point.
+  LSession := SessionForRequest(ADcuPath);
+  if LSession = nil then
+  begin
+    AOnDone(False, '', 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.DcuSource(ADcuPath, AOnDone);
+end;
+
 procedure TLspSession.IdleSync(const APath: string);
 begin
   // PASSIVE by design: pushes the live buffer to a server that is already
@@ -4389,6 +4483,14 @@ var
   LSession: TLspSession;
 begin
   Result := '';
+  // A compiled unit's text is generated, not on disk - reading the .dcu's
+  // bytes as text would make a snippet of garbage. What the plugin was
+  // given for it (PasTreeIdePlugin.DcuNames) is the text the answer's
+  // lines refer to; a .dcu never shown yet has no snippet.
+  if TryGetDcuText(AFileName, Result) then
+    Exit;
+  if IsDcuPath(AFileName) then
+    Exit;
   // The session that HOLDS this file is the one whose overlay is the text the
   // answer was computed from; the active one may never have been sent it.
   if Assigned(GPool) then

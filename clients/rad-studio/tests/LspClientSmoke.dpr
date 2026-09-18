@@ -350,7 +350,9 @@ begin
   // evaluation, which keeps this test independent of any .dproj.
   LOptions.ProjectFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
   LOptions.Platform := 'Win32';
-  LOptions.SearchPaths := [GFixtureDir];
+  // dcu32 holds the one fixture the server may see only compiled - see
+  // TestDcuSource and build.bat, which puts DemoDcuLib.dcu there.
+  LOptions.SearchPaths := [GFixtureDir, TPath.Combine(GFixtureDir, 'dcu32')];
   Result := GClient.Start(LOptions);
 end;
 
@@ -473,6 +475,124 @@ begin
   Check(not GOk and GError.Contains('conditional symbol'),
     'and is refused, naming the reason');
 end;
+{ 2d. A unit the server sees only compiled, and pastree/dcuSource.
+
+  fixtures\DemoDcu.pas imports DemoDcuLib, whose .pas is nowhere on the
+  session's search paths - only its .dcu is, under fixtures\dcu32 (built by
+  build.bat from tests\dcusrc). PasTree 0.37.0 analyzes such a unit from the
+  .dcu, so definition from the importer must land in a Location whose uri
+  names the .dcu, and pastree/dcuSource - what the RAD Studio client asks
+  before it can show that file - must answer with the generated text those
+  lines belong to. The two are checked AGAINST EACH OTHER: the line the
+  Location names is read out of the returned text and must carry the name
+  that was clicked. Then the tab's own requests: a didOpen with the text
+  under the .dcu uri (what the client sends for the generated tab) and a
+  definition from inside it. Last, a file that is not a .dcu at all must
+  come back as an error with a reason, not as an empty answer. }
+procedure TestDcuSource;
+var
+  LFile, LDcuFile, LDcuUri, LText, LLineText, LBogus: string;
+  LLine, LChar, LTargetLine: Integer;
+  LRoot: TJSONValue;
+  LLines: TArray<string>;
+begin
+  Writeln;
+  Writeln('=== 2d. a compiled-only unit: definition into the .dcu, '
+    + 'pastree/dcuSource ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoDcu.pas');
+  LDcuFile := TPath.Combine(GFixtureDir, 'dcu32\DemoDcuLib.dcu');
+  if not TFile.Exists(LDcuFile) then
+  begin
+    Check(False, 'fixtures\dcu32\DemoDcuLib.dcu exists (build.bat compiles '
+      + 'it from tests\dcusrc; run the harness through build.bat)');
+    Exit;
+  end;
+  DidOpen(LFile);
+
+  FindPos(LFile, 'Result := DcuGreeting', 'DcuGreeting', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition on a routine of the compiled-only unit answered');
+  Check(GOk and GResultJson.ToLower.Contains('demodculib.dcu'),
+    'and its Location names the .dcu itself');
+  LTargetLine := -1;
+  LDcuUri := '';
+  if GOk then
+  begin
+    LRoot := TJSONObject.ParseJSONValue(GResultJson);
+    try
+      if LRoot is TJSONObject then
+      begin
+        LDcuUri := LRoot.GetValue<string>('uri', '');
+        LTargetLine := LRoot.GetValue<Integer>('range.start.line', -1);
+      end;
+    finally
+      LRoot.Free;
+    end;
+  end;
+  Check(LTargetLine >= 0, 'with a line into the generated text');
+
+  Check(Ask('pastree/dcuSource',
+    TJSONObject.Create.AddPair('textDocument',
+      TJSONObject.Create.AddPair('uri', LDcuUri))),
+    'pastree/dcuSource on that uri answered');
+  LText := '';
+  if GOk then
+  begin
+    LRoot := TJSONObject.ParseJSONValue(GResultJson);
+    try
+      if LRoot is TJSONObject then
+        LText := LRoot.GetValue<string>('text', '');
+    finally
+      LRoot.Free;
+    end;
+  end;
+  Check(LText.Contains('unit DemoDcuLib;') and LText.Contains('interface'),
+    'and the text is an interface-only unit named after the .dcu');
+  Check(LText.Contains('TDcuThing = class') and LText.Contains('DcuLimit'),
+    'declaring the type and the constant the source declared');
+  LLines := SplitLines(LText);
+  if (LTargetLine >= 0) and (LTargetLine <= High(LLines)) then
+    LLineText := LLines[LTargetLine]
+  else
+    LLineText := '';
+  Check(LLineText.Contains('DcuGreeting'),
+    Format('the Location''s line %d of that text is the routine''s header: "%s"',
+      [LTargetLine, LLineText.Trim]));
+
+  // The generated tab, as the RAD Studio client presents it: a didOpen under
+  // the .dcu uri carrying the generated text (the same the server would
+  // regenerate, so no rebuild), then a question from inside it.
+  SendDidOpenText(LDcuFile, LText);
+  FindPosInText(LText, 'read FCount', 'FCount', LLine, LChar);
+  Check(Ask('textDocument/definition',
+    PositionParams(LDcuFile, LLine, LChar)),
+    'definition from inside the generated text answered');
+  Check(GOk and GResultJson.ToLower.Contains('demodculib.dcu') and
+    not GResultJson.Contains(Format('"line":%d,', [LLine])),
+    'and lands on the field''s declaration, another line of the same text');
+  FindPosInText(LText, 'TDcuThing = class', 'TDcuThing', LLine, LChar);
+  Check(Ask('textDocument/references',
+    PositionParams(LDcuFile, LLine, LChar, True)),
+    'references from inside the generated text answered');
+  Check(GOk and GResultJson.Contains('DemoDcu.pas'),
+    'and finds the importer''s uses of the type');
+
+  // Not a .dcu of any compiler: the answer is an error that says so.
+  LBogus := TPath.Combine(TPath.GetTempPath, 'PasTreeSmokeBogus.dcu');
+  TFile.WriteAllBytes(LBogus, TBytes.Create(0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    10, 11, 12, 13, 14, 15));
+  try
+    Check(Ask('pastree/dcuSource',
+      TJSONObject.Create.AddPair('textDocument',
+        TJSONObject.Create.AddPair('uri', PathToLspUri(LBogus)))),
+      'pastree/dcuSource on a file that is no .dcu answered');
+    Check(not GOk and GError.Contains('could not be read'),
+      'and is an error naming the file and the reason: ' + GError);
+  finally
+    TFile.Delete(LBogus);
+  end;
+end;
+
 { 2b. pastree/findOverrides and pastree/findImplementations over
   fixtures\DemoHierarchy.pas - the two hierarchy commands of the RAD client.
 
@@ -2814,7 +2934,7 @@ begin
   LOptions := Default(TLspInitOptions);
   LOptions.ProjectFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
   LOptions.Platform := 'Win64';
-  LOptions.SearchPaths := [GFixtureDir];
+  LOptions.SearchPaths := [GFixtureDir, TPath.Combine(GFixtureDir, 'dcu32')];
   GOpened := nil;   // the new server starts with no documents
   Check(GClient.Start(LOptions), 'Start succeeded for the new configuration');
 
@@ -2943,6 +3063,7 @@ begin
       TestQueuedBeforeReady(GExe);
       TestNavigation;
       TestDefines;
+      TestDcuSource;
       TestNonAsciiPositions;
       TestBareInherited;
       TestHierarchy;

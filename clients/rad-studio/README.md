@@ -441,6 +441,69 @@ Two things LSP does not carry, and where they come from instead:
   re-reading the file, so an unsaved buffer's line numbers still match the
   text shown.
 
+### Compiled-only units: a read-only tab for a `.dcu` (0.44.0)
+
+Since PasTree 0.37.0 a unit with no `.pas` on any path is analyzed from its
+`.dcu` - the reader decodes the file, a printer turns its declarations into
+interface source, and that text goes through the ordinary pipeline
+(`docs/dcu-reader.md` in the PasTree repo). Every answer about such a unit
+names the `.dcu` and a line of that text: Ctrl+Click on a TeeChart type lands
+in `lib\win32\release\VCLTee.Chart.dcu` line 412. The IDE cannot open a
+`.dcu` as source, so the plugin shows the text itself.
+
+**How: a registered file system, not a temp file.** `PasTreeIdePlugin.DcuSource`
+registers an `IOTAFileSystem` (`IOTAModuleServices.AddFileSystem`) and creates
+the module through `CreateModule` with a creator whose `GetFileSystem` names
+it and whose `GetExisting` is True, so the IDE reads the text through the file
+system instead of asking for a skeleton. The module is named `<dcu path>.pas`
+- `VCLTee.Chart.dcu.pas` - which buys the Pascal highlighter (the IDE picks
+the editor by extension) and still says on the tab what it is; the mapping
+back to the `.dcu` is a suffix rule in `PasTreeIdePlugin.DcuNames`, applied
+once, in `PathToLspUri`, so every request the tab makes (definition, hover,
+references, the outline, its own `didOpen`) reaches the server under the
+`.dcu` URI the server knows the unit by. The file system answers
+`IsReadonly` True and the buffer gets `IsReadOnly` besides, so the editor
+refuses edits the way it does for a read-only file. Owner nil: the tab joins
+no project.
+
+A file in `%TEMP%` was the alternative and lost three ways: it lands in
+Recent Files, the server sees an unknown `.pas` outside the closure (so
+nothing could be asked from inside the tab), and somebody has to delete it.
+The unnamed-module route (`GetUnnamed`) prompts to save on close.
+
+**The text comes from the server** - `pastree/dcuSource`, one request per
+tab, answered through the very routine the analysis reads the unit with
+(`TPasSourceManager.LoadFileTolerant`), so the line a Location names is a line
+of what is shown. The package cannot generate it: it must not link PasTree
+(Win32 against a Win64-only library, the reason the analysis is a process).
+The plugin adds nothing to the text; PasTree's own header comment (the source
+`.dcu`, the types it could not resolve, the constants it could not lay out) is
+all a reader gets.
+
+**A configuration change closes the tabs.** Win32 and Win64 print different
+values (Extended, pointer-sized constants), and a platform switch may resolve
+the same unit to a different `.dcu` under a different lib directory or to a
+`.pas`. So when a project's server is replaced
+(`LspSetSessionRestartListener`: platform, configuration, a re-saved
+`.dproj`) every generated tab is closed and its text forgotten, with one Build
+line saying so; the next navigation regenerates from whatever the new server
+resolves. Closed rather than refreshed because the old line numbers mean
+nothing in a different file.
+
+**A `.dcu` the reader refuses** (a compiler before Delphi 11, a platform other
+than Win32/Win64, a truncated file) goes to the Build tab with the reader's
+own words: `Foo.dcu: no source to show - Foo.dcu could not be read: Delphi
+10.4 is not supported (Delphi 11 to 13 are)`. The importer's `F1027` already
+says the same in the diagnostics; this is its twin for the click.
+
+Both navigation paths reach it: the mouse override and the menu items go
+through `NavigateToPosition`, which detects either spelling of a `.dcu` name
+and makes the tab first; the Code Insight manager's `AsyncGotoDefinitionEx`
+does the same and hands the IDE the module name instead of the `.dcu`, so the
+IDE's own navigation finds the open module. Alt+Left/Alt+Right work across
+it: a history entry captured in such a tab stores the module name, and a tab
+closed by a configuration change is regenerated when the entry is replayed.
+
 ### Diagnostics
 
 Logged only on failure (no active project, cursor's file not analyzed, no
@@ -840,6 +903,14 @@ what lets `tests/` drive them against a real server outside the IDE:
   Overrides, Implementations, Descendants (painted as a nested tree),
   Assignments, Creations, Destructions - six group-wide requests and their
   result tabs, over the same ResultRows the references tab uses.
+- `PasTreeIdePlugin.DcuNames.pas` - the `Foo.dcu` <-> `Foo.dcu.pas` naming
+  rule for a compiled unit's generated tab, and the cache of its text; no
+  ToolsAPI, so LspClient (which maps the name in `PathToLspUri`) and
+  DcuSource can both use it.
+- `PasTreeIdePlugin.DcuSource.pas` - the registered `IOTAFileSystem` and the
+  module creator behind those tabs, `EnsureDcuModule` (one
+  `pastree/dcuSource` per tab), and the restart listener that closes them
+  when the project's server is replaced.
 - `PasTreeIdePlugin.GotoDeclaration.pas` - the Ctrl+Click override plus the
   shared `ResolveAndNavigate`/`ExecuteGotoDeclaration` used by both Go to
   Declaration entry points: mouse event interception, cursor

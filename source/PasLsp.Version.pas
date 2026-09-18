@@ -181,7 +181,15 @@ const
   /// patched copy of a library unit shadows the original for every importer.
   /// Loud rather than silent - the server calls methods that do not exist
   /// before it.
-  cMinPasTreeVersion = '0.31.0';
+  ///
+  /// 0.38.0 (2026-09-18): the .dcu reader (0.37.0) and the values it prints
+  /// (0.38.0) - TPasSourceManager lists .dcu files on the search paths,
+  /// falls back to one when a unit has no .pas, and LoadFileTolerant of a
+  /// .dcu path is the generated interface text pastree/dcuSource serves.
+  /// SILENT rather than loud without this floor: an older PasTree compiles
+  /// the server fine and simply keeps answering F1027 for every compiled-only
+  /// unit, and dcuSource would return the file's bytes decoded as text.
+  cMinPasTreeVersion = '0.38.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
