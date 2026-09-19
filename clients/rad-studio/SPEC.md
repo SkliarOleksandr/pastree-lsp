@@ -1267,16 +1267,21 @@ the alternative is a wait the user did not ask for.
    still costs no server a rebuild. What the broadcast costs is the JSON and
    the pipe per server for a real edit.
 3. ~~Group-wide Find References~~ **Done, 0.32.0.** `LspReferencesInGroup`
-   asks every session whose server is already up - the owning one first, since
-   it is the only one allowed to start - and merges the answers through
-   `MergeHits`, which sorts by file, row and column and drops exact
-   duplicates: a unit two projects compile is analyzed twice, so every use
-   inside it comes back from both servers and would otherwise be listed twice.
-   A server that does not have the file in its closure is the ordinary case,
-   not a fault, so a failure is reported only when EVERY target failed. The
-   title says what was covered - `across 3 of 9 projects` - because a project
-   whose analysis has never started is not started for a search: nine closure
-   builds on one keystroke is a hang, not a search.
+   asks every project of the group - the owning one first - and merges the
+   answers through `MergeHits`, which sorts by file, row and column and drops
+   exact duplicates: a unit two projects compile is analyzed twice, so every
+   use inside it comes back from both servers and would otherwise be listed
+   twice. A server that does not have the file in its closure is the ordinary
+   case, not a fault, so a failure is reported only when EVERY target failed.
+   The title says what was covered - `across 3 of 9 projects`. Until 0.45.2
+   only the servers already up were asked, on the reasoning that nine closure
+   builds on one keystroke is a hang, not a search; on a nine-project group
+   where one project had been touched that searched one project (found on the
+   Go To group tab, 2026-09-18). Now `GroupTargets` asks all of them, starting
+   a cold project's server ON DEMAND - the first such search on a cold group
+   waits for the analyses under the wait dialog; warming every server at group
+   open was declined (the machine is the user's), so later searches find them
+   up only because the first one started them.
 
    **Group-wide Rename is deliberately NOT this.** Deferred (Alex, 2026-09-07)
    until the rename itself is reworked. It is a plan the user approves, and a

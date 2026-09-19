@@ -418,6 +418,49 @@ type
     const ASymbols: TArray<TLspWorkspaceSymbol>; const AError: string);
 
   /// <summary>
+  /// One row of a Go To list (pastree/outline) - PasTree's TPasOutlineEntry
+  /// field for field, spelled here because this package must not link
+  /// PasTree (see the .dpk). Kind and Section are the server's WORDS
+  /// ('type', 'routine', 'include'...; 'interface', 'implementation'...),
+  /// never ordinals. A MODULE row carries its position (Line/Col 1-based,
+  /// IDE coordinates as they are - PasTree and the editor agree here) and
+  /// UnitId = -1; a PROJECT row carries UnitId/Sym/Node and NO position
+  /// (Line = 0): LspOutlineTarget places it when it is chosen. ProjectFile
+  /// is the .dproj whose server answered - what routes the target request
+  /// back to that server in a group.
+  /// </summary>
+  TLspOutlineRow = record
+    Kind: string;
+    Head: string;
+    Owner: string;
+    Name: string;
+    Detail: string;
+    Section: string;
+    IsImpl: Boolean;
+    FilePath: string;
+    Line: Integer;
+    Col: Integer;
+    UnitId: Integer;
+    Sym: Integer;
+    Node: Integer;
+    UnitName: string;
+    ProjectFile: string;
+  end;
+
+  TLspOutlineProc = reference to procedure(ASuccess: Boolean;
+    const ARows: TArray<TLspOutlineRow>; const AError: string);
+
+  /// <summary>
+  /// The group-wide form, delivered PROGRESSIVELY: once after every
+  /// project's answer, with the merged rows so far, AAnswered projects in
+  /// them of AInGroup, and APending still to answer (0 on the last call).
+  /// ASuccess is False only when nothing has answered successfully yet.
+  /// </summary>
+  TLspOutlineGroupProc = reference to procedure(ASuccess: Boolean;
+    const ARows: TArray<TLspOutlineRow>; AAnswered, AInGroup, APending: Integer;
+    const AError: string);
+
+  /// <summary>
   /// One node of a document's outline (textDocument/documentSymbol), in IDE
   /// coordinates. Children are the type's members, one level deep - the
   /// same shape the server builds.
@@ -499,19 +542,23 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
 
 /// <summary>
-/// The same question asked of EVERY project of the group whose analysis is
-/// already running, with the answers merged and de-duplicated by file, row and
-/// column - a site that two projects both compile is reported once.
+/// The same question asked of EVERY project of the group, with the answers
+/// merged and de-duplicated by file, row and column - a site that two
+/// projects both compile is reported once.
 ///
 /// A closure is one project, so a unit shared by two projects of a group has
 /// its uses counted twice over, once per closure, and each server sees only
 /// its own. Asking one of them is a partial answer that looks complete, which
 /// is the failure mode this exists to remove.
 ///
-/// A project whose server has never started is NOT started for this: nine
-/// closure builds on one keystroke is not a search, it is a hang. Those
-/// projects are simply not searched, and the count handed to AOnDone is how
-/// the caller says so.
+/// EVERY project, cold ones included (0.45.2, GroupTargets): a search that
+/// covers only the projects the user happened to touch is the partial
+/// answer again, in a different coat. A cold project's server is started BY
+/// the search, on demand - never at group open (declined: the machine is
+/// the user's) - so the first group-wide search on a cold group waits for
+/// the analyses under the wait dialog, and every later one finds the
+/// servers up. The count handed to AOnDone says how many answered; one that
+/// failed (the file not in its closure) is the ordinary case, not a fault.
 /// </summary>
 procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
   AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
@@ -519,9 +566,9 @@ procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
 /// <summary>
 /// One Find All request (AMethod is the server's name - pastree/findOverrides,
 /// findImplementations, findDescendants, findAssignments, findCreations,
-/// findDestructions) across the project group: every project whose analysis
-/// is already running is asked (the owner of the file first and
-/// unconditionally), the answers are merged and de-duplicated by position,
+/// findDestructions) across the project group: every project is asked (the
+/// owner of the file first and unconditionally - see LspReferencesInGroup
+/// for the cold ones), the answers are merged and de-duplicated by position,
 /// with the owner's name and subject verdict standing for the whole. The
 /// group matters here as much as for references: a descendant class in a
 /// unit only ANOTHER project compiles is invisible to the owner's closure.
@@ -671,6 +718,51 @@ procedure LspIdleSync(const APaths: TArray<string>);
 /// </summary>
 procedure LspWorkspaceSymbols(const AQuery: string;
   const AOnDone: TLspWorkspaceSymbolsProc);
+
+/// <summary>
+/// The Go To picker's MODULE list (pastree/outline, scope "module"): every
+/// declaration and routine body of AFileName in source order plus the
+/// section landmarks, each with its position. Asked of the file's owner.
+/// </summary>
+procedure LspOutlineModule(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+
+/// <summary>
+/// The picker's PROJECT list (scope "project"): every declaration of every
+/// unit of the project that owns AFileName, without positions. Asked of the
+/// owner alone.
+/// </summary>
+procedure LspOutlineProject(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+
+/// <summary>
+/// The picker's GROUP list: the PROJECT list of EVERY project of the group
+/// (the owner of AFileName first), merged, delivered progressively as the
+/// servers answer. A unit two projects both compile is listed once - the
+/// owner's rows stand, de-duplicated by unit file, owner, name and head
+/// word. Cold projects are started for this like for every group-wide
+/// question (GroupTargets - this tab was where the ready-only rule was seen
+/// to fail: Alex, 2026-09-18, a nine-project group listing one project's
+/// declarations), and the answers arrive one project at a time as each
+/// analysis finishes, so a cold group fills in rather than hangs.
+/// </summary>
+procedure LspOutlineGroup(const AFileName: string;
+  const AOnDone: TLspOutlineGroupProc);
+
+/// <summary>
+/// Where a PROJECT row lands (pastree/outlineTarget) - asked of the server
+/// that listed it (ARow.ProjectFile). Zero or one hit; zero means the
+/// declaration could not be placed and the picker should stay open.
+/// </summary>
+procedure LspOutlineTarget(const ARow: TLspOutlineRow;
+  const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// The .dproj of the project that would answer for AFileName - the owner,
+/// or the active project for a file no project claims. '' without a pool.
+/// What the picker names its Project tab after.
+/// </summary>
+function LspOwningProjectFile(const AFileName: string): string;
 
 /// <summary>
 /// Asks which call encloses an IDE position and for its target's
@@ -1044,6 +1136,13 @@ type
       const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
       const AOnDone: TLspWorkspaceSymbolsProc);
+    /// <summary>pastree/outline - AScope is 'module' (AFileName's own list)
+    /// or 'project' (AFileName ignored). See LspOutlineModule.</summary>
+    procedure Outline(const AScope, AFileName: string;
+      const AOnDone: TLspOutlineProc);
+    /// <summary>pastree/outlineTarget for a project row this server listed.</summary>
+    procedure OutlineTarget(const ARow: TLspOutlineRow;
+      const AOnDone: TLspHitsProc);
     procedure DocumentSymbols(const AFileName: string;
       const AOnDone: TLspDocSymbolsProc);
     function TryGetSentText(const APath: string; out AText: string): Boolean;
@@ -1113,6 +1212,19 @@ type
     { Every session with a server up and past its handshake - the ones a
       group-wide search can ask without starting anything. }
     function ReadySessions: TArray<TLspSession>;
+    { The session whose project file is AProjectFile, nil when the pool has
+      none - never creates one. How a Go To row finds the server that
+      listed it. }
+    function SessionByProjectFile(const AProjectFile: string): TLspSession;
+    { The sessions a GROUP-WIDE question goes to: AOwner first, then one per
+      other project of the group, created here if need be - the request then
+      starts its server, ON DEMAND and only then (no warm-up at group open).
+      Every project, not just the running ones (Alex,
+      2026-09-18: "the point is that it finds everything there is, not only
+      what the user happened to open"). Until 0.45.1 this was ReadySessions,
+      and a group of nine with one project touched searched one project
+      while its title said so in small print. }
+    function GroupTargets(const AOwner: TLspSession): TArray<TLspSession>;
     { The session for AProject, created if this is the first time it is asked
       for. nil only for a nil project. }
     function SessionFor(const AProject: IOTAProject): TLspSession;
@@ -3203,6 +3315,117 @@ begin
   FPendingWorkspace := LIssuedId;
 end;
 
+function ParseOutlineRows(AResult: TJSONValue;
+  const AProjectFile: string): TArray<TLspOutlineRow>;
+var
+  LItems: TJSONArray;
+  LValue: TJSONValue;
+  LObj: TJSONObject;
+  LRow: TLspOutlineRow;
+  LCount: Integer;
+  LUri: string;
+begin
+  Result := nil;
+  if not (AResult is TJSONObject) or
+     not TJSONObject(AResult).TryGetValue<TJSONArray>('rows', LItems) then
+    Exit;
+  SetLength(Result, LItems.Count);
+  LCount := 0;
+  for LValue in LItems do
+  begin
+    if not (LValue is TJSONObject) then
+      Continue;
+    LObj := TJSONObject(LValue);
+    LRow := Default(TLspOutlineRow);
+    LRow.Kind := LObj.GetValue<string>('kind', '');
+    if LRow.Kind = '' then
+      Continue;
+    LRow.Head := LObj.GetValue<string>('head', '');
+    LRow.Owner := LObj.GetValue<string>('owner', '');
+    LRow.Name := LObj.GetValue<string>('name', '');
+    LRow.Detail := LObj.GetValue<string>('detail', '');
+    LRow.Section := LObj.GetValue<string>('section', '');
+    LRow.IsImpl := LObj.GetValue<Boolean>('isImpl', False);
+    LUri := LObj.GetValue<string>('uri', '');
+    if LUri <> '' then
+      LRow.FilePath := LspUriToPath(LUri);
+    // PasTree's positions are 1-based like the editor's: no conversion.
+    LRow.Line := LObj.GetValue<Integer>('line', 0);
+    LRow.Col := LObj.GetValue<Integer>('col', 0);
+    LRow.UnitId := LObj.GetValue<Integer>('unitId', -1);
+    LRow.Sym := LObj.GetValue<Integer>('sym', -1);
+    LRow.Node := LObj.GetValue<Integer>('node', -1);
+    LRow.UnitName := LObj.GetValue<string>('unitName', '');
+    LRow.ProjectFile := AProjectFile;
+    Result[LCount] := LRow;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
+procedure TLspSession.Outline(const AScope, AFileName: string;
+  const AOnDone: TLspOutlineProc);
+var
+  LParams, LDoc: TJSONObject;
+  LProjectFile: string;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+  // The module list is read off the analyzed tree of the LIVE buffer, so
+  // the edits since the last sync must reach the server first - Ctrl+G
+  // right after typing a routine should list it.
+  FDocs.Sync;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('scope', AScope);
+  if AScope = 'module' then
+  begin
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFileName));
+    LParams.AddPair('textDocument', LDoc);
+  end;
+  LProjectFile := FProjectFile;
+  FClient.Request('pastree/outline', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if not ASuccess then
+        AOnDone(False, nil, AError)
+      else if AResult is TJSONObject then
+        AOnDone(True, ParseOutlineRows(AResult, LProjectFile), '')
+      else
+        // null: the file is not in this project's closure (or the analysis
+        // has nothing yet) - an empty list, not a failure.
+        AOnDone(True, nil, '');
+    end);
+end;
+
+procedure TLspSession.OutlineTarget(const ARow: TLspOutlineRow;
+  const AOnDone: TLspHitsProc);
+var
+  LParams: TJSONObject;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, nil, 'no LSP server available');
+    Exit;
+  end;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('kind', ARow.Kind);
+  LParams.AddPair('unitId', TJSONNumber.Create(ARow.UnitId));
+  LParams.AddPair('sym', TJSONNumber.Create(ARow.Sym));
+  LParams.AddPair('node', TJSONNumber.Create(ARow.Node));
+  FClient.Request('pastree/outlineTarget', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseHits(AResult), '')
+      else
+        AOnDone(False, nil, AError);
+    end);
+end;
+
 procedure TLspSession.SyncDocuments;
 begin
   // A pooled session exists before it has a client: it is created the moment
@@ -3576,6 +3799,43 @@ begin
       Result := Result + [FSessions[LIdx]];
 end;
 
+function TLspSessionPool.SessionByProjectFile(
+  const AProjectFile: string): TLspSession;
+var
+  LIdx: Integer;
+begin
+  Result := nil;
+  if FDestroying then
+    Exit;
+  LIdx := IndexOf(AProjectFile);
+  if LIdx >= 0 then
+    Result := FSessions[LIdx];
+end;
+
+function TLspSessionPool.GroupTargets(
+  const AOwner: TLspSession): TArray<TLspSession>;
+var
+  LGroup: IOTAProjectGroup;
+  LSession: TLspSession;
+  LIdx: Integer;
+begin
+  Result := nil;
+  if FDestroying then
+    Exit;
+  if Assigned(AOwner) then
+    Result := [AOwner];
+  LGroup := GetProjectGroup;
+  if not Assigned(LGroup) then
+    Exit;
+  for LIdx := 0 to LGroup.ProjectCount - 1 do
+  begin
+    LSession := SessionFor(LGroup.Projects[LIdx]);
+    if Assigned(LSession) and
+       not TArray.Contains<TLspSession>(Result, LSession) then
+      Result := Result + [LSession];
+  end;
+end;
+
 procedure TLspSessionPool.ForEach(const AProc: TProc<TLspSession>);
 var
   LIdx: Integer;
@@ -3637,6 +3897,10 @@ begin
   LSession := GPool.Activate;
   if Assigned(LSession) then
     LSession.ProjectOpened;
+  // ONLY the active project's. The other projects' servers start ON DEMAND,
+  // at the first group-wide search that needs them (GroupTargets) - not
+  // here: warming nine servers on every group open was considered and
+  // declined (Alex, 2026-09-18), the machine is the user's.
 end;
 
 procedure LspFilesChangedOnDisk(const APaths: TArray<string>);
@@ -3891,13 +4155,10 @@ begin
   else
     LInGroup := 1;
 
-  // The owning session FIRST and unconditionally - it is the one that can
-  // answer at all, since the position is in a file of its project, and it is
-  // the one allowed to start a server. The rest are the already-running ones.
-  LTargets := [LOwner];
-  for LSession in GPool.ReadySessions do
-    if LSession <> LOwner then
-      LTargets := LTargets + [LSession];
+  // The owning session FIRST - it is the one that can answer at all, since
+  // the position is in a file of its project - then every other project of
+  // the group, cold ones started by the request (see GroupTargets).
+  LTargets := GPool.GroupTargets(LOwner);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;
@@ -3992,10 +4253,8 @@ begin
   else
     LInGroup := 1;
 
-  LTargets := [LOwner];
-  for LSession in GPool.ReadySessions do
-    if LSession <> LOwner then
-      LTargets := LTargets + [LSession];
+  // Every project of the group, the owner first - see GroupTargets.
+  LTargets := GPool.GroupTargets(LOwner);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;
@@ -4159,9 +4418,9 @@ end;
 
 { THE WHOLE GROUP, the shape of LspReferencesInGroup: the owning session
   first and unconditionally - the position is in a file of its project, so
-  it is the one that can answer, and the one allowed to start a server - and
-  then every other project's server that is already running, asked the same
-  question at the same position. A unit shared between projects is in the
+  it is the one that can answer - and then every other project of the group
+  (GroupTargets, cold servers started), asked the same question at the same
+  position. A unit shared between projects is in the
   closure of each, so each plans the rename of the symbol declared there
   across ITS closure, and the union is the rename across the group. A server
   without that file answers with an error, which is the ordinary case here
@@ -4204,10 +4463,8 @@ begin
   else
     LInGroup := 1;
 
-  LTargets := [LOwner];
-  for LSession in GPool.ReadySessions do
-    if LSession <> LOwner then
-      LTargets := LTargets + [LSession];
+  // Every project of the group, the owner first - see GroupTargets.
+  LTargets := GPool.GroupTargets(LOwner);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;
@@ -4446,6 +4703,202 @@ begin
     Exit;
   end;
   GSession.WorkspaceSymbols(AQuery, AOnDone);
+end;
+
+procedure LspOutlineModule(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Outline('module', AFileName, AOnDone);
+end;
+
+procedure LspOutlineProject(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Outline('project', AFileName, AOnDone);
+end;
+
+{ The group merge: rows in the order the servers answered (the owner's list
+  first), a row dropped when an earlier one already names the same
+  declaration - same unit file, owner, name and head word. A unit two
+  projects compile is the case; the two servers agree on those four fields
+  because they read the same source. Landmarks (module header, include
+  sites) de-duplicate the same way, by file and name. }
+function MergeOutlineRows(
+  const ARows: TArray<TLspOutlineRow>): TArray<TLspOutlineRow>;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LIdx: Integer;
+  LKey: string;
+begin
+  Result := nil;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for LIdx := 0 to High(ARows) do
+      with ARows[LIdx] do
+      begin
+        LKey := LowerCase(FilePath) + #1 + LowerCase(Owner) + #1 +
+          LowerCase(Name) + #1 + Head + #1 + Kind + #1 + IntToStr(Node);
+        if LSeen.ContainsKey(LKey) then
+          Continue;
+        LSeen.Add(LKey, True);
+        Result := Result + [ARows[LIdx]];
+      end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+type
+  { The state one group-wide outline request shares between its per-server
+    callbacks. An object rather than captured locals because the slot index
+    has to be captured BY VALUE per server - an anonymous method over the
+    loop variable sees its final value - and Delphi's closures capture
+    variables, not values; a method taking the index as a parameter is the
+    idiom. Frees itself when the last answer is in. }
+  TOutlineGather = class
+  private
+    FSlots: TArray<TArray<TLspOutlineRow>>;
+    FOutstanding, FAnswered, FInGroup: Integer;
+    FFirstError: string;
+    FOnDone: TLspOutlineGroupProc;
+  public
+    constructor Create(ATargets, AInGroup: Integer;
+      const AOnDone: TLspOutlineGroupProc);
+    function SlotProc(AIdx: Integer): TLspOutlineProc;
+  end;
+
+constructor TOutlineGather.Create(ATargets, AInGroup: Integer;
+  const AOnDone: TLspOutlineGroupProc);
+begin
+  inherited Create;
+  SetLength(FSlots, ATargets);
+  FOutstanding := ATargets;
+  FInGroup := AInGroup;
+  FOnDone := AOnDone;
+end;
+
+function TOutlineGather.SlotProc(AIdx: Integer): TLspOutlineProc;
+begin
+  Result :=
+    procedure(ASuccess: Boolean; const ARows: TArray<TLspOutlineRow>;
+      const AError: string)
+    var
+      LAll: TArray<TLspOutlineRow>;
+      LIdx: Integer;
+      LOnDone: TLspOutlineGroupProc;
+      LAnswered, LInGroup, LPending: Integer;
+      LError: string;
+    begin
+      if ASuccess then
+      begin
+        Inc(FAnswered);
+        FSlots[AIdx] := ARows;
+      end
+      else if FFirstError = '' then
+        // Most projects of a group answer for most requests here (the
+        // project list needs no file of the caller's), so a failure is
+        // still only worth reporting when every server failed.
+        FFirstError := AError;
+      Dec(FOutstanding);
+      // The slots keep the owner-first order whatever the answer order was,
+      // so the merge keeps the owner's copy of a shared unit. Reported after
+      // EVERY answer: a cold project's server takes its analysis time, and
+      // the rows already in are worth showing meanwhile.
+      LAll := nil;
+      for LIdx := 0 to High(FSlots) do
+        LAll := LAll + FSlots[LIdx];
+      LOnDone := FOnDone;
+      LAnswered := FAnswered;
+      LInGroup := FInGroup;
+      LError := FFirstError;
+      LPending := FOutstanding;
+      if LPending = 0 then
+        Free;   // nothing below reads a field
+      if LAnswered = 0 then
+        LOnDone(False, nil, 0, LInGroup, LPending, LError)
+      else
+        LOnDone(True, MergeOutlineRows(LAll), LAnswered, LInGroup, LPending,
+          '');
+    end;
+end;
+
+procedure LspOutlineGroup(const AFileName: string;
+  const AOnDone: TLspOutlineGroupProc);
+var
+  LOwner: TLspSession;
+  LTargets: TArray<TLspSession>;
+  LSession: TLspSession;
+  LGroup: IOTAProjectGroup;
+  LInGroup, LIdx: Integer;
+  LGather: TOutlineGather;
+begin
+  LOwner := SessionForRequest(AFileName);
+  if LOwner = nil then
+  begin
+    AOnDone(False, nil, 0, 0, 0, 'LSP session not initialized');
+    Exit;
+  end;
+  LGroup := GetProjectGroup;
+  // The owner first, so the merge keeps its rows over another project's
+  // copy of a shared unit; then EVERY other project of the group, its
+  // session created and its server started by the request itself (Outline
+  // -> EnsureSession) - see the interface comment for why this one fans out
+  // to cold projects where Find References does not.
+  LTargets := [LOwner];
+  if Assigned(LGroup) then
+    for LIdx := 0 to LGroup.ProjectCount - 1 do
+    begin
+      LSession := GPool.SessionFor(LGroup.Projects[LIdx]);
+      if Assigned(LSession) and (LSession <> LOwner) and
+         not TArray.Contains<TLspSession>(LTargets, LSession) then
+        LTargets := LTargets + [LSession];
+    end;
+  LInGroup := Length(LTargets);
+  LGather := TOutlineGather.Create(Length(LTargets), LInGroup, AOnDone);
+  for LIdx := 0 to High(LTargets) do
+    LTargets[LIdx].Outline('project', AFileName, LGather.SlotProc(LIdx));
+end;
+
+procedure LspOutlineTarget(const ARow: TLspOutlineRow;
+  const AOnDone: TLspHitsProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := nil;
+  if Assigned(GPool) then
+    LSession := GPool.SessionByProjectFile(ARow.ProjectFile);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'the project that listed this row is no longer open');
+    Exit;
+  end;
+  LSession.OutlineTarget(ARow, AOnDone);
+end;
+
+function LspOwningProjectFile(const AFileName: string): string;
+var
+  LSession: TLspSession;
+begin
+  Result := '';
+  LSession := SessionForRequest(AFileName);
+  if Assigned(LSession) then
+    Result := LSession.ProjectFile;
 end;
 
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;

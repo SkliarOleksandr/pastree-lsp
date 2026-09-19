@@ -106,6 +106,31 @@ declared as exactly that class. Both are about the static type, so an instance
 created through a descendant, or freed through an ancestor-typed variable or by
 an owner, is not a row.
 
+### Go To (Ctrl+G)
+
+A picker over three lists, one filter box above them: the current unit's
+outline (every declaration and every routine body in source order, plus the
+`unit`, `interface`, `uses`, `implementation` and `include` landmarks), the
+declarations of every unit of the project that owns the file, and the same
+across the whole project group. Type to filter, Enter or a double-click
+jumps, Up/Down move the list while you keep typing, Ctrl+Tab flips the tab
+with the filter intact. A filter that is only digits adds a `line N` row on
+top of the unit list, so the same box is go-to-line. Opened with an empty
+box, the unit tab selects the row nearest above the caret - "where am I".
+
+The boxes at the bottom narrow the lists by kind (types, vars and fields,
+consts, routines, properties) and hide or show the `include` rows; those and
+the window size are remembered. The unit list is read from the live buffer,
+so a routine typed a second ago is in it. The project and group lists load
+on the first switch to their tab and carry no line numbers: choosing a row
+asks the server that listed it where the declaration is, and the dialog
+closes on the answer. The group list covers every project of the group,
+starting the servers that are not running yet: it fills in one project at a
+time as each analysis finishes, the status line counts the projects in and
+still loading, the mouse cursor shows the wait, and a unit two projects share
+is listed once. The jump is history-aware, like every other navigation here. Off in
+the settings, Ctrl+G goes back to whatever your keymap binds it to.
+
 ### IDE Insight symbol search (Ctrl+.)
 
 Adds a "PasTree symbols" category to the IDE Insight search box, holding every
@@ -120,7 +145,7 @@ dialog is what kicks the prefetch off.
 ### Rename (Ctrl+Shift+E)
 
 Renames a routine, type, field, variable or parameter across every project of
-the group whose server is running, applied and saved at once - files you have
+the group, applied and saved at once - files you have
 open change in their buffers (Ctrl+Z works there), files nobody has open are
 written on disk in their own encoding - without opening a tab for any of them.
 Afterwards it lists every edit it made in a Messages tab shaped like Find

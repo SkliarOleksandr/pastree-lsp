@@ -160,6 +160,27 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 2
       end
+      object lblGoToHint: TLabel
+        Left = 35
+        Top = 271
+        Width = 405
+        Height = 45
+        Caption =
+          'A picker over the declarations of the current unit, the project' +
+          ' and the whole project group - type a name or a line number. Off' +
+          ' hands Ctrl+G back to the IDE.'
+        WordWrap = True
+      end
+      object chkGoTo: TCheckBox
+        Left = 16
+        Top = 250
+        Width = 430
+        Height = 17
+        Caption = 'Go To (Ctrl+G)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 3
+      end
     end
     object tsEditing: TTabSheet
       Caption = 'Editing'

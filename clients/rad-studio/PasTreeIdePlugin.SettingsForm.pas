@@ -72,6 +72,8 @@ type
     lblDeclImplToggleHint: TLabel;
     chkFindAll: TCheckBox;
     lblFindAllHint: TLabel;
+    chkGoTo: TCheckBox;
+    lblGoToHint: TLabel;
     chkRename: TCheckBox;
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
@@ -199,6 +201,7 @@ begin
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
+    LForm.chkGoTo.Checked := LSettings.EnableGoTo;
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
@@ -214,6 +217,7 @@ begin
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;
+    LSettings.EnableGoTo := LForm.chkGoTo.Checked;
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
     SaveSettings(LSettings);

@@ -115,6 +115,24 @@ function FindAllEnabled: Boolean;
 function ClassCompleteEnabled: Boolean;
 
 /// <summary>
+/// Whether Ctrl+G is ours - the Go To picker (PasTreeIdePlugin.GoToPicker). False
+/// hands the keystroke back to the IDE, whatever the user's keymap binds it
+/// to: the same off-switch shape as the decl/impl toggle.
+/// </summary>
+function GoToEnabled: Boolean;
+
+/// <summary>
+/// The Go To picker's own remembered state - window size, the kind boxes -
+/// as named integers under the same registry key as the switches. THE ONE
+/// EXCEPTION to "written only by the dialog": the picker writes these when
+/// it closes, because a size the user dragged out is a preference too, and
+/// asking for it in the settings dialog would be absurd. ADefault answers
+/// for a value never written or unreadable.
+/// </summary>
+function ReadPickerValue(const AName: string; ADefault: Integer): Integer;
+procedure WritePickerValue(const AName: string; AValue: Integer);
+
+/// <summary>
 /// Whether Enter after an unclosed block opener inserts the closer (block
 /// completion - PasTreeIdePlugin.BlockClose). False stops the plugin from
 /// even asking the server, and Enter is never swallowed either way.
@@ -177,6 +195,7 @@ type
     EnableFindAll: Boolean;
     EnableBlockCompletion: Boolean;
     EnableClassComplete: Boolean;
+    EnableGoTo: Boolean;
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
   end;
@@ -208,6 +227,7 @@ const
   cValueFindAll = 'EnableFindAll';
   cValueBlockCompletion = 'EnableBlockCompletion';
   cValueClassComplete = 'EnableClassComplete';
+  cValueGoTo = 'EnableGoTo';
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
 
@@ -301,6 +321,7 @@ begin
   Result.EnableFindAll := True;
   Result.EnableBlockCompletion := True;
   Result.EnableClassComplete := True;
+  Result.EnableGoTo := True;
   Result.EnableLogging := True;
   // See AdvancedLoggingEnabled: the one default that is False.
   Result.AdvancedLogging := False;
@@ -329,6 +350,7 @@ begin
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
       Result.EnableClassComplete :=
         ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
+      Result.EnableGoTo := ReadFlag(LReg, cValueGoTo, Result.EnableGoTo);
       Result.EnableLogging :=
         ReadFlag(LReg, cValueLogging, Result.EnableLogging);
       Result.AdvancedLogging :=
@@ -374,6 +396,7 @@ begin
           Ord(ASettings.EnableBlockCompletion));
         LReg.WriteInteger(cValueClassComplete,
           Ord(ASettings.EnableClassComplete));
+        LReg.WriteInteger(cValueGoTo, Ord(ASettings.EnableGoTo));
         LReg.WriteInteger(cValueLogging, Ord(ASettings.EnableLogging));
         LReg.WriteInteger(cValueAdvancedLogging,
           Ord(ASettings.AdvancedLogging));
@@ -436,6 +459,57 @@ end;
 function ClassCompleteEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableClassComplete;
+end;
+
+function GoToEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableGoTo;
+end;
+
+function ReadPickerValue(const AName: string; ADefault: Integer): Integer;
+var
+  LReg: TRegistry;
+  LKey: string;
+begin
+  Result := ADefault;
+  LKey := SettingsRegistryKey;
+  if LKey = '' then
+    Exit;
+  LReg := TRegistry.Create(KEY_READ);
+  try
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+      if LReg.OpenKeyReadOnly(LKey) and LReg.ValueExists(AName) then
+        Result := LReg.ReadInteger(AName);
+    except
+      Result := ADefault;
+    end;
+  finally
+    LReg.Free;
+  end;
+end;
+
+procedure WritePickerValue(const AName: string; AValue: Integer);
+var
+  LReg: TRegistry;
+  LKey: string;
+begin
+  LKey := SettingsRegistryKey;
+  if LKey = '' then
+    Exit;
+  LReg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+      if LReg.OpenKey(LKey, True) then
+        LReg.WriteInteger(AName, AValue);
+    except
+      // As for SaveSettings: a picker size that does not survive a restart
+      // is not worth an exception into the IDE.
+    end;
+  finally
+    LReg.Free;
+  end;
 end;
 
 function LoggingEnabled: Boolean;

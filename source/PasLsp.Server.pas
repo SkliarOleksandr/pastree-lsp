@@ -49,6 +49,7 @@ uses
   System.Classes,
   System.Generics.Collections,
   System.Generics.Defaults,
+  System.Math,
   System.JSON,
   System.IOUtils,
   System.Hash,
@@ -62,6 +63,7 @@ uses
   PasTree.Sema.Project,
   PasTree.Sema.Async,
   PasTree.Sema.Nav,
+  PasTree.Outline,
   PasLsp.Protocol,
   PasLsp.Documents,
   PasLsp.Completion,
@@ -303,6 +305,8 @@ type
     function HandleFindDefines(const AMsg: TLspIncoming): string;
     function HandleDefinesAt(const AMsg: TLspIncoming): string;
     function HandleDcuSource(const AMsg: TLspIncoming): string;
+    function HandleOutline(const AMsg: TLspIncoming): string;
+    function HandleOutlineTarget(const AMsg: TLspIncoming): string;
     function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
       out APath: string; out AMid, APasLine, APasCol: Integer;
       out AReply: string): Boolean;
@@ -3864,6 +3868,219 @@ begin
        JsonQuote(LText)]));
 end;
 
+{ pastree/outline - OURS, not LSP. The Go To picker's lists (the RAD Studio
+  client's Ctrl+G, copied from PasTree's demo): every row a TPasOutlineEntry,
+  serialized field for field, so the picker draws the head word, the name,
+  the detail, the section note and the unit the way the demo does. LSP's own
+  documentSymbol cannot carry this - it has no head word, no detail, no
+  routine BODIES and no landmarks - and reshaping it would have lost exactly
+  what the picker is for.
+
+  `scope` picks the list:
+  - `module`: PasTree.Outline.PasModuleOutline over the analyzed tree of
+    `textDocument.uri` - declarations AND bodies in source order, plus the
+    `unit`/`interface`/`uses`/`implementation`/`include` landmarks, each row
+    with its position (1-based, PasTree's own; the client draws `:N` from it
+    and needs no conversion). A demoted model is rehydrated first.
+  - `project`: TPasNavigator.ProjectOutline over the PROJECT's own units
+    (the .dproj's list plus the main source - library units reached through
+    the search path are not project files and are not listed), from the
+    retained symbol tables, so a demoted unit costs nothing. These rows carry
+    NO position (line = col = 0): a row is placed when it is chosen, by
+    pastree/outlineTarget below, which hydrates that one unit. The client
+    asks every project of a group for this to build its Group tab.
+
+  Kinds and sections travel as words (`type`, `routine`, `include`...;
+  `interface`, `implementation`...) rather than ordinals: the client is not
+  compiled against PasTree and must not depend on an enum's order. }
+function TLspServer.HandleOutline(const AMsg: TLspIncoming): string;
+const
+  KINDS: array[TPasOutlineKind] of string = ('module', 'section', 'uses',
+    'include', 'type', 'var', 'const', 'property', 'routine');
+  SECTIONS: array[TPasOutlineSection] of string = ('', 'interface',
+    'implementation', 'initialization', 'finalization');
+var
+  LScope, LPath, LItem: string;
+  LMid, LIdx: Integer;
+  LMids: TArray<Integer>;
+  LEntries: TArray<TPasOutlineEntry>;
+  LSB: TStringBuilder;
+  LStart: UInt64;
+begin
+  LScope := 'module';
+  if AMsg.Params <> nil then
+    LScope := AMsg.Params.GetValue<string>('scope', 'module');
+  if (LScope <> 'module') and (LScope <> 'project') then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'outline: scope must be "module" or "project"'));
+  LPath := '';
+  if LScope = 'module' then
+  begin
+    LPath := DocPathOf(AMsg.Params);
+    if LPath = '' then
+      Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+        'outline: textDocument.uri required for scope "module"'));
+  end;
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if (FNav = nil) or (FProject = nil) then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LStart := GetTickCount64;
+  if LScope = 'module' then
+  begin
+    LMid := FNav.ModelIdOf(LPath);
+    if LMid < 0 then
+    begin
+      Log('pastree/outline: file not in the analyzed closure: ' + LPath);
+      Exit(BuildResponse(AMsg.IdJson, 'null'));
+    end;
+    if not FProject.EnsureHydrated(LMid) then
+    begin
+      Log('pastree/outline: could not rehydrate ' + LPath);
+      Exit(BuildResponse(AMsg.IdJson, 'null'));
+    end;
+    LEntries := PasModuleOutline(FProject.Model(LMid).Tree);
+  end
+  else
+  begin
+    // The project's own files, the main source first and then the .dproj's
+    // list in its order - a file the closure never reached (not compiled on
+    // this platform, a missing unit) has no model and is silently not a row.
+    LMids := nil;
+    if FMainSource <> '' then
+    begin
+      LMid := FNav.ModelIdOf(FMainSource);
+      if LMid >= 0 then
+        LMids := LMids + [LMid];
+    end;
+    for LItem in FProjectFiles do
+    begin
+      LMid := FNav.ModelIdOf(LItem);
+      if (LMid >= 0) and not TArray.Contains<Integer>(LMids, LMid) then
+        LMids := LMids + [LMid];
+    end;
+    // A project with no .dproj (a bare .dpr - the harness's, or a file
+    // opened from disk) lists no units; its units are then the models
+    // under its own directory, which is what a .dproj would have listed.
+    if (Length(FProjectFiles) = 0) and (FProjectDir <> '') then
+      for LMid := 0 to FProject.ModelCount - 1 do
+        if FProject.Model(LMid) <> nil then
+        begin
+          LItem := TPath.GetFullPath(FProject.ModelFile(LMid));
+          if LItem.StartsWith(IncludeTrailingPathDelimiter(FProjectDir),
+               True) and not TArray.Contains<Integer>(LMids, LMid) then
+            LMids := LMids + [LMid];
+        end;
+    LEntries := FNav.ProjectOutline(LMids);
+  end;
+
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('{"scope":').Append(JsonQuote(LScope)).Append(',"rows":[');
+    for LIdx := 0 to High(LEntries) do
+      with LEntries[LIdx] do
+      begin
+        if LIdx > 0 then
+          LSB.Append(',');
+        LSB.Append(Format(
+          '{"kind":%s,"head":%s,"owner":%s,"name":%s,"detail":%s,' +
+          '"section":%s,"isImpl":%s,"uri":%s,"line":%d,"col":%d,' +
+          '"unitId":%d,"sym":%d,"node":%d,"unitName":%s}',
+          [JsonQuote(KINDS[Kind]), JsonQuote(Head), JsonQuote(Owner),
+           JsonQuote(Name), JsonQuote(Detail), JsonQuote(SECTIONS[Section]),
+           JsonBool(IsImpl), JsonQuote(PathToUri(FilePath)), Line, Col,
+           UnitId, Sym, Node, JsonQuote(UnitName)]));
+      end;
+    LSB.Append(']}');
+    Log(Format('pastree/outline %s%s -> %d rows in %d ms',
+      [LScope, IfThen(LPath <> '', ' ' + TPath.GetFileName(LPath), ''),
+       Length(LEntries), GetTickCount64 - LStart]));
+    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ pastree/outlineTarget - OURS, not LSP. Where a `project` row of
+  pastree/outline lands: `kind`, `unitId`, `sym` and `node` are the row's own
+  fields handed back. A `module` row goes to the unit header
+  (TPasNavigator.UnitHeaderTarget), an `include` row to the directive itself
+  (IncludeSiteTarget, `node` = its IncludeRefs index), anything else to the
+  declared name (DeclHit - the same call Find References pins its declaration
+  row with). Each hydrates the one unit it needs, which is why the list did
+  not carry positions in the first place. Answers a Location, or null when
+  the row cannot be placed - the picker then stays open rather than landing
+  somewhere else. }
+function TLspServer.HandleOutlineTarget(const AMsg: TLspIncoming): string;
+var
+  LKind: string;
+  LUnitId, LSym, LNode: Integer;
+  LTarget: TPasNavTarget;
+  LHit: TPasRefHit;
+  LFile: string;
+  LLine, LCol, LLen: Integer;
+  LFound: Boolean;
+begin
+  if (AMsg.Params = nil) or
+     not AMsg.Params.TryGetValue<Integer>('unitId', LUnitId) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'outlineTarget: unitId required'));
+  LKind := AMsg.Params.GetValue<string>('kind', '');
+  LSym := AMsg.Params.GetValue<Integer>('sym', -1);
+  LNode := AMsg.Params.GetValue<Integer>('node', -1);
+  if not WaitAnalyzed('', AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+
+  LLen := 0;
+  LFile := '';
+  LLine := 0;
+  LCol := 0;
+  if LKind = 'module' then
+  begin
+    LFound := FNav.UnitHeaderTarget(LUnitId, LTarget);
+    if LFound then
+    begin
+      LFile := LTarget.FilePath;
+      LLine := LTarget.Line;
+      LCol := LTarget.Col;
+      LLen := Length(LTarget.Name);
+    end;
+  end
+  else if LKind = 'include' then
+  begin
+    LFound := FNav.IncludeSiteTarget(LUnitId, LNode, LTarget);
+    if LFound then
+    begin
+      LFile := LTarget.FilePath;
+      LLine := LTarget.Line;
+      LCol := LTarget.Col;
+    end;
+  end
+  else
+  begin
+    LFound := (LSym >= 0) and FNav.DeclHit(LUnitId, LSym, LHit);
+    if LFound then
+    begin
+      LFile := LHit.FilePath;
+      LLine := LHit.Line;
+      LCol := LHit.Col;
+      LLen := Max(0, LHit.HiTo - LHit.HiFrom);
+    end;
+  end;
+  if not LFound then
+  begin
+    Log(Format('pastree/outlineTarget: %s unit %d sym %d node %d -> not placed',
+      [LKind, LUnitId, LSym, LNode]));
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  Log(Format('pastree/outlineTarget: %s unit %d sym %d -> %s',
+    [LKind, LUnitId, LSym, PosTag(LFile, LLine, LCol)]));
+  Result := BuildResponse(AMsg.IdJson, LocationJson(LFile, LLine, LCol, LLen));
+end;
+
 { textDocument/implementation and textDocument/declaration - the decl<->impl
   toggle, a Pascal-specific navigation the navigator implements as pure CST
   walks (GotoImplementation/GotoDeclaration; they never cross units, because
@@ -5357,6 +5574,10 @@ begin
         Exit(HandleDefinesAt(LMsg));
       if LMsg.Method = 'pastree/dcuSource' then
         Exit(HandleDcuSource(LMsg));
+      if LMsg.Method = 'pastree/outline' then
+        Exit(HandleOutline(LMsg));
+      if LMsg.Method = 'pastree/outlineTarget' then
+        Exit(HandleOutlineTarget(LMsg));
       if LMsg.Method = 'pastree/findAllAt' then
         Exit(HandleFindAllAt(LMsg));
       { A HOST-SIDE EVENT, WRITTEN INTO THIS LOG. The client sends one when
