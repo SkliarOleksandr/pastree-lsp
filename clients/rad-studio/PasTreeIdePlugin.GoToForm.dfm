@@ -2,8 +2,8 @@ object PasTreeGoToForm: TPasTreeGoToForm
   Left = 0
   Top = 0
   Caption = 'Go To'
-  ClientHeight = 600
-  ClientWidth = 900
+  ClientHeight = 566
+  ClientWidth = 888
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -18,15 +18,17 @@ object PasTreeGoToForm: TPasTreeGoToForm
   TextHeight = 15
   object pnlButtons: TPanel
     Left = 0
-    Top = 543
-    Width = 900
+    Top = 509
+    Width = 888
     Height = 36
     Align = alBottom
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
+    ExplicitTop = 543
+    ExplicitWidth = 900
     DesignSize = (
-      900
+      888
       36)
     object chkAll: TCheckBox
       Left = 8
@@ -96,7 +98,7 @@ object PasTreeGoToForm: TPasTreeGoToForm
       OnClick = IncludesChanged
     end
     object btnGo: TButton
-      Left = 690
+      Left = 678
       Top = 3
       Width = 100
       Height = 27
@@ -105,9 +107,10 @@ object PasTreeGoToForm: TPasTreeGoToForm
       Default = True
       TabOrder = 7
       OnClick = btnGoClick
+      ExplicitLeft = 690
     end
     object btnCancel: TButton
-      Left = 796
+      Left = 784
       Top = 3
       Width = 100
       Height = 27
@@ -116,13 +119,14 @@ object PasTreeGoToForm: TPasTreeGoToForm
       Caption = 'Cancel'
       ModalResult = 2
       TabOrder = 8
+      ExplicitLeft = 796
     end
   end
   object edFilter: TEdit
     AlignWithMargins = True
     Left = 4
     Top = 4
-    Width = 892
+    Width = 880
     Height = 23
     Margins.Left = 4
     Margins.Top = 4
@@ -133,32 +137,33 @@ object PasTreeGoToForm: TPasTreeGoToForm
     TextHint = 'Type a name, or a line number'
     OnChange = edFilterChange
     OnKeyDown = edFilterKeyDown
+    ExplicitWidth = 892
   end
   object tcScope: TTabControl
     AlignWithMargins = True
     Left = 4
-    Top = 31
-    Width = 892
-    Height = 510
+    Top = 33
+    Width = 880
+    Height = 474
     Margins.Left = 4
     Margins.Top = 4
     Margins.Right = 4
     Margins.Bottom = 2
     Align = alClient
     TabOrder = 1
-    TabStop = False
     Tabs.Strings = (
       'Module'
       'Project'
       'Project Group')
     TabIndex = 0
+    TabStop = False
     OnChange = tcScopeChange
     object lbItems: TListBox
       AlignWithMargins = True
       Left = 8
       Top = 28
-      Width = 876
-      Height = 495
+      Width = 864
+      Height = 438
       Margins.Left = 4
       Margins.Top = 2
       Margins.Right = 4
@@ -174,10 +179,12 @@ object PasTreeGoToForm: TPasTreeGoToForm
   end
   object sbStatus: TStatusBar
     Left = 0
-    Top = 579
-    Width = 900
+    Top = 545
+    Width = 888
     Height = 21
     Panels = <>
     SimplePanel = True
+    ExplicitTop = 579
+    ExplicitWidth = 900
   end
 end

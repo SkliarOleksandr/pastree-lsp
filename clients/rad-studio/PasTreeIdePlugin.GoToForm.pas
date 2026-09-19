@@ -162,6 +162,7 @@ type
     FHeadWidth: Integer;      // the head-word column, measured per tab
     FUnitWidth: Integer;      // the unit column (project/group tabs), same
     FSectionWidth: Integer;   // the section column, same
+    FLineWidth: Integer;      // the `:N` column, by the longest line number
     FLoadingState: Boolean;   // boxes being set in bulk: rules and refilter off
     FQuiet, FStrong: TColor;  // the two row colours, from the IDE's theme
     function Scope: TGoToScope;
@@ -237,7 +238,6 @@ const
   // Between the head column and the name. 8 had `class procedure` (bold,
   // in the editor's reserved-word style) touching the name.
   cHeadGap = 16;
-  cDeclarationSuffix = ', declaration';
 
 var
   // The one open picker, or nil. Every asynchronous answer checks that the
@@ -287,8 +287,6 @@ begin
   if not DeclKind(AEntry, LKind) or (AEntry.Section = '') then
     Exit;
   Result := AEntry.Section;
-  if (LKind = gkRoutine) and (AEntry.Sym < 0) and not AEntry.IsImpl then
-    Result := Result + cDeclarationSuffix;
 end;
 
 function IsDigits(const AText: string): Boolean;
@@ -530,7 +528,7 @@ procedure TPasTreeGoToForm.MeasureHeadColumn;
 var
   LEntries: TArray<TLspOutlineRow>;
   LSeen, LSeenUnit, LSeenSection: TDictionary<string, Boolean>;
-  LIdx: Integer;
+  LIdx, LMaxLine: Integer;
   LText, LPrevUnit: string;
   LUnitColumn: Boolean;
 begin
@@ -575,10 +573,12 @@ begin
     lbItems.Canvas.Font.Style := [];
     FUnitWidth := 0;
     FSectionWidth := 0;
+    LMaxLine := 0;
     LPrevUnit := '';
     LUnitColumn := Scope <> gsModule;
     for LIdx := 0 to High(LEntries) do
     begin
+      LMaxLine := Max(LMaxLine, LEntries[LIdx].Line);
       if LUnitColumn and (LEntries[LIdx].UnitName <> '') and
          (LEntries[LIdx].UnitName <> LPrevUnit) then
       begin
@@ -591,10 +591,15 @@ begin
       begin
         LText := LEntries[LIdx].Section;
         FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
-        LText := LText + cDeclarationSuffix;
         FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
       end;
     end;
+    // One width for the whole `:N` column: the columns left of it are
+    // placed from its edge, and a per-row width moved them by a digit
+    // between `:99` and `:100` (Alex, 2026-09-19).
+    FLineWidth := 0;
+    if LMaxLine > 0 then
+      FLineWidth := lbItems.Canvas.TextWidth(':' + IntToStr(LMaxLine));
   finally
     LSeenSection.Free;
     LSeenUnit.Free;
@@ -970,7 +975,7 @@ var
   LCanvas: TCanvas;
   LRow: TGoToRow;
   LEntries: TArray<TLspOutlineRow>;
-  LQuiet, LStrong, LIdent, LKeyword, LForce: TColor;
+  LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce: TColor;
   LNameStyle: TFontStyles;
   LX, LY, LLineRight, LSaved: Integer;
   LName, LNote: string;
@@ -986,18 +991,28 @@ var
   end;
 
   // One right-aligned column of width AWidth ending at LLineRight - 6,
-  // clipped to itself; LLineRight moves left past it and a gap.
+  // clipped to itself; LLineRight moves left past it and a gap. The text
+  // ends at the column's right edge, like the `:N` numbers do (Alex,
+  // 2026-09-19: "the unit against the right edge, the section against the
+  // unit") - a text wider than the cap loses its start, not its end.
   procedure PutColumn(const AText: string; AWidth: Integer);
   begin
     if (AText = '') or (AWidth <= 0) then
       Exit;
     AWidth := Min(AWidth, lbItems.ClientWidth div 3);
-    LX := LLineRight - 6 - AWidth;
+    LCanvas.Font.Style := [];
+    LX := LLineRight - 6 - LCanvas.TextWidth(AText);
     LSaved := SaveDC(LCanvas.Handle);
-    IntersectClipRect(LCanvas.Handle, LX, ARect.Top, LLineRight - 6,
-      ARect.Bottom);
+    IntersectClipRect(LCanvas.Handle, LLineRight - 6 - AWidth, ARect.Top,
+      LLineRight - 6, ARect.Bottom);
     Put(AText, LQuiet, []);
     RestoreDC(LCanvas.Handle, LSaved);
+    // RestoreDC puts back the DC's text colour from before SaveDC, but the
+    // canvas still believes its Font is selected - so the next Put with the
+    // SAME Font.Color changes nothing and paints in whatever the DC holds.
+    // On the project tab no `:N` precedes the columns, and the section came
+    // out in the list's default black while the unit was grey (2026-09-19).
+    LCanvas.Refresh;
     LLineRight := LLineRight - 6 - AWidth - 8;
   end;
 
@@ -1025,6 +1040,7 @@ begin
     LStrong := LCanvas.Font.Color;
     LIdent := LStrong;
     LKeyword := LStrong;
+    LPreproc := LStrong;
     LForce := LStrong;
   end
   else
@@ -1033,9 +1049,13 @@ begin
     LStrong := FStrong;
     // The name column is an identifier and a landmark is a reserved word,
     // in the editor's live colours for those classes; the head word and
-    // the detail go through the tokenizer (PutSyntax).
+    // the detail go through the tokenizer (PutSyntax). `include` is neither -
+    // there is no such keyword and the path is not a string literal - it is
+    // the directive colour, the one the editor paints the whole
+    // `{$INCLUDE ...}` line with.
     LIdent := EditorSyntaxColor(atIdentifier, LStrong);
     LKeyword := EditorSyntaxColor(atReservedWord, LStrong);
+    LPreproc := EditorSyntaxColor(atPreproc, LStrong);
     LForce := clNone;
   end;
   LX := ARect.Left + 6;
@@ -1073,10 +1093,9 @@ begin
     begin
       LNote := ':' + IntToStr(Line);
       LCanvas.Font.Style := [];
-      LLineRight := ARect.Right - 6 - LCanvas.TextWidth(LNote);
-      LX := LLineRight;
+      LX := ARect.Right - 6 - LCanvas.TextWidth(LNote);
       Put(LNote, LQuiet, []);
-      LLineRight := LLineRight - 8;
+      LLineRight := ARect.Right - 6 - FLineWidth - 8;
     end;
     if (Kind <> 'module') and (Scope <> gsModule) then
       PutColumn(UnitName, FUnitWidth);
@@ -1091,7 +1110,13 @@ begin
     // and `uses` came out plain when only the colour was taken).
     LName := NameColumn(LEntries[LRow.Entry]);
     LNameStyle := [];
-    if Name <> '' then
+    if Kind = 'include' then
+    begin
+      Put(Head, LPreproc, []);
+      LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
+      LIdent := LPreproc;
+    end
+    else if Name <> '' then
     begin
       PutSyntax(Head);
       LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
