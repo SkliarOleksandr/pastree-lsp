@@ -153,6 +153,11 @@ type
     // TPasAsyncSession's double-buffering contract).
     FProject: TPasSemaProject;      // last COMPLETED analysis (may be nil)
     FNav: TPasNavigator;
+    // pastree/outline scope "project", serialized, for the FProject it was
+    // built from: the list changes only when an analysis installs a new
+    // project (FinalizeAnalysisIfDone), so it is dropped there - and a
+    // Ctrl+G that comes back to the Group tab costs the server nothing.
+    FOutlineCache: string;
     // The completion seam's engine (PasLsp.Completion) - configuration-
     // derived, so created lazily once and kept for the session.
     FCompletion: TLspCompletionEngine;
@@ -848,6 +853,7 @@ begin
       FSession.WaitFor;
       FreeAndNil(FNav);
       FProject := FSession.TakeProject;
+      FOutlineCache := '';   // a new project: the outline table is stale
       if FProject <> nil then
       begin
         FNav := NewNavigator;
@@ -1113,6 +1119,7 @@ begin
   if FModuleMode and not FSession.ModuleAccepted then
   begin
     FProject := FSession.TakeProject;
+    FOutlineCache := '';   // a new project: the outline table is stale
     FreeAndNil(FSession);
     FModuleMode := False;
     if FProject <> nil then
@@ -1134,6 +1141,7 @@ begin
   FreeAndNil(FNav);
   FreeAndNil(FProject);
   FProject := FSession.TakeProject;
+  FOutlineCache := '';   // a new project: the outline table is stale
   FreeAndNil(FSession);
   if FProject = nil then
     Exit;
@@ -3890,9 +3898,27 @@ end;
     pastree/outlineTarget below, which hydrates that one unit. The client
     asks every project of a group for this to build its Group tab.
 
-  Kinds and sections travel as words (`type`, `routine`, `include`...;
-  `interface`, `implementation`...) rather than ordinals: the client is not
-  compiled against PasTree and must not depend on an enum's order. }
+  THE ANSWER IS A TABLE, NOT ONE OBJECT PER ROW. The project list of a real
+  project is 100k+ rows (AVImark: 113,613), and spelled out as objects it was
+  33 MB that the client's System.JSON took two seconds to read on a fast
+  machine. Most of a row is a repeated value - a dozen kind and head words, a
+  few hundred owners, one file per unit - so those are interned once, in
+  tables written BEFORE the rows, and each row is a positional array - one
+  object with these members (its braces left out here, a brace would end
+  this comment):
+
+    "scope": "project"
+    "kinds": [...], "heads": [...], "sections": [...], "owners": [...]
+    "files": [[uri, unitName, unitId], ...]
+    "rows": [[kind, head, owner, "Name", "detail", section, isImpl, file, sym, node, line, col], ...]
+
+  kind/head/owner/section/file are indices into the tables; isImpl is 0/1.
+  Same list: ~8 MB, and the client reads it in one pass
+  (PasTreeIdePlugin.OutlineRows, the reader; TLspClient.RequestRaw hands it
+  the text without a DOM). Kinds, heads and sections still travel as WORDS
+  (`type`, `routine`, `include`...; `interface`, `implementation`...), just
+  once each: the client is not compiled against PasTree and must not depend
+  on an enum's order, only on this answer's own tables. }
 function TLspServer.HandleOutline(const AMsg: TLspIncoming): string;
 const
   KINDS: array[TPasOutlineKind] of string = ('module', 'section', 'uses',
@@ -3901,11 +3927,28 @@ const
     'implementation', 'initialization', 'finalization');
 var
   LScope, LPath, LItem: string;
-  LMid, LIdx: Integer;
+  LMid, LIdx, LTable: Integer;
   LMids: TArray<Integer>;
   LEntries: TArray<TPasOutlineEntry>;
-  LSB: TStringBuilder;
-  LStart: UInt64;
+  LBuf: TJsonBuf;
+  LStart, LListed: UInt64;
+  LHeads, LOwners, LFiles: TDictionary<string, Integer>;
+  LHeadList, LOwnerList, LFileList: TList<string>;
+  LFileUnit: TList<TPair<string, Integer>>;   // per file: unit name, unit id
+  LHeadIdx, LOwnerIdx, LFileIdx: TArray<Integer>;
+  LKind: TPasOutlineKind;
+  LSection: TPasOutlineSection;
+
+  function Intern(ADict: TDictionary<string, Integer>; AList: TList<string>;
+    const AValue: string): Integer;
+  begin
+    if not ADict.TryGetValue(AValue, Result) then
+    begin
+      Result := AList.Add(AValue);
+      ADict.Add(AValue, Result);
+    end;
+  end;
+
 begin
   LScope := 'module';
   if AMsg.Params <> nil then
@@ -3925,6 +3968,11 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if (FNav = nil) or (FProject = nil) then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  if (LScope = 'project') and (FOutlineCache <> '') then
+  begin
+    Log('pastree/outline project -> cached');
+    Exit(BuildResponse(AMsg.IdJson, FOutlineCache));
+  end;
 
   LStart := GetTickCount64;
   if LScope = 'module' then
@@ -3974,31 +4022,131 @@ begin
         end;
     LEntries := FNav.ProjectOutline(LMids);
   end;
+  LListed := GetTickCount64;
 
-  LSB := TStringBuilder.Create;
+  LHeads := TDictionary<string, Integer>.Create;
+  LOwners := TDictionary<string, Integer>.Create;
+  LFiles := TDictionary<string, Integer>.Create;
+  LHeadList := TList<string>.Create;
+  LOwnerList := TList<string>.Create;
+  LFileList := TList<string>.Create;
+  LFileUnit := TList<TPair<string, Integer>>.Create;
   try
-    LSB.Append('{"scope":').Append(JsonQuote(LScope)).Append(',"rows":[');
+    // Pass 1: the tables. A file's unit name and id are the same on every
+    // row of that file (a project row's file IS its unit; a module row's
+    // may be an include, with UnitId -1), so they live in the file table.
+    SetLength(LHeadIdx, Length(LEntries));
+    SetLength(LOwnerIdx, Length(LEntries));
+    SetLength(LFileIdx, Length(LEntries));
+    for LIdx := 0 to High(LEntries) do
+      with LEntries[LIdx] do
+      begin
+        LHeadIdx[LIdx] := Intern(LHeads, LHeadList, Head);
+        LOwnerIdx[LIdx] := Intern(LOwners, LOwnerList, Owner);
+        if not LFiles.TryGetValue(FilePath, LTable) then
+        begin
+          LTable := LFileList.Add(FilePath);
+          LFiles.Add(FilePath, LTable);
+          LFileUnit.Add(TPair<string, Integer>.Create(UnitName, UnitId));
+        end;
+        LFileIdx[LIdx] := LTable;
+      end;
+
+    // Pass 2: the text. ~70 chars a row; the buffer is sized for it once.
+    LBuf.Init(Length(LEntries) * 80 + LFileList.Count * 120 + 1024);
+    LBuf.Add('{"scope":');
+    LBuf.AddQuoted(LScope);
+    LBuf.Add(',"kinds":[');
+    for LKind := Low(TPasOutlineKind) to High(TPasOutlineKind) do
+    begin
+      if LKind > Low(TPasOutlineKind) then
+        LBuf.AddChar(',');
+      LBuf.AddQuoted(KINDS[LKind]);
+    end;
+    LBuf.Add('],"heads":[');
+    for LTable := 0 to LHeadList.Count - 1 do
+    begin
+      if LTable > 0 then
+        LBuf.AddChar(',');
+      LBuf.AddQuoted(LHeadList[LTable]);
+    end;
+    LBuf.Add('],"sections":[');
+    for LSection := Low(TPasOutlineSection) to High(TPasOutlineSection) do
+    begin
+      if LSection > Low(TPasOutlineSection) then
+        LBuf.AddChar(',');
+      LBuf.AddQuoted(SECTIONS[LSection]);
+    end;
+    LBuf.Add('],"owners":[');
+    for LTable := 0 to LOwnerList.Count - 1 do
+    begin
+      if LTable > 0 then
+        LBuf.AddChar(',');
+      LBuf.AddQuoted(LOwnerList[LTable]);
+    end;
+    LBuf.Add('],"files":[');
+    for LTable := 0 to LFileList.Count - 1 do
+    begin
+      if LTable > 0 then
+        LBuf.AddChar(',');
+      LBuf.AddChar('[');
+      LBuf.AddQuoted(PathToUri(LFileList[LTable]));
+      LBuf.AddChar(',');
+      LBuf.AddQuoted(LFileUnit[LTable].Key);
+      LBuf.AddChar(',');
+      LBuf.AddInt(LFileUnit[LTable].Value);
+      LBuf.AddChar(']');
+    end;
+    LBuf.Add('],"rows":[');
     for LIdx := 0 to High(LEntries) do
       with LEntries[LIdx] do
       begin
         if LIdx > 0 then
-          LSB.Append(',');
-        LSB.Append(Format(
-          '{"kind":%s,"head":%s,"owner":%s,"name":%s,"detail":%s,' +
-          '"section":%s,"isImpl":%s,"uri":%s,"line":%d,"col":%d,' +
-          '"unitId":%d,"sym":%d,"node":%d,"unitName":%s}',
-          [JsonQuote(KINDS[Kind]), JsonQuote(Head), JsonQuote(Owner),
-           JsonQuote(Name), JsonQuote(Detail), JsonQuote(SECTIONS[Section]),
-           JsonBool(IsImpl), JsonQuote(PathToUri(FilePath)), Line, Col,
-           UnitId, Sym, Node, JsonQuote(UnitName)]));
+          LBuf.AddChar(',');
+        LBuf.AddChar('[');
+        LBuf.AddInt(Ord(Kind));
+        LBuf.AddChar(',');
+        LBuf.AddInt(LHeadIdx[LIdx]);
+        LBuf.AddChar(',');
+        LBuf.AddInt(LOwnerIdx[LIdx]);
+        LBuf.AddChar(',');
+        LBuf.AddQuoted(Name);
+        LBuf.AddChar(',');
+        LBuf.AddQuoted(Detail);
+        LBuf.AddChar(',');
+        LBuf.AddInt(Ord(Section));
+        LBuf.AddChar(',');
+        LBuf.AddInt(Ord(IsImpl));
+        LBuf.AddChar(',');
+        LBuf.AddInt(LFileIdx[LIdx]);
+        LBuf.AddChar(',');
+        LBuf.AddInt(Sym);
+        LBuf.AddChar(',');
+        LBuf.AddInt(Node);
+        LBuf.AddChar(',');
+        LBuf.AddInt(Line);
+        LBuf.AddChar(',');
+        LBuf.AddInt(Col);
+        LBuf.AddChar(']');
       end;
-    LSB.Append(']}');
-    Log(Format('pastree/outline %s%s -> %d rows in %d ms',
+    LBuf.Add(']}');
+    // Two times, because they are two different problems: the list is
+    // PasTree's walk over the symbol tables, the JSON is this unit's.
+    Log(Format('pastree/outline %s%s -> %d rows: list %d ms, json %d ms, %dK chars',
       [LScope, IfThen(LPath <> '', ' ' + TPath.GetFileName(LPath), ''),
-       Length(LEntries), GetTickCount64 - LStart]));
-    Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+       Length(LEntries), LListed - LStart, GetTickCount64 - LListed,
+       LBuf.Length div 1024]));
+    if LScope = 'project' then
+      FOutlineCache := LBuf.ToString;
+    Result := BuildResponse(AMsg.IdJson, LBuf.ToString);
   finally
-    LSB.Free;
+    LFileUnit.Free;
+    LFileList.Free;
+    LOwnerList.Free;
+    LHeadList.Free;
+    LFiles.Free;
+    LOwners.Free;
+    LHeads.Free;
   end;
 end;
 

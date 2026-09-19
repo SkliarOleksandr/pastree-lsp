@@ -76,6 +76,30 @@ function BuildError(const AIdJson: string; ACode: Integer;
 
 function JsonQuote(const S: string): string;
 
+type
+  { A growable character buffer for BULK JSON - a result of 100k+ rows (the
+    Go To table, pastree/outline) where per-row Format() calls, a
+    TJSONString per quoted field and TStringBuilder's per-call overhead were
+    most of the serialization time. Add appends verbatim; AddQuoted writes a
+    JSON string literal, copying the text straight through when nothing in
+    it needs escaping (the common case: identifiers, signatures) and going
+    through JsonQuote otherwise; AddInt formats without an allocation.
+    Value semantics: Init before use, ToString hands the text back trimmed. }
+  TJsonBuf = record
+  private
+    FData: string;
+    FLen: Integer;
+    procedure Grow(AExtra: Integer);
+  public
+    procedure Init(ACapacity: Integer);
+    procedure Add(const S: string); inline;
+    procedure AddChar(C: Char); inline;
+    procedure AddInt(V: Int64);
+    procedure AddQuoted(const S: string);
+    function ToString: string;
+    property Length: Integer read FLen;
+  end;
+
 { file:///c%3A/dir/file.pas <-> C:\dir\file.pas. UriToPath returns '' for a
   non-file URI. PathToUri lower-cases the drive letter (VS Code's own
   canonical form, so our URIs compare equal to the client's). }
@@ -110,7 +134,8 @@ function PosTag(const AFilePath: string; APasLine, APasCol: Integer): string;
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils,
+  System.Math;
 
 { TLspCancelSet }
 
@@ -212,6 +237,95 @@ begin
   finally
     LStr.Free;
   end;
+end;
+
+{ TJsonBuf }
+
+procedure TJsonBuf.Init(ACapacity: Integer);
+begin
+  FData := '';
+  SetLength(FData, System.Math.Max(ACapacity, 256));
+  FLen := 0;
+end;
+
+procedure TJsonBuf.Grow(AExtra: Integer);
+var
+  LNeed: Integer;
+begin
+  LNeed := FLen + AExtra;
+  if LNeed > System.Length(FData) then
+    SetLength(FData, System.Math.Max(LNeed, System.Length(FData) * 2));
+end;
+
+procedure TJsonBuf.Add(const S: string);
+var
+  LN: Integer;
+begin
+  LN := System.Length(S);
+  if LN = 0 then
+    Exit;
+  if FLen + LN > System.Length(FData) then
+    Grow(LN);
+  Move(PChar(S)^, FData[FLen + 1], LN * SizeOf(Char));
+  Inc(FLen, LN);
+end;
+
+procedure TJsonBuf.AddChar(C: Char);
+begin
+  if FLen + 1 > System.Length(FData) then
+    Grow(1);
+  Inc(FLen);
+  FData[FLen] := C;
+end;
+
+procedure TJsonBuf.AddInt(V: Int64);
+var
+  LDigits: array[0..23] of Char;
+  LPos: Integer;
+  LNeg: Boolean;
+  LAbs: UInt64;
+begin
+  LNeg := V < 0;
+  if LNeg then
+    LAbs := UInt64(-V)
+  else
+    LAbs := UInt64(V);
+  LPos := High(LDigits) + 1;
+  repeat
+    Dec(LPos);
+    LDigits[LPos] := Char(Ord('0') + (LAbs mod 10));
+    LAbs := LAbs div 10;
+  until LAbs = 0;
+  if LNeg then
+  begin
+    Dec(LPos);
+    LDigits[LPos] := '-';
+  end;
+  if FLen + (High(LDigits) + 1 - LPos) > System.Length(FData) then
+    Grow(High(LDigits) + 1 - LPos);
+  Move(LDigits[LPos], FData[FLen + 1], (High(LDigits) + 1 - LPos) * SizeOf(Char));
+  Inc(FLen, High(LDigits) + 1 - LPos);
+end;
+
+procedure TJsonBuf.AddQuoted(const S: string);
+var
+  LIdx: Integer;
+begin
+  for LIdx := 1 to System.Length(S) do
+    if (S[LIdx] < ' ') or (S[LIdx] = '"') or (S[LIdx] = '\') then
+    begin
+      Add(JsonQuote(S));
+      Exit;
+    end;
+  AddChar('"');
+  Add(S);
+  AddChar('"');
+end;
+
+function TJsonBuf.ToString: string;
+begin
+  SetLength(FData, FLen);
+  Result := FData;
 end;
 
 function HexVal(C: Char): Integer;

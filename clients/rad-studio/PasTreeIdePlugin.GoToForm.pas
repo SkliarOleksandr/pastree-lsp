@@ -210,6 +210,7 @@ uses
   System.Math,
   System.UITypes,
   System.IOUtils,
+  System.Generics.Collections,
   Vcl.Themes,
   ToolsAPI,
   PasTreeIdePlugin.Settings;
@@ -272,7 +273,7 @@ function FilterRows(const AEntries: TArray<TLspOutlineRow>;
   const AFilter: string; AKinds: TGoToKinds; AIncludes: Boolean;
   ALineCount: Integer): TArray<TGoToRow>;
 var
-  LFilter, LText: string;
+  LFilter: string;
   LIdx, LCount, LPos, LLine: Integer;
   LRow: TGoToRow;
   LKind: TGoToKind;
@@ -308,8 +309,10 @@ begin
     LRow.Entry := LIdx;
     if LFilter <> '' then
     begin
-      LText := NameColumn(AEntries[LIdx]);
-      LPos := Pos(LFilter, LowerCase(LText));
+      // Key is the name column lower-cased once when the list arrived
+      // (PasTreeIdePlugin.OutlineRows) - per keystroke this is one Pos per
+      // row and no allocation, which matters at 100k rows.
+      LPos := Pos(LFilter, AEntries[LIdx].Key);
       if LPos = 0 then
         Continue;
       LRow.MatchFrom := LPos - 1;
@@ -488,16 +491,26 @@ end;
 procedure TPasTreeGoToForm.MeasureHeadColumn;
 var
   LEntries: TArray<TLspOutlineRow>;
+  LSeen: TDictionary<string, Boolean>;
   LIdx: Integer;
 begin
   // The head column: wide enough for the longest head word actually present,
   // so names line up whatever mix of `class function` and `var` the list
-  // has. Measured here, where the canvas has the scaled font.
+  // has. Measured here, where the canvas has the scaled font - and once per
+  // DISTINCT word: there are a dozen of them in 100k rows, and a GDI text
+  // measurement per row was a third of a second on the project list.
   lbItems.Canvas.Font.Assign(lbItems.Font);
   FHeadWidth := lbItems.Canvas.TextWidth('line');
   LEntries := Entries;
-  for LIdx := 0 to High(LEntries) do
-    FHeadWidth := Max(FHeadWidth, lbItems.Canvas.TextWidth(LEntries[LIdx].Head));
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for LIdx := 0 to High(LEntries) do
+      if LSeen.TryAdd(LEntries[LIdx].Head, True) then
+        FHeadWidth := Max(FHeadWidth,
+          lbItems.Canvas.TextWidth(LEntries[LIdx].Head));
+  finally
+    LSeen.Free;
+  end;
 end;
 
 procedure TPasTreeGoToForm.FormShow(Sender: TObject);

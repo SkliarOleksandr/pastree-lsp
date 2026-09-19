@@ -47,7 +47,8 @@ interface
 
 uses
   System.SysUtils,   // TProc, for LspSetSessionRestartListener
-  ToolsAPI;
+  ToolsAPI,
+  PasTreeIdePlugin.OutlineRows;   // TLspOutlineRow and the table reader
 
 type
   /// <summary>
@@ -418,34 +419,11 @@ type
     const ASymbols: TArray<TLspWorkspaceSymbol>; const AError: string);
 
   /// <summary>
-  /// One row of a Go To list (pastree/outline) - PasTree's TPasOutlineEntry
-  /// field for field, spelled here because this package must not link
-  /// PasTree (see the .dpk). Kind and Section are the server's WORDS
-  /// ('type', 'routine', 'include'...; 'interface', 'implementation'...),
-  /// never ordinals. A MODULE row carries its position (Line/Col 1-based,
-  /// IDE coordinates as they are - PasTree and the editor agree here) and
-  /// UnitId = -1; a PROJECT row carries UnitId/Sym/Node and NO position
-  /// (Line = 0): LspOutlineTarget places it when it is chosen. ProjectFile
-  /// is the .dproj whose server answered - what routes the target request
-  /// back to that server in a group.
+  /// One row of a Go To list (pastree/outline) - defined in
+  /// PasTreeIdePlugin.OutlineRows with the table the server sends it as;
+  /// re-exported here so the picker units keep one import.
   /// </summary>
-  TLspOutlineRow = record
-    Kind: string;
-    Head: string;
-    Owner: string;
-    Name: string;
-    Detail: string;
-    Section: string;
-    IsImpl: Boolean;
-    FilePath: string;
-    Line: Integer;
-    Col: Integer;
-    UnitId: Integer;
-    Sym: Integer;
-    Node: Integer;
-    UnitName: string;
-    ProjectFile: string;
-  end;
+  TLspOutlineRow = PasTreeIdePlugin.OutlineRows.TLspOutlineRow;
 
   TLspOutlineProc = reference to procedure(ASuccess: Boolean;
     const ARows: TArray<TLspOutlineRow>; const AError: string);
@@ -3315,54 +3293,6 @@ begin
   FPendingWorkspace := LIssuedId;
 end;
 
-function ParseOutlineRows(AResult: TJSONValue;
-  const AProjectFile: string): TArray<TLspOutlineRow>;
-var
-  LItems: TJSONArray;
-  LValue: TJSONValue;
-  LObj: TJSONObject;
-  LRow: TLspOutlineRow;
-  LCount: Integer;
-  LUri: string;
-begin
-  Result := nil;
-  if not (AResult is TJSONObject) or
-     not TJSONObject(AResult).TryGetValue<TJSONArray>('rows', LItems) then
-    Exit;
-  SetLength(Result, LItems.Count);
-  LCount := 0;
-  for LValue in LItems do
-  begin
-    if not (LValue is TJSONObject) then
-      Continue;
-    LObj := TJSONObject(LValue);
-    LRow := Default(TLspOutlineRow);
-    LRow.Kind := LObj.GetValue<string>('kind', '');
-    if LRow.Kind = '' then
-      Continue;
-    LRow.Head := LObj.GetValue<string>('head', '');
-    LRow.Owner := LObj.GetValue<string>('owner', '');
-    LRow.Name := LObj.GetValue<string>('name', '');
-    LRow.Detail := LObj.GetValue<string>('detail', '');
-    LRow.Section := LObj.GetValue<string>('section', '');
-    LRow.IsImpl := LObj.GetValue<Boolean>('isImpl', False);
-    LUri := LObj.GetValue<string>('uri', '');
-    if LUri <> '' then
-      LRow.FilePath := LspUriToPath(LUri);
-    // PasTree's positions are 1-based like the editor's: no conversion.
-    LRow.Line := LObj.GetValue<Integer>('line', 0);
-    LRow.Col := LObj.GetValue<Integer>('col', 0);
-    LRow.UnitId := LObj.GetValue<Integer>('unitId', -1);
-    LRow.Sym := LObj.GetValue<Integer>('sym', -1);
-    LRow.Node := LObj.GetValue<Integer>('node', -1);
-    LRow.UnitName := LObj.GetValue<string>('unitName', '');
-    LRow.ProjectFile := AProjectFile;
-    Result[LCount] := LRow;
-    Inc(LCount);
-  end;
-  SetLength(Result, LCount);
-end;
-
 procedure TLspSession.Outline(const AScope, AFileName: string;
   const AOnDone: TLspOutlineProc);
 var
@@ -3387,17 +3317,30 @@ begin
     LParams.AddPair('textDocument', LDoc);
   end;
   LProjectFile := FProjectFile;
-  FClient.Request('pastree/outline', LParams,
-    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+  // Raw: the answer is a table of 100k rows for a big project, read by
+  // PasTreeIdePlugin.OutlineRows in one pass rather than through a DOM. A
+  // null result (the file is not in this project's closure, or the analysis
+  // has nothing yet) reads as an empty list, not a failure.
+  FClient.RequestRaw('pastree/outline', LParams,
+    procedure(ASuccess: Boolean; const AResultJson: string;
+      const AError: string)
+    var
+      LRows: TArray<TLspOutlineRow>;
+      LParseError: string;
     begin
       if not ASuccess then
-        AOnDone(False, nil, AError)
-      else if AResult is TJSONObject then
-        AOnDone(True, ParseOutlineRows(AResult, LProjectFile), '')
+      begin
+        AOnDone(False, nil, AError);
+        Exit;
+      end;
+      LRows := ParseOutlineTable(AResultJson, LProjectFile, LParseError);
+      if LParseError <> '' then
+      begin
+        LogDiagnostic('pastree/outline: ' + LParseError);
+        AOnDone(False, nil, LParseError);
+      end
       else
-        // null: the file is not in this project's closure (or the analysis
-        // has nothing yet) - an empty list, not a failure.
-        AOnDone(True, nil, '');
+        AOnDone(True, LRows, '');
     end);
 end;
 
@@ -4731,37 +4674,6 @@ begin
     Exit;
   end;
   LSession.Outline('project', AFileName, AOnDone);
-end;
-
-{ The group merge: rows in the order the servers answered (the owner's list
-  first), a row dropped when an earlier one already names the same
-  declaration - same unit file, owner, name and head word. A unit two
-  projects compile is the case; the two servers agree on those four fields
-  because they read the same source. Landmarks (module header, include
-  sites) de-duplicate the same way, by file and name. }
-function MergeOutlineRows(
-  const ARows: TArray<TLspOutlineRow>): TArray<TLspOutlineRow>;
-var
-  LSeen: TDictionary<string, Boolean>;
-  LIdx: Integer;
-  LKey: string;
-begin
-  Result := nil;
-  LSeen := TDictionary<string, Boolean>.Create;
-  try
-    for LIdx := 0 to High(ARows) do
-      with ARows[LIdx] do
-      begin
-        LKey := LowerCase(FilePath) + #1 + LowerCase(Owner) + #1 +
-          LowerCase(Name) + #1 + Head + #1 + Kind + #1 + IntToStr(Node);
-        if LSeen.ContainsKey(LKey) then
-          Continue;
-        LSeen.Add(LKey, True);
-        Result := Result + [ARows[LIdx]];
-      end;
-  finally
-    LSeen.Free;
-  end;
 end;
 
 type

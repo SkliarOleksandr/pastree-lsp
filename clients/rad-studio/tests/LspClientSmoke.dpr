@@ -23,7 +23,8 @@ uses
   System.IOUtils,
   System.JSON,
   System.Generics.Collections,   // TJSONArray.GetValue<T> inlines through it
-  PasTreeIdePlugin.LspClient;
+  PasTreeIdePlugin.LspClient,
+  PasTreeIdePlugin.OutlineRows;  // the Go To table's reader, checked in 5d-ter
 
 const
   { The server this repo's own build.bat produces, as a path RELATIVE to the
@@ -129,6 +130,38 @@ begin
     Writeln('  !! no answer to ' + AMethod + ' within the timeout')
   else if not GOk then
     Writeln('  -- ' + AMethod + ' failed: ' + GError)
+  else
+    Writeln('  -- ' + AMethod + ' -> ' + GResultJson);
+end;
+
+/// <summary>
+/// Ask, through RequestRaw: the result is the server's text as written, no
+/// DOM - the path the package takes for pastree/outline.
+/// </summary>
+function AskRaw(const AMethod: string; AParams: TJSONObject): Boolean;
+begin
+  GAnswered := False;
+  GOk := False;
+  GResultJson := '';
+  GError := '';
+  GClient.RequestRaw(AMethod, AParams,
+    procedure(ASuccess: Boolean; const AResultJson: string;
+      const AError: string)
+    begin
+      GAnswered := True;
+      GOk := ASuccess;
+      GError := AError;
+      GResultJson := AResultJson;
+    end);
+  Result := PumpUntil(function: Boolean begin Result := GAnswered end,
+    cAnswerTimeoutMs);
+  if not Result then
+    Writeln('  !! no answer to ' + AMethod + ' within the timeout')
+  else if not GOk then
+    Writeln('  -- ' + AMethod + ' failed: ' + GError)
+  else if Length(GResultJson) > 300 then
+    Writeln('  -- ' + AMethod + ' -> ' + Copy(GResultJson, 1, 300) + '... (' +
+      IntToStr(Length(GResultJson)) + ' chars)')
   else
     Writeln('  -- ' + AMethod + ' -> ' + GResultJson);
 end;
@@ -1569,41 +1602,53 @@ begin
 end;
 
 { 5d-ter. pastree/outline and pastree/outlineTarget - the Go To picker's
-  lists (RAD Studio client, Ctrl+G). The MODULE list of DemoUnit.pas must
-  carry the landmarks (the unit header, the sections), the record type with
-  its field as an OWNED row, the constant, and the routine TWICE - its
-  declaration and its body (isImpl) - each with a position. The PROJECT list
-  must name the units (unitName) and carry no positions but the ids that
-  outlineTarget takes back; the routine's row is then placed on the
-  declaration in DemoUnit.pas, and the unit's own header row on line 1.
-  A bad scope is refused, not answered with a list. }
+  lists (RAD Studio client, Ctrl+G). The answer is the TABLE the package
+  reads with PasTreeIdePlugin.OutlineRows (tables of words first, then
+  positional rows), asked through RequestRaw as the package asks it, and read
+  back here with the same reader - so this checks the wire shape and the
+  reader in one go. The MODULE list of DemoUnit.pas must carry the landmarks
+  (the unit header, the sections), the record type with its field as an
+  OWNED row, the constant, and the routine TWICE - its declaration and its
+  body (isImpl) - each with a position. The PROJECT list must name the units
+  and carry no positions but the ids that outlineTarget takes back; the
+  routine's row is then placed on the declaration in DemoUnit.pas, and the
+  unit's own header row on line 1. A bad scope is refused, not answered with
+  a list; a malformed table is an error from the reader, not a crash. }
 procedure TestOutline;
 var
-  LUnitFile: string;
-  LParams, LDoc, LRow, LGreet, LModule: TJSONObject;
-  LRoot: TJSONValue;
-  LRows: TJSONArray;
-  LValue: TJSONValue;
+  LUnitFile, LError: string;
+  LParams, LDoc: TJSONObject;
+  LRows: TArray<TLspOutlineRow>;
+  LGreet, LGreetImpl, LModule, LField, LIdx: Integer;
   LLine, LChar: Integer;
+  LAllStamped, LAnyInterface, LAnyImplementation, LAnyPositioned: Boolean;
 
-  function FindRow(AItems: TJSONArray; const AKind, AName, AUnit: string):
-    TJSONObject;
+  function FindRow(const AKind, AName: string; AImpl: Boolean;
+    const AUnit: string): Integer;
   var
-    LItem: TJSONValue;
+    I: Integer;
   begin
-    Result := nil;
-    for LItem in AItems do
-      if (LItem is TJSONObject) and
-         (TJSONObject(LItem).GetValue<string>('kind', '') = AKind) and
-         (TJSONObject(LItem).GetValue<string>('name', '') = AName) and
-         ((AUnit = '') or
-          (TJSONObject(LItem).GetValue<string>('unitName', '') = AUnit)) then
-        Exit(TJSONObject(LItem));
+    Result := -1;
+    for I := 0 to High(LRows) do
+      if (LRows[I].Kind = AKind) and (LRows[I].Name = AName) and
+         (LRows[I].IsImpl = AImpl) and
+         ((AUnit = '') or SameText(LRows[I].UnitName, AUnit)) then
+        Exit(I);
+  end;
+
+  function FindKind(const AKind: string): Integer;
+  var
+    I: Integer;
+  begin
+    Result := -1;
+    for I := 0 to High(LRows) do
+      if LRows[I].Kind = AKind then
+        Exit(I);
   end;
 
 begin
   Writeln;
-  Writeln('=== 5d-ter. pastree/outline: the Go To lists, and outlineTarget ===');
+  Writeln('=== 5d-ter. pastree/outline: the Go To table, and outlineTarget ===');
   LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
 
   // The module list.
@@ -1612,103 +1657,118 @@ begin
   LDoc := TJSONObject.Create;
   LDoc.AddPair('uri', PathToLspUri(LUnitFile));
   LParams.AddPair('textDocument', LDoc);
-  Check(Ask('pastree/outline', LParams), 'outline (module) answered');
-  Check(GOk and GResultJson.Contains('"kind":"module"') and
-    GResultJson.Contains('"head":"unit"'), 'the unit header is a row');
-  Check(GOk and GResultJson.Contains('"kind":"section"'),
-    'and the sections are rows');
-  Check(GOk and GResultJson.Contains('"owner":"TBox","name":"Value"'),
-    'the record''s field is a row owned by the record');
-  Check(GOk and GResultJson.Contains('"name":"CAnswer"'), 'the constant too');
-  Check(GOk and GResultJson.Contains('"name":"Greet"') and
-    GResultJson.Contains('"isImpl":true'),
+  Check(AskRaw('pastree/outline', LParams), 'outline (module) answered');
+  LRows := ParseOutlineTable(GResultJson, 'Demo.dproj', LError);
+  Check(GOk and (LError = '') and (Length(LRows) > 0),
+    'and the table reads back (PasTreeIdePlugin.OutlineRows): ' + LError);
+  LModule := FindKind('module');
+  Check((LModule >= 0) and (LRows[LModule].Head = 'unit'),
+    'the unit header is a row, head word "unit"');
+  Check(FindKind('section') >= 0, 'and the sections are rows');
+  LField := FindRow('var', 'Value', False, '');
+  Check((LField >= 0) and (LRows[LField].Owner = 'TBox') and
+    (LRows[LField].Head = 'field'),
+    'the record''s field is a row owned by the record, head word "field"');
+  Check(FindRow('const', 'CAnswer', False, '') >= 0, 'the constant too');
+  LGreet := FindRow('routine', 'Greet', False, '');
+  LGreetImpl := FindRow('routine', 'Greet', True, '');
+  Check((LGreet >= 0) and (LGreetImpl >= 0),
     'the routine is listed, and its body is a second row marked isImpl');
-  Check(GOk and GResultJson.Contains('"section":"interface"') and
-    GResultJson.Contains('"section":"implementation"'),
-    'rows carry their section');
+  LAllStamped := True;
+  LAnyInterface := False;
+  LAnyImplementation := False;
+  LAnyPositioned := True;
+  for LIdx := 0 to High(LRows) do
+  begin
+    LAllStamped := LAllStamped and (LRows[LIdx].ProjectFile = 'Demo.dproj') and
+      SameText(LRows[LIdx].FilePath, LUnitFile) and (LRows[LIdx].UnitId = -1);
+    LAnyInterface := LAnyInterface or (LRows[LIdx].Section = 'interface');
+    LAnyImplementation := LAnyImplementation or
+      (LRows[LIdx].Section = 'implementation');
+    LAnyPositioned := LAnyPositioned and (LRows[LIdx].Line > 0);
+  end;
+  Check(LAnyInterface and LAnyImplementation, 'rows carry their section');
+  Check(LAllStamped,
+    'every module row names the unit''s file, no unit id, and the project stamp');
+  Check(LAnyPositioned, 'every module row has a position');
   FindPos(LUnitFile, 'function Greet(const AName: string): string;', 'Greet',
     LLine, LChar);
-  Check(GOk and GResultJson.Contains(Format('"line":%d,"col":%d',
-    [LLine + 1, LChar + 1])),
+  Check((LGreet >= 0) and (LRows[LGreet].Line = LLine + 1) and
+    (LRows[LGreet].Col = LChar + 1),
     'a module row''s position is the name''s, 1-based (PasTree''s own)');
+  Check((LGreet >= 0) and (LRows[LGreet].Key = 'greet') and
+    (LField >= 0) and (LRows[LField].Key = 'tbox.value'),
+    'the reader stamps the lower-cased name column as the filter key');
 
   // The project list.
   LParams := TJSONObject.Create;
   LParams.AddPair('scope', 'project');
-  Check(Ask('pastree/outline', LParams), 'outline (project) answered');
-  Check(GOk and GResultJson.Contains('"unitName":"DemoUnit"') and
-    GResultJson.Contains('"unitName":"DemoApp"'),
+  Check(AskRaw('pastree/outline', LParams), 'outline (project) answered');
+  LRows := ParseOutlineTable(GResultJson, 'Demo.dproj', LError);
+  Check(GOk and (LError = '') and (Length(LRows) > 0),
+    'and the table reads back: ' + LError);
+  Check((FindRow('module', 'DemoUnit', False, 'DemoUnit') >= 0) and
+    (FindRow('module', 'DemoApp', False, 'DemoApp') >= 0),
     'rows name their unit, the main source included');
-  LGreet := nil;
-  LModule := nil;
-  if GOk then
-  begin
-    LRoot := TJSONObject.ParseJSONValue(GResultJson);
-    try
-      if (LRoot is TJSONObject) and
-         TJSONObject(LRoot).TryGetValue<TJSONArray>('rows', LRows) then
-      begin
-        LRow := FindRow(LRows, 'routine', 'Greet', 'DemoUnit');
-        if LRow <> nil then
-          LGreet := TJSONObject(LRow.Clone);
-        LRow := FindRow(LRows, 'module', 'DemoUnit', '');
-        if LRow <> nil then
-          LModule := TJSONObject(LRow.Clone);
-        // Positions are NOT on project rows: every one says line 0.
-        Check(not GResultJson.Contains('"line":1,'),
-          'project rows carry no position');
-        for LValue in LRows do
-          if (LValue is TJSONObject) and
-             (TJSONObject(LValue).GetValue<string>('name', '') = 'Greet') and
-             (TJSONObject(LValue).GetValue<Boolean>('isImpl', False)) then
-            Check(False, 'a project row is never a body');
-      end;
-    finally
-      LRoot.Free;
-    end;
-  end;
-  Check(LGreet <> nil, 'the routine has ONE project row, in its unit');
-  Check((LGreet <> nil) and (LGreet.GetValue<Integer>('sym', -1) >= 0) and
-    (LGreet.GetValue<Integer>('unitId', -1) >= 0),
-    'carrying the unit id and symbol index');
-  Check(LModule <> nil, 'and the unit has a header row named after its file');
+  LGreet := FindRow('routine', 'Greet', False, 'DemoUnit');
+  Check((LGreet >= 0) and (FindRow('routine', 'Greet', True, '') < 0),
+    'the routine has ONE project row, in its unit, never a body');
+  Check((LGreet >= 0) and (LRows[LGreet].Sym >= 0) and
+    (LRows[LGreet].UnitId >= 0), 'carrying the unit id and symbol index');
+  LAnyPositioned := False;
+  for LIdx := 0 to High(LRows) do
+    LAnyPositioned := LAnyPositioned or (LRows[LIdx].Line <> 0);
+  Check(not LAnyPositioned, 'project rows carry no position');
+  LModule := FindRow('module', 'DemoUnit', False, 'DemoUnit');
+  Check((LModule >= 0) and (LRows[LModule].UnitId >= 0),
+    'and the unit has a header row named after its file, with its unit id');
 
   // The landing of a project row: the declaration, and the header.
-  if LGreet <> nil then
+  if LGreet >= 0 then
   begin
     LParams := TJSONObject.Create;
-    LParams.AddPair('kind', LGreet.GetValue<string>('kind'));
-    LParams.AddPair('unitId',
-      TJSONNumber.Create(LGreet.GetValue<Integer>('unitId')));
-    LParams.AddPair('sym', TJSONNumber.Create(LGreet.GetValue<Integer>('sym')));
-    LParams.AddPair('node',
-      TJSONNumber.Create(LGreet.GetValue<Integer>('node')));
+    LParams.AddPair('kind', LRows[LGreet].Kind);
+    LParams.AddPair('unitId', TJSONNumber.Create(LRows[LGreet].UnitId));
+    LParams.AddPair('sym', TJSONNumber.Create(LRows[LGreet].Sym));
+    LParams.AddPair('node', TJSONNumber.Create(LRows[LGreet].Node));
     Check(Ask('pastree/outlineTarget', LParams),
       'outlineTarget on the routine''s row answered');
     Check(GOk and GResultJson.Contains('DemoUnit.pas') and
       GResultJson.Contains(Format('"line":%d,"character":%d', [LLine, LChar])),
       'and lands on the routine''s declaration (a Location, 0-based)');
-    LGreet.Free;
   end;
-  if LModule <> nil then
+  if LModule >= 0 then
   begin
     LParams := TJSONObject.Create;
     LParams.AddPair('kind', 'module');
-    LParams.AddPair('unitId',
-      TJSONNumber.Create(LModule.GetValue<Integer>('unitId')));
+    LParams.AddPair('unitId', TJSONNumber.Create(LRows[LModule].UnitId));
     LParams.AddPair('sym', TJSONNumber.Create(-1));
     LParams.AddPair('node', TJSONNumber.Create(-1));
     Check(Ask('pastree/outlineTarget', LParams),
       'outlineTarget on the unit header row answered');
     Check(GOk and GResultJson.Contains('DemoUnit.pas') and
       GResultJson.Contains('"line":0,'), 'and lands on the unit header');
-    LModule.Free;
   end;
+
+  // The reader on its own: null is an empty list, a broken table an error.
+  LRows := ParseOutlineTable('null', 'Demo.dproj', LError);
+  Check((Length(LRows) = 0) and (LError = ''), 'a null result reads as no rows');
+  LRows := ParseOutlineTable('{"kinds":["type"],"heads":["type"],' +
+    '"sections":[""],"owners":[""],"files":[["file:///c%3A/x.pas","x",0]],' +
+    '"rows":[[0,0,0,"A\"B\\C","",0,0,0,1,2,3,4]]}', 'Demo.dproj', LError);
+  Check((Length(LRows) = 1) and (LError = '') and (LRows[0].Name = 'A"B\C') and
+    (LRows[0].FilePath = 'c:\x.pas') and (LRows[0].Line = 3) and
+    (LRows[0].Col = 4) and (LRows[0].Sym = 1) and (LRows[0].Node = 2),
+    'escapes, indices and positions read back field for field');
+  LRows := ParseOutlineTable('{"kinds":["type"],"rows":[[0,7', 'Demo.dproj',
+    LError);
+  Check((Length(LRows) = 0) and (LError <> ''),
+    'a malformed table is an error naming the offset: ' + LError);
 
   // A bad scope is an error, not a guess.
   LParams := TJSONObject.Create;
   LParams.AddPair('scope', 'galaxy');
-  Check(Ask('pastree/outline', LParams), 'outline with a bad scope answered');
+  Check(AskRaw('pastree/outline', LParams), 'outline with a bad scope answered');
   Check(not GOk and GError.Contains('scope'), 'and is refused, naming the parameter');
 end;
 

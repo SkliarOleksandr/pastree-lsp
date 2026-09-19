@@ -115,12 +115,23 @@ type
     function ToJson: TJSONObject;
   end;
 
+  /// <summary>
+  /// The RAW form of a response (RequestRaw): AResultJson is the text of the
+  /// `result` member exactly as the server wrote it ('null' for a null),
+  /// never parsed into a DOM here. For bulk answers the caller reads itself -
+  /// the Go To table, 8 MB for a big project - where the DOM parse plus the
+  /// per-field lookups were 2 s of main-thread time (PasTreeIdePlugin.OutlineRows).
+  /// </summary>
+  TLspRawResponseProc = reference to procedure(ASuccess: Boolean;
+    const AResultJson: string; const AError: string);
+
   TLspClient = class
   private type
     TPendingRequest = class
       Id: Int64;
       Method: string;
       Callback: TLspResponseProc;
+      RawCallback: TLspRawResponseProc;   // set instead of Callback by RequestRaw
     end;
   private
     FExePath: string;
@@ -172,7 +183,19 @@ type
     /// </summary>
     function EnsureStarted: Boolean;
     procedure HandleFrame(const AJson: string);
+    /// <summary>
+    /// The fast path for a RequestRaw answer: reads the id off the front of
+    /// the frame without building a DOM and hands the result text to the raw
+    /// callback. True when the frame was consumed. A frame of any other shape
+    /// (an error, a notification, a different key order) is left to the DOM
+    /// path, which serves a raw pending too - slower but the same contract.
+    /// </summary>
+    function TryRawResponse(const AJson: string): Boolean;
     procedure HandleResponse(AId: Int64; AObj: TJSONObject);
+    function Issue(const AMethod: string; AParams: TJSONObject;
+      const AOnResponse: TLspResponseProc;
+      const AOnRaw: TLspRawResponseProc): Int64;
+    procedure FailPending(APending: TPendingRequest; const AReason: string);
     procedure HandleServerRequest(AIdJson: TJSONValue; const AMethod: string);
     procedure OnConnectionGone(const AReason: string);
     procedure SendInitialize;
@@ -220,6 +243,14 @@ type
     /// </summary>
     function Request(const AMethod: string; AParams: TJSONObject;
       const AOnResponse: TLspResponseProc): Int64;
+
+    /// <summary>
+    /// Request, with the answer delivered as TEXT (TLspRawResponseProc) and
+    /// no DOM built for it - for a bulk result the caller parses itself.
+    /// Same ownership and exactly-once rules as Request.
+    /// </summary>
+    function RequestRaw(const AMethod: string; AParams: TJSONObject;
+      const AOnResponse: TLspRawResponseProc): Int64;
 
     /// <summary>
     /// Asks the server to abandon a request. The response still arrives (as
@@ -995,6 +1026,7 @@ procedure TLspClient.FailAllPending(const AReason: string);
 var
   LItems: TArray<TPendingRequest>;
   LCallbacks: TArray<TLspResponseProc>;
+  LRaws: TArray<TLspRawResponseProc>;
   I: Integer;
 begin
   if FPending.Count = 0 then
@@ -1004,12 +1036,35 @@ begin
   // by the clear, nor may it mutate a dictionary we are still walking.
   LItems := FPending.Values.ToArray;
   SetLength(LCallbacks, Length(LItems));
+  SetLength(LRaws, Length(LItems));
   for I := 0 to High(LItems) do
+  begin
     LCallbacks[I] := LItems[I].Callback;
+    LRaws[I] := LItems[I].RawCallback;
+  end;
   FPending.Clear;
   for I := 0 to High(LCallbacks) do
     if Assigned(LCallbacks[I]) then
-      LCallbacks[I](False, nil, AReason);
+      LCallbacks[I](False, nil, AReason)
+    else if Assigned(LRaws[I]) then
+      LRaws[I](False, '', AReason);
+end;
+
+{ Fails one pending request that is still in the map - the entry is removed
+  first, the callback copied out, because Remove frees it. }
+procedure TLspClient.FailPending(APending: TPendingRequest;
+  const AReason: string);
+var
+  LCallback: TLspResponseProc;
+  LRaw: TLspRawResponseProc;
+begin
+  LCallback := APending.Callback;
+  LRaw := APending.RawCallback;
+  FPending.Remove(APending.Id);
+  if Assigned(LCallback) then
+    LCallback(False, nil, AReason)
+  else if Assigned(LRaw) then
+    LRaw(False, '', AReason);
 end;
 
 function TLspClient.SendOrQueue(const AJson: string;
@@ -1029,13 +1084,25 @@ end;
 
 function TLspClient.Request(const AMethod: string; AParams: TJSONObject;
   const AOnResponse: TLspResponseProc): Int64;
+begin
+  Result := Issue(AMethod, AParams, AOnResponse, nil);
+end;
+
+function TLspClient.RequestRaw(const AMethod: string; AParams: TJSONObject;
+  const AOnResponse: TLspRawResponseProc): Int64;
+begin
+  Result := Issue(AMethod, AParams, nil, AOnResponse);
+end;
+
+function TLspClient.Issue(const AMethod: string; AParams: TJSONObject;
+  const AOnResponse: TLspResponseProc;
+  const AOnRaw: TLspRawResponseProc): Int64;
 var
   LId: Int64;
   LMsg: TJSONObject;
   LJson: string;
   LPending: TPendingRequest;
   LIsLifecycle: Boolean;
-  LCallback: TLspResponseProc;
 begin
   Result := 0;
   // A safe point to collect any connection whose disposal was deferred because
@@ -1047,7 +1114,9 @@ begin
   begin
     AParams.Free;
     if Assigned(AOnResponse) then
-      AOnResponse(False, nil, 'server unavailable');
+      AOnResponse(False, nil, 'server unavailable')
+    else if Assigned(AOnRaw) then
+      AOnRaw(False, '', 'server unavailable');
     Exit;
   end;
 
@@ -1070,17 +1139,14 @@ begin
   LPending.Id := LId;
   LPending.Method := AMethod;
   LPending.Callback := AOnResponse;
+  LPending.RawCallback := AOnRaw;
   FPending.Add(LId, LPending);
 
   if SendOrQueue(LJson, LIsLifecycle) then
     Exit(LId);
 
-  // Could not be sent: fail it here so no caller waits forever. Copy the
-  // callback out first - Remove frees the entry.
-  LCallback := LPending.Callback;
-  FPending.Remove(LId);
-  if Assigned(LCallback) then
-    LCallback(False, nil, 'send failed');
+  // Could not be sent: fail it here so no caller waits forever.
+  FailPending(LPending, 'send failed');
 end;
 
 procedure TLspClient.Cancel(AId: Int64);
@@ -1157,6 +1223,8 @@ begin
   // that cost something are logged (cFrameLogMs) - the 200 ms progress ticks
   // would otherwise drown the lines that matter.
   LStart := TimingNowMs;
+  if TryRawResponse(AJson) then
+    Exit;
   LRoot := TJSONObject.ParseJSONValue(AJson);
   if LRoot = nil then
   begin
@@ -1195,10 +1263,57 @@ begin
   end;
 end;
 
+function TLspClient.TryRawResponse(const AJson: string): Boolean;
+const
+  // PasLsp.Protocol.BuildResponse's own spelling: the id right after the
+  // version, the result right after the id. Anything else falls through.
+  PREFIX = '{"jsonrpc":"2.0","id":';
+  RESULT_KEY = ',"result":';
+var
+  LLen, LPos: Integer;
+  LId: Int64;
+  LPending: TPendingRequest;
+  LRaw: TLspRawResponseProc;
+  LStart: Double;
+begin
+  Result := False;
+  LLen := Length(AJson);
+  if (LLen < Length(PREFIX) + Length(RESULT_KEY) + 2) or
+     (StrLComp(PChar(AJson), PREFIX, Length(PREFIX)) <> 0) then
+    Exit;
+  LPos := Length(PREFIX) + 1;
+  if not CharInSet(AJson[LPos], ['0'..'9']) then
+    Exit;
+  LId := 0;
+  while (LPos <= LLen) and CharInSet(AJson[LPos], ['0'..'9']) do
+  begin
+    LId := LId * 10 + (Ord(AJson[LPos]) - Ord('0'));
+    Inc(LPos);
+  end;
+  if (LLen - LPos + 1 <= Length(RESULT_KEY)) or
+     (StrLComp(PChar(AJson) + LPos - 1, RESULT_KEY, Length(RESULT_KEY)) <> 0) or
+     (AJson[LLen] <> '}') then
+    Exit;
+  if not FPending.TryGetValue(LId, LPending) or
+     not Assigned(LPending.RawCallback) then
+    Exit;
+  Inc(LPos, Length(RESULT_KEY));
+  LRaw := LPending.RawCallback;
+  FPending.Remove(LId);   // frees LPending; the callback was copied out first
+  LStart := TimingNowMs;
+  // The result is everything between the key and the closing brace.
+  LRaw(True, Copy(AJson, LPos, LLen - LPos), '');
+  if TimingNowMs - LStart >= cFrameLogMs then
+    TimingLogFmt('recv response (raw): %d chars, handle %s',
+      [LLen, TimingSince(LStart)]);
+  Result := True;
+end;
+
 procedure TLspClient.HandleResponse(AId: Int64; AObj: TJSONObject);
 var
   LPending: TPendingRequest;
   LCallback: TLspResponseProc;
+  LRaw: TLspRawResponseProc;
   LError, LResult: TJSONValue;
   LMessage: string;
 begin
@@ -1211,8 +1326,9 @@ begin
   end;
 
   LCallback := LPending.Callback;
-  FPending.Remove(AId);   // frees LPending; the callback was copied out first
-  if not Assigned(LCallback) then
+  LRaw := LPending.RawCallback;
+  FPending.Remove(AId);   // frees LPending; the callbacks were copied out first
+  if not Assigned(LCallback) and not Assigned(LRaw) then
     Exit;
 
   LError := AObj.FindValue('error');
@@ -1221,7 +1337,10 @@ begin
     LMessage := 'server error';
     if LError is TJSONObject then
       LMessage := TJSONObject(LError).GetValue<string>('message', LMessage);
-    LCallback(False, nil, LMessage);
+    if Assigned(LCallback) then
+      LCallback(False, nil, LMessage)
+    else
+      LRaw(False, '', LMessage);
     Exit;
   end;
 
@@ -1230,7 +1349,14 @@ begin
   LResult := AObj.FindValue('result');
   if LResult is TJSONNull then
     LResult := nil;
-  LCallback(True, LResult, '');
+  if Assigned(LCallback) then
+    LCallback(True, LResult, '')
+  else if LResult = nil then
+    LRaw(True, 'null', '')
+  else
+    // The DOM path reached a raw pending (a frame TryRawResponse did not
+    // recognise): the text is re-made from the DOM - correct, just slower.
+    LRaw(True, LResult.ToJSON, '');
 end;
 
 procedure TLspClient.HandleServerRequest(AIdJson: TJSONValue;
