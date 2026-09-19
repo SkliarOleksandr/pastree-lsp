@@ -119,7 +119,7 @@ top of the unit list, so the same box is go-to-line. Opened with an empty
 box, the unit tab selects the row nearest above the caret - "where am I".
 
 The boxes at the bottom narrow the lists by kind (types, vars and fields,
-consts, routines, properties) and hide or show the `include` rows; those and
+consts, routines, properties, `include` rows) - All, or any subset; those and
 the window size are remembered. The unit list is read from the live buffer,
 so a routine typed a second ago is in it. The project and group lists load
 on the first switch to their tab and carry no line numbers: choosing a row

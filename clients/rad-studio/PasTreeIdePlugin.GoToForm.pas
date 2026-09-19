@@ -16,13 +16,17 @@ unit PasTreeIdePlugin.GoToForm;
   nearest ABOVE the caret is selected when the module tab opens, so Ctrl+G
   with an empty box answers "where am I". Each row is drawn by hand
   (lbVirtualOwnerDraw - a project's fifty thousand rows cost nothing to
-  list): the head word and the detail in a quieter colour, the name in the
-  window text colour with the matched letters in bold, then the unit name
-  and the section note quiet again, and `:N` at the right edge for a row
-  that knows its line. The boxes at the bottom filter by KIND - All or a
-  subset of Types, Vars/Fields, Consts, Routines, Properties; ticking a kind
-  unticks All, ticking All clears the kinds, unticking the last kind falls
-  back to All. Size and the boxes persist between openings.
+  list): the head word and the detail in the EDITOR'S syntax colours (the
+  live palette the Find References rows paint with, through
+  PasTreeIdePlugin.ResultRows - Alex, 2026-09-19: "the keyword colours the
+  IDE editor uses, as in the Find All tabs"), the name in the editor's
+  identifier colour with the matched letters in bold, and at the right edge
+  three aligned quiet columns: the section (interface / implementation),
+  the unit name on the project and group tabs, `:N` for a row that knows
+  its line. The boxes at the bottom filter by KIND - All or a
+  subset of Types, Vars/Fields, Consts, Routines, Properties, Includes;
+  ticking a kind unticks All, ticking All clears the kinds, unticking the
+  last kind falls back to All. Size and the boxes persist between openings.
 
   THE THREE CHANGES FROM THE DEMO:
 
@@ -36,10 +40,11 @@ unit PasTreeIdePlugin.GoToForm;
      .groupproj - so the dialog says where a chosen row can land. No group
      tab when the group has one project.
 
-  2. AN INCLUDES BOX: the `include 'Foo.inc'` landmark rows can be hidden
-     (Alex: "a filter - show or do not show the include entries"). The
-     other landmarks (unit, interface, uses, implementation) always show, as
-     in the demo. Independent of All: a landmark is not a kind.
+  2. AN INCLUDES BOX: the `include 'Foo.inc'` landmark rows show under All
+     or under the Includes box, one more box under the All-or-subset rule
+     (Alex: "a filter - show or do not show the include entries"; then
+     "Includes should work like all the others"). The other landmarks
+     (unit, interface, uses, implementation) always show, as in the demo.
 
   3. THE LISTS ARRIVE ASYNCHRONOUSLY. The demo reads them off an in-process
      model; here every list is an LSP answer delivered on a later
@@ -155,6 +160,8 @@ type
     FChosenLine, FChosenCol: Integer;
     FResolving: Boolean;      // a landing request is in flight
     FHeadWidth: Integer;      // the head-word column, measured per tab
+    FUnitWidth: Integer;      // the unit column (project/group tabs), same
+    FSectionWidth: Integer;   // the section column, same
     FLoadingState: Boolean;   // boxes being set in bulk: rules and refilter off
     FQuiet, FStrong: TColor;  // the two row colours, from the IDE's theme
     function Scope: TGoToScope;
@@ -213,7 +220,10 @@ uses
   System.Generics.Collections,
   Vcl.Themes,
   ToolsAPI,
-  PasTreeIdePlugin.Settings;
+  ToolsAPI.Editor,
+  PasTreeIdePlugin.ResultRows,
+  PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.Timing;
 
 {$R *.dfm}
 
@@ -224,6 +234,10 @@ const
   SET_INCLUDES = 'GoToIncludes';   // 1 = the include rows show (default)
 
   ALL_KINDS: TGoToKinds = [gkType, gkVar, gkConst, gkProperty, gkRoutine];
+  // Between the head column and the name. 8 had `class procedure` (bold,
+  // in the editor's reserved-word style) touching the name.
+  cHeadGap = 16;
+  cDeclarationSuffix = ', declaration';
 
 var
   // The one open picker, or nil. Every asynchronous answer checks that the
@@ -257,6 +271,24 @@ begin
     Result := AEntry.Owner + '.' + AEntry.Name
   else
     Result := AEntry.Name;
+end;
+
+// The section column: `interface` or `implementation` for a declaration
+// that knows its section, `interface, declaration` for a routine header
+// without a body (a project row - one per routine, never a body - reads the
+// same). Nothing for a landmark. Until 0.46.1 this was a note in
+// parentheses after the detail; Alex asked for a column of its own, the
+// second from the right (2026-09-19).
+function SectionColumn(const AEntry: TLspOutlineRow): string;
+var
+  LKind: TGoToKind;
+begin
+  Result := '';
+  if not DeclKind(AEntry, LKind) or (AEntry.Section = '') then
+    Exit;
+  Result := AEntry.Section;
+  if (LKind = gkRoutine) and (AEntry.Sym < 0) and not AEntry.IsImpl then
+    Result := Result + cDeclarationSuffix;
 end;
 
 function IsDigits(const AText: string): Boolean;
@@ -451,6 +483,7 @@ procedure TPasTreeGoToForm.EnsureLoaded;
 var
   LScope: TGoToScope;
   LSelf: TPasTreeGoToForm;
+  LStart, LMeasured: Double;
 begin
   LScope := Scope;
   if FLoaded[LScope] or FLoading[LScope] or not Assigned(FSource) then
@@ -480,8 +513,13 @@ begin
         FEntries[LScope] := nil;
       if Scope = LScope then
       begin
+        LStart := TimingNowMs;
         MeasureHeadColumn;
+        LMeasured := TimingNowMs;
         Refilter(lbItems.ItemIndex < 0);
+        TimingLogFmt('goto list landed %d: %d rows, measure %s, refilter %s',
+          [Ord(LScope), Length(ARows), Ms(LMeasured - LStart),
+           TimingSince(LMeasured)]);
         if not ASuccess and (AError <> '') and (APending = 0) then
           sbStatus.SimpleText := '  ' + AError;
       end;
@@ -491,24 +529,75 @@ end;
 procedure TPasTreeGoToForm.MeasureHeadColumn;
 var
   LEntries: TArray<TLspOutlineRow>;
-  LSeen: TDictionary<string, Boolean>;
+  LSeen, LSeenUnit, LSeenSection: TDictionary<string, Boolean>;
   LIdx: Integer;
+  LText, LPrevUnit: string;
+  LUnitColumn: Boolean;
 begin
   // The head column: wide enough for the longest head word actually present,
   // so names line up whatever mix of `class function` and `var` the list
   // has. Measured here, where the canvas has the scaled font - and once per
   // DISTINCT word: there are a dozen of them in 100k rows, and a GDI text
   // measurement per row was a third of a second on the project list.
+  //
+  // Measured in the reserved-word style of the editor's palette (bold by
+  // default) - head words are painted in it, and measuring them plain left
+  // `class procedure` running into the name (Alex's first screenshot,
+  // 2026-09-19).
+  //
+  // The unit and section columns the same way. The loop body is what a
+  // project list of a million rows (AVImark with the library) runs once per
+  // row, so NOTHING in it allocates: a first cut that built a `'unit:' +
+  // Name` key and a SectionColumn string per row made the project tab take
+  // seconds to open (Alex, 2026-09-19: "wild lag"). A row's UnitName is
+  // the files table's string shared by every row of that file, and rows
+  // arrive grouped by file, so a plain inequality against the previous
+  // row's skips the dictionary for all but one row per file; the section
+  // words are keyed by the raw Section and both spellings the column can
+  // have are measured for each new one - a column a few pixels wider than
+  // strictly needed beats a string per row. And no Scope in the loop: it
+  // reads tcScope.TabIndex, a SendMessage to the tab control, 47 us a row
+  // - 5.7 s over the AVImark list, traced 2026-09-19 with the same cost
+  // per row on the module tab. The unit width is zero on the module tab,
+  // whose rows draw no unit (lbItemsDrawItem).
   lbItems.Canvas.Font.Assign(lbItems.Font);
+  lbItems.Canvas.Font.Style := EditorSyntaxStyle(atReservedWord);
   FHeadWidth := lbItems.Canvas.TextWidth('line');
   LEntries := Entries;
   LSeen := TDictionary<string, Boolean>.Create;
+  LSeenUnit := TDictionary<string, Boolean>.Create;
+  LSeenSection := TDictionary<string, Boolean>.Create;
   try
     for LIdx := 0 to High(LEntries) do
       if LSeen.TryAdd(LEntries[LIdx].Head, True) then
         FHeadWidth := Max(FHeadWidth,
           lbItems.Canvas.TextWidth(LEntries[LIdx].Head));
+    lbItems.Canvas.Font.Style := [];
+    FUnitWidth := 0;
+    FSectionWidth := 0;
+    LPrevUnit := '';
+    LUnitColumn := Scope <> gsModule;
+    for LIdx := 0 to High(LEntries) do
+    begin
+      if LUnitColumn and (LEntries[LIdx].UnitName <> '') and
+         (LEntries[LIdx].UnitName <> LPrevUnit) then
+      begin
+        LPrevUnit := LEntries[LIdx].UnitName;
+        if LSeenUnit.TryAdd(LPrevUnit, True) then
+          FUnitWidth := Max(FUnitWidth, lbItems.Canvas.TextWidth(LPrevUnit));
+      end;
+      if (LEntries[LIdx].Section <> '') and
+         LSeenSection.TryAdd(LEntries[LIdx].Section, True) then
+      begin
+        LText := LEntries[LIdx].Section;
+        FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
+        LText := LText + cDeclarationSuffix;
+        FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
+      end;
+    end;
   finally
+    LSeenSection.Free;
+    LSeenUnit.Free;
     LSeen.Free;
   end;
 end;
@@ -561,7 +650,9 @@ begin
     chkProps.Checked := LBits and 16 <> 0;
     if LBits and 63 = 0 then
       chkAll.Checked := True;
-    chkIncludes.Checked := ReadPickerValue(SET_INCLUDES, 1) <> 0;
+    // Includes is under the All rule: it cannot be on beside All.
+    chkIncludes.Checked := not chkAll.Checked and
+      (ReadPickerValue(SET_INCLUDES, 0) <> 0);
   finally
     FLoadingState := False;
   end;
@@ -619,8 +710,8 @@ begin
     LLineCount := 0    // no `line N` row: there is no one file to go to
   else
     LLineCount := FLineCount;
-  FRows := FilterRows(LEntries, edFilter.Text, Kinds, chkIncludes.Checked,
-    LLineCount);
+  FRows := FilterRows(LEntries, edFilter.Text, Kinds,
+    chkAll.Checked or chkIncludes.Checked, LLineCount);
   // Virtual list: the count is the whole update, every row is painted from
   // FRows on demand.
   lbItems.Count := Length(FRows);
@@ -668,6 +759,8 @@ begin
 end;
 
 procedure TPasTreeGoToForm.tcScopeChange(Sender: TObject);
+var
+  LStart, LMeasured: Double;
 begin
   // A tab switch is a new list: the old selection means nothing in it, the
   // module tab reselects by caret, the others start at the top.
@@ -675,8 +768,14 @@ begin
   FRows := nil;
   EnsureLoaded;
   UpdateCursor;
+  // Timing lines under Advanced Logging: they found the 5.7 s Scope-per-row
+  // loop on 2026-09-19 and stay for the next such report.
+  LStart := TimingNowMs;
   MeasureHeadColumn;
+  LMeasured := TimingNowMs;
   Refilter(True);
+  TimingLogFmt('goto tab %d: %d rows, measure %s, refilter %s',
+    [Ord(Scope), Length(Entries), Ms(LMeasured - LStart), TimingSince(LMeasured)]);
   ActiveControl := edFilter;
 end;
 
@@ -706,7 +805,8 @@ begin
     if TCheckBox(Sender).Checked then
       chkAll.Checked := False
     else if not (chkTypes.Checked or chkVars.Checked or chkConsts.Checked or
-                 chkRoutines.Checked or chkProps.Checked) then
+                 chkRoutines.Checked or chkProps.Checked or
+                 chkIncludes.Checked) then
       chkAll.Checked := True;
   finally
     FLoadingState := False;
@@ -727,9 +827,11 @@ begin
       chkConsts.Checked := False;
       chkRoutines.Checked := False;
       chkProps.Checked := False;
+      chkIncludes.Checked := False;
     end
     else if not (chkTypes.Checked or chkVars.Checked or chkConsts.Checked or
-                 chkRoutines.Checked or chkProps.Checked) then
+                 chkRoutines.Checked or chkProps.Checked or
+                 chkIncludes.Checked) then
       chkAll.Checked := True;   // nothing else is on: All cannot go off
   finally
     FLoadingState := False;
@@ -737,13 +839,13 @@ begin
   Refilter(False);
 end;
 
-// Includes is a landmark switch, not a kind: it takes no part in the
-// All-or-subset rule above.
+// Includes is one more box under the All-or-subset rule since 0.46.3 (Alex,
+// 2026-09-19: "Includes should work like all the others - ticking it
+// unticks All"). Until then it was a landmark switch outside the rule, and
+// the one box that behaved differently. All shows the include rows too.
 procedure TPasTreeGoToForm.IncludesChanged(Sender: TObject);
 begin
-  if FLoadingState then
-    Exit;
-  Refilter(False);
+  FilterChanged(Sender);
 end;
 
 procedure TPasTreeGoToForm.MoveSelection(ADelta: Integer);
@@ -862,45 +964,49 @@ begin
   ModalResult := mrOk;
 end;
 
-// The section note after the detail: `(declaration; interface section)` for
-// a routine header without a body, `(interface section)` for any other
-// declaration, nothing for an implementation row (its section is implied)
-// or a landmark. A project row (one row per routine, never a body) reads
-// `(interface section)` for a routine too.
-function SectionNote(const AEntry: TLspOutlineRow): string;
-var
-  LKind: TGoToKind;
-begin
-  Result := '';
-  if not DeclKind(AEntry, LKind) or AEntry.IsImpl or (AEntry.Section = '') then
-    Exit;
-  Result := AEntry.Section + ' section';
-  if (LKind = gkRoutine) and (AEntry.Sym < 0) then
-    Result := 'declaration; ' + Result;
-  Result := '(' + Result + ')';
-end;
-
 procedure TPasTreeGoToForm.lbItemsDrawItem(AControl: TWinControl;
   AIndex: Integer; ARect: TRect; AState: TOwnerDrawState);
 var
   LCanvas: TCanvas;
   LRow: TGoToRow;
   LEntries: TArray<TLspOutlineRow>;
-  LQuiet, LStrong: TColor;
+  LQuiet, LStrong, LIdent, LKeyword, LForce: TColor;
+  LNameStyle: TFontStyles;
   LX, LY, LLineRight, LSaved: Integer;
   LName, LNote: string;
 
-  procedure Put(const AText: string; AColor: TColor; ABold: Boolean);
+  procedure Put(const AText: string; AColor: TColor; AStyle: TFontStyles);
   begin
     if AText = '' then
       Exit;
     LCanvas.Font.Color := AColor;
-    if ABold then
-      LCanvas.Font.Style := [fsBold]
-    else
-      LCanvas.Font.Style := [];
+    LCanvas.Font.Style := AStyle;
     LCanvas.TextOut(LX, LY, AText);
     Inc(LX, LCanvas.TextWidth(AText));
+  end;
+
+  // One right-aligned column of width AWidth ending at LLineRight - 6,
+  // clipped to itself; LLineRight moves left past it and a gap.
+  procedure PutColumn(const AText: string; AWidth: Integer);
+  begin
+    if (AText = '') or (AWidth <= 0) then
+      Exit;
+    AWidth := Min(AWidth, lbItems.ClientWidth div 3);
+    LX := LLineRight - 6 - AWidth;
+    LSaved := SaveDC(LCanvas.Handle);
+    IntersectClipRect(LCanvas.Handle, LX, ARect.Top, LLineRight - 6,
+      ARect.Bottom);
+    Put(AText, LQuiet, []);
+    RestoreDC(LCanvas.Handle, LSaved);
+    LLineRight := LLineRight - 6 - AWidth - 8;
+  end;
+
+  // A run in the editor's syntax colours (PasTreeIdePlugin.ResultRows, the
+  // same palette the Find References rows paint with). Font.Style is the
+  // last run's afterwards; every Put sets its own.
+  procedure PutSyntax(const AText: string);
+  begin
+    PaintSyntaxText(LCanvas, LX, LY, AText, LQuiet, LForce);
   end;
 
 begin
@@ -910,24 +1016,35 @@ begin
     Exit;
   LRow := FRows[AIndex];
   // A selected row keeps the highlight text colour for everything: it is
-  // the only colour guaranteed readable on the highlight background.
+  // the only colour guaranteed readable on the highlight background (the
+  // list's, a saturated blue - not the editor's own selection colour that
+  // the Messages panel rows keep their palette on).
   if odSelected in AState then
   begin
     LQuiet := LCanvas.Font.Color;
     LStrong := LCanvas.Font.Color;
+    LIdent := LStrong;
+    LKeyword := LStrong;
+    LForce := LStrong;
   end
   else
   begin
     LQuiet := FQuiet;
     LStrong := FStrong;
+    // The name column is an identifier and a landmark is a reserved word,
+    // in the editor's live colours for those classes; the head word and
+    // the detail go through the tokenizer (PutSyntax).
+    LIdent := EditorSyntaxColor(atIdentifier, LStrong);
+    LKeyword := EditorSyntaxColor(atReservedWord, LStrong);
+    LForce := clNone;
   end;
   LX := ARect.Left + 6;
   LY := ARect.Top + (ARect.Height - LCanvas.TextHeight('Xg')) div 2;
   if LRow.Kind = grLine then
   begin
-    Put('line', LQuiet, False);
-    LX := ARect.Left + 6 + FHeadWidth + 8;
-    Put(IntToStr(LRow.LineNo), LStrong, True);
+    Put('line', LQuiet, []);
+    LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
+    Put(IntToStr(LRow.LineNo), LStrong, [fsBold]);
     Exit;
   end;
   LEntries := Entries;
@@ -935,10 +1052,22 @@ begin
     Exit;
   with LEntries[LRow.Entry] do
   begin
-    // The line column, right-aligned as `:N`, for a row that knows its line
-    // (the module tab; a project row has no position until it is chosen).
-    // Drawn FIRST, and the row text is then clipped short of it, so a long
-    // detail runs out under the column instead of over it.
+    // The right-hand columns, drawn FIRST, and the row text is then clipped
+    // short of them, so a long detail runs out under a column instead of
+    // over it. From the edge inwards:
+    //  - the LINE, `:N`, for a row that knows its line (the module tab; a
+    //    project row has no position until it is chosen);
+    //  - the UNIT, on the project and group tabs (Alex, 2026-09-19: "the
+    //    module name in a separate column, as the line number is for the
+    //    module tab"). The module tab's rows are all from the one module
+    //    the tab is named after, and the unit's own header row already IS
+    //    that name - so neither gets the column;
+    //  - the SECTION - interface / implementation, `, declaration` for a
+    //    bodiless routine header (Alex, the same day: "one more column for
+    //    the extra information, second from the right").
+    // Each as wide as its longest text on the tab (MeasureHeadColumn),
+    // capped at a third of the list so one absurd name does not eat the
+    // row (PutColumn).
     LLineRight := ARect.Right;
     if Line > 0 then
     begin
@@ -946,40 +1075,44 @@ begin
       LCanvas.Font.Style := [];
       LLineRight := ARect.Right - 6 - LCanvas.TextWidth(LNote);
       LX := LLineRight;
-      Put(LNote, LQuiet, False);
-      LX := ARect.Left + 6;
+      Put(LNote, LQuiet, []);
       LLineRight := LLineRight - 8;
     end;
+    if (Kind <> 'module') and (Scope <> gsModule) then
+      PutColumn(UnitName, FUnitWidth);
+    PutColumn(SectionColumn(LEntries[LRow.Entry]), FSectionWidth);
+    LX := ARect.Left + 6;
     LSaved := SaveDC(LCanvas.Handle);
     IntersectClipRect(LCanvas.Handle, ARect.Left, ARect.Top, LLineRight,
       ARect.Bottom);
     // The name column is `Owner.Name` - or, for a landmark, the head word
-    // itself, which then takes the head column and the match highlight.
+    // itself, which then takes the head column and the match highlight, in
+    // the reserved-word colour AND style (bold by default - `interface`
+    // and `uses` came out plain when only the colour was taken).
     LName := NameColumn(LEntries[LRow.Entry]);
+    LNameStyle := [];
     if Name <> '' then
     begin
-      Put(Head, LQuiet, False);
-      LX := ARect.Left + 6 + FHeadWidth + 8;
+      PutSyntax(Head);
+      LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
+    end
+    else
+    begin
+      LIdent := LKeyword;
+      LNameStyle := EditorSyntaxStyle(atReservedWord);
     end;
     if LRow.MatchLen > 0 then
     begin
-      Put(Copy(LName, 1, LRow.MatchFrom), LStrong, False);
-      Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LStrong, True);
-      Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LStrong,
-        False);
+      Put(Copy(LName, 1, LRow.MatchFrom), LIdent, LNameStyle);
+      Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LIdent,
+        LNameStyle + [fsBold]);
+      Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LIdent,
+        LNameStyle);
     end
     else
-      Put(LName, LStrong, False);
+      Put(LName, LIdent, LNameStyle);
     if Detail <> '' then
-      Put('  ' + Detail, LQuiet, False);
-    // A project row says which unit it is from; the module tab's rows are
-    // all from the one module the tab is named after. The unit's own header
-    // row already IS that name - printing it twice read as a stutter.
-    if (UnitName <> '') and (Kind <> 'module') then
-      Put('  ' + UnitName, LQuiet, False);
-    LNote := SectionNote(LEntries[LRow.Entry]);
-    if LNote <> '' then
-      Put('  ' + LNote, LQuiet, False);
+      PutSyntax('  ' + Detail);
     RestoreDC(LCanvas.Handle, LSaved);
   end;
 end;

@@ -73,7 +73,7 @@ unit PasTreeIdePlugin.ResultRows;
 interface
 
 uses
-  ToolsAPI;
+  Vcl.Graphics, ToolsAPI, ToolsAPI.Editor;
 
 /// <summary>
 /// The tab's first line - "PasTree Find References: ..." - painted bold in
@@ -106,11 +106,38 @@ function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
   const ATag: string): IOTACustomMessage;
 
+/// <summary>
+/// The editor's live colour for one syntax class - FontColor of the code
+/// editor options, read now (a Tools > Options change shows on the next
+/// repaint); ADefault when the editor services are not there. For a
+/// caller that paints a single run it knows the class of (the Go To
+/// picker's name column is an identifier).
+/// </summary>
+function EditorSyntaxColor(ACode: TOTASyntaxCode; ADefault: TColor): TColor;
+
+/// <summary>
+/// The editor's live font style for one syntax class (reserved words are
+/// bold by default); [] without the editor services.
+/// </summary>
+function EditorSyntaxStyle(ACode: TOTASyntaxCode): TFontStyles;
+
+/// <summary>
+/// Paints AText at AX/AY through the display tokenizer in the editor's
+/// live syntax colours and styles - keywords, identifiers, symbols,
+/// numbers - and advances AX past it. ADefault is the colour and style
+/// when there is no palette. AForceColor, when not clNone, replaces every
+/// run's colour (a selected row keeps its highlight text colour; the
+/// styles still follow the palette). Font.Style is left as the last run
+/// set it. The Go To picker paints its head word and its detail with this.
+/// </summary>
+procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
+  const AText: string; ADefault: TColor; AForceColor: TColor = clNone);
+
 implementation
 
 uses
   Winapi.Windows, System.SysUtils, System.Types, System.StrUtils,
-  System.UITypes, Vcl.Graphics, ToolsAPI.UI, ToolsAPI.Editor;
+  System.UITypes, ToolsAPI.UI;
 
 { ------------------------------------------------------------------------- }
 { The display tokenizer                                                      }
@@ -585,6 +612,57 @@ begin
   if Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
     AOptions := LServices.Options;
   Result := Assigned(AOptions);
+end;
+
+function EditorSyntaxColor(ACode: TOTASyntaxCode; ADefault: TColor): TColor;
+var
+  LOptions: INTACodeEditorOptions;
+begin
+  if TryEditorOptions(LOptions) then
+    Result := LOptions.FontColor[ACode]
+  else
+    Result := ADefault;
+end;
+
+function EditorSyntaxStyle(ACode: TOTASyntaxCode): TFontStyles;
+var
+  LOptions: INTACodeEditorOptions;
+begin
+  if TryEditorOptions(LOptions) then
+    Result := LOptions.FontStyles[ACode]
+  else
+    Result := [];
+end;
+
+procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
+  const AText: string; ADefault: TColor; AForceColor: TColor);
+var
+  LOptions: INTACodeEditorOptions;
+  LHavePalette: Boolean;
+  LRun: TTokenRun;
+  LText: string;
+begin
+  if AText = '' then
+    Exit;
+  LHavePalette := TryEditorOptions(LOptions);
+  for LRun in TokenizeLine(AText) do
+  begin
+    if LHavePalette then
+    begin
+      ACanvas.Font.Color := LOptions.FontColor[LRun.Code];
+      ACanvas.Font.Style := LOptions.FontStyles[LRun.Code];
+    end
+    else
+    begin
+      ACanvas.Font.Color := ADefault;
+      ACanvas.Font.Style := [];
+    end;
+    if AForceColor <> clNone then
+      ACanvas.Font.Color := AForceColor;
+    LText := Copy(AText, LRun.Start, LRun.Len);
+    ACanvas.TextOut(AX, AY, LText);
+    Inc(AX, ACanvas.TextWidth(LText));
+  end;
 end;
 
 { ------------------------------------------------------------------------- }
