@@ -90,6 +90,45 @@ reasoning is in `SPEC.md`; do not re-derive it.
 Ruled out by measurement, so do not start there: out-of-process overhead (nil -
 in-process is the same 15 s) and Debug-vs-Release (~2%, inside noise).
 
+## Go To (Ctrl+G) is slow on a big project or group
+
+Before 0.46.0 this was NOT the analysis - the project list comes off the
+retained symbol tables (`TPasNavigator.ProjectOutline`) and cost ~70 ms even
+on AVImark (1553 units, 113,613 rows). The delay was the ANSWER's SIZE: one
+JSON object per row was 33 MB on the wire, and the client spent 1.5 s in
+`TJSONObject.ParseJSONValue` plus per-field `GetValue<T>` on the main thread,
+then another ~900 ms in `MeasureHeadColumn` doing one GDI `TextWidth` PER
+ROW - all before the picker showed anything. Measured end to end: 2.2 s warm,
+worse on a first (cold) request or a slower machine.
+
+0.46.0 answers `pastree/outline` as a TABLE (`kinds`/`heads`/`sections`/
+`owners`/`files` interned once, rows as positional index arrays - see
+`SPEC.md`'s entry for `pastree/outline` and the header of
+`PasTreeIdePlugin.OutlineRows.pas`), read by the client in one pass with no
+DOM (`TLspClient.RequestRaw`), and cached on the server until the next
+analysis replaces the project. Same project: 205 ms first request, 65 ms on a
+repeat. If it is slow again on 0.46.0+:
+
+- Check the server log for `pastree/outline ... -> N rows: list X ms, json Y
+  ms` - `list` growing means the symbol tables are unusually large or the
+  scope is unusually broad (a group tab asks every project); `json` growing
+  past a few tens of ms for a project this size means something changed in
+  `TJsonBuf` or the row shape.
+- `pastree/outline project -> cached` means the server-side cache answered -
+  if it is STILL slow, the cost moved to the client or the wire, not PasTree.
+- A stale server (built before 0.46.0) still answers the old per-row shape;
+  `PasTreeIdePlugin.OutlineRows`'s reader expects the table and will report a
+  parse error naming an offset rather than silently misreading it - that
+  error means a version mismatch, not a data problem.
+- The reproduction bench is `local/bench/OutlineBench.dpr` (untracked,
+  `local/` - see `CLAUDE.md`): it drives the real `TLspClient` against a real
+  `.dproj` and prints the same breakdown warm/cold, DOM path vs raw path.
+
+Not yet done, noted for when it is needed: a library-wide scope (RTL/VCL/
+third-party, 400k+ rows in a project like AVImark) was judged too big to ship
+as a full list even in the table format: `pastree/outline` would need
+`filter`/`limit` parameters and server-side filtering per keystroke instead.
+
 ## An access violation with only an address
 
 `EAccessViolation ... in module 'pastree-server.exe' (offset NNNNNN)` and
