@@ -159,7 +159,8 @@ uses
   ToolsAPI.UI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.ResultRows,
-  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar;
+  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar,
+  PasTreeIdePlugin.KeyBindings;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -168,17 +169,6 @@ const
   cAlreadyDone = -1;
 
 type
-  TPasRenameBinding = class(TNotifierObject, IOTAKeyboardBinding)
-  private
-    procedure RenameProc(const AContext: IOTAKeyContext;
-      AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
-  public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
-  end;
-
   { One touched FILE, of one of two kinds.
 
     OPEN in the IDE - on screen, or loaded behind a form - and then Module
@@ -223,8 +213,6 @@ type
 
 var
   GMessageGroup: IOTAMessageGroup;
-  GKeyboardServices: IOTAKeyboardServices;
-  GBindingIndex: Integer = -1;
   // Same teardown guard every async feature here carries: a plan can answer
   // while the package is unloading, and by then nothing it touches is safe.
   GAlive: Boolean = False;
@@ -1324,33 +1312,9 @@ begin
   end;
 end;
 
-{ TPasRenameBinding }
-
-function TPasRenameBinding.GetBindingType: TBindingType;
-begin
-  Result := btPartial;
-end;
-
-function TPasRenameBinding.GetDisplayName: string;
-begin
-  Result := 'PasTree: rename (Ctrl+Shift+E)';
-end;
-
-function TPasRenameBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.RenameBinding';
-end;
-
-procedure TPasRenameBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  // Ctrl+Shift+E, not Ctrl+E: the IDE gives Ctrl+E to incremental search,
-  // which is used far more often than this is.
-  ABindingServices.AddKeyBinding([ShortCut(Ord('E'), [ssCtrl, ssShift])],
-    RenameProc, nil);
-end;
-
-procedure TPasRenameBinding.RenameProc(const AContext: IOTAKeyContext;
+{ The key's handler - Ctrl+Shift+E, through PasTreeIdePlugin.KeyBindings
+  (the package's one binding). }
+procedure RenameKeyProc(const AContext: IOTAKeyContext;
   AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
 begin
   // krHandled once the key is recognised, for the reason the toggle and
@@ -1376,11 +1340,10 @@ end;
 procedure InitializeRename;
 begin
   GAlive := True;
-  if not Supports(BorlandIDEServices, IOTAKeyboardServices,
-    GKeyboardServices) then
-    Exit;
-  GBindingIndex := GKeyboardServices.AddKeyboardBinding(
-    TPasRenameBinding.Create);
+  // Ctrl+Shift+E, not Ctrl+E: the IDE gives Ctrl+E to incremental search,
+  // which is used far more often than this is. Registered, not bound: the
+  // wizard binds everything at once (InitializeKeyBindings).
+  RegisterKey(ShortCut(Ord('E'), [ssCtrl, ssShift]), RenameKeyProc);
 end;
 
 procedure FinalizeRename;
@@ -1392,10 +1355,7 @@ begin
   // rename it acts on is gone with GAlive anyway.
   HideRenameToolbar;
   DropApplied;
-  if (GBindingIndex >= 0) and Assigned(GKeyboardServices) then
-    GKeyboardServices.RemoveKeyboardBinding(GBindingIndex);
-  GBindingIndex := -1;
-  GKeyboardServices := nil;
+  // The key binding itself is already gone - FinalizeKeyBindings runs first.
   // NOT AT IDE SHUTDOWN - PasTreeIdePlugin.FindReferences' finalizer carries
   // the full story of the access violation this guard exists for.
   if Assigned(GMessageGroup) and not Application.Terminated and

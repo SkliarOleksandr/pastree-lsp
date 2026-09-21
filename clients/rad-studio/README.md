@@ -793,6 +793,102 @@ commit has happened: whether the IDE is running the BPL you just built - worth
 being able to check, given that rebuilding inside a live IDE session is
 unreliable here.
 
+## Keyboard bindings: one `IOTAKeyboardBinding` for the whole package
+
+Every key this plugin takes - Ctrl+G, Ctrl+Shift+C, Ctrl+Shift+E,
+Ctrl+Shift+A, Ctrl+Shift+Up/Down - goes through ONE `IOTAKeyboardBinding`,
+`PasTreeIdePlugin.KeyBindings`, registered once after every feature has
+handed it a key (`RegisterKey`) and removed once, first thing at unload. A
+feature never calls `AddKeyboardBinding` itself. Until 0.46.7 there were
+five bindings, one per feature, and the 2026-09-21 audit of how the package
+binds keys found two reasons that shape was wrong. Both fail silently, and
+both were found in other plugins' code rather than in ours, which is why
+they are written down here.
+
+1. **`RemoveKeyboardBinding` takes an index, and ToolsAPI does not say
+   whether that index survives the removal of a lower one.** If the IDE's
+   list shifts, five removals in anything but exact reverse registration
+   order remove the wrong bindings - and the indices past our own belong to
+   whatever plugin loaded after us, so the symptom is *their* keys dying
+   when *we* unload. Our five were removed in the order 5, 1, 2, 4, 3. It
+   was never established whether the index does shift; GExperts and CnPack
+   each register exactly one binding, and with one there is nothing to get
+   out of order, so the question no longer needs an answer.
+
+2. **Every `AddKeyboardBinding` and `RemoveKeyboardBinding` makes the IDE
+   rebuild its keymap, and the rebuild rewrites `TMenuItem.ShortCut` across
+   the main menu.** A plugin that put its shortcut straight on a menu item
+   (the older experts do - DelForEx was CnPack's example) loses it on each
+   rebuild. CnPack saves every main-menu shortcut with `Action = nil` before
+   each of its own calls and restores them a second later on a timer
+   (`CnWizShortCut.pas`, `SaveMainMenuShortCuts`). Five bindings meant ten
+   rebuilds per IDE session; one means two. **The save/restore is not done
+   here yet** - it is the next step if a user reports a lost menu shortcut
+   after installing this package, and the wrinkle is that at unload the
+   restoring timer cannot live in this BPL.
+
+Rules that follow:
+
+- **A new key is a `RegisterKey` call in the feature's `Initialize`, before
+  `InitializeKeyBindings` runs in `TIDEWizard.Create`.** Anything registered
+  after that line is recorded but never reaches the IDE. The Key Mappings
+  row's caption is built from the registrations, so it cannot go stale.
+- **The per-feature off switches stay in the features' key procedures**,
+  answering `krUnhandled` to hand the key back to the IDE - unchanged, and
+  still the only way "off" means "the IDE's own", since a single binding
+  cannot drop one key without a rebind.
+- **The binding's `Context` pointer is the registration entry, never
+  `nil`** - the handler is found by it, the shortcut is the fallback.
+- **A startup error `Can't register duplicate keybinding,
+  Parnassus.Navigator` (stack through
+  `KbClient.TKeyboardServices.ExplicitAssignmentExists` from
+  `PnNavigatorManager.RegisterInternal`) is NOT this package**, although it
+  first showed up on 2026-09-21 on the machine that had just installed this
+  one and RAD Studio 13.2 together. It persisted with the package
+  unregistered. The cause: 13.2 ships Navigator inside the IDE
+  (`ParnassusIDE370.bpl`, a Known IDE Package), and a Parnassus Navigator
+  installed earlier from GetIt is still registered as an expert -
+  `HKCU\Software\Embarcadero\BDS\37.0\Experts`, value `Navigator` pointing
+  at `Common Files\ParnassusShared\ParnassusNavigator_XFlorence.dll`. The
+  expert registers the `Parnassus.Navigator` binding first and the built-in
+  one refuses to register the same name. Removing that `Experts` value (IDE
+  closed, or the IDE writes it back on exit) is the fix - confirmed
+  2026-09-21, the error was gone at the next start. Recorded here
+  because the stack points at keyboard services and the first hour went to
+  our own bindings.
+- **`Editor\Options\Known Editor Enhancements` keeps every binding NAME ever
+  registered**, with its priority and enabled flag - eight `PasTreeIdePlugin.*`
+  keys on that machine, seven of them names this package no longer uses
+  (`BlockCloseBinding`, `SyncPrototypesBinding`, the five per-feature ones).
+  Harmless as far as is known, but a rename of `GetName` leaves one behind
+  forever; `PasTreeIdePlugin.KeyBinding` is the only current name.
+- **`FinalizeKeyBindings` is the first teardown in `TIDEWizard.Destroy`**,
+  before any feature's `Finalize`: a keystroke dispatched into unloaded
+  package code is an immediate crash, and every feature's `GAlive` gate
+  covers only a keystroke the IDE had already dispatched.
+- **Unloading this package kills the built-in Navigator's Ctrl+G until the
+  IDE restarts - and that is RAD Studio 13.2, not this package.** Settled
+  2026-09-21 after most of a day: unloading Embarcadero's own "Sample
+  Components" (`dclsmp370.bpl`) through Component > Install Packages does
+  exactly the same. Observed on Tools > Options > Editor > Key Mappings:
+  after any designtime package is unloaded, the `Navigator` and `Bookmarks`
+  modules (both from `ParnassusIDE370.bpl`, registered at `ProductStartup`,
+  i.e. after every package has loaded) are gone from the list, while
+  modules registered earlier (Castalia's, MMX's, the IDE's own) and the
+  default keymap stay. The reading is that the IDE drops every binding
+  module registered after the unloaded package was loaded. Reproduction for
+  a Quality Portal report: 13.2, fresh start, Ctrl+G opens Navigator;
+  uncheck Sample Components in Install Packages; Ctrl+G does nothing and
+  Navigator is missing from Key Mappings. Three shapes of our binding were
+  tried against this before the Sample Components test, all with Advanced
+  Logging confirming they ran, none of which could have helped:
+  `RestartKeyboardServices` after our removal; a fixed one-second delay
+  before our registration; a registration deferred until
+  `LookupKeyBinding(Ctrl+G)` showed Navigator had bound the key (it had,
+  ours layered on top and worked, and the unload still took Navigator's).
+  When a user reports Ctrl+G dead after unloading this package, the answer
+  is "restart the IDE", and the same happens with any other package.
+
 ## When a navigation does nothing
 
 The editor's own report is deliberately thin - `[pastree] Goto Declaration: no
@@ -857,6 +953,10 @@ log anything leaves its last words.
   single editor-menu action list (Find Declaration + Find References,
   both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP
   session's.
+- `PasTreeIdePlugin.KeyBindings.pas` - the package's ONE
+  `IOTAKeyboardBinding`: features register a key and a handler, the wizard
+  binds them all at once and removes them all at once. See "Keyboard
+  bindings" above for why one and not one per feature.
 
 The LSP client, bottom up. The first two touch no ToolsAPI at all, which is
 what lets `tests/` drive them against a real server outside the IDE:

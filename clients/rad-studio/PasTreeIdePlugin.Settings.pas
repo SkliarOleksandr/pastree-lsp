@@ -73,7 +73,8 @@ function CtrlClickNavigation: Boolean;
 /// <summary>
 /// Whether Ctrl+Shift+Up/Down runs OUR declaration/implementation jump. False
 /// hands the keystroke back to the IDE, which then runs its own - see
-/// TToggleKeyBinding.ToggleProc, where that fallback is the whole mechanism.
+/// ToggleKeyProc (PasTreeIdePlugin.Wizard), where that fallback is the whole
+/// mechanism.
 /// </summary>
 function OverrideDeclImplToggle: Boolean;
 

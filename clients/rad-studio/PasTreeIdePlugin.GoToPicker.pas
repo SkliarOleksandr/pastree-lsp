@@ -7,9 +7,10 @@ unit PasTreeIdePlugin.GoToPicker;
   a number. The dialog is the demo's; this unit is the IDE side of it - the
   key, the three lists, the landing.
 
-  THE KEY. An IOTAKeyboardBinding on Ctrl+G, btPartial like every binding of
-  this package (it layers over the user's keymap and shows on Key Mappings).
-  The switch (Settings.GoToEnabled) is the ONE place that answers
+  THE KEY. Ctrl+G, registered with the package's ONE keyboard binding
+  (PasTreeIdePlugin.KeyBindings - btPartial, one row on Key Mappings for
+  every key this plugin takes; its header has why there is one and not one
+  per feature). The switch (Settings.GoToEnabled) is the ONE place that answers
   krUnhandled: off hands the keystroke back to whatever the keymap binds
   Ctrl+G to, so "off" means "the IDE's own", with nothing to unbind - the
   decl/impl toggle's shape. Once recognised and on, the key is krHandled
@@ -61,25 +62,12 @@ uses
   Vcl.Menus,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.WaitDialog,
   PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.GoToForm;
 
-type
-  TPasGoToBinding = class(TNotifierObject, IOTAKeyboardBinding)
-  private
-    procedure GoToProc(const AContext: IOTAKeyContext; AKeyCode: TShortCut;
-      var ABindingResult: TKeyBindingResult);
-  public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
-  end;
-
 var
-  GKeyboardServices: IOTAKeyboardServices = nil;
-  GBindingIndex: Integer = -1;
   // Set by Initialize, cleared by Finalize: a callback that lands after the
   // package started unloading must do nothing (the same guard every async
   // unit here keeps).
@@ -181,31 +169,8 @@ begin
     end);
 end;
 
-{ TPasGoToBinding }
-
-function TPasGoToBinding.GetBindingType: TBindingType;
-begin
-  Result := btPartial;
-end;
-
-function TPasGoToBinding.GetDisplayName: string;
-begin
-  Result := 'PasTree: Go To (Ctrl+G)';
-end;
-
-function TPasGoToBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.GoToBinding';
-end;
-
-procedure TPasGoToBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  ABindingServices.AddKeyBinding([ShortCut(Ord('G'), [ssCtrl])], GoToProc,
-    nil);
-end;
-
-procedure TPasGoToBinding.GoToProc(const AContext: IOTAKeyContext;
+{ The key's handler - Ctrl+G, through PasTreeIdePlugin.KeyBindings. }
+procedure GoToKeyProc(const AContext: IOTAKeyContext;
   AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
 var
   LView: IOTAEditView;
@@ -229,20 +194,16 @@ end;
 procedure InitializeGoTo;
 begin
   GAlive := True;
-  if not Supports(BorlandIDEServices, IOTAKeyboardServices,
-    GKeyboardServices) then
-    Exit;
-  GBindingIndex := GKeyboardServices.AddKeyboardBinding(
-    TPasGoToBinding.Create);
+  // Registered, not bound: the wizard binds everything at once after every
+  // feature has registered (InitializeKeyBindings).
+  RegisterKey(ShortCut(Ord('G'), [ssCtrl]), GoToKeyProc);
 end;
 
 procedure FinalizeGoTo;
 begin
+  // The binding itself is already gone (FinalizeKeyBindings runs first);
+  // this gate covers a keystroke the IDE had already dispatched.
   GAlive := False;
-  if (GBindingIndex >= 0) and Assigned(GKeyboardServices) then
-    GKeyboardServices.RemoveKeyboardBinding(GBindingIndex);
-  GBindingIndex := -1;
-  GKeyboardServices := nil;
 end;
 
 end.

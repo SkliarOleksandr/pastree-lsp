@@ -59,30 +59,17 @@ uses
   Vcl.Menus,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.AnnotateArgsForm;
 
 const
   // How long the key may wait for the caret's reading - the menu's budget.
   cKeyGateBudgetMs = 250;
 
-type
-  TPasAnnotateArgsBinding = class(TNotifierObject, IOTAKeyboardBinding)
-  private
-    procedure AnnotateProc(const AContext: IOTAKeyContext;
-      AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
-  public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
-  end;
-
 var
   // The request's callback can fire while the package is unloading, and by
   // then nothing it touches is safe to touch - class completion's guard.
   GAlive: Boolean = False;
-  GKeyboardServices: IOTAKeyboardServices;
-  GBindingIndex: Integer = -1;
 
 procedure LogDiagnostic(const AMessage: string);
 var
@@ -205,36 +192,15 @@ begin
     end);
 end;
 
-{ TPasAnnotateArgsBinding - Ctrl+Shift+A, the keyboard way to the same
-  dialog (Alex, 2026-09-14). btPartial, like every binding of this package:
-  it layers over the user's keymap and shows on Key Mappings. The menu gate
+{ Ctrl+Shift+A, the keyboard way to the same dialog (Alex, 2026-09-14),
+  through the package's one keyboard binding (PasTreeIdePlugin.KeyBindings -
+  btPartial, so it layers over the user's keymap and shows on Key Mappings).
+  The menu gate
   is not at hand here - the menu was never opened - so the caret's reading is
   asked for directly, with the menu's own budget; past it the dialog offers
   "at the caret" anyway and the server refuses if it does not apply. }
 
-function TPasAnnotateArgsBinding.GetBindingType: TBindingType;
-begin
-  Result := btPartial;
-end;
-
-function TPasAnnotateArgsBinding.GetDisplayName: string;
-begin
-  Result := 'PasTree: annotate arguments (Ctrl+Shift+A)';
-end;
-
-function TPasAnnotateArgsBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.AnnotateArgsBinding';
-end;
-
-procedure TPasAnnotateArgsBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  ABindingServices.AddKeyBinding([ShortCut(Ord('A'), [ssCtrl, ssShift])],
-    AnnotateProc, nil);
-end;
-
-procedure TPasAnnotateArgsBinding.AnnotateProc(const AContext: IOTAKeyContext;
+procedure AnnotateArgsKeyProc(const AContext: IOTAKeyContext;
   AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
 var
   LView: IOTAEditView;
@@ -269,20 +235,16 @@ end;
 procedure InitializeAnnotateArgs;
 begin
   GAlive := True;
-  if not Supports(BorlandIDEServices, IOTAKeyboardServices,
-    GKeyboardServices) then
-    Exit;
-  GBindingIndex := GKeyboardServices.AddKeyboardBinding(
-    TPasAnnotateArgsBinding.Create);
+  // Registered, not bound: the wizard binds everything at once after every
+  // feature has registered (InitializeKeyBindings).
+  RegisterKey(ShortCut(Ord('A'), [ssCtrl, ssShift]), AnnotateArgsKeyProc);
 end;
 
 procedure FinalizeAnnotateArgs;
 begin
+  // The binding itself is already gone (FinalizeKeyBindings runs first);
+  // this gate covers a keystroke the IDE had already dispatched.
   GAlive := False;
-  if (GBindingIndex >= 0) and Assigned(GKeyboardServices) then
-    GKeyboardServices.RemoveKeyboardBinding(GBindingIndex);
-  GBindingIndex := -1;
-  GKeyboardServices := nil;
 end;
 
 end.

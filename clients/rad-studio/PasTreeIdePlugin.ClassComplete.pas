@@ -58,23 +58,10 @@ uses
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.SyncPrototypes;
 
-type
-  TPasClassCompleteBinding = class(TNotifierObject, IOTAKeyboardBinding)
-  private
-    procedure ClassCompleteProc(const AContext: IOTAKeyContext;
-      AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
-  public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
-  end;
-
 var
-  GKeyboardServices: IOTAKeyboardServices;
-  GBindingIndex: Integer = -1;
   // Same teardown guard as the Code Insight manager's: the request's callback
   // can fire while the package is unloading, and by then nothing it touches
   // is safe to touch.
@@ -158,31 +145,10 @@ begin
   AView.Paint;
 end;
 
-{ TPasClassCompleteBinding }
-
-function TPasClassCompleteBinding.GetBindingType: TBindingType;
-begin
-  Result := btPartial;
-end;
-
-function TPasClassCompleteBinding.GetDisplayName: string;
-begin
-  // The Key Mappings page is where someone goes to find out why Ctrl+Shift+C
-  // stopped behaving the way it used to, so it says so here.
-  Result := 'PasTree: class completion (Ctrl+Shift+C)';
-end;
-
-function TPasClassCompleteBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.ClassCompleteBinding';
-end;
-
-procedure TPasClassCompleteBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  ABindingServices.AddKeyBinding([ShortCut(Ord('C'), [ssCtrl, ssShift])],
-    ClassCompleteProc, nil);
-end;
+{ The key's handler - Ctrl+Shift+C, through PasTreeIdePlugin.KeyBindings
+  (the package's one binding). }
+procedure ClassCompleteKeyProc(const AContext: IOTAKeyContext;
+  AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult); forward;
 
 { Class completion proper - everything after the prototype sync that now runs
   in front of it. Split out of the key handler so the chaining below reads as
@@ -255,9 +221,8 @@ begin
     end);
 end;
 
-procedure TPasClassCompleteBinding.ClassCompleteProc(
-  const AContext: IOTAKeyContext; AKeyCode: TShortCut;
-  var ABindingResult: TKeyBindingResult);
+procedure ClassCompleteKeyProc(const AContext: IOTAKeyContext;
+  AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
 var
   LView: IOTAEditView;
   LFileName: string;
@@ -307,22 +272,16 @@ end;
 procedure InitializeClassComplete;
 begin
   GAlive := True;
-  if not Supports(BorlandIDEServices, IOTAKeyboardServices,
-    GKeyboardServices) then
-    Exit;
-  GBindingIndex := GKeyboardServices.AddKeyboardBinding(
-    TPasClassCompleteBinding.Create);
-  // Not announced - a binding that worked is not news; see the same reasoning
-  // in InitializeCodeInsight.
+  // Registered, not bound: the wizard binds everything at once after every
+  // feature has registered (InitializeKeyBindings).
+  RegisterKey(ShortCut(Ord('C'), [ssCtrl, ssShift]), ClassCompleteKeyProc);
 end;
 
 procedure FinalizeClassComplete;
 begin
+  // The binding itself is already gone (FinalizeKeyBindings runs first);
+  // this gate covers a keystroke the IDE had already dispatched.
   GAlive := False;
-  if (GBindingIndex >= 0) and Assigned(GKeyboardServices) then
-    GKeyboardServices.RemoveKeyboardBinding(GBindingIndex);
-  GBindingIndex := -1;
-  GKeyboardServices := nil;
 end;
 
 end.

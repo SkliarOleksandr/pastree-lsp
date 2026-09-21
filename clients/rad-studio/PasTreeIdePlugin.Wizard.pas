@@ -83,6 +83,7 @@ uses
   PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.GoToPicker,
+  PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
 
@@ -182,38 +183,11 @@ type
     procedure AfterCompile(ASucceeded: Boolean);
   end;
 
-  { Ctrl+Shift+Up / Ctrl+Shift+Down - RAD Studio's own keys for the decl<->impl
-    jump, routed through our LSP instead, for the same reason the native "Find
-    Declaration" menu item was replaced: on a large project the IDE's version is
-    the thing people complain about.
-
-    btPartial, NOT btComplete: a partial binding layers over whatever keymap the
-    user has instead of replacing it, so nothing else in their bindings moves,
-    and the IDE lists it on Tools > Options > Editor > Key Mappings where it can
-    be reordered or switched off. btComplete would mean "this IS the keymap",
-    which is emphatically not what a two-key feature should claim.
-
-    One KeyProc for both keys, dispatching on the shortcut it was handed: the
-    two directions differ by a single Boolean, and a second near-identical
-    handler is a second place to forget something. }
-  TToggleKeyBinding = class(TNotifierObject, IOTAKeyboardBinding)
-  private
-    procedure ToggleProc(const AContext: IOTAKeyContext; AKeyCode: TShortCut;
-      var ABindingResult: TKeyBindingResult);
-  public
-    function GetBindingType: TBindingType;
-    function GetDisplayName: string;
-    function GetName: string;
-    procedure BindKeyboard(const ABindingServices: IOTAKeyBindingServices);
-  end;
-
   TIDEWizard = class(TNotifierObject, IOTAWizard)
   private
     FMenuManager: TMenuManager;
     FServices: IOTAServices;
     FNotifierIndex: Integer;
-    FKeyboardServices: IOTAKeyboardServices;
-    FKeyBindingIndex: Integer;
   public
     constructor Create;
     destructor Destroy; override;
@@ -259,7 +233,8 @@ begin
     working. The IDE draws TAction.ShortCut in the menu's own right-hand
     column, which is the only reason it is set: this action list has no form
     and no owner, so VCL's shortcut dispatch never sees it and the key is
-    still delivered by TPasRenameBinding (PasTreeIdePlugin.Rename). Keep the
+    still delivered by RenameKeyProc (PasTreeIdePlugin.Rename, through the
+    package's one binding in PasTreeIdePlugin.KeyBindings). Keep the
     two spellings in step - a menu promising a key that does nothing is
     worse than a menu that promises nothing. }
   LAction.ShortCut := ShortCut(Ord('E'), [ssCtrl, ssShift]);
@@ -281,7 +256,7 @@ begin
   LAction.Caption := 'Annotate Arguments...';
   LAction.Category := 'PasTreeAnnotateArgs';
   // A LABEL, NOT A BINDING - Rename's note above: the key itself is
-  // delivered by TPasAnnotateArgsBinding (PasTreeIdePlugin.AnnotateArgs).
+  // delivered by AnnotateArgsKeyProc (PasTreeIdePlugin.AnnotateArgs).
   LAction.ShortCut := ShortCut(Ord('A'), [ssCtrl, ssShift]);
   LAction.OnUpdate := OnAnnotateArgsUpdate;
   LAction.OnExecute := OnAnnotateArgsExecute;
@@ -718,36 +693,18 @@ begin
   end;
 end;
 
-{ TToggleKeyBinding }
+{ Ctrl+Shift+Up / Ctrl+Shift+Down - RAD Studio's own keys for the decl<->impl
+  jump, routed through our LSP instead, for the same reason the native "Find
+  Declaration" menu item was replaced: on a large project the IDE's version is
+  the thing people complain about.
 
-function TToggleKeyBinding.GetBindingType: TBindingType;
-begin
-  Result := btPartial;
-end;
-
-function TToggleKeyBinding.GetDisplayName: string;
-begin
-  // What the user sees in the Key Mappings list, so it has to say which keys
-  // it takes over - that page is where someone goes to find out why
-  // Ctrl+Shift+Up stopped behaving the way it used to.
-  Result := 'PasTree: declaration/implementation (Ctrl+Shift+Up/Down)';
-end;
-
-function TToggleKeyBinding.GetName: string;
-begin
-  Result := 'PasTreeIdePlugin.ToggleKeyBinding';
-end;
-
-procedure TToggleKeyBinding.BindKeyboard(
-  const ABindingServices: IOTAKeyBindingServices);
-begin
-  ABindingServices.AddKeyBinding([ShortCut(VK_DOWN, [ssCtrl, ssShift])],
-    ToggleProc, nil);
-  ABindingServices.AddKeyBinding([ShortCut(VK_UP, [ssCtrl, ssShift])],
-    ToggleProc, nil);
-end;
-
-procedure TToggleKeyBinding.ToggleProc(const AContext: IOTAKeyContext;
+  Registered with the package's ONE keyboard binding
+  (PasTreeIdePlugin.KeyBindings, which has why there is one and not one per
+  feature; btPartial, so it layers over the user's keymap and shows on Key
+  Mappings). One handler for both keys, dispatching on the shortcut it was
+  handed: the two directions differ by a single Boolean, and a second
+  near-identical handler is a second place to forget something. }
+procedure ToggleKeyProc(const AContext: IOTAKeyContext;
   AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
 var
   LView: IOTAEditView;
@@ -897,10 +854,13 @@ begin
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
     FNotifierIndex := FServices.AddNotifier(TProjectOpenNotifier.Create);
 
-  FKeyBindingIndex := -1;
-  if Supports(BorlandIDEServices, IOTAKeyboardServices, FKeyboardServices) then
-    FKeyBindingIndex :=
-      FKeyboardServices.AddKeyboardBinding(TToggleKeyBinding.Create);
+  // THE ONE KEYBOARD BINDING, after every feature above has registered its
+  // keys with PasTreeIdePlugin.KeyBindings: the toggle's two here, then a
+  // single AddKeyboardBinding for all of them. Register keys above this
+  // line; a RegisterKey after it does not reach the IDE.
+  RegisterKey(ShortCut(VK_DOWN, [ssCtrl, ssShift]), ToggleKeyProc);
+  RegisterKey(ShortCut(VK_UP, [ssCtrl, ssShift]), ToggleKeyProc);
+  InitializeKeyBindings;
 
   // A project can already be open when this package loads - installing it into
   // a running IDE, or an IDE that restored its project group before the
@@ -918,11 +878,9 @@ begin
     FServices.RemoveNotifier(FNotifierIndex);
   FServices := nil;
   // Same rule as every other registration here: a keystroke dispatched into
-  // unloaded package code is an immediate crash, so the binding goes before
-  // anything it could call.
-  if (FKeyBindingIndex >= 0) and Assigned(FKeyboardServices) then
-    FKeyboardServices.RemoveKeyboardBinding(FKeyBindingIndex);
-  FKeyboardServices := nil;
+  // unloaded package code is an immediate crash, so the one binding goes
+  // before anything it could call - every feature's key at once.
+  FinalizeKeyBindings;
   // Early, with the other things the IDE can dispatch into: a Tools menu
   // item whose OnClick points into an unloaded BPL is the same crash as a
   // keystroke or a notification arriving late.

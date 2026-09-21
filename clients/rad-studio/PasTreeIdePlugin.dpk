@@ -102,6 +102,9 @@ contains
     binding that opens it. See PasTreeIdePlugin.GoToForm's header. }
   PasTreeIdePlugin.GoToPicker in 'PasTreeIdePlugin.GoToPicker.pas',
   PasTreeIdePlugin.GoToForm in 'PasTreeIdePlugin.GoToForm.pas' {PasTreeGoToForm},
+  { The package's ONE IOTAKeyboardBinding - every feature's key goes through
+    it. Its header has why one and not one per feature (0.47.0). }
+  PasTreeIdePlugin.KeyBindings in 'PasTreeIdePlugin.KeyBindings.pas',
   { The settings store, and the ONE form in this package - the only unit here
     with a .dfm, so that the dialog can be laid out in the Form Designer
     rather than in code. See PasTreeIdePlugin.SettingsForm's header. }

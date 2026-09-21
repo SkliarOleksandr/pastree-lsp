@@ -128,6 +128,7 @@
         <DCCReference Include="PasTreeIdePlugin.EditorWindowHook.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>
         <DCCReference Include="PasTreeIdePlugin.RenameToolbar.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.KeyBindings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Settings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">
             <Form>PasTreeSettingsForm</Form>
