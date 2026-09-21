@@ -485,9 +485,9 @@ begin
   FStrong := AStrong;
   // The tabs are named after what they list - the file, the project, the
   // group - so the dialog says where a chosen row can land.
-  tcScope.Tabs[0] := TPath.GetFileName(AModuleFile);
+  tcScope.Tabs[0] := '  ' + TPath.GetFileName(AModuleFile) + '  ';
   if AProjectName <> '' then
-    tcScope.Tabs[1] := AProjectName
+    tcScope.Tabs[1] := '  ' + AProjectName + '  '
   else
     tcScope.Tabs[1] := 'Project';
   if FHasGroup then

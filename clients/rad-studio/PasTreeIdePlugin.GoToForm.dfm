@@ -5,6 +5,8 @@ object PasTreeGoToForm: TPasTreeGoToForm
   ClientHeight = 566
   ClientWidth = 888
   Color = clBtnFace
+  Constraints.MinHeight = 300
+  Constraints.MinWidth = 400
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
   Font.Height = -12
@@ -25,8 +27,6 @@ object PasTreeGoToForm: TPasTreeGoToForm
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
-    ExplicitTop = 543
-    ExplicitWidth = 900
     DesignSize = (
       888
       36)
@@ -42,7 +42,7 @@ object PasTreeGoToForm: TPasTreeGoToForm
       OnClick = AllChanged
     end
     object chkTypes: TCheckBox
-      Left = 56
+      Left = 54
       Top = 9
       Width = 60
       Height = 21
@@ -87,7 +87,7 @@ object PasTreeGoToForm: TPasTreeGoToForm
       OnClick = FilterChanged
     end
     object chkIncludes: TCheckBox
-      Left = 472
+      Left = 458
       Top = 9
       Width = 76
       Height = 21
@@ -107,7 +107,6 @@ object PasTreeGoToForm: TPasTreeGoToForm
       Default = True
       TabOrder = 7
       OnClick = btnGoClick
-      ExplicitLeft = 690
     end
     object btnCancel: TButton
       Left = 784
@@ -119,7 +118,6 @@ object PasTreeGoToForm: TPasTreeGoToForm
       Caption = 'Cancel'
       ModalResult = 2
       TabOrder = 8
-      ExplicitLeft = 796
     end
   end
   object edFilter: TEdit
@@ -137,7 +135,6 @@ object PasTreeGoToForm: TPasTreeGoToForm
     TextHint = 'Type a name, or a line number'
     OnChange = edFilterChange
     OnKeyDown = edFilterKeyDown
-    ExplicitWidth = 892
   end
   object tcScope: TTabControl
     AlignWithMargins = True
@@ -184,7 +181,5 @@ object PasTreeGoToForm: TPasTreeGoToForm
     Height = 21
     Panels = <>
     SimplePanel = True
-    ExplicitTop = 579
-    ExplicitWidth = 900
   end
 end

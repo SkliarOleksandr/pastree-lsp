@@ -52,6 +52,8 @@ for /f "tokens=5 delims=\" %%V in ('reg query "HKCU\Software\Embarcadero\BDS" 2^
   if not "%%V"=="" call :probe "%%V"
 )
 
+for /l %%I in (1,1,%LCOUNT%) do set "LLIST=!LLIST! !LVER[%%I]!"
+
 if %LCOUNT%==0 (
   echo.
   echo No suitable RAD Studio installation found.
@@ -81,12 +83,9 @@ if %LCOUNT%==1 (
   goto :chosen
 )
 
-rem Newest by MAJOR, not by enumeration order: reg query lists subkeys as text,
-rem so it would put "10.0" ahead of "9.0". Every version in play is two digits
-rem today and the two orders agree - which is exactly why relying on the
-rem accident would go unnoticed until it did not.
+rem The candidates are held newest first (see :probe), so the newest is [1].
 if defined LYES (
-  set "LPICK=%LBEST%"
+  set "LPICK=1"
   goto :chosen
 )
 
@@ -141,13 +140,24 @@ if !LMAJOR! lss %LMINMAJOR% (
   exit /b 0
 )
 
+rem KEPT NEWEST FIRST, by insertion rather than by enumeration order: reg query
+rem lists subkeys as text, so it would put "10.0" ahead of "9.0". Sorting once,
+rem here, is what makes the menu, the "Suitable:" line and the --yes pick agree,
+rem and it puts the newest IDE - the one meant in the common case - at [1].
 set /a LCOUNT+=1
-set "LVER[!LCOUNT!]=%LV%"
-set "LROOT[!LCOUNT!]=!LR!"
-set "LLIST=!LLIST! %LV%"
-if not defined LBEST set "LBESTMAJOR=-1"
-if !LMAJOR! gtr !LBESTMAJOR! (
-  set "LBESTMAJOR=!LMAJOR!"
-  set "LBEST=!LCOUNT!"
+set "LPOS=!LCOUNT!"
+:insert
+if !LPOS! gtr 1 (
+  set /a LPREV=!LPOS!-1
+  call set "LPV=%%LVER[!LPREV!]%%"
+  for /f "tokens=1 delims=." %%M in ("!LPV!") do set "LPMAJOR=%%M"
+  if !LMAJOR! gtr !LPMAJOR! (
+    call set "LVER[!LPOS!]=%%LVER[!LPREV!]%%"
+    call set "LROOT[!LPOS!]=%%LROOT[!LPREV!]%%"
+    set "LPOS=!LPREV!"
+    goto :insert
+  )
 )
+set "LVER[!LPOS!]=%LV%"
+set "LROOT[!LPOS!]=!LR!"
 exit /b 0
