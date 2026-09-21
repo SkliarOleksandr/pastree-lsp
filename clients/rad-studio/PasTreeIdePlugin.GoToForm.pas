@@ -61,6 +61,15 @@ unit PasTreeIdePlugin.GoToForm;
   TPasOutlineEntry spelled without PasTree - this package must not link it
   (see the .dpk). Kinds are the server's words, matched by string here.
 
+  THE PAINTING DISCIPLINE. The list is buffered and every change to it goes
+  under one redraw lock (BeginListUpdate), and NOTHING in lbItemsDrawItem or
+  in MeasureHeadColumn may talk to a window or to the IDE: a tab read is a
+  SendMessage, a palette lookup is a QueryInterface, and either one, done
+  per row, is milliseconds per repaint on a slow machine. The cached FScope /
+  FScopeEntries pair, FColumnCap and the held editor palette
+  (BeginEditorPalette) exist for that reason; docs/diagnosing.md has the
+  symptoms both mistakes produce.
+
   THEMED THE IDE'S OWN WAY - RegisterFormClass before construction,
   ApplyTheme after, exactly as PasTreeIdePlugin.SettingsForm does; the
   owner-drawn rows take their two colours from the IDE's style services so
@@ -101,6 +110,14 @@ type
   TGoToKinds = set of TGoToKind;
 
   TGoToScope = (gsModule, gsProject, gsGroup);
+
+  { The right-hand columns' widths for one tab. Measured by a pass over
+    every row of that tab's list, so they are kept until the list itself
+    is replaced rather than re-measured on each switch back. }
+  TGoToWidths = record
+    Head, UnitCol, Section, Line: Integer;
+    Valid: Boolean;
+  end;
 
   { The project or group list, asked for once, on the first switch to that
     tab; the answer comes later, on the main thread. AAnswered/AInGroup are
@@ -163,14 +180,36 @@ type
     FUnitWidth: Integer;      // the unit column (project/group tabs), same
     FSectionWidth: Integer;   // the section column, same
     FLineWidth: Integer;      // the `:N` column, by the longest line number
+    FColumnCap: Integer;      // a third of the list: the cap on one column
     FLoadingState: Boolean;   // boxes being set in bulk: rules and refilter off
     FQuiet, FStrong: TColor;  // the two row colours, from the IDE's theme
+    FScope: TGoToScope;       // the current tab, read once per switch
+    FScopeEntries: TArray<TLspOutlineRow>;   // and its list
+    FListLock: Integer;       // WM_SETREDRAW nesting (BeginListUpdate)
+    FWidths: array[TGoToScope] of TGoToWidths;   // measured once per list
+    // A group answer that has not been put on screen yet - see EnsureLoaded.
+    FStaged: array[TGoToScope] of TArray<TLspOutlineRow>;
+    FStagedNew: array[TGoToScope] of Boolean;
+    FShownMs: array[TGoToScope] of Double;   // when the tab last repainted
+    // The last filter result of each tab, and the filter that produced it:
+    // a switch back with the box untouched is the common case and must not
+    // walk the list again (FilterKey).
+    FFiltered: array[TGoToScope] of TArray<TGoToRow>;
+    FFilterKey: array[TGoToScope] of string;
+    FFilterValid: array[TGoToScope] of Boolean;
     function Scope: TGoToScope;
     function Entries: TArray<TLspOutlineRow>;
     function Kinds: TGoToKinds;
+    function FilterKey: string;
+    procedure SyncScope;
+    procedure BeginListUpdate;
+    procedure EndListUpdate;
     procedure EnsureLoaded;
+    procedure AdoptStaged(AScope: TGoToScope);
     procedure UpdateCursor;
+    procedure MeasureScope(AScope: TGoToScope);
     procedure MeasureHeadColumn;
+    procedure UpdateStatus;
     procedure Refilter(ASelectNearCaret: Boolean);
     procedure MoveSelection(ADelta: Integer);
     procedure LoadState;
@@ -215,6 +254,7 @@ function ShowGoTo(const AEntries: TArray<TLspOutlineRow>;
 implementation
 
 uses
+  Winapi.Messages,   // WM_SETREDRAW (BeginListUpdate)
   System.Math,
   System.UITypes,
   System.IOUtils,
@@ -238,6 +278,11 @@ const
   // Between the head column and the name. 8 had `class procedure` (bold,
   // in the editor's reserved-word style) touching the name.
   cHeadGap = 16;
+  // The shortest gap between two rebuilds of a list that is still growing -
+  // see EnsureLoaded. Long enough that a group whose projects answer in a
+  // burst is drawn twice (first and last) rather than once per project,
+  // short enough that a genuinely slow project still shows progress.
+  cGrowthRedrawMs = 500;
 
 var
   // The one open picker, or nil. Every asynchronous answer checks that the
@@ -382,7 +427,10 @@ var
   LThemed: Boolean;
   LQuiet, LStrong: TColor;
 begin
-  Result := False;
+  // No `Result := False` here: every path out of this function either
+  // raises or reaches the assignment from LForm.FChosen below, and the
+  // compiler says so (H2077). The out parameters are still cleared, for a
+  // caller that reads them without looking at the result first.
   AFile := '';
   ALine := 0;
   ACol := 0;
@@ -452,31 +500,87 @@ begin
   else
     tcScope.Tabs.Delete(2);
   tcScope.TabIndex := 0;
+  SyncScope;
   // One text line plus breathing room, from the font in effect after
   // scaling - the designer cannot state a row height in font terms.
   lbItems.ItemHeight := Abs(Font.Height) + 9;
+  // The rows are painted by hand, one FillRect and a dozen TextOuts each,
+  // and a list box erases its whole client area before the first of them:
+  // on a slow machine the white flash between the erase and the rows is
+  // the flicker of a tab switch (Alex, 2026-09-21). Buffered, the erase
+  // and the rows happen in memory and the screen changes once.
+  lbItems.DoubleBuffered := True;
   LoadState;
+end;
+
+{ The tab and its list, read ONCE per switch. tcScope.TabIndex is a
+  SendMessage to the tab control - 47 us, measured 2026-09-19 - and
+  lbItemsDrawItem asked for it twice a row; over a screenful per scroll
+  step that is milliseconds of pure window messaging. Every place that
+  changes the tab or replaces a list calls this. }
+procedure TPasTreeGoToForm.SyncScope;
+begin
+  case tcScope.TabIndex of
+    1: FScope := gsProject;
+    2: FScope := gsGroup;
+  else
+    FScope := gsModule;
+  end;
+  FScopeEntries := FEntries[FScope];
 end;
 
 function TPasTreeGoToForm.Scope: TGoToScope;
 begin
-  case tcScope.TabIndex of
-    1: Result := gsProject;
-    2: Result := gsGroup;
-  else
-    Result := gsModule;
-  end;
+  Result := FScope;
 end;
 
 function TPasTreeGoToForm.Entries: TArray<TLspOutlineRow>;
 begin
-  Result := FEntries[Scope];
+  Result := FScopeEntries;
+end;
+
+{ A tab switch or a landed list is several changes to the list box - the
+  count, the selection, the top row - and each of them repaints it. Held
+  between Begin and End they repaint it once. Nested, because a list that
+  is already cached answers EnsureLoaded synchronously and its callback
+  refilters inside the switch. }
+procedure TPasTreeGoToForm.BeginListUpdate;
+begin
+  Inc(FListLock);
+  if (FListLock = 1) and lbItems.HandleAllocated then
+    SendMessage(lbItems.Handle, WM_SETREDRAW, 0, 0);
+end;
+
+procedure TPasTreeGoToForm.EndListUpdate;
+begin
+  if FListLock = 0 then
+    Exit;
+  Dec(FListLock);
+  if (FListLock = 0) and lbItems.HandleAllocated then
+  begin
+    SendMessage(lbItems.Handle, WM_SETREDRAW, 1, 0);
+    RedrawWindow(lbItems.Handle, nil, 0,
+      RDW_INVALIDATE or RDW_ERASE or RDW_FRAME);
+  end;
 end;
 
 { The project and group lists are asked for on the first switch to their
   tab and arrive later; until then the tab shows an empty list and a status
   line that says so. The answer refilters the CURRENT tab only if it is
-  still the one the answer is for - the user may have flipped back. }
+  still the one the answer is for - the user may have flipped back.
+
+  THE GROUP ANSWERS ONCE PER PROJECT, each time with the whole merged list
+  again (TOutlineGather in PasTreeIdePlugin.LspSession), so a group of six
+  used to re-measure, re-filter and repaint the list six times in a second
+  or two - visibly, every time the Group tab was opened, which is every
+  Ctrl+G since the lists live on the form (Alex, 2026-09-21: "between the
+  project and the group it still flickers"; the module and project tabs
+  answer once and never did). An intermediate answer is now STAGED instead:
+  the rows are kept, the status line still counts the projects in, and the
+  list itself is rebuilt on the first answer, on the last one, and at most
+  once every cGrowthRedrawMs in between. Staged rather than stored, because
+  FRows holds INDEXES into the tab's list: replacing the list without
+  refiltering would leave them pointing at other rows. }
 procedure TPasTreeGoToForm.EnsureLoaded;
 var
   LScope: TGoToScope;
@@ -484,6 +588,13 @@ var
   LStart, LMeasured: Double;
 begin
   LScope := Scope;
+  // A staged answer that landed while another tab was up - this is its tab
+  // now, so take it; the caller's Refilter draws it.
+  if FStagedNew[LScope] then
+  begin
+    AdoptStaged(LScope);
+    FShownMs[LScope] := TimingNowMs;
+  end;
   if FLoaded[LScope] or FLoading[LScope] or not Assigned(FSource) then
     Exit;
   FLoading[LScope] := True;
@@ -496,9 +607,13 @@ begin
     // finish their analysis, and the selection is kept across the growth.
     procedure(ASuccess: Boolean; const ARows: TArray<TLspOutlineRow>;
       AAnswered, AInGroup, APending: Integer; const AError: string)
+    var
+      LFirst, LShow: Boolean;
+      LNow: Double;
     begin
       if GOpenForm <> LSelf then
         Exit;   // the dialog this was asked for is gone
+      LFirst := not FLoaded[LScope];
       FLoading[LScope] := APending > 0;
       UpdateCursor;
       FLoaded[LScope] := True;
@@ -506,11 +621,25 @@ begin
       FInGroup[LScope] := AInGroup;
       FPending[LScope] := APending;
       if ASuccess then
-        FEntries[LScope] := ARows
+        FStaged[LScope] := ARows
       else
-        FEntries[LScope] := nil;
-      if Scope = LScope then
+        FStaged[LScope] := nil;
+      FStagedNew[LScope] := True;
+      if FScope <> LScope then
+        Exit;   // the user flipped back; the rows wait for the return
+      LNow := TimingNowMs;
+      LShow := LFirst or (APending = 0) or
+        (LNow - FShownMs[LScope] >= cGrowthRedrawMs);
+      if not LShow then
       begin
+        // The list stands as it is; only the count of projects moved.
+        UpdateStatus;
+        Exit;
+      end;
+      FShownMs[LScope] := LNow;
+      AdoptStaged(LScope);
+      BeginListUpdate;
+      try
         LStart := TimingNowMs;
         MeasureHeadColumn;
         LMeasured := TimingNowMs;
@@ -518,13 +647,46 @@ begin
         TimingLogFmt('goto list landed %d: %d rows, measure %s, refilter %s',
           [Ord(LScope), Length(ARows), Ms(LMeasured - LStart),
            TimingSince(LMeasured)]);
-        if not ASuccess and (AError <> '') and (APending = 0) then
-          sbStatus.SimpleText := '  ' + AError;
+      finally
+        EndListUpdate;
       end;
+      if not ASuccess and (AError <> '') and (APending = 0) then
+        sbStatus.SimpleText := '  ' + AError;
     end);
 end;
 
+{ Takes the staged rows as AScope's list. The list box is NOT touched: every
+  caller measures and refilters right afterwards, and doing it here as well
+  would draw a big list twice. }
+procedure TPasTreeGoToForm.AdoptStaged(AScope: TGoToScope);
+begin
+  FStagedNew[AScope] := False;
+  FEntries[AScope] := FStaged[AScope];
+  // A new list: both things measured from it are stale.
+  FWidths[AScope].Valid := False;
+  FFilterValid[AScope] := False;
+  FFiltered[AScope] := nil;
+  if AScope = FScope then
+    SyncScope;
+end;
+
+{ The current tab's column widths, measured once per list. A switch back to
+  a tab whose list has not changed reuses them: measuring is a pass over
+  every row with a GDI call per distinct word, and on a group list that is
+  the slowest thing a tab switch does. }
 procedure TPasTreeGoToForm.MeasureHeadColumn;
+begin
+  if not FWidths[FScope].Valid then
+    MeasureScope(FScope);
+  FHeadWidth := FWidths[FScope].Head;
+  FUnitWidth := FWidths[FScope].UnitCol;
+  FSectionWidth := FWidths[FScope].Section;
+  FLineWidth := FWidths[FScope].Line;
+  // Not cached with the rest: it follows the window, not the list.
+  FColumnCap := Max(40, lbItems.ClientWidth div 3);
+end;
+
+procedure TPasTreeGoToForm.MeasureScope(AScope: TGoToScope);
 var
   LEntries: TArray<TLspOutlineRow>;
   LSeen, LSeenUnit, LSeenSection: TDictionary<string, Boolean>;
@@ -558,24 +720,23 @@ begin
   // - 5.7 s over the AVImark list, traced 2026-09-19 with the same cost
   // per row on the module tab. The unit width is zero on the module tab,
   // whose rows draw no unit (lbItemsDrawItem).
+  FWidths[AScope] := Default(TGoToWidths);
   lbItems.Canvas.Font.Assign(lbItems.Font);
   lbItems.Canvas.Font.Style := EditorSyntaxStyle(atReservedWord);
-  FHeadWidth := lbItems.Canvas.TextWidth('line');
-  LEntries := Entries;
+  FWidths[AScope].Head := lbItems.Canvas.TextWidth('line');
+  LEntries := FEntries[AScope];
   LSeen := TDictionary<string, Boolean>.Create;
   LSeenUnit := TDictionary<string, Boolean>.Create;
   LSeenSection := TDictionary<string, Boolean>.Create;
   try
     for LIdx := 0 to High(LEntries) do
       if LSeen.TryAdd(LEntries[LIdx].Head, True) then
-        FHeadWidth := Max(FHeadWidth,
+        FWidths[AScope].Head := Max(FWidths[AScope].Head,
           lbItems.Canvas.TextWidth(LEntries[LIdx].Head));
     lbItems.Canvas.Font.Style := [];
-    FUnitWidth := 0;
-    FSectionWidth := 0;
     LMaxLine := 0;
     LPrevUnit := '';
-    LUnitColumn := Scope <> gsModule;
+    LUnitColumn := AScope <> gsModule;
     for LIdx := 0 to High(LEntries) do
     begin
       LMaxLine := Max(LMaxLine, LEntries[LIdx].Line);
@@ -584,22 +745,24 @@ begin
       begin
         LPrevUnit := LEntries[LIdx].UnitName;
         if LSeenUnit.TryAdd(LPrevUnit, True) then
-          FUnitWidth := Max(FUnitWidth, lbItems.Canvas.TextWidth(LPrevUnit));
+          FWidths[AScope].UnitCol := Max(FWidths[AScope].UnitCol,
+            lbItems.Canvas.TextWidth(LPrevUnit));
       end;
       if (LEntries[LIdx].Section <> '') and
          LSeenSection.TryAdd(LEntries[LIdx].Section, True) then
       begin
         LText := LEntries[LIdx].Section;
-        FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
-        FSectionWidth := Max(FSectionWidth, lbItems.Canvas.TextWidth(LText));
+        FWidths[AScope].Section := Max(FWidths[AScope].Section,
+          lbItems.Canvas.TextWidth(LText));
       end;
     end;
     // One width for the whole `:N` column: the columns left of it are
     // placed from its edge, and a per-row width moved them by a digit
     // between `:99` and `:100` (Alex, 2026-09-19).
-    FLineWidth := 0;
     if LMaxLine > 0 then
-      FLineWidth := lbItems.Canvas.TextWidth(':' + IntToStr(LMaxLine));
+      FWidths[AScope].Line :=
+        lbItems.Canvas.TextWidth(':' + IntToStr(LMaxLine));
+    FWidths[AScope].Valid := True;
   finally
     LSeenSection.Free;
     LSeenUnit.Free;
@@ -611,6 +774,24 @@ procedure TPasTreeGoToForm.FormShow(Sender: TObject);
 begin
   Height := Min(Height, Screen.MonitorFromWindow(Handle).WorkareaRect.Height);
   Width := Min(Width, Screen.MonitorFromWindow(Handle).WorkareaRect.Width);
+  // THE TAB CONTROL MUST NOT PAINT OVER THE LIST. A tab control repaints
+  // its whole client area when the selected tab changes, and it does that
+  // BEFORE OnChange runs - so for as long as the handler takes to build
+  // the new list, the rows' rectangle shows the tab control's background
+  // rather than rows. On the module and project tabs the handler is quick
+  // enough that nothing is seen; on the group tab, with the largest list,
+  // it is the flicker Alex reported (2026-09-21). WS_CLIPCHILDREN excludes
+  // the child windows' rectangles from the parent's own painting, which is
+  // what a container with one big child wants and what the VCL does not
+  // set by default. Here rather than in CreateParams: the tab control's
+  // handle belongs to it, and this is the one place that knows why.
+  SetWindowLong(tcScope.Handle, GWL_STYLE,
+    GetWindowLong(tcScope.Handle, GWL_STYLE) or WS_CLIPCHILDREN);
+  // The editor palette is held for as long as the dialog is up: a row asks
+  // it for six colours and styles while painting, and each of those was a
+  // QueryInterface on BorlandIDEServices (PasTreeIdePlugin.ResultRows).
+  // Released in FormClose, which a modal form always reaches.
+  BeginEditorPalette;
   MeasureHeadColumn;
   Refilter(True);
   ActiveControl := edFilter;
@@ -632,6 +813,7 @@ end;
 procedure TPasTreeGoToForm.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
   Screen.Cursor := crDefault;
+  EndEditorPalette;
   SaveState;
 end;
 
@@ -695,17 +877,32 @@ begin
   if chkProps.Checked then Include(Result, gkProperty);
 end;
 
+{ Everything FilterRows reads besides the tab's own list, in one string:
+  two results with the same key over the same list are the same rows. The
+  filter text can contain anything, so the parts are separated by a
+  character it cannot - #1. }
+function TPasTreeGoToForm.FilterKey: string;
+begin
+  Result := Format('%d'#1'%d'#1'%s', [Byte(Kinds), Ord(chkAll.Checked or
+    chkIncludes.Checked), edFilter.Text]);
+end;
+
 procedure TPasTreeGoToForm.Refilter(ASelectNearCaret: Boolean);
 var
   LEntries: TArray<TLspOutlineRow>;
   LIdx, LKeep, LKeepEntry, LLineCount: Integer;
+  LWasIndex, LWasTop: Integer;
   LScope: TGoToScope;
-  LStatus: string;
+  LKey: string;
 begin
+  BeginListUpdate;
+  try
   // Keep the selected entry across a filter change when it survives it -
   // losing the selection mid-typing is what makes a picker feel like it is
   // fighting back. On first show the caret decides instead.
   LKeepEntry := -1;
+  LWasIndex := lbItems.ItemIndex;
+  LWasTop := lbItems.TopIndex;
   if (lbItems.ItemIndex >= 0) and (lbItems.ItemIndex <= High(FRows)) and
      (FRows[lbItems.ItemIndex].Kind = grEntry) then
     LKeepEntry := FRows[lbItems.ItemIndex].Entry;
@@ -715,8 +912,22 @@ begin
     LLineCount := 0    // no `line N` row: there is no one file to go to
   else
     LLineCount := FLineCount;
-  FRows := FilterRows(LEntries, edFilter.Text, Kinds,
-    chkAll.Checked or chkIncludes.Checked, LLineCount);
+  // The tab's last result, when nothing it depends on has changed - a tab
+  // switch with the filter box untouched is the common one, and on a group
+  // list FilterRows is a pass over every row plus an allocation of one
+  // record per row (megabytes) for an answer identical to the one just
+  // thrown away.
+  LKey := FilterKey;
+  if FFilterValid[LScope] and (FFilterKey[LScope] = LKey) then
+    FRows := FFiltered[LScope]
+  else
+  begin
+    FRows := FilterRows(LEntries, edFilter.Text, Kinds,
+      chkAll.Checked or chkIncludes.Checked, LLineCount);
+    FFiltered[LScope] := FRows;
+    FFilterKey[LScope] := LKey;
+    FFilterValid[LScope] := True;
+  end;
   // Virtual list: the count is the whole update, every row is painted from
   // FRows on demand.
   lbItems.Count := Length(FRows);
@@ -741,15 +952,42 @@ begin
   if (LKeep < 0) and (Length(FRows) > 0) then
     LKeep := 0;
   lbItems.ItemIndex := LKeep;
+  // LB_SETCURSEL SCROLLS the selected row into view, and a growing list
+  // refilters on every answering project - so a group tab that was still
+  // loading yanked the view back to the selection while the user was
+  // dragging the scrollbar, a few times a second (Alex, 2026-09-21: "the
+  // thumb jumps, as if something were loading" - it was). The view is the
+  // user's as long as the selected ROW did not move: put the top row back.
+  // When the selection really changed (typing, a tab switch, the caret row
+  // on first show) the scroll into view is the point and stands.
+  if (LKeep = LWasIndex) and (LWasTop > 0) and (LWasTop < Length(FRows)) then
+    lbItems.TopIndex := LWasTop;
   btnGo.Enabled := (LKeep >= 0) and not FResolving;
+  UpdateStatus;
+  finally
+    EndListUpdate;
+  end;
+end;
+
+{ The status line: how many rows are shown of how many the tab lists, and
+  on the group tab how many projects have answered. Its own method because
+  an answer that is only STAGED (EnsureLoaded) moves the project count
+  without rebuilding the list, and must still say so. }
+procedure TPasTreeGoToForm.UpdateStatus;
+var
+  LScope: TGoToScope;
+  LShown: Integer;
+  LStatus: string;
+begin
+  LScope := FScope;
   // Shown of listed - the `line N` row is not an entry and is not counted.
-  LIdx := Length(FRows);
-  if (LIdx > 0) and (FRows[0].Kind = grLine) then
-    Dec(LIdx);
+  LShown := Length(FRows);
+  if (LShown > 0) and (FRows[0].Kind = grLine) then
+    Dec(LShown);
   if FLoading[LScope] and not FLoaded[LScope] then
     LStatus := '  loading...'
   else
-    LStatus := Format('  %d of %d', [LIdx, Length(LEntries)]);
+    LStatus := Format('  %d of %d', [LShown, Length(FScopeEntries)]);
   // The group tab says how many projects are in the list so far, and how
   // many servers are still analyzing - a cold project takes its time, and
   // the rows already in are shown meanwhile.
@@ -768,19 +1006,37 @@ var
   LStart, LMeasured: Double;
 begin
   // A tab switch is a new list: the old selection means nothing in it, the
-  // module tab reselects by caret, the others start at the top.
-  lbItems.ItemIndex := -1;
-  FRows := nil;
-  EnsureLoaded;
-  UpdateCursor;
-  // Timing lines under Advanced Logging: they found the 5.7 s Scope-per-row
-  // loop on 2026-09-19 and stay for the next such report.
-  LStart := TimingNowMs;
-  MeasureHeadColumn;
-  LMeasured := TimingNowMs;
-  Refilter(True);
-  TimingLogFmt('goto tab %d: %d rows, measure %s, refilter %s',
-    [Ord(Scope), Length(Entries), Ms(LMeasured - LStart), TimingSince(LMeasured)]);
+  // module tab reselects by caret, the others start at the top. Under one
+  // redraw lock, or the emptying and the refilling are two repaints with
+  // an empty list between them - that blank frame is the flicker.
+  //
+  // The list box is NOT emptied first. Setting Count to 0 and building the
+  // new list afterwards leaves the rows' rectangle with nothing to paint
+  // for as long as the build takes, and on the group tab that is long
+  // enough to see (0.47.2..0.47.4 made it a cleaner and therefore more
+  // obvious flash, Alex 2026-09-21: "it became MORE distinct"). The old
+  // rows stay on screen until the new ones are ready to replace them,
+  // which is what WS_CLIPCHILDREN on the tab control (FormShow) makes
+  // reliable: without it the tab control erases that rectangle itself on
+  // the way in, whatever the list box does.
+  SyncScope;
+  BeginListUpdate;
+  try
+    lbItems.ItemIndex := -1;   // the old tab's row means nothing in this one
+    EnsureLoaded;
+    UpdateCursor;
+    // Timing lines under Advanced Logging: they found the 5.7 s
+    // Scope-per-row loop on 2026-09-19 and stay for the next such report.
+    LStart := TimingNowMs;
+    MeasureHeadColumn;
+    LMeasured := TimingNowMs;
+    Refilter(True);
+    TimingLogFmt('goto tab %d: %d rows, measure %s, refilter %s',
+      [Ord(Scope), Length(Entries), Ms(LMeasured - LStart),
+       TimingSince(LMeasured)]);
+  finally
+    EndListUpdate;
+  end;
   ActiveControl := edFilter;
 end;
 
@@ -789,6 +1045,7 @@ end;
 // numbers stay where the edge used to be.
 procedure TPasTreeGoToForm.FormResize(Sender: TObject);
 begin
+  FColumnCap := Max(40, lbItems.ClientWidth div 3);
   lbItems.Invalidate;
 end;
 
@@ -999,7 +1256,7 @@ var
   begin
     if (AText = '') or (AWidth <= 0) then
       Exit;
-    AWidth := Min(AWidth, lbItems.ClientWidth div 3);
+    AWidth := Min(AWidth, FColumnCap);
     LCanvas.Font.Style := [];
     LX := LLineRight - 6 - LCanvas.TextWidth(AText);
     LSaved := SaveDC(LCanvas.Handle);
@@ -1067,7 +1324,10 @@ begin
     Put(IntToStr(LRow.LineNo), LStrong, [fsBold]);
     Exit;
   end;
-  LEntries := Entries;
+  // The tab's list and the tab itself from the cached pair, never through
+  // tcScope.TabIndex: that read is a SendMessage, and this runs once per
+  // row per repaint (SyncScope).
+  LEntries := FScopeEntries;
   if LRow.Entry > High(LEntries) then
     Exit;
   with LEntries[LRow.Entry] do
@@ -1097,7 +1357,7 @@ begin
       Put(LNote, LQuiet, []);
       LLineRight := ARect.Right - 6 - FLineWidth - 8;
     end;
-    if (Kind <> 'module') and (Scope <> gsModule) then
+    if (Kind <> 'module') and (FScope <> gsModule) then
       PutColumn(UnitName, FUnitWidth);
     PutColumn(SectionColumn(LEntries[LRow.Entry]), FSectionWidth);
     LX := ARect.Left + 6;

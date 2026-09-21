@@ -499,7 +499,10 @@ var
   LWritten: DWORD;
   LTry: Integer;
 begin
-  LFile := INVALID_HANDLE_VALUE;
+  // No `LFile := INVALID_HANDLE_VALUE` before the loop: cRetries is a
+  // positive constant, so the body always assigns it and the compiler says
+  // so (H2077). If it is ever made zero, the check after the loop turns
+  // into W1036 rather than reading a stale handle.
   for LTry := 1 to cRetries do
   begin
     LFile := CreateFile(PChar(FLogPath), FILE_APPEND_DATA,

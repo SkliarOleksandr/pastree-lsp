@@ -202,7 +202,6 @@ var
   LModuleServices: IOTAModuleServices;
   LModule: IOTAModule;
   LSourceEditor: IOTASourceEditor;
-  LView: IOTAEditView;
 begin
   if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
   begin

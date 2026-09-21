@@ -133,6 +133,22 @@ function EditorSyntaxStyle(ACode: TOTASyntaxCode): TFontStyles;
 procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   const AText: string; ADefault: TColor; AForceColor: TColor = clNone);
 
+/// <summary>
+/// Holds the editor palette still between Begin and End: the code editor
+/// options interface is fetched once and every colour and style is
+/// remembered the first time it is asked for, instead of a
+/// Supports(BorlandIDEServices) plus an interface property read PER RUN
+/// PER ROW. The Go To picker holds it for as long as it is open - a row
+/// asks for six of them while painting, and it repaints twenty-odd rows
+/// per scroll step (Alex, 2026-09-21: "the tabs flicker on a slow
+/// machine"). Nested calls are counted; a Tools > Options change cannot
+/// reach a modal picker, so a snapshot that lives for one dialog is
+/// current by construction. Outside a Begin/End every lookup reads the
+/// editor as before.
+/// </summary>
+procedure BeginEditorPalette;
+procedure EndEditorPalette;
+
 implementation
 
 uses
@@ -604,22 +620,86 @@ end;
 { The palette                                                                }
 { ------------------------------------------------------------------------- }
 
+var
+  // The held palette (BeginEditorPalette). GPaletteKnown is per syntax
+  // code - TOTASyntaxCode is a Byte, and only a handful of the 256 are
+  // ever asked for, so the codes are cached as they come rather than
+  // enumerated up front.
+  GPaletteDepth: Integer = 0;
+  GPaletteOptions: INTACodeEditorOptions = nil;
+  GPaletteKnown: array[Byte] of Boolean;
+  GPaletteColor: array[Byte] of TColor;
+  GPaletteStyle: array[Byte] of TFontStyles;
+
 function TryEditorOptions(out AOptions: INTACodeEditorOptions): Boolean;
 var
   LServices: INTACodeEditorServices;
 begin
+  if GPaletteDepth > 0 then
+  begin
+    AOptions := GPaletteOptions;
+    Exit(Assigned(AOptions));
+  end;
   AOptions := nil;
   if Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
     AOptions := LServices.Options;
   Result := Assigned(AOptions);
 end;
 
+procedure BeginEditorPalette;
+var
+  LServices: INTACodeEditorServices;
+begin
+  Inc(GPaletteDepth);
+  if GPaletteDepth = 1 then
+  begin
+    FillChar(GPaletteKnown, SizeOf(GPaletteKnown), 0);
+    // Not through TryEditorOptions - the depth is already up and it would
+    // answer from the cache it is here to fill.
+    GPaletteOptions := nil;
+    if Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
+      GPaletteOptions := LServices.Options;
+  end;
+end;
+
+procedure EndEditorPalette;
+begin
+  if GPaletteDepth = 0 then
+    Exit;
+  Dec(GPaletteDepth);
+  if GPaletteDepth = 0 then
+    GPaletteOptions := nil;
+end;
+
+{ The colour and the style of one code, from the held palette when there is
+  one. Both are taken together: a caller that wants one of them almost
+  always wants the other on the next line, and the pair costs one lookup. }
+procedure PaletteEntry(const AOptions: INTACodeEditorOptions;
+  ACode: TOTASyntaxCode; out AColor: TColor; out AStyle: TFontStyles);
+begin
+  if GPaletteDepth > 0 then
+  begin
+    if not GPaletteKnown[ACode] then
+    begin
+      GPaletteColor[ACode] := AOptions.FontColor[ACode];
+      GPaletteStyle[ACode] := AOptions.FontStyles[ACode];
+      GPaletteKnown[ACode] := True;
+    end;
+    AColor := GPaletteColor[ACode];
+    AStyle := GPaletteStyle[ACode];
+    Exit;
+  end;
+  AColor := AOptions.FontColor[ACode];
+  AStyle := AOptions.FontStyles[ACode];
+end;
+
 function EditorSyntaxColor(ACode: TOTASyntaxCode; ADefault: TColor): TColor;
 var
   LOptions: INTACodeEditorOptions;
+  LStyle: TFontStyles;
 begin
   if TryEditorOptions(LOptions) then
-    Result := LOptions.FontColor[ACode]
+    PaletteEntry(LOptions, ACode, Result, LStyle)
   else
     Result := ADefault;
 end;
@@ -627,9 +707,10 @@ end;
 function EditorSyntaxStyle(ACode: TOTASyntaxCode): TFontStyles;
 var
   LOptions: INTACodeEditorOptions;
+  LColor: TColor;
 begin
   if TryEditorOptions(LOptions) then
-    Result := LOptions.FontStyles[ACode]
+    PaletteEntry(LOptions, ACode, LColor, Result)
   else
     Result := [];
 end;
@@ -641,6 +722,8 @@ var
   LHavePalette: Boolean;
   LRun: TTokenRun;
   LText: string;
+  LColor: TColor;
+  LStyle: TFontStyles;
 begin
   if AText = '' then
     Exit;
@@ -649,8 +732,9 @@ begin
   begin
     if LHavePalette then
     begin
-      ACanvas.Font.Color := LOptions.FontColor[LRun.Code];
-      ACanvas.Font.Style := LOptions.FontStyles[LRun.Code];
+      PaletteEntry(LOptions, LRun.Code, LColor, LStyle);
+      ACanvas.Font.Color := LColor;
+      ACanvas.Font.Style := LStyle;
     end
     else
     begin

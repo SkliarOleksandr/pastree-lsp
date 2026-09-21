@@ -129,6 +129,92 @@ third-party, 400k+ rows in a project like AVImark) was judged too big to ship
 as a full list even in the table format: `pastree/outline` would need
 `filter`/`limit` parameters and server-side filtering per keystroke instead.
 
+## The Go To list flickers, or its scrollbar thumb jumps
+
+Three different things, fixed across 0.47.2..0.47.5; the notes are here
+because all of them will look like "the list is slow" in the next report.
+
+**Flicker on a tab switch or while scrolling.** The rows are owner-drawn
+(`lbItemsDrawItem`), so every repaint is a `FillRect` and a dozen `TextOut`s
+per row, and a list box erases its whole client area before the first of
+them - on a slow machine that white frame is what is seen. Three things
+address it and all three must stay:
+
+- `lbItems.DoubleBuffered := True` (the constructor) - the erase and the
+  rows happen in memory, the screen changes once.
+- `BeginListUpdate`/`EndListUpdate` (a `WM_SETREDRAW` pair, nested and
+  counted) around a tab switch and around `Refilter` - clearing the list,
+  setting the count, the selection and the top row are four repaints
+  otherwise, with an empty list visible between them.
+- Nothing per row that talks to a window or to the IDE. `Scope` used to
+  read `tcScope.TabIndex`, a `SendMessage` at 47 us, twice per row; it now
+  answers from `FScope`, refreshed by `SyncScope` on every tab change and
+  every landed list. `PutColumn`'s cap comes from `FColumnCap` rather than
+  `ClientWidth`. And the editor palette is held for the life of the dialog
+  (`BeginEditorPalette`/`EndEditorPalette` in
+  `PasTreeIdePlugin.ResultRows`), because each colour and style lookup was
+  a `Supports(BorlandIDEServices, ...)` and a row asks for six of them.
+
+If it flickers again, look for a new per-row call into the VCL or ToolsAPI
+before looking anywhere else - the same mistake cost 5.7 s on AVImark on
+2026-09-19 and is recorded in `MeasureHeadColumn`'s header.
+
+**The Group tab flickers where the Module and Project tabs do not.** Two
+causes, and the first one was not the whole answer - if it comes back, read
+both before theorising, and get the `goto tab` timing line first (Advanced
+Logging; it says how long the switch held the list).
+
+*The tab control erases the rows' rectangle while OnChange is busy* (fixed
+0.47.5). A tab control repaints its whole client area when the selected tab
+changes, and it does so BEFORE `OnChange` runs, so for however long the
+handler takes to build the new list that rectangle shows the tab control's
+background instead of rows. Two changes: `WS_CLIPCHILDREN` on `tcScope`
+(set in `FormShow`, since the VCL does not set it) excludes the list box's
+rectangle from the parent's painting, and `tcScopeChange` no longer empties
+the list before building the new one - the old rows stay up until the new
+ones replace them. The switch also does far less work now: both the column
+widths (`FWidths`) and the filter result (`FFiltered` / `FilterKey`) are
+kept per tab, so a switch back with the filter box untouched rebuilds
+nothing. Only the module and project tabs were quick enough to hide this;
+the group list is the biggest, so it was the one that showed.
+
+*The group answers once per project* (fixed in 0.47.4): `LspOutlineGroup`
+calls back
+ONCE PER PROJECT of the group (`TOutlineGather`), each time with the whole
+merged list again, so a group of six re-measured, re-filtered and repainted
+the list six times over a second or two. The Module and Project tabs answer
+once and never showed it. Visible on every Ctrl+G, since the lists live on
+the form and the Group tab reloads when it is first opened. An intermediate
+answer is now staged (`FStaged` / `AdoptStaged` in
+`PasTreeIdePlugin.GoToForm`) and the list is rebuilt on the first answer,
+on the last one, and at most once per `cGrowthRedrawMs` in between; the
+status line keeps counting projects in meanwhile. The rows are STAGED, not
+stored, because `FRows` holds indexes into the tab's list - swapping the
+list without refiltering would point them at other rows. The column widths
+are now kept per tab too (`FWidths`), so a switch back to an unchanged list
+does not re-measure every row.
+
+**A wait dialog flashes as the picker opens.** Fixed in 0.47.3: the dialog
+is ARMED for 250 ms rather than shown (`ShowWaitDialogAfter` in
+`PasTreeIdePlugin.WaitDialog`), so a warm project - which answers off the
+server's outline cache in tens of milliseconds - never sees it, and a cold
+one, which takes seconds, still does. If it flashes again, the outline is
+taking longer than 250 ms and the entry above is the one to read. Note that
+the dialog no longer disables input for those first milliseconds, so
+`GBusy` in `PasTreeIdePlugin.GoToPicker` is what keeps a second Ctrl+G from
+starting a second picker; a Ctrl+G that does nothing at all means that flag
+is stuck, which means an outline callback never fired.
+
+**The thumb jumps back while dragging it.** This was real dynamic loading:
+the group tab refilters on every project that answers, and `Refilter` sets
+`lbItems.ItemIndex`, which is `LB_SETCURSEL`, which SCROLLS the selected row
+into view. A drag of the scrollbar runs a modal loop that still dispatches
+messages, so an answer landing mid-drag yanked the view back to the
+selection a few times a second. `Refilter` now puts the top row back when
+the selected row did not move; when the selection really changed (typing, a
+tab switch, the caret row on first show) the scroll into view is the point
+and stands.
+
 ## An access violation with only an address
 
 `EAccessViolation ... in module 'pastree-server.exe' (offset NNNNNN)` and
