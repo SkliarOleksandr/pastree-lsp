@@ -1365,6 +1365,85 @@ a missing `uses` clause in either section and respect the file's line ending
 and BOM through `PasLsp.SourceText`. Cover the insertion with a harness
 request and test in AVImark, where the implicit set is the large one.
 
+## Go To over library units (deferred 2026-09-19, not started)
+
+**The ask.** Go To (Ctrl+G, `PasTreeIdePlugin.GoToForm` / `.GoToPicker`,
+0.45.0+) lists the module, the project and the group - never the library
+units the closure reaches through the search path (RTL, VCL, third-party).
+Alex asked for them too, either behind a checkbox ("include libraries") or,
+if the cost allowed, always. Weighed 2026-09-19 and put aside, not because
+it is hard but because it is not wanted yet. This section is the design so
+that the next session starts from the arithmetic instead of redoing it.
+
+**What is true.** The server already holds everything needed: every unit of
+the closure has a retained symbol table, and `TPasNavigator.ProjectOutline`
+takes any list of model ids, so "library" is literally all models minus the
+project set that `HandleOutline` builds today - no hydration, no new PasTree
+work. What is NOT true is "every object on the paths": the server knows only
+the units the closure reached through `uses`. A unit on the search path that
+nothing uses is not analyzed and cannot be listed (the IDE-wide Library Path
+is not read either - see "Still missing" above). Fine for Go To by symbol;
+not a Find Unit.
+
+**The arithmetic (AVImark, the real test bed).** The closure is 3767 units,
+of which 1553 are project units producing 113,613 rows, 6.4 MB as the 0.46.0
+table, 65 ms cached end to end. The ~2200 library units are the LARGER ones
+(System, Winapi.Windows, Vcl.*, DevExpress), so the estimate is 300-500k
+rows and 20-30 MB - roughly 300 ms cached, a second uncached, and ~60 MB of
+`TLspOutlineRow` strings resident in a 32-bit IDE that AVImark already
+strains. The estimate is the one number nobody has measured: the first step
+of the work is to add `scope: library` to the server and run
+`local/bench/OutlineBench` (see the 0.46.0 bench notes) before choosing a
+shape.
+
+**Two shapes, decided by that measurement.**
+
+- A. *The whole list to the client*, as the project tab does. Least code;
+  the memory and wire costs above at full strength. Acceptable only if the
+  library table measures under ~15 MB and ~200 ms cached.
+- B. *Filter on the server.* `pastree/outline` gains `filter` and `limit`;
+  the server keeps lower-cased keys beside the cached table (a `Pos` over
+  400k keys is single-digit milliseconds) and answers a small page. The
+  client debounces ~150 ms, drops a stale answer by request id, shows
+  library rows from two typed characters, and the status line reads
+  `first 500 of 12,340`. A second row-arrival path in the form, but no
+  resident list. The recorded expectation is that B wins.
+
+**Rules that hold under either shape.**
+
+1. UI is a checkbox on the Project and Group tabs beside the kind boxes, not
+   a fourth tab; off by default; remembered in Settings.
+2. Project rows sort above library rows, and library rows draw in the quiet
+   colour the `include` rows got in 0.46.7 - typing `TStr` must not bury the
+   project's own types under RTL.
+3. Group tab: library rows come from the CURRENT project's server only; the
+   other servers contribute their project rows as now. Nine servers hold nine
+   copies of the RTL analyzed under nine sets of defines, so a merge by (file,
+   name) would be both slow and wrong.
+4. The server's `FOutlineCache` is dropped at every analysis install, i.e.
+   after every edit. The library table changes only when the closure does,
+   so it needs its own cache keyed by the closure generation, or every
+   keystroke after an edit pays the full list again.
+5. DCU-only units (DevExpress without sources) are listed like any other;
+   `pastree/outlineTarget` answers a `.dcu` path and `NavigateToPosition`
+   already routes that to the generated `Foo.dcu.pas` tab. Never exercised
+   from the picker - a named test case, not an assumption.
+6. A cold server waits for the full analysis under the wait dialog, exactly
+   as the project tab does; nothing new, but on a cold group it is the same
+   wait multiplied.
+7. Cover `scope: library` with a harness request (the empty-scope trap of
+   CLAUDE.md applies to any new model-walking handler) and bump MINOR.
+
+**Open questions for Alex, unanswered when this was shelved:** the checkbox
+placement and default (1), library-from-the-owning-server-only (3), quiet
+colour and ordering (2), whether DCU-only units belong in "library" (5), and
+whether a two-character minimum before library rows appear is acceptable
+under shape B.
+
+**A byproduct worth keeping in view.** Rows of kind `module` over the whole
+closure are exactly the data the queued Use Unit / Find Unit dialog above
+needs; design the request parameters so one call serves both.
+
 ## The product mark, and the sizes it still needs
 
 One bitmap serves everything today: `PasTreeIdePlugin.Logo.bmp`, 24x24, linked
