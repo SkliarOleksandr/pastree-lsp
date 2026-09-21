@@ -43,6 +43,29 @@ call :drop "%CD%\out\PasTreeIdePlugin.bpl"
 call :drop "%PUBLIC%\Documents\Embarcadero\Studio\%BDSVER%\Bpl\PasTreeIdePlugin.bpl"
 if defined BDSCOMMONDIR call :drop "%BDSCOMMONDIR%\Bpl\PasTreeIdePlugin.bpl"
 
+rem THE KEY MAPPINGS RECORD. The IDE writes one subkey under Editor\Options\
+rem Known Editor Enhancements for every keyboard-binding module it has ever
+rem seen, by the module's GetName, and never removes one - eight
+rem PasTreeIdePlugin.* subkeys were found on 2026-09-21, seven of them dead
+rem names. An uninstall that leaves them is not an uninstall. BUT THEY CANNOT
+rem SIMPLY BE DELETED: the IDE places each module at its Priority in a list
+rem sized by the count, so a gap stops RAD Studio from starting ("List index
+rem out of bounds (15). TList range is 0..7" - the first version of this step,
+rem same day). The remaining modules must be renumbered to 0..N-1, which is
+rem why this is a PowerShell script (scripts\prune-key-mappings.ps1) rather
+rem than a reg delete loop: it deletes and renumbers as one step, and closes
+rem the gaps even when a deletion fails halfway. -File, not -Command - see
+rem scripts\ide-closed.bat for what cmd's parser does to an inline
+rem expression.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\prune-key-mappings.ps1"
+if errorlevel 2 (
+  set "LFOUND=1"
+) else if errorlevel 1 (
+  echo.
+  echo WARNING: the Key Mappings records could not be cleaned - see above.
+  set "LFOUND=1"
+)
+
 rem The same sweep install.bat ends with, and it matters more here: the whole
 rem point of this script is that nothing is left to fail at startup, so a
 rem registration in a location neither script can name must at least be named

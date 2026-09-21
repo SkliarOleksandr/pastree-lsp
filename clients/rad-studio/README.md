@@ -862,6 +862,23 @@ Rules that follow:
   (`BlockCloseBinding`, `SyncPrototypesBinding`, the five per-feature ones).
   Harmless as far as is known, but a rename of `GetName` leaves one behind
   forever; `PasTreeIdePlugin.KeyBinding` is the only current name.
+  `uninstall.bat` deletes every `PasTreeIdePlugin.*` subkey there (0.47.1,
+  `scripts\prune-key-mappings.ps1`) - the prefix is this package's unit
+  namespace, so nothing else matches. **And then renumbers the remaining
+  modules' `Priority` to 0..N-1**, because the IDE places each module at its
+  priority in a list sized by the count: deleting the eight subkeys alone
+  left RAD Studio 13.2 unable to start (`List index out of bounds (15).
+  TList range is 0..7`, 2026-09-21), recovered by recreating the keys by
+  hand with their old priorities. Never delete a subkey there without
+  closing the gap. The value types matter too: `Priority` is a DWORD but
+  `Enabled` is a **REG_SZ** `"1"` - recreated as a DWORD, the IDE skips the
+  subkey without a word, which is the same 8-module list and the same
+  startup error with all sixteen keys plainly present in the registry.
+  The rule that fits everything seen that day: **every `Priority` must be
+  below the number of subkeys the IDE accepts**; duplicates and gaps under
+  that bound are tolerated (the IDE renumbers the live modules itself at
+  startup and leaves dead names as they are). A backup of the key as it was
+  is `local\KnownEditorEnhancements-37.0-backup-2026-09-21.reg`.
 - **`FinalizeKeyBindings` is the first teardown in `TIDEWizard.Destroy`**,
   before any feature's `Finalize`: a keystroke dispatched into unloaded
   package code is an immediate crash, and every feature's `GAlive` gate
