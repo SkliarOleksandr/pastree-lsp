@@ -56,9 +56,16 @@ begin
   LBitmap := LoadBitmap(HInstance, cSplashBitmapName);
   if LBitmap = 0 then
     Exit;   // no icon, no entry: passing 0 is not documented to be safe
+  // The caption is the name and the version only; the description rides in
+  // ALicenseStatus. The splash cell is narrow and clipped one caption in two
+  // ("PasTree LSP 0.47.10 - Object Pascal..."), while the 13.x splash draws
+  // ALicenseStatus as a second, smaller line under the caption - the line
+  // "MPL 1.1" and "Registered" sit on for the other packages (Alex,
+  // 2026-09-21). Older splashes put it in parentheses after the caption,
+  // which reads fine too.
   SplashScreenServices.AddPluginBitmap(
-    Format('PasTree LSP %s - Object Pascal code intelligence',
-      [PasTreeLspVersion]), LBitmap);
+    Format('PasTree LSP %s', [PasTreeLspVersion]), LBitmap, False,
+    'Object Pascal code intelligence');
 end;
 
 initialization

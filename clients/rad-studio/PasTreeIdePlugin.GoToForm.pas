@@ -529,6 +529,16 @@ begin
   // on a slow machine the white flash between the erase and the rows is
   // the flicker of a tab switch (Alex, 2026-09-21). Buffered, the erase
   // and the rows happen in memory and the screen changes once.
+  //
+  // NOT ENOUGH while typing (Alex, 2026-09-21): the list still flickers as
+  // the filter narrows it. Tried and withdrawn the same day, verified in
+  // the IDE: a TListBox interposer that declined the on-screen
+  // WM_ERASEBKGND (TCustomListBox.WMEraseBkgnd hands it to the LISTBOX
+  // class when DoubleBuffered is on) and added LBS_DISABLENOSCROLL so the
+  // scrollbar's coming and going stopped resizing the client area. No
+  // visible change, so the erase is not where the flash comes from. Next
+  // candidates: the WM_SETREDRAW(1) + RedrawWindow pair in EndListUpdate
+  // (RDW_ERASE | RDW_FRAME), or the LB_SETCOUNT reset of a virtual list.
   lbItems.DoubleBuffered := True;
   LoadState;
 end;
@@ -1253,7 +1263,7 @@ var
   LCanvas: TCanvas;
   LRow: TGoToRow;
   LEntries: TArray<TLspOutlineRow>;
-  LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce: TColor;
+  LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce, LMatch: TColor;
   LNameStyle: TFontStyles;
   LX, LY, LLineRight, LSaved: Integer;
   LName, LNote: string;
@@ -1322,6 +1332,7 @@ begin
     LKeyword := LStrong;
     LPreproc := LStrong;
     LForce := LStrong;
+    LMatch := LStrong;
   end
   else
   begin
@@ -1337,6 +1348,9 @@ begin
     LKeyword := EditorSyntaxColor(atReservedWord, LStrong);
     LPreproc := EditorSyntaxColor(atPreproc, LStrong);
     LForce := clNone;
+    // The matched letters in the Find References marker colour as well as
+    // bold - the same "what you typed" mark in both places.
+    LMatch := MatchMarkerColor(LStrong);
   end;
   LX := ARect.Left + 6;
   LY := ARect.Top + (ARect.Height - LCanvas.TextHeight('Xg')) div 2;
@@ -1414,7 +1428,7 @@ begin
     if LRow.MatchLen > 0 then
     begin
       Put(Copy(LName, 1, LRow.MatchFrom), LIdent, LNameStyle);
-      Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LIdent,
+      Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LMatch,
         LNameStyle + [fsBold]);
       Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LIdent,
         LNameStyle);

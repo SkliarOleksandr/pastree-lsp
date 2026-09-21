@@ -289,6 +289,27 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
         TabOrder = 1
       end
+      object lblClearLogOnOpenHint: TLabel
+        Left = 35
+        Top = 181
+        Width = 405
+        Height = 30
+        Caption =
+          'Empties the project'#39's log when the project is opened, so the ' +
+          'log is this session'#39's alone. Off appends every run, separated ' +
+          'by a line of dashes.'
+        WordWrap = True
+      end
+      object chkClearLogOnOpen: TCheckBox
+        Left = 16
+        Top = 160
+        Width = 430
+        Height = 17
+        Caption = 'Clear log when opening a project'
+        Checked = True
+        State = cbChecked
+        TabOrder = 2
+      end
     end
   end
   object btnOK: TButton

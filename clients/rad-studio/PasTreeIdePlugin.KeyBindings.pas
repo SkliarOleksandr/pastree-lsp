@@ -151,21 +151,17 @@ begin
   GEntries.Add(LEntry);
 end;
 
-{ Advanced Logging only: a line read once, when a key did not behave after a
-  load or an unload. Into the server's log when a server is up - at unload
-  it is, FinalizeKeyBindings being the first teardown - and into the Build
-  tab otherwise, which is the case at package load. Silent with the switch
-  off. }
+{ Advanced Logging only, and into the server's log only: a line read once,
+  when a key did not behave after a load or an unload. At unload a server is
+  up (FinalizeKeyBindings is the first teardown); at package load none is,
+  and the line is simply lost - a first cut fell back to the Build tab
+  there, which put "binding registered" in front of every build with the
+  switch on (Alex, 2026-09-21: "drop the extra diagnostics from Build").
+  Silent with the switch off. }
 procedure LogAdvanced(const AMessage: string);
-var
-  LMessageServices: IOTAMessageServices;
 begin
-  if not AdvancedLoggingEnabled then
-    Exit;
-  if LspLogToServer('keybindings: ' + AMessage) then
-    Exit;
-  if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
-    LMessageServices.AddTitleMessage('[pastree] keybindings: ' + AMessage);
+  if AdvancedLoggingEnabled then
+    LspLogToServer('keybindings: ' + AMessage);
 end;
 
 { TPasTreeKeyBinding }

@@ -1304,6 +1304,27 @@ begin
 end;
 
 /// <summary>
+/// Empties the log at APath, if it exists. TRUNCATE_EXISTING with both
+/// shares: the server (when it is already up for a reopened project) and a
+/// tail may hold the file, and a deny-share open would fail against either -
+/// as the server's own AppendLog explains. An append handle keeps working
+/// across the truncation; the OS positions each write at the new end. A
+/// failure is nobody's problem: the log merely keeps its history this once.
+/// </summary>
+procedure ClearLogFile(const APath: string);
+var
+  LFile: THandle;
+begin
+  if (APath = '') or not FileExists(APath) then
+    Exit;
+  LFile := CreateFile(PChar(APath), GENERIC_WRITE,
+    FILE_SHARE_READ or FILE_SHARE_WRITE, nil, TRUNCATE_EXISTING,
+    FILE_ATTRIBUTE_NORMAL, 0);
+  if LFile <> INVALID_HANDLE_VALUE then
+    CloseHandle(LFile);
+end;
+
+/// <summary>
 /// Every directory the IDE itself would search for source outside the project:
 /// the Library <b>Search Path</b> and <b>Browsing Path</b> for APlatform, read
 /// from the IDE's own configuration and macro-expanded.
@@ -3421,6 +3442,15 @@ begin
   LProject := Project;
   if not Assigned(LProject) then
     Exit;   // see Prewarm: normal during startup, and not ours to report
+  // A GENUINE OPEN, not a switch of the active project inside a group: the
+  // one this session has not announced yet (first open, or reopened after
+  // ProjectClosed cleared the mark). Emptied BEFORE EnsureSession, so a
+  // server spawned for it - whose stderr is an append handle onto this very
+  // file - and its "server ready" line come first in the fresh file. A
+  // server already running for it keeps logging: it opens the file per line.
+  if ClearLogOnProjectOpen and
+     not SameText(FAnnouncedProject, LProject.FileName) then
+    ClearLogFile(LogPathFor(LProject.FileName));
   LWasReady := Assigned(FClient) and (FClient.State = lcsReady);
   if not EnsureSession then
     Exit;

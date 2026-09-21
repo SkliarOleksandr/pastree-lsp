@@ -107,6 +107,15 @@ function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ATag: string): IOTACustomMessage;
 
 /// <summary>
+/// The colour a Find References row marks its match with - clMaroon, or the
+/// IDE's theme-aware red on a dark panel (judged by the luminance of
+/// ABaseColor, the text colour the row is painted in). Shared with the Go To
+/// picker, whose matched letters take the same colour so the two "this is
+/// what you typed" markers read alike (Alex, 2026-09-21).
+/// </summary>
+function MatchMarkerColor(ABaseColor: TColor): TColor;
+
+/// <summary>
 /// The editor's live colour for one syntax class - FontColor of the code
 /// editor options, read now (a Tools > Options change shows on the next
 /// repaint); ADefault when the editor services are not there. For a
@@ -699,6 +708,24 @@ begin
   AStyle := AOptions.FontStyles[ACode];
 end;
 
+function MatchMarkerColor(ABaseColor: TColor): TColor;
+var
+  LUI: INTAIDEUIServices;
+  LBaseRgb: Cardinal;
+  LPanelIsDark: Boolean;
+begin
+  Result := clMaroon;
+  // Light TEXT means a dark PANEL, where clMaroon is mud - take the IDE's
+  // theme-aware red accent there instead. Plain luminance of the prepared
+  // font color; the panel's own background is not exposed here.
+  LBaseRgb := ColorToRGB(ABaseColor);
+  LPanelIsDark :=
+    (2 * GetRValue(LBaseRgb) + 5 * GetGValue(LBaseRgb) + GetBValue(LBaseRgb))
+      div 8 > 128;
+  if LPanelIsDark and Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+    Result := LUI.ThemeAwareColors[itcRed];
+end;
+
 function EditorSyntaxColor(ACode: TOTASyntaxCode; ADefault: TColor): TColor;
 var
   LOptions: INTACodeEditorOptions;
@@ -950,8 +977,6 @@ var
 
 var
   LUI: INTAIDEUIServices;
-  LBaseRgb: Cardinal;
-  LPanelIsDark: Boolean;
 begin
   LHavePalette := TryEditorOptions(LOptions);
   LBaseColor := ACanvas.Font.Color;
@@ -959,21 +984,12 @@ begin
   LBlue := LBaseColor;
   LOrange := LBaseColor;
   LGreen := LBaseColor;
-  LMatchColor := clMaroon;
-  // Light TEXT means a dark PANEL, where clMaroon is mud - take the IDE's
-  // theme-aware red accent there instead. Plain luminance of the prepared
-  // font color; the panel's own background is not exposed here.
-  LBaseRgb := ColorToRGB(LBaseColor);
-  LPanelIsDark :=
-    (2 * GetRValue(LBaseRgb) + 5 * GetGValue(LBaseRgb) + GetBValue(LBaseRgb))
-      div 8 > 128;
+  LMatchColor := MatchMarkerColor(LBaseColor);
   if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
   begin
     LBlue := LUI.ThemeAwareColors[itcBlue];
     LOrange := LUI.ThemeAwareColors[itcOrange];
     LGreen := LUI.ThemeAwareColors[itcGreen];
-    if LPanelIsDark then
-      LMatchColor := LUI.ThemeAwareColors[itcRed];
   end;
   LTop := ARect.Top + (ARect.Height - ACanvas.TextHeight('Ag')) div 2;
   LX := ARect.Left + cPad;

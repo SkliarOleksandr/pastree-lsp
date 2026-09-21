@@ -105,7 +105,8 @@ uses
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.DcuNames,
-  PasTreeIdePlugin.DcuSource;
+  PasTreeIdePlugin.DcuSource,
+  PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
   callback SYNCHRONOUSLY when the request cannot even be issued (no server
@@ -141,14 +142,6 @@ var
   GHelpInsightProbed: Boolean = False;
   // Edge-trigger for the "PasTree is not selected" line - see SetEnabled.
   GInsightWarned: Boolean = False;
-
-procedure LogDiagnostic(const AMessage: string);
-var
-  LMessageServices: IOTAMessageServices;
-begin
-  if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
-    LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
-end;
 
 { ---------------------------------------------------------------------------
   The symbol list: one async answer, filtered synchronously ever after
@@ -1746,10 +1739,15 @@ begin
   if Assigned(LCurrent) and Supports(LCurrent, IOTACodeInsightSelection,
     LSelection) then
     LCurrentName := '"' + LSelection.GetDisplayName + '"';
-  LogDiagnostic(Format('PasTree is not selected as the Insight Provider - '
-    + 'completion, browse and parameter insight will come from %s instead '
-    + 'until it is selected under Tools > Options > Editor > Source.',
-    [LCurrentName]));
+  // Into the server's log, under Advanced Logging only - never the Build
+  // tab. Until completion is complete, not being the provider is the normal
+  // state, and a Build-tab line about it was noise on every load (Alex,
+  // 2026-09-21). GInsightWarned is set either way so the check stays cheap.
+  if AdvancedLoggingEnabled then
+    LspLogToServer(Format('PasTree is not selected as the Insight Provider - '
+      + 'completion, browse and parameter insight come from %s instead '
+      + 'until it is selected under Tools > Options > Editor > Source.',
+      [LCurrentName]));
   GInsightWarned := True;
 end;
 

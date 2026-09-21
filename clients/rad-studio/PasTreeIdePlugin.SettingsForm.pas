@@ -84,6 +84,8 @@ type
     lblLoggingHint: TLabel;
     chkAdvancedLogging: TCheckBox;
     lblAdvancedLoggingHint: TLabel;
+    chkClearLogOnOpen: TCheckBox;
+    lblClearLogOnOpenHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
@@ -143,6 +145,8 @@ procedure TPasTreeSettingsForm.chkLoggingClick(Sender: TObject);
 begin
   chkAdvancedLogging.Enabled := chkLogging.Checked;
   lblAdvancedLoggingHint.Enabled := chkLogging.Checked;
+  chkClearLogOnOpen.Enabled := chkLogging.Checked;
+  lblClearLogOnOpenHint.Enabled := chkLogging.Checked;
 end;
 
 function ExecuteSettingsDialog: Boolean;
@@ -204,6 +208,7 @@ begin
     LForm.chkGoTo.Checked := LSettings.EnableGoTo;
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
+    LForm.chkClearLogOnOpen.Checked := LSettings.ClearLogOnOpen;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -220,6 +225,7 @@ begin
     LSettings.EnableGoTo := LForm.chkGoTo.Checked;
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
+    LSettings.ClearLogOnOpen := LForm.chkClearLogOnOpen.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally

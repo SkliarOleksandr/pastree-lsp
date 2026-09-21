@@ -1039,6 +1039,16 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    configuration for restart purposes (like platform and build config), so
    changing either takes effect on the next gesture rather than at the next
    IDE start. `pastree.logDetail` is the VS Code equivalent.
+   **Clear log when opening a project** (added 2026-09-21, v0.47.10,
+   default ON) empties the project's log at a genuine open - the first for
+   that project in the IDE session, or one after it was closed - so the log
+   is this session's alone; off keeps the server's append-with-separator
+   history. IDE-side (`TLspSession.ProjectOpened`), because only the IDE
+   can tell an open from a switch of the active project inside a group,
+   and it happens BEFORE the server is spawned so its "server ready" line
+   heads the fresh file. A running server is unaffected: it opens the file
+   per line, and the stderr append handle it was given writes at the new
+   end. Greyed with logging off, like Advanced logging.
 10. **The analysis starts when the project opens - DELIVERED 2026-09-01
    (v0.24.1).** It used to start on whichever came first: a `didOpen` or a
    request reaching `WaitAnalyzed`. Both are the wrong moment for a client

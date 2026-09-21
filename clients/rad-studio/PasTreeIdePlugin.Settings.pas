@@ -165,6 +165,17 @@ function LoggingEnabled: Boolean;
 /// </summary>
 function AdvancedLoggingEnabled: Boolean;
 
+/// <summary>
+/// Whether the project's log is emptied when that project is opened, so a
+/// session's log is that session's and not the history of every run since
+/// the file was created (Alex, 2026-09-21, the default). Off keeps the
+/// server's behaviour of appending with a separator per run. False whenever
+/// logging itself is off - there is no file to clear. Read by
+/// TLspSession.ProjectOpened, the one place that knows an open from a
+/// switch of the active project inside a group.
+/// </summary>
+function ClearLogOnProjectOpen: Boolean;
+
 /// <summary>Registers Tools > PasTree > Settings.</summary>
 procedure InitializeSettings;
 
@@ -199,6 +210,7 @@ type
     EnableGoTo: Boolean;
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
+    ClearLogOnOpen: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -231,6 +243,7 @@ const
   cValueGoTo = 'EnableGoTo';
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
+  cValueClearLogOnOpen = 'ClearLogOnProjectOpen';
 
 var
   // The in-memory copy. Loaded on first read, replaced on every save, so a
@@ -326,6 +339,7 @@ begin
   Result.EnableLogging := True;
   // See AdvancedLoggingEnabled: the one default that is False.
   Result.AdvancedLogging := False;
+  Result.ClearLogOnOpen := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -356,6 +370,8 @@ begin
         ReadFlag(LReg, cValueLogging, Result.EnableLogging);
       Result.AdvancedLogging :=
         ReadFlag(LReg, cValueAdvancedLogging, Result.AdvancedLogging);
+      Result.ClearLogOnOpen :=
+        ReadFlag(LReg, cValueClearLogOnOpen, Result.ClearLogOnOpen);
     finally
       LReg.CloseKey;
     end;
@@ -401,6 +417,8 @@ begin
         LReg.WriteInteger(cValueLogging, Ord(ASettings.EnableLogging));
         LReg.WriteInteger(cValueAdvancedLogging,
           Ord(ASettings.AdvancedLogging));
+        LReg.WriteInteger(cValueClearLogOnOpen,
+          Ord(ASettings.ClearLogOnOpen));
       finally
         LReg.CloseKey;
       end;
@@ -525,6 +543,12 @@ begin
   // it was given alone when it greys the box out - and a caller asking "should
   // I log the inventory?" must get False for that, not the stale tick.
   Result := CurrentSettings.EnableLogging and CurrentSettings.AdvancedLogging;
+end;
+
+function ClearLogOnProjectOpen: Boolean;
+begin
+  // Same dependency as AdvancedLoggingEnabled, for the same reason.
+  Result := CurrentSettings.EnableLogging and CurrentSettings.ClearLogOnOpen;
 end;
 
 procedure ShowSettingsDialog;
