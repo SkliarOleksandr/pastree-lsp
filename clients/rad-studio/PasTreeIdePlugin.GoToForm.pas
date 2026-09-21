@@ -19,7 +19,9 @@ unit PasTreeIdePlugin.GoToForm;
   list): the head word and the detail in the EDITOR'S syntax colours (the
   live palette the Find References rows paint with, through
   PasTreeIdePlugin.ResultRows - Alex, 2026-09-19: "the keyword colours the
-  IDE editor uses, as in the Find All tabs"), the name in the editor's
+  IDE editor uses, as in the Find All tabs" - colours only, never the
+  palette's bold: in this list bold means the matched letters and nothing
+  else, Alex, 2026-09-21), the name in the editor's
   identifier colour with the matched letters in bold, and at the right edge
   three aligned quiet columns: the section (interface / implementation),
   the unit name on the project and group tabs, `:N` for a row that knows
@@ -43,8 +45,14 @@ unit PasTreeIdePlugin.GoToForm;
   2. AN INCLUDES BOX: the `include 'Foo.inc'` landmark rows show under All
      or under the Includes box, one more box under the All-or-subset rule
      (Alex: "a filter - show or do not show the include entries"; then
-     "Includes should work like all the others"). The other landmarks
-     (unit, interface, uses, implementation) always show, as in the demo.
+     "Includes should work like all the others"). Of the other landmarks
+     only the module header (unit / program / library / package) shows -
+     the `interface`, `uses` and `implementation` rows the demo lists are
+     not identifiers and were dropped (Alex, 2026-09-21) - and it shows
+     only under All, on every tab: with a kind box ticked the list is "the
+     routines" or "the types", and a `unit Foo` row is neither (same day;
+     a first cut kept it on the module tab, and Alex asked for it gone
+     there too).
 
   3. THE LISTS ARRIVE ASYNCHRONOUSLY. The demo reads them off an in-process
      model; here every list is an LSP answer delivered on a later
@@ -233,8 +241,10 @@ var
   and still lists the entries whose text contains the digits; ALineCount <= 0
   means "no line row" (a project tab has no line to go to). The match is a
   case-insensitive substring over the row's name column (Owner.Name, or the
-  head word for a landmark). Landmarks pass the kind filter unconditionally;
-  an include row passes only with AIncludes. Exposed for a test. }
+  head word for a landmark). The `section` and `uses` landmarks never show;
+  a module header passes the kind filter only under All (AKinds =
+  ALL_KINDS); an include row passes only with AIncludes.
+  Exposed for a test. }
 function FilterRows(const AEntries: TArray<TLspOutlineRow>;
   const AFilter: string; AKinds: TGoToKinds; AIncludes: Boolean;
   ALineCount: Integer): TArray<TGoToRow>;
@@ -377,7 +387,17 @@ begin
       if not (LKind in AKinds) then
         Continue;
     end
-    else if not AIncludes and (AEntries[LIdx].Kind = 'include') then
+    else if (AEntries[LIdx].Kind = 'section') or
+            (AEntries[LIdx].Kind = 'uses') then
+      Continue
+    else if AEntries[LIdx].Kind = 'include' then
+    begin
+      if not AIncludes then
+        Continue;
+    end
+    else if AKinds <> ALL_KINDS then
+      // A module header with a kind box ticked - on every tab (Alex,
+      // 2026-09-21: "program still shows on the module tab with a filter").
       Continue;
     LRow := Default(TGoToRow);
     LRow.Kind := grEntry;
@@ -700,10 +720,10 @@ begin
   // DISTINCT word: there are a dozen of them in 100k rows, and a GDI text
   // measurement per row was a third of a second on the project list.
   //
-  // Measured in the reserved-word style of the editor's palette (bold by
-  // default) - head words are painted in it, and measuring them plain left
-  // `class procedure` running into the name (Alex's first screenshot,
-  // 2026-09-19).
+  // Measured in the plain style, which is how head words are painted since
+  // 2026-09-21 (bold is the matched letters only); the words of the
+  // `section` and `uses` landmarks are skipped, as FilterRows drops those
+  // rows - `implementation` would otherwise set the column's width alone.
   //
   // The unit and section columns the same way. The loop body is what a
   // project list of a million rows (AVImark with the library) runs once per
@@ -722,7 +742,7 @@ begin
   // whose rows draw no unit (lbItemsDrawItem).
   FWidths[AScope] := Default(TGoToWidths);
   lbItems.Canvas.Font.Assign(lbItems.Font);
-  lbItems.Canvas.Font.Style := EditorSyntaxStyle(atReservedWord);
+  lbItems.Canvas.Font.Style := [];
   FWidths[AScope].Head := lbItems.Canvas.TextWidth('line');
   LEntries := FEntries[AScope];
   LSeen := TDictionary<string, Boolean>.Create;
@@ -730,10 +750,11 @@ begin
   LSeenSection := TDictionary<string, Boolean>.Create;
   try
     for LIdx := 0 to High(LEntries) do
-      if LSeen.TryAdd(LEntries[LIdx].Head, True) then
+      if (LEntries[LIdx].Kind <> 'section') and
+         (LEntries[LIdx].Kind <> 'uses') and
+         LSeen.TryAdd(LEntries[LIdx].Head, True) then
         FWidths[AScope].Head := Max(FWidths[AScope].Head,
           lbItems.Canvas.TextWidth(LEntries[LIdx].Head));
-    lbItems.Canvas.Font.Style := [];
     LMaxLine := 0;
     LPrevUnit := '';
     LUnitColumn := AScope <> gsModule;
@@ -1274,11 +1295,13 @@ var
   end;
 
   // A run in the editor's syntax colours (PasTreeIdePlugin.ResultRows, the
-  // same palette the Find References rows paint with). Font.Style is the
-  // last run's afterwards; every Put sets its own.
+  // same palette the Find References rows paint with) - colours only, in
+  // the plain style: bold in this list is the matched letters alone.
+  // Font.Style is the last run's afterwards; every Put sets its own.
   procedure PutSyntax(const AText: string);
   begin
-    PaintSyntaxText(LCanvas, LX, LY, AText, LQuiet, LForce);
+    LCanvas.Font.Style := [];
+    PaintSyntaxText(LCanvas, LX, LY, AText, LQuiet, LForce, True);
   end;
 
 begin
@@ -1366,8 +1389,10 @@ begin
       ARect.Bottom);
     // The name column is `Owner.Name` - or, for a landmark, the head word
     // itself, which then takes the head column and the match highlight, in
-    // the reserved-word colour AND style (bold by default - `interface`
-    // and `uses` came out plain when only the colour was taken).
+    // the reserved-word colour. `field` is a head word of ours, not a
+    // reserved word, so the tokenizer would paint it as an identifier; it
+    // takes the keyword colour by name (Alex, 2026-09-21: "field in the
+    // same colour as uses / program / type").
     LName := NameColumn(LEntries[LRow.Entry]);
     LNameStyle := [];
     if Kind = 'include' then
@@ -1378,14 +1403,14 @@ begin
     end
     else if Name <> '' then
     begin
-      PutSyntax(Head);
+      if Head = 'field' then
+        Put(Head, LKeyword, [])
+      else
+        PutSyntax(Head);
       LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
     end
     else
-    begin
       LIdent := LKeyword;
-      LNameStyle := EditorSyntaxStyle(atReservedWord);
-    end;
     if LRow.MatchLen > 0 then
     begin
       Put(Copy(LName, 1, LRow.MatchFrom), LIdent, LNameStyle);
@@ -1396,8 +1421,16 @@ begin
     end
     else
       Put(LName, LIdent, LNameStyle);
+    // The detail spaced the way the source is written: `APath: string`,
+    // `GetIndex(const A: string): Integer`, `CName = 'x'`, `TFoo = class` -
+    // a `:` or `(` right after the name, anything else after one space.
+    // The demo's two spaces before every detail read as `APath : string`
+    // (Alex, 2026-09-21: "Delphi's convention is name-colon-space-type").
     if Detail <> '' then
-      PutSyntax('  ' + Detail);
+      if CharInSet(Detail[1], [':', '(']) then
+        PutSyntax(Detail)
+      else
+        PutSyntax(' ' + Detail);
     RestoreDC(LCanvas.Handle, LSaved);
   end;
 end;

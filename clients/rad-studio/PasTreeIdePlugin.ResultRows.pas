@@ -127,11 +127,17 @@ function EditorSyntaxStyle(ACode: TOTASyntaxCode): TFontStyles;
 /// numbers - and advances AX past it. ADefault is the colour and style
 /// when there is no palette. AForceColor, when not clNone, replaces every
 /// run's colour (a selected row keeps its highlight text colour; the
-/// styles still follow the palette). Font.Style is left as the last run
-/// set it. The Go To picker paints its head word and its detail with this.
+/// styles still follow the palette). APlain drops the palette's styles
+/// and paints every run in the canvas font's current style - the Go To
+/// picker, where bold means one thing only, the letters the filter matched
+/// (Alex, 2026-09-21: "bold only for what matched while typing"); the Find
+/// References rows keep the editor's bold reserved words. Font.Style is
+/// left as the last run set it. The Go To picker paints its head word and
+/// its detail with this.
 /// </summary>
 procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
-  const AText: string; ADefault: TColor; AForceColor: TColor = clNone);
+  const AText: string; ADefault: TColor; AForceColor: TColor = clNone;
+  APlain: Boolean = False);
 
 /// <summary>
 /// Holds the editor palette still between Begin and End: the code editor
@@ -716,7 +722,8 @@ begin
 end;
 
 procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
-  const AText: string; ADefault: TColor; AForceColor: TColor);
+  const AText: string; ADefault: TColor; AForceColor: TColor;
+  APlain: Boolean);
 var
   LOptions: INTACodeEditorOptions;
   LHavePalette: Boolean;
@@ -734,12 +741,14 @@ begin
     begin
       PaletteEntry(LOptions, LRun.Code, LColor, LStyle);
       ACanvas.Font.Color := LColor;
-      ACanvas.Font.Style := LStyle;
+      if not APlain then
+        ACanvas.Font.Style := LStyle;
     end
     else
     begin
       ACanvas.Font.Color := ADefault;
-      ACanvas.Font.Style := [];
+      if not APlain then
+        ACanvas.Font.Style := [];
     end;
     if AForceColor <> clNone then
       ACanvas.Font.Color := AForceColor;
