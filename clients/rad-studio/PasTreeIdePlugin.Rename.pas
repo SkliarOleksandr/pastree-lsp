@@ -160,7 +160,8 @@ uses
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar,
-  PasTreeIdePlugin.KeyBindings;
+  PasTreeIdePlugin.KeyBindings, PasTreeIdePlugin.GroupScope,
+  PasTreeIdePlugin.RenameForm;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -1111,19 +1112,19 @@ procedure RenameFrom(const AFileName: string; ARow, ACol: Integer;
   const AOldName: string);
 var
   LNewName: string;
-  LUI: INTAIDEUIServices;
+  LScope: TGroupScopeProjects;
+  LProjects: TArray<string>;
 begin
-  LNewName := AOldName;
-  // The IDE's own prompt, not Vcl.Dialogs.InputQuery: the VCL one knows
-  // nothing about IDE theming and came up light inside the dark theme
-  // (user, 2026-08-31). INTAIDEUIServices is how the settings dialog gets
-  // its colors too, just wholesale rather than per-prompt.
-  if not Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+  // Our own themed form (PasTreeIdePlugin.RenameForm), since 0.51.0 with the
+  // group's project list beneath the name: which other closures the plan
+  // covers is the user's choice, remembered per group - starting every
+  // server of a big group ran the machine out of memory (Alex, 2026-09-22).
+  // Until then this was INTAIDEUIServices.InputQuery, chosen over the VCL
+  // one because that came up light in the dark theme (user, 2026-08-31).
+  // Outside a group LScope is nil and the form is the plain name prompt.
+  LScope := GroupScopeProjects(LspOwningProjectFile(AFileName));
+  if not ExecuteRenameDialog(AOldName, LScope, LNewName, LProjects) then
     Exit;
-  if not LUI.InputQuery('Rename', Format('Rename "%s" to:', [AOldName]),
-    LNewName) then
-    Exit;
-  LNewName := Trim(LNewName);
   if LNewName = AOldName then
     Exit;   // not a refusal worth a dialog: the user changed nothing
   if not LooksLikeName(LNewName) then
@@ -1136,7 +1137,7 @@ begin
   // No names in the text: the dialog does not grow for it, and two
   // identifiers plus decoration is clipped (user, 2026-08-31).
   ShowWaitDialog('Renaming...');
-  LspRenamePlan(AFileName, ARow, ACol, LNewName,
+  LspRenamePlan(AFileName, ARow, ACol, LNewName, LProjects,
     procedure(ASuccess: Boolean; const APlan: TLspRenamePlan;
       const AError: string)
     var

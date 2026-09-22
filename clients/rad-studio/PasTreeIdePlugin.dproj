@@ -129,6 +129,13 @@
         <DCCReference Include="PasTreeIdePlugin.EditorWindowHook.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Rename.pas"/>
         <DCCReference Include="PasTreeIdePlugin.RenameToolbar.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.GroupScope.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.GroupScopeForm.pas">
+            <Form>PasTreeGroupScopeForm</Form>
+        </DCCReference>
+        <DCCReference Include="PasTreeIdePlugin.RenameForm.pas">
+            <Form>PasTreeRenameForm</Form>
+        </DCCReference>
         <DCCReference Include="PasTreeIdePlugin.KeyBindings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Settings.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">

@@ -552,9 +552,19 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
 /// the analyses under the wait dialog, and every later one finds the
 /// servers up. The count handed to AOnDone says how many answered; one that
 /// failed (the file not in its closure) is the ordinary case, not a fault.
+///
+/// AProjectFiles (0.51.0) is the user's choice of OTHER projects to ask, as
+/// .dproj paths - the scope dialog's answer (PasTreeIdePlugin.GroupScope).
+/// The owner is asked whether it is listed or not; nothing else is. Starting
+/// every server of a large group cost more memory than the machine had, so
+/// "every project" became "every project the user ticked", remembered per
+/// group in the registry, unticked by default. AProjectsInGroup still counts
+/// the WHOLE group, so the title's "across 2 of 9 projects" says honestly
+/// how partial the answer is.
 /// </summary>
 procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
-  AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
+  AIncludeDeclaration: Boolean; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspGroupHitsProc);
 
 /// <summary>
 /// One Find All request (AMethod is the server's name - pastree/findOverrides,
@@ -565,9 +575,18 @@ procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
 /// with the owner's name and subject verdict standing for the whole. The
 /// group matters here as much as for references: a descendant class in a
 /// unit only ANOTHER project compiles is invisible to the owner's closure.
+/// AProjectFiles as for LspReferencesInGroup: the other projects to ask.
 /// </summary>
 procedure LspFindAllInGroup(const AMethod, AFileName: string;
-  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+  ARow, ACol: Integer; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspHierarchyProc);
+
+/// <summary>
+/// Whether AProjectFile's server is up and past its handshake - what the
+/// scope dialog marks "(running)", so the user can tell a free tick from one
+/// that starts a server. Never creates a session.
+/// </summary>
+function LspProjectServerRunning(const AProjectFile: string): Boolean;
 
 /// <summary>
 /// Which Find All commands apply at the caret - SYNCHRONOUS, and the only
@@ -853,9 +872,14 @@ procedure LspOnTypeFormatting(const AFileName: string; ARow, ACol: Integer;
 /// reserved new name, a unit name (a unit rename is a file rename plus
 /// every uses clause - not this), or a compiler builtin with no declaration
 /// to rename all come back as an error with a sentence saying so.
+///
+/// AProjectFiles as for LspReferencesInGroup: the other projects of the
+/// group whose closures the plan also covers - the ticks in the Rename
+/// dialog's project list.
 /// </summary>
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
-  const ANewName: string; const AOnDone: TLspRenamePlanProc);
+  const ANewName: string; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspRenamePlanProc);
 
 /// <summary>
 /// Asks whether the identifier at an IDE position can be renamed at all, and
@@ -1241,8 +1265,16 @@ type
       2026-09-18: "the point is that it finds everything there is, not only
       what the user happened to open"). Until 0.45.1 this was ReadySessions,
       and a group of nine with one project touched searched one project
-      while its title said so in small print. }
-    function GroupTargets(const AOwner: TLspSession): TArray<TLspSession>;
+      while its title said so in small print.
+
+      Since 0.51.0 the caller CHOOSES: AProjectFiles is the set of .dproj
+      the user ticked in the scope dialog (PasTreeIdePlugin.GroupScope), and
+      only those are asked besides the owner, which is always in. Starting
+      every server of a big group cost more memory than the machine had
+      (Alex, 2026-09-22), so the choice moved to the user and is remembered
+      per group, unticked by default. }
+    function GroupTargets(const AOwner: TLspSession;
+      const AProjectFiles: TArray<string>): TArray<TLspSession>;
     { The session for AProject, created if this is the first time it is asked
       for. nil only for a nil project. }
     function SessionFor(const AProject: IOTAProject): TLspSession;
@@ -3947,12 +3979,14 @@ begin
     Result := FSessions[LIdx];
 end;
 
-function TLspSessionPool.GroupTargets(
-  const AOwner: TLspSession): TArray<TLspSession>;
+function TLspSessionPool.GroupTargets(const AOwner: TLspSession;
+  const AProjectFiles: TArray<string>): TArray<TLspSession>;
 var
   LGroup: IOTAProjectGroup;
+  LProject: IOTAProject;
   LSession: TLspSession;
-  LIdx: Integer;
+  LIdx, LSel: Integer;
+  LChosen: Boolean;
 begin
   Result := nil;
   if FDestroying then
@@ -3964,7 +3998,22 @@ begin
     Exit;
   for LIdx := 0 to LGroup.ProjectCount - 1 do
   begin
-    LSession := SessionFor(LGroup.Projects[LIdx]);
+    LProject := LGroup.Projects[LIdx];
+    if not Assigned(LProject) then
+      Continue;
+    // Only the projects the user ticked. Compared by .dproj path, which is
+    // what the scope dialog hands back and what the registry remembers.
+    LChosen := False;
+    for LSel := 0 to High(AProjectFiles) do
+      if SameText(AProjectFiles[LSel], LProject.FileName) then
+      begin
+        LChosen := True;
+        Break;
+      end;
+    if not LChosen then
+      Continue;
+    // Created here if need be - the request that follows starts its server.
+    LSession := SessionFor(LProject);
     if Assigned(LSession) and
        not TArray.Contains<TLspSession>(Result, LSession) then
       Result := Result + [LSession];
@@ -4264,7 +4313,8 @@ begin
 end;
 
 procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
-  AIncludeDeclaration: Boolean; const AOnDone: TLspGroupHitsProc);
+  AIncludeDeclaration: Boolean; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspGroupHitsProc);
 var
   LOwner: TLspSession;
   LTargets: TArray<TLspSession>;
@@ -4291,9 +4341,9 @@ begin
     LInGroup := 1;
 
   // The owning session FIRST - it is the one that can answer at all, since
-  // the position is in a file of its project - then every other project of
-  // the group, cold ones started by the request (see GroupTargets).
-  LTargets := GPool.GroupTargets(LOwner);
+  // the position is in a file of its project - then every other project the
+  // user ticked, cold ones started by the request (see GroupTargets).
+  LTargets := GPool.GroupTargets(LOwner, AProjectFiles);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;
@@ -4363,7 +4413,8 @@ end;
   "not a method", so it must not override the owner. Rows from every project
   that did answer are merged. }
 procedure HierarchyInGroup(const AMethod, AFileName: string;
-  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+  ARow, ACol: Integer; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspHierarchyProc);
 var
   LOwner: TLspSession;
   LTargets: TArray<TLspSession>;
@@ -4388,8 +4439,8 @@ begin
   else
     LInGroup := 1;
 
-  // Every project of the group, the owner first - see GroupTargets.
-  LTargets := GPool.GroupTargets(LOwner);
+  // The ticked projects of the group, the owner first - see GroupTargets.
+  LTargets := GPool.GroupTargets(LOwner, AProjectFiles);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;
@@ -4443,9 +4494,23 @@ begin
 end;
 
 procedure LspFindAllInGroup(const AMethod, AFileName: string;
-  ARow, ACol: Integer; const AOnDone: TLspHierarchyProc);
+  ARow, ACol: Integer; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspHierarchyProc);
 begin
-  HierarchyInGroup(AMethod, AFileName, ARow, ACol, AOnDone);
+  HierarchyInGroup(AMethod, AFileName, ARow, ACol, AProjectFiles, AOnDone);
+end;
+
+function LspProjectServerRunning(const AProjectFile: string): Boolean;
+var
+  LSession: TLspSession;
+begin
+  Result := False;
+  // The pool as it stands - a dialog is no reason to create a session, let
+  // alone start a server.
+  if not Assigned(GPool) then
+    Exit;
+  LSession := GPool.SessionByProjectFile(AProjectFile);
+  Result := Assigned(LSession) and LSession.IsReady;
 end;
 
 function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;
@@ -4573,7 +4638,8 @@ end;
   plan's ProjectsAnswered/ProjectsInGroup say how far it reached, and the
   results tab shows them. (User, 2026-09-12: "it must rename everywhere".) }
 procedure LspRenamePlan(const AFileName: string; ARow, ACol: Integer;
-  const ANewName: string; const AOnDone: TLspRenamePlanProc);
+  const ANewName: string; const AProjectFiles: TArray<string>;
+  const AOnDone: TLspRenamePlanProc);
 var
   LOwner, LSession: TLspSession;
   LTargets: TArray<TLspSession>;
@@ -4598,8 +4664,8 @@ begin
   else
     LInGroup := 1;
 
-  // Every project of the group, the owner first - see GroupTargets.
-  LTargets := GPool.GroupTargets(LOwner);
+  // The ticked projects of the group, the owner first - see GroupTargets.
+  LTargets := GPool.GroupTargets(LOwner, AProjectFiles);
 
   LOutstanding := Length(LTargets);
   LAnswered := 0;

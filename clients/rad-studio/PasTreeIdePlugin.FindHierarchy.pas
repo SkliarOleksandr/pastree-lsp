@@ -106,7 +106,8 @@ uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
-  PasTreeIdePlugin.WaitDialog;
+  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
+  PasTreeIdePlugin.FindReferences;   // IdentifierAt, for the scope dialog
 
 const
   cMethod: array[TFindAllCommand] of string =
@@ -119,6 +120,11 @@ const
   cCommandName: array[TFindAllCommand] of string =
     ('Find Overrides', 'Find Implementations', 'Find Descendants',
      'Find Assignments', 'Find Creations', 'Find Destructions');
+  // The scope dialog's title - the submenu's full path, as the user sees it.
+  cDialogCaption: array[TFindAllCommand] of string =
+    ('Find All Overrides', 'Find All Implementations',
+     'Find All Descendants', 'Find All Assignments', 'Find All Creations',
+     'Find All Destructions');
   cWaitText: array[TFindAllCommand] of string =
     ('Searching overrides...', 'Searching implementations...',
      'Searching descendants...', 'Searching assignments...',
@@ -523,6 +529,7 @@ procedure ExecuteFindAll(ACommand: TFindAllCommand; const AView: IOTAEditView);
 var
   LCursorFile: string;
   LRow, LCol: Integer;
+  LProjects: TArray<string>;
 begin
   try
     if not Assigned(AView) then
@@ -532,13 +539,20 @@ begin
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
 
+    // Which projects of the group to ask - the scope dialog, in a group of
+    // two or more; Cancel there cancels the command. See Find References.
+    if not ChooseGroupScope(LspOwningProjectFile(LCursorFile),
+      cDialogCaption[ACommand], IdentifierAt(LCursorFile, LRow, LCol),
+      LProjects) then
+      Exit;
+
     // Visible progress, closed FIRST on every terminal path that TALKS to
     // the user: the dialog disables input, and a message box over disabled
     // input is a stuck IDE (the Find References lesson of 2026-08-31). The
     // report into the panel is the exception - it is not modal, and the
     // dialog deliberately covers it (ReportUnderWaitDialog).
     ShowWaitDialog(cWaitText[ACommand]);
-    LspFindAllInGroup(cMethod[ACommand], LCursorFile, LRow, LCol,
+    LspFindAllInGroup(cMethod[ACommand], LCursorFile, LRow, LCol, LProjects,
       procedure(ASuccess, AIsSubject: Boolean; const AName: string;
         const ARows: TArray<TLspHierarchyRow>;
         AProjectsSearched, AProjectsInGroup: Integer; const AError: string)

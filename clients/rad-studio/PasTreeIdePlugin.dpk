@@ -99,6 +99,13 @@ contains
   PasTreeIdePlugin.EditorWindowHook in 'PasTreeIdePlugin.EditorWindowHook.pas',
   PasTreeIdePlugin.Rename in 'PasTreeIdePlugin.Rename.pas',
   PasTreeIdePlugin.RenameToolbar in 'PasTreeIdePlugin.RenameToolbar.pas',
+  { Which projects of the group a group-wide command asks (0.51.0): the rows
+    and their registry memory, the stand-alone dialog for Find References and
+    Find All, and the Rename dialog that carries the same list beneath the
+    new name. See PasTreeIdePlugin.GroupScope's header. }
+  PasTreeIdePlugin.GroupScope in 'PasTreeIdePlugin.GroupScope.pas',
+  PasTreeIdePlugin.GroupScopeForm in 'PasTreeIdePlugin.GroupScopeForm.pas' {PasTreeGroupScopeForm},
+  PasTreeIdePlugin.RenameForm in 'PasTreeIdePlugin.RenameForm.pas' {PasTreeRenameForm},
   { Go To (Ctrl+G): the picker form, copied from PasTree's demo, and the key
     binding that opens it. See PasTreeIdePlugin.GoToForm's header. }
   PasTreeIdePlugin.GoToPicker in 'PasTreeIdePlugin.GoToPicker.pas',

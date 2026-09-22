@@ -1293,6 +1293,21 @@ the alternative is a wait the user did not ask for.
    open was declined (the machine is the user's), so later searches find them
    up only because the first one started them.
 
+   **0.51.0: the user picks the projects.** Asking all of them on a large
+   group meant one server per project, each with its closure, and the
+   machine ran out of memory (Alex, 2026-09-22). Now every group-wide
+   command - References, the six Find All commands, Rename - takes a list
+   of `.dproj` paths (`GroupTargets(AOwner, AProjectFiles)`): the owner is
+   always asked, the rest only when ticked. The ticks come from a check-list
+   dialog (`PasTreeIdePlugin.GroupScope` + `GroupScopeForm`; for Rename the
+   same list sits inside `RenameForm` beneath the new name, so one dialog),
+   shown only for a group of two or more, owner ticked and greyed,
+   "(running)" marking a free tick. Remembered per group in the registry
+   (`<settings key>\GroupScope`, one value per `.groupproj`, the ticked set
+   joined by `|`), unticked by default so a project added later costs
+   nothing until asked for. `ProjectsInGroup` still counts the whole group,
+   so `across 2 of 9 projects` stays an honest statement of coverage.
+
    **Group-wide Rename is deliberately NOT this.** Deferred (Alex, 2026-09-07)
    until the rename itself is reworked. It is a plan the user approves, and a
    plan spanning two closures has to be presented as one before a single file

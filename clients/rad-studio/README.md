@@ -243,13 +243,18 @@ once, with one button to take it back.
   shows "Renaming..." from the request onward, with the file being saved on
   its work line. The results tab says how many files were open and how many
   were written on disk.
-- **Across the group.** The plan is the union of the answers of every
-  running project server: the project owning the file under the caret
-  decides what is being renamed, and every other project whose server is
-  already up plans the same symbol across its own closure; edits are merged
-  by position. Servers not yet running are not started for this, so the tab
-  title says how far it reached - `in 2 of 5 project(s)`. Open a file in a
-  project first if you need its server up.
+- **Across the group, as far as you tick.** The plan is the union of the
+  answers of the project servers you chose: the project owning the file
+  under the caret decides what is being renamed and is always asked, and
+  every other project ticked in the dialog's list plans the same symbol
+  across its own closure; edits are merged by position. Since 0.51.0 the
+  Rename dialog is our own themed form (`PasTreeIdePlugin.RenameForm`) with
+  the group's projects beneath the new name - one dialog, not a name prompt
+  followed by a scope prompt. A ticked cold project starts its server for
+  the plan; the ticks are remembered per group (`PasTreeIdePlugin.GroupScope`),
+  unticked by default, because starting every server of a large group cost
+  more memory than the machine had (2026-09-22). The tab title says how far
+  it reached - `in 2 of 5 project(s)`.
 - **Revert** - the one button on the tab's toolbar - runs the same two-pass
   applier backwards over the files as they now stand and saves again. It
   skips a site that already reads the old name, so after Ctrl+Z in the one
@@ -324,6 +329,18 @@ once, with one button to take it back.
   show its own source line with the identifier picked out. (It began as
   `AddToolMessage`; that is what the earlier version of this paragraph
   described.)
+- **Which projects of the group** (0.51.0): in a group of two or more,
+  References and every other Find All command first show the scope dialog
+  (`PasTreeIdePlugin.GroupScopeForm`) - the group's projects as a check list,
+  the owner of the caret's file ticked and greyed, the others as last left,
+  "(running)" marking a server already up. Only the ticked projects are asked
+  (`GroupTargets` takes the list); a ticked cold one starts its server for
+  the search. Remembered per group under the settings key, `GroupScope`
+  subkey, one value per `.groupproj` holding the ticked `.dproj` paths - the
+  ticked set, so a project added later starts unticked. Until 0.50.x every
+  project was asked; on a large group that was one server per project and
+  more memory than the machine had (2026-09-22). Go To is unaffected: it has
+  been project-scoped since 0.47.23.
 
 ### Go to Declaration
 

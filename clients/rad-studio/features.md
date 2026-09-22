@@ -44,12 +44,21 @@ and you get the native behaviour with nothing to unbind.
 
 Seven searches under one editor-menu entry, "Find All": References, Overrides,
 Implementations, Descendants, Assignments, Creations, Destructions. All of them
-run across the whole project group - not just the open unit and not just the
+can run across the project group - not just the open unit and not just the
 active project - and each reports into a Messages tab of its own, shaped alike:
 one row per hit showing the source line in your live editor syntax colors with
 the match highlighted, navigable on double-click, Enter and F8/Shift+F8, and a
 title that counts the units searched so "did it only look at this file?" has an
 answer on screen.
+
+In a group of two or more projects each of the seven first asks **which
+projects to search**: a small dialog lists the group, the project owning the
+file under the caret ticked and greyed, every other project as you last left
+it - unticked on first use. A ticked project that is "(running)" answers at no
+cost; one that is not starts its analysis server for the search, which is why
+the choice is yours: a group of nine is nine servers, and that can be more
+memory than the machine has. The ticks are remembered per group, so the
+second search is one Enter. Cancel in the dialog cancels the search.
 
 The items are greyed per caret, the way PasTree's own demo greys them: opening
 the menu asks the server which of the seven apply where the caret is, with a
@@ -142,8 +151,10 @@ dialog is what kicks the prefetch off.
 
 ### Rename (Ctrl+Shift+E)
 
-Renames a routine, type, field, variable or parameter across every project of
-the group, applied and saved at once - files you have
+Renames a routine, type, field, variable or parameter across the projects of
+the group you tick - the Rename dialog carries the same project list the Find
+All dialog shows, beneath the new name, so it is one dialog and not two; the
+project owning the file is always in - applied and saved at once - files you have
 open change in their buffers (Ctrl+Z works there), files nobody has open are
 written on disk in their own encoding - without opening a tab for any of them.
 Afterwards it lists every edit it made in a Messages tab shaped like Find

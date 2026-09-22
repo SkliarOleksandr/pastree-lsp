@@ -44,6 +44,13 @@ uses
 procedure ExecuteFindReferences(const AView: IOTAEditView);
 
 /// <summary>
+/// The identifier at an IDE position, read out of the text the server was
+/// given - for the result titles and the scope dialog's "Search for" edit
+/// (the Find All family borrows it). '' when the position is not on a word.
+/// </summary>
+function IdentifierAt(const AFileName: string; ARow, ACol: Integer): string;
+
+/// <summary>
 /// Removes the "Find References" Messages tab. Call once (from
 /// PasTreeIdePlugin.Wizard's TIDEWizard.Destroy) so the group doesn't
 /// persist forever across package reinstalls - see the field comment on
@@ -69,7 +76,7 @@ uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
-  PasTreeIdePlugin.WaitDialog;
+  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope;
 
 const
   cMessageGroupName = 'Find References';
@@ -429,6 +436,7 @@ procedure ExecuteFindReferences(const AView: IOTAEditView);
 var
   LCursorFile: string;
   LRow, LCol: Integer;
+  LProjects: TArray<string>;
 begin
   try
     if not Assigned(AView) then
@@ -437,6 +445,16 @@ begin
     LCursorFile := AView.Buffer.FileName;
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
+
+    // WHICH PROJECTS, before anything is shown or asked: in a group of two
+    // or more the scope dialog lists them, the owner ticked and greyed, the
+    // rest as the user left them last time (PasTreeIdePlugin.GroupScope).
+    // Cancel there is the whole command cancelled. A single project asks
+    // nothing and LProjects stays empty - the owner alone.
+    if not ChooseGroupScope(LspOwningProjectFile(LCursorFile),
+      'Find All References', IdentifierAt(LCursorFile, LRow, LCol),
+      LProjects) then
+      Exit;
 
     // Visible progress: on a cold big project the first of these requests
     // waits for the whole analysis, and until now nothing on screen said
@@ -452,10 +470,10 @@ begin
       [ExtractFileName(LCursorFile), LRow, LCol]));
     // ACROSS THE GROUP, not just the project owning the file: a unit two
     // projects compile has its uses counted in both closures, and each server
-    // sees only its own. LspReferencesInGroup asks every project whose
-    // analysis is already running and merges the answers, dropping the
-    // duplicates a shared unit produces.
-    LspReferencesInGroup(LCursorFile, LRow, LCol, False,
+    // sees only its own. LspReferencesInGroup asks the owner and every
+    // project ticked above and merges the answers, dropping the duplicates
+    // a shared unit produces.
+    LspReferencesInGroup(LCursorFile, LRow, LCol, False, LProjects,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
         AProjectsSearched, AProjectsInGroup: Integer; const AError: string)
       var

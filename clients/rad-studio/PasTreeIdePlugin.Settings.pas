@@ -138,6 +138,13 @@ function ReadPickerValue(const AName: string; ADefault: Integer): Integer;
 procedure WritePickerValue(const AName: string; AValue: Integer);
 
 /// <summary>
+/// HKCU-relative path of this plugin's settings key, for the units that keep
+/// a value of their own beneath it (PasTreeIdePlugin.GroupScope keeps the
+/// per-group project ticks in a GroupScope subkey). '' without IOTAServices.
+/// </summary>
+function SettingsRegistryKey: string;
+
+/// <summary>
 /// Whether Enter after an unclosed block opener inserts the closer (block
 /// completion - PasTreeIdePlugin.BlockClose). False stops the plugin from
 /// even asking the server, and Enter is never swallowed either way.
