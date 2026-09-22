@@ -2263,7 +2263,15 @@ begin
   // half, or an unresolved position): that is not an error, just nothing to
   // redirect to. Not from the implementation's own header (LOwnHeader
   // above): there the declaration IS the answer.
+  // ONLY when the target is in the model's MAIN file: GotoImplementation
+  // takes a line/col and reads it in the main file's token stream (VisAt),
+  // so a declaration inside an $I include - `uaviOptionValues.inc:1012`,
+  // a constant - was read as line 1012 of the HOST unit, which happened to
+  // be a method header, and Ctrl+Click landed in that method's body
+  // (2026-09-22). A routine declared in an include and implemented in the
+  // host loses the redirect and lands on its header, which is still right.
   if not ADeclarationOnly and not LOwnHeader and
+     SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) and
      FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
        LImplTarget) then
     LTarget := LImplTarget;
