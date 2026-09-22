@@ -429,16 +429,6 @@ type
     const ARows: TArray<TLspOutlineRow>; const AError: string);
 
   /// <summary>
-  /// The group-wide form, delivered PROGRESSIVELY: once after every
-  /// project's answer, with the merged rows so far, AAnswered projects in
-  /// them of AInGroup, and APending still to answer (0 on the last call).
-  /// ASuccess is False only when nothing has answered successfully yet.
-  /// </summary>
-  TLspOutlineGroupProc = reference to procedure(ASuccess: Boolean;
-    const ARows: TArray<TLspOutlineRow>; AAnswered, AInGroup, APending: Integer;
-    const AError: string);
-
-  /// <summary>
   /// One node of a document's outline (textDocument/documentSymbol), in IDE
   /// coordinates. Children are the type's members, one level deep - the
   /// same shape the server builds.
@@ -712,20 +702,6 @@ procedure LspOutlineModule(const AFileName: string;
 /// </summary>
 procedure LspOutlineProject(const AFileName: string;
   const AOnDone: TLspOutlineProc);
-
-/// <summary>
-/// The picker's GROUP list: the PROJECT list of EVERY project of the group
-/// (the owner of AFileName first), merged, delivered progressively as the
-/// servers answer. A unit two projects both compile is listed once - the
-/// owner's rows stand, de-duplicated by unit file, owner, name and head
-/// word. Cold projects are started for this like for every group-wide
-/// question (GroupTargets - this tab was where the ready-only rule was seen
-/// to fail: Alex, 2026-09-18, a nine-project group listing one project's
-/// declarations), and the answers arrive one project at a time as each
-/// analysis finishes, so a cold group fills in rather than hangs.
-/// </summary>
-procedure LspOutlineGroup(const AFileName: string;
-  const AOnDone: TLspOutlineGroupProc);
 
 /// <summary>
 /// Where a PROJECT row lands (pastree/outlineTarget) - asked of the server
@@ -4704,117 +4680,6 @@ begin
     Exit;
   end;
   LSession.Outline('project', AFileName, AOnDone);
-end;
-
-type
-  { The state one group-wide outline request shares between its per-server
-    callbacks. An object rather than captured locals because the slot index
-    has to be captured BY VALUE per server - an anonymous method over the
-    loop variable sees its final value - and Delphi's closures capture
-    variables, not values; a method taking the index as a parameter is the
-    idiom. Frees itself when the last answer is in. }
-  TOutlineGather = class
-  private
-    FSlots: TArray<TArray<TLspOutlineRow>>;
-    FOutstanding, FAnswered, FInGroup: Integer;
-    FFirstError: string;
-    FOnDone: TLspOutlineGroupProc;
-  public
-    constructor Create(ATargets, AInGroup: Integer;
-      const AOnDone: TLspOutlineGroupProc);
-    function SlotProc(AIdx: Integer): TLspOutlineProc;
-  end;
-
-constructor TOutlineGather.Create(ATargets, AInGroup: Integer;
-  const AOnDone: TLspOutlineGroupProc);
-begin
-  inherited Create;
-  SetLength(FSlots, ATargets);
-  FOutstanding := ATargets;
-  FInGroup := AInGroup;
-  FOnDone := AOnDone;
-end;
-
-function TOutlineGather.SlotProc(AIdx: Integer): TLspOutlineProc;
-begin
-  Result :=
-    procedure(ASuccess: Boolean; const ARows: TArray<TLspOutlineRow>;
-      const AError: string)
-    var
-      LAll: TArray<TLspOutlineRow>;
-      LIdx: Integer;
-      LOnDone: TLspOutlineGroupProc;
-      LAnswered, LInGroup, LPending: Integer;
-      LError: string;
-    begin
-      if ASuccess then
-      begin
-        Inc(FAnswered);
-        FSlots[AIdx] := ARows;
-      end
-      else if FFirstError = '' then
-        // Most projects of a group answer for most requests here (the
-        // project list needs no file of the caller's), so a failure is
-        // still only worth reporting when every server failed.
-        FFirstError := AError;
-      Dec(FOutstanding);
-      // The slots keep the owner-first order whatever the answer order was,
-      // so the merge keeps the owner's copy of a shared unit. Reported after
-      // EVERY answer: a cold project's server takes its analysis time, and
-      // the rows already in are worth showing meanwhile.
-      LAll := nil;
-      for LIdx := 0 to High(FSlots) do
-        LAll := LAll + FSlots[LIdx];
-      LOnDone := FOnDone;
-      LAnswered := FAnswered;
-      LInGroup := FInGroup;
-      LError := FFirstError;
-      LPending := FOutstanding;
-      if LPending = 0 then
-        Free;   // nothing below reads a field
-      if LAnswered = 0 then
-        LOnDone(False, nil, 0, LInGroup, LPending, LError)
-      else
-        LOnDone(True, MergeOutlineRows(LAll), LAnswered, LInGroup, LPending,
-          '');
-    end;
-end;
-
-procedure LspOutlineGroup(const AFileName: string;
-  const AOnDone: TLspOutlineGroupProc);
-var
-  LOwner: TLspSession;
-  LTargets: TArray<TLspSession>;
-  LSession: TLspSession;
-  LGroup: IOTAProjectGroup;
-  LInGroup, LIdx: Integer;
-  LGather: TOutlineGather;
-begin
-  LOwner := SessionForRequest(AFileName);
-  if LOwner = nil then
-  begin
-    AOnDone(False, nil, 0, 0, 0, 'LSP session not initialized');
-    Exit;
-  end;
-  LGroup := GetProjectGroup;
-  // The owner first, so the merge keeps its rows over another project's
-  // copy of a shared unit; then EVERY other project of the group, its
-  // session created and its server started by the request itself (Outline
-  // -> EnsureSession) - see the interface comment for why this one fans out
-  // to cold projects where Find References does not.
-  LTargets := [LOwner];
-  if Assigned(LGroup) then
-    for LIdx := 0 to LGroup.ProjectCount - 1 do
-    begin
-      LSession := GPool.SessionFor(LGroup.Projects[LIdx]);
-      if Assigned(LSession) and (LSession <> LOwner) and
-         not TArray.Contains<TLspSession>(LTargets, LSession) then
-        LTargets := LTargets + [LSession];
-    end;
-  LInGroup := Length(LTargets);
-  LGather := TOutlineGather.Create(Length(LTargets), LInGroup, AOnDone);
-  for LIdx := 0 to High(LTargets) do
-    LTargets[LIdx].Outline('project', AFileName, LGather.SlotProc(LIdx));
 end;
 
 procedure LspOutlineTarget(const ARow: TLspOutlineRow;

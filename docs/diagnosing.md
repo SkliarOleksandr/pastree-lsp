@@ -90,7 +90,7 @@ reasoning is in `SPEC.md`; do not re-derive it.
 Ruled out by measurement, so do not start there: out-of-process overhead (nil -
 in-process is the same 15 s) and Debug-vs-Release (~2%, inside noise).
 
-## Go To (Ctrl+G) is slow on a big project or group
+## Go To (Ctrl+G) is slow on a big project
 
 Before 0.46.0 this was NOT the analysis - the project list comes off the
 retained symbol tables (`TPasNavigator.ProjectOutline`) and cost ~70 ms even
@@ -110,8 +110,8 @@ analysis replaces the project. Same project: 205 ms first request, 65 ms on a
 repeat. If it is slow again on 0.46.0+:
 
 - Check the server log for `pastree/outline ... -> N rows: list X ms, json Y
-  ms` - `list` growing means the symbol tables are unusually large or the
-  scope is unusually broad (a group tab asks every project); `json` growing
+  ms` - `list` growing means the symbol tables are unusually large; `json`
+  growing
   past a few tens of ms for a project this size means something changed in
   `TJsonBuf` or the row shape.
 - `pastree/outline project -> cached` means the server-side cache answered -
@@ -159,10 +159,8 @@ If it flickers again, look for a new per-row call into the VCL or ToolsAPI
 before looking anywhere else - the same mistake cost 5.7 s on AVImark on
 2026-09-19 and is recorded in `MeasureHeadColumn`'s header.
 
-**The Group tab flickers where the Module and Project tabs do not.** Two
-causes, and the first one was not the whole answer - if it comes back, read
-both before theorising, and get the `goto tab` timing line first (Advanced
-Logging; it says how long the switch held the list).
+**A tab switch flickers on a big list.** Get the `goto tab` timing line
+first (Advanced Logging; it says how long the switch held the list).
 
 *The tab control erases the rows' rectangle while OnChange is busy* (fixed
 0.47.5). A tab control repaints its whole client area when the selected tab
@@ -175,24 +173,13 @@ the list before building the new one - the old rows stay up until the new
 ones replace them. The switch also does far less work now: both the column
 widths (`FWidths`) and the filter result (`FFiltered` / `FilterKey`) are
 kept per tab, so a switch back with the filter box untouched rebuilds
-nothing. Only the module and project tabs were quick enough to hide this;
-the group list is the biggest, so it was the one that showed.
+nothing.
 
-*The group answers once per project* (fixed in 0.47.4): `LspOutlineGroup`
-calls back
-ONCE PER PROJECT of the group (`TOutlineGather`), each time with the whole
-merged list again, so a group of six re-measured, re-filtered and repainted
-the list six times over a second or two. The Module and Project tabs answer
-once and never showed it. Visible on every Ctrl+G, since the lists live on
-the form and the Group tab reloads when it is first opened. An intermediate
-answer is now staged (`FStaged` / `AdoptStaged` in
-`PasTreeIdePlugin.GoToForm`) and the list is rebuilt on the first answer,
-on the last one, and at most once per `cGrowthRedrawMs` in between; the
-status line keeps counting projects in meanwhile. The rows are STAGED, not
-stored, because `FRows` holds indexes into the tab's list - swapping the
-list without refiltering would point them at other rows. The column widths
-are now kept per tab too (`FWidths`), so a switch back to an unchanged list
-does not re-measure every row.
+A third, group-wide tab was withdrawn in 0.47.23 after testing (Alex,
+2026-09-22). It answered once per project of the group and had staging of
+its own (`FStaged` / `AdoptStaged`, `cGrowthRedrawMs`) to keep a group of
+six from re-measuring and repainting the list six times in a second; all of
+that went with it, and `git log` has it if the scope is ever wanted back.
 
 **A wait dialog flashes as the picker opens.** Fixed in 0.47.3: the dialog
 is ARMED for 250 ms rather than shown (`ShowWaitDialogAfter` in

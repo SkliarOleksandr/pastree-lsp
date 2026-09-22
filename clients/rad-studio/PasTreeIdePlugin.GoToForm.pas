@@ -24,7 +24,7 @@ unit PasTreeIdePlugin.GoToForm;
   else, Alex, 2026-09-21), the name in the editor's
   identifier colour with the matched letters in bold, and at the right edge
   three aligned quiet columns: the section (interface / implementation),
-  the unit name on the project and group tabs, `:N` for a row that knows
+  the unit name on the project tab, `:N` for a row that knows
   its line. The boxes at the bottom filter by KIND - All or a
   subset of Types, Vars/Fields, Consts, Routines, Properties, Includes;
   ticking a kind unticks All, ticking All clears the kinds, unticking the
@@ -32,15 +32,14 @@ unit PasTreeIdePlugin.GoToForm;
 
   THE THREE CHANGES FROM THE DEMO:
 
-  1. THREE TABS, not two: the MODULE (the active file's outline, with
-     positions), the PROJECT (every declaration of every unit of the project
-     that owns the file) and the GROUP (the same over every project of the
-     group whose server is running - the demo has no groups). A project or
-     group row has no position of its own; choosing it asks the server that
-     listed it where it lands (LspOutlineTarget), which rehydrates that one
-     unit. The tab is named after what it lists - the file, the .dproj, the
-     .groupproj - so the dialog says where a chosen row can land. No group
-     tab when the group has one project.
+  1. TWO TABS: the MODULE (the active file's outline, with positions) and
+     the PROJECT (every declaration of every unit of the project that owns
+     the file). A project row has no position of its own; choosing it asks
+     the server that listed it where it lands (LspOutlineTarget), which
+     rehydrates that one unit. The tab is named after what it lists - the
+     file, the .dproj - so the dialog says where a chosen row can land. A
+     third, group-wide tab existed until 0.47.23 and was withdrawn after
+     testing (Alex, 2026-09-22).
 
   2. AN INCLUDES BOX: the `include 'Foo.inc'` landmark rows show under All
      or under the Includes box, one more box under the All-or-subset rule
@@ -58,8 +57,8 @@ unit PasTreeIdePlugin.GoToForm;
      model; here every list is an LSP answer delivered on a later
      main-thread turn (PasTreeIdePlugin.LspSession). The module list is
      fetched BEFORE the dialog opens (under the IDE's wait dialog, by
-     PasTreeIdePlugin.GoToPicker); the project and group lists on the first switch
-     to their tab, with the status bar saying "loading" until the answer
+     PasTreeIdePlugin.GoToPicker); the project list on the first switch
+     to its tab, with the status bar saying "loading" until the answer
      lands - the modal loop pumps messages, so it does. A row's landing is
      asked the same way, with the Go button disabled while it is in flight.
      Every callback checks that THIS form is still the open one (GOpenForm)
@@ -119,7 +118,7 @@ type
   TGoToKind = (gkType, gkVar, gkConst, gkProperty, gkRoutine);
   TGoToKinds = set of TGoToKind;
 
-  TGoToScope = (gsModule, gsProject, gsGroup);
+  TGoToScope = (gsModule, gsProject);
 
   { The right-hand columns' widths for one tab. Measured by a pass over
     every row of that tab's list, so they are kept until the list itself
@@ -129,13 +128,12 @@ type
     Valid: Boolean;
   end;
 
-  { The project or group list, asked for once, on the first switch to that
-    tab; the answer comes later, on the main thread. AAnswered/AInGroup are
-    the group's "N of M projects" (1 of 1 for a project). }
+  { The project list, asked for once, on the first switch to that tab; the
+    answer comes later, on the main thread. }
   TGoToListSource = reference to procedure(AScope: TGoToScope;
-    const AOnDone: TLspOutlineGroupProc);
+    const AOnDone: TLspOutlineProc);
 
-  { The landing of a row that carries no position (a project/group row),
+  { The landing of a row that carries no position (a project row),
     answered later with zero or one hit. Zero keeps the dialog open. }
   TGoToResolve = reference to procedure(const ARow: TLspOutlineRow;
     const AOnDone: TLspHitsProc);
@@ -169,8 +167,6 @@ type
     FEntries: array[TGoToScope] of TArray<TLspOutlineRow>;
     FLoaded: array[TGoToScope] of Boolean;
     FLoading: array[TGoToScope] of Boolean;
-    FAnswered, FInGroup, FPending: array[TGoToScope] of Integer;
-    FHasGroup: Boolean;
     FSource: TGoToListSource;
     FResolve: TGoToResolve;
     FRows: TArray<TGoToRow>;
@@ -182,7 +178,7 @@ type
     FChosenLine, FChosenCol: Integer;
     FResolving: Boolean;      // a landing request is in flight
     FHeadWidth: Integer;      // the head-word column, measured per tab
-    FUnitWidth: Integer;      // the unit column (project/group tabs), same
+    FUnitWidth: Integer;      // the unit column (the project tab), same
     FSectionWidth: Integer;   // the section column, same
     FLineWidth: Integer;      // the `:N` column, by the longest line number
     FColumnCap: Integer;      // a third of the list: the cap on one column
@@ -201,10 +197,6 @@ type
     FTextHeight: Integer;
     FIdentColor, FKeywordColor, FPreprocColor, FMatchColor: TColor;
     FWidths: array[TGoToScope] of TGoToWidths;   // measured once per list
-    // A group answer that has not been put on screen yet - see EnsureLoaded.
-    FStaged: array[TGoToScope] of TArray<TLspOutlineRow>;
-    FStagedNew: array[TGoToScope] of Boolean;
-    FShownMs: array[TGoToScope] of Double;   // when the tab last repainted
     // The last filter result of each tab, and the filter that produced it:
     // a switch back with the box untouched is the common case and must not
     // walk the list again (FilterKey).
@@ -226,7 +218,6 @@ type
     procedure BeginListUpdate;
     procedure EndListUpdate;
     procedure EnsureLoaded;
-    procedure AdoptStaged(AScope: TGoToScope);
     procedure UpdateCursor;
     procedure MeasureScope(AScope: TGoToScope);
     procedure MeasureHeadColumn;
@@ -238,8 +229,7 @@ type
   public
     constructor CreateWith(AOwner: TComponent;
       const AEntries: TArray<TLspOutlineRow>; const AModuleFile: string;
-      ACaretLine, ALineCount: Integer;
-      const AProjectName, AGroupName: string; AHasGroup: Boolean;
+      ACaretLine, ALineCount: Integer; const AProjectName: string;
       ASource: TGoToListSource; AResolve: TGoToResolve;
       AQuiet, AStrong: TColor); reintroduce;
   end;
@@ -270,7 +260,7 @@ function NameColumn(const AEntry: TLspOutlineRow): string;
   the user chose a row that could be placed. }
 function ShowGoTo(const AEntries: TArray<TLspOutlineRow>;
   const AModuleFile: string; ACaretLine, ALineCount: Integer;
-  const AProjectName, AGroupName: string; AHasGroup: Boolean;
+  const AProjectName: string;
   ASource: TGoToListSource; AResolve: TGoToResolve;
   out AFile: string; out ALine, ACol: Integer): Boolean;
 
@@ -300,11 +290,6 @@ const
   // Between the head column and the name. 8 had `class procedure` (bold,
   // in the editor's reserved-word style) touching the name.
   cHeadGap = 16;
-  // The shortest gap between two rebuilds of a list that is still growing -
-  // see EnsureLoaded. Long enough that a group whose projects answer in a
-  // burst is drawn twice (first and last) rather than once per project,
-  // short enough that a genuinely slow project still shows progress.
-  cGrowthRedrawMs = 500;
 
 var
   // The one open picker, or nil. Every asynchronous answer checks that the
@@ -450,7 +435,7 @@ end;
 
 function ShowGoTo(const AEntries: TArray<TLspOutlineRow>;
   const AModuleFile: string; ACaretLine, ALineCount: Integer;
-  const AProjectName, AGroupName: string; AHasGroup: Boolean;
+  const AProjectName: string;
   ASource: TGoToListSource; AResolve: TGoToResolve;
   out AFile: string; out ALine, ACol: Integer): Boolean;
 var
@@ -474,7 +459,7 @@ begin
     LTheming.RegisterFormClass(TPasTreeGoToForm);
   RowColors(LQuiet, LStrong);
   LForm := TPasTreeGoToForm.CreateWith(Application.MainForm, AEntries,
-    AModuleFile, ACaretLine, ALineCount, AProjectName, AGroupName, AHasGroup,
+    AModuleFile, ACaretLine, ALineCount, AProjectName,
     ASource, AResolve, LQuiet, LStrong);
   try
     if LThemed then
@@ -498,39 +483,27 @@ end;
 
 constructor TPasTreeGoToForm.CreateWith(AOwner: TComponent;
   const AEntries: TArray<TLspOutlineRow>; const AModuleFile: string;
-  ACaretLine, ALineCount: Integer; const AProjectName, AGroupName: string;
-  AHasGroup: Boolean; ASource: TGoToListSource; AResolve: TGoToResolve;
+  ACaretLine, ALineCount: Integer; const AProjectName: string;
+  ASource: TGoToListSource; AResolve: TGoToResolve;
   AQuiet, AStrong: TColor);
 begin
   inherited Create(AOwner);   // loads the .dfm, and with it the design PPI
   FEntries[gsModule] := AEntries;
   FLoaded[gsModule] := True;
-  FAnswered[gsModule] := 1;
-  FInGroup[gsModule] := 1;
   FModuleFile := AModuleFile;
   FCaretLine := ACaretLine;
   FLineCount := ALineCount;
-  FHasGroup := AHasGroup;
   FSource := ASource;
   FResolve := AResolve;
   FQuiet := AQuiet;
   FStrong := AStrong;
-  // The tabs are named after what they list - the file, the project, the
-  // group - so the dialog says where a chosen row can land.
+  // The tabs are named after what they list - the file, the project - so
+  // the dialog says where a chosen row can land.
   tcScope.Tabs[0] := '  ' + TPath.GetFileName(AModuleFile) + '  ';
   if AProjectName <> '' then
     tcScope.Tabs[1] := '  ' + AProjectName + '  '
   else
     tcScope.Tabs[1] := 'Project';
-  if FHasGroup then
-  begin
-    if AGroupName <> '' then
-      tcScope.Tabs[2] := AGroupName
-    else
-      tcScope.Tabs[2] := 'Project Group';
-  end
-  else
-    tcScope.Tabs.Delete(2);
   tcScope.TabIndex := 0;
   SyncScope;
   CreateList;
@@ -581,12 +554,10 @@ end;
   changes the tab or replaces a list calls this. }
 procedure TPasTreeGoToForm.SyncScope;
 begin
-  case tcScope.TabIndex of
-    1: FScope := gsProject;
-    2: FScope := gsGroup;
+  if tcScope.TabIndex = 1 then
+    FScope := gsProject
   else
     FScope := gsModule;
-  end;
   FScopeEntries := FEntries[FScope];
 end;
 
@@ -636,23 +607,13 @@ begin
   end;
 end;
 
-{ The project and group lists are asked for on the first switch to their
-  tab and arrive later; until then the tab shows an empty list and a status
-  line that says so. The answer refilters the CURRENT tab only if it is
-  still the one the answer is for - the user may have flipped back.
-
-  THE GROUP ANSWERS ONCE PER PROJECT, each time with the whole merged list
-  again (TOutlineGather in PasTreeIdePlugin.LspSession), so a group of six
-  used to re-measure, re-filter and repaint the list six times in a second
-  or two - visibly, every time the Group tab was opened, which is every
-  Ctrl+G since the lists live on the form (Alex, 2026-09-21: "between the
-  project and the group it still flickers"; the module and project tabs
-  answer once and never did). An intermediate answer is now STAGED instead:
-  the rows are kept, the status line still counts the projects in, and the
-  list itself is rebuilt on the first answer, on the last one, and at most
-  once every cGrowthRedrawMs in between. Staged rather than stored, because
-  FRows holds INDEXES into the tab's list: replacing the list without
-  refiltering would leave them pointing at other rows. }
+{ The project list is asked for on the first switch to its tab and arrives
+  later; until then the tab shows an empty list and a status line that says
+  so. The answer is stored whichever tab is up when it lands, and the list
+  itself is rebuilt only if its own tab is the current one - FRows holds
+  INDEXES into the tab's list, so a list replaced without a refilter would
+  leave them pointing at other rows. A return to the tab refilters anyway
+  (tcScopeChange), which is what the invalidated caches below are for. }
 procedure TPasTreeGoToForm.EnsureLoaded;
 var
   LScope: TGoToScope;
@@ -660,13 +621,6 @@ var
   LStart, LMeasured: Double;
 begin
   LScope := Scope;
-  // A staged answer that landed while another tab was up - this is its tab
-  // now, so take it; the caller's Refilter draws it.
-  if FStagedNew[LScope] then
-  begin
-    AdoptStaged(LScope);
-    FShownMs[LScope] := TimingNowMs;
-  end;
   if FLoaded[LScope] or FLoading[LScope] or not Assigned(FSource) then
     Exit;
   FLoading[LScope] := True;
@@ -674,42 +628,25 @@ begin
   UpdateCursor;
   LSelf := Self;
   FSource(LScope,
-    // Called once per answering project for the group (APending counts
-    // down to 0), once for the project: the list grows as cold servers
-    // finish their analysis, and the selection is kept across the growth.
     procedure(ASuccess: Boolean; const ARows: TArray<TLspOutlineRow>;
-      AAnswered, AInGroup, APending: Integer; const AError: string)
-    var
-      LFirst, LShow: Boolean;
-      LNow: Double;
+      const AError: string)
     begin
       if GOpenForm <> LSelf then
         Exit;   // the dialog this was asked for is gone
-      LFirst := not FLoaded[LScope];
-      FLoading[LScope] := APending > 0;
+      FLoading[LScope] := False;
       UpdateCursor;
       FLoaded[LScope] := True;
-      FAnswered[LScope] := AAnswered;
-      FInGroup[LScope] := AInGroup;
-      FPending[LScope] := APending;
       if ASuccess then
-        FStaged[LScope] := ARows
+        FEntries[LScope] := ARows
       else
-        FStaged[LScope] := nil;
-      FStagedNew[LScope] := True;
+        FEntries[LScope] := nil;
+      // A new list: both things measured from it are stale.
+      FWidths[LScope].Valid := False;
+      FFilterValid[LScope] := False;
+      FFiltered[LScope] := nil;
       if FScope <> LScope then
         Exit;   // the user flipped back; the rows wait for the return
-      LNow := TimingNowMs;
-      LShow := LFirst or (APending = 0) or
-        (LNow - FShownMs[LScope] >= cGrowthRedrawMs);
-      if not LShow then
-      begin
-        // The list stands as it is; only the count of projects moved.
-        UpdateStatus;
-        Exit;
-      end;
-      FShownMs[LScope] := LNow;
-      AdoptStaged(LScope);
+      SyncScope;
       BeginListUpdate;
       try
         LStart := TimingNowMs;
@@ -722,30 +659,15 @@ begin
       finally
         EndListUpdate;
       end;
-      if not ASuccess and (AError <> '') and (APending = 0) then
+      if not ASuccess and (AError <> '') then
         sbStatus.SimpleText := '  ' + AError;
     end);
 end;
 
-{ Takes the staged rows as AScope's list. The list box is NOT touched: every
-  caller measures and refilters right afterwards, and doing it here as well
-  would draw a big list twice. }
-procedure TPasTreeGoToForm.AdoptStaged(AScope: TGoToScope);
-begin
-  FStagedNew[AScope] := False;
-  FEntries[AScope] := FStaged[AScope];
-  // A new list: both things measured from it are stale.
-  FWidths[AScope].Valid := False;
-  FFilterValid[AScope] := False;
-  FFiltered[AScope] := nil;
-  if AScope = FScope then
-    SyncScope;
-end;
-
 { The current tab's column widths, measured once per list. A switch back to
   a tab whose list has not changed reuses them: measuring is a pass over
-  every row with a GDI call per distinct word, and on a group list that is
-  the slowest thing a tab switch does. }
+  every row with a GDI call per distinct word, and on the project list that
+  is the slowest thing a tab switch does. }
 procedure TPasTreeGoToForm.MeasureHeadColumn;
 begin
   if not FWidths[FScope].Valid then
@@ -852,8 +774,8 @@ begin
   // BEFORE OnChange runs - so for as long as the handler takes to build
   // the new list, the rows' rectangle shows the tab control's background
   // rather than rows. On the module and project tabs the handler is quick
-  // enough that nothing is seen; on the group tab, with the largest list,
-  // it is the flicker Alex reported (2026-09-21). WS_CLIPCHILDREN excludes
+  // enough that nothing is seen; on a big project list it was the flicker
+  // Alex reported (2026-09-21, then on the group tab this no longer has). WS_CLIPCHILDREN excludes
   // the child windows' rectangles from the parent's own painting, which is
   // what a container with one big child wants and what the VCL does not
   // set by default. Here rather than in CreateParams: the tab control's
@@ -1031,10 +953,10 @@ begin
   else
     LLineCount := FLineCount;
   // The tab's last result, when nothing it depends on has changed - a tab
-  // switch with the filter box untouched is the common one, and on a group
-  // list FilterRows is a pass over every row plus an allocation of one
-  // record per row (megabytes) for an answer identical to the one just
-  // thrown away.
+  // switch with the filter box untouched is the common one, and on a
+  // project list FilterRows is a pass over every row plus an allocation
+  // of one record per row (megabytes) for an answer identical to the one
+  // just thrown away.
   LKey := FilterKey;
   if FFilterValid[LScope] and (FFilterKey[LScope] = LKey) then
     FRows := FFiltered[LScope]
@@ -1074,12 +996,11 @@ begin
   if (LKeep < 0) and (Length(FRows) > 0) then
     LKeep := 0;
   lbItems.ItemIndex := LKeep;
-  // LB_SETCURSEL SCROLLS the selected row into view, and a growing list
-  // refilters on every answering project - so a group tab that was still
-  // loading yanked the view back to the selection while the user was
-  // dragging the scrollbar, a few times a second (Alex, 2026-09-21: "the
-  // thumb jumps, as if something were loading" - it was). The view is the
-  // user's as long as the selected ROW did not move: put the top row back.
+  // LB_SETCURSEL SCROLLS the selected row into view, which yanked the view
+  // back to the selection while the user was dragging the scrollbar of a
+  // tab that was still filling (Alex, 2026-09-21: "the thumb jumps, as if
+  // something were loading" - it was). The view is the user's as long as
+  // the selected ROW did not move: put the top row back.
   // When the selection really changed (typing, a tab switch, the caret row
   // on first show) the scroll into view is the point and stands.
   if (LKeep = LWasIndex) and (LWasTop > 0) and (LWasTop < Length(FRows)) then
@@ -1091,10 +1012,9 @@ begin
   end;
 end;
 
-{ The status line: how many rows are shown of how many the tab lists, and
-  on the group tab how many projects have answered. Its own method because
-  an answer that is only STAGED (EnsureLoaded) moves the project count
-  without rebuilding the list, and must still say so. }
+{ The status line: how many rows are shown of how many the tab lists. Its
+  own method because a refilter is not the only thing that moves it - a
+  list that has just landed does too (EnsureLoaded). }
 procedure TPasTreeGoToForm.UpdateStatus;
 var
   LScope: TGoToScope;
@@ -1110,16 +1030,6 @@ begin
     LStatus := '  loading...'
   else
     LStatus := Format('  %d of %d', [LShown, Length(FScopeEntries)]);
-  // The group tab says how many projects are in the list so far, and how
-  // many servers are still analyzing - a cold project takes its time, and
-  // the rows already in are shown meanwhile.
-  if (LScope = gsGroup) and FLoaded[LScope] then
-  begin
-    LStatus := LStatus + Format('  -  %d of %d projects',
-      [FAnswered[LScope], FInGroup[LScope]]);
-    if FPending[LScope] > 0 then
-      LStatus := LStatus + Format(', %d still loading', [FPending[LScope]]);
-  end;
   sbStatus.SimpleText := LStatus;
 end;
 
@@ -1134,7 +1044,7 @@ begin
   //
   // The list box is NOT emptied first. Setting Count to 0 and building the
   // new list afterwards leaves the rows' rectangle with nothing to paint
-  // for as long as the build takes, and on the group tab that is long
+  // for as long as the build takes, and on a big project list that is long
   // enough to see (0.47.2..0.47.4 made it a cleaner and therefore more
   // obvious flash, Alex 2026-09-21: "it became MORE distinct"). The old
   // rows stay on screen until the new ones are ready to replace them,
@@ -1500,7 +1410,7 @@ begin
       // instead of over it. From the edge inwards:
       //  - the LINE, `:N`, for a row that knows its line (the module tab;
       //    a project row has no position until it is chosen);
-      //  - the UNIT, on the project and group tabs (Alex, 2026-09-19: "the
+      //  - the UNIT, on the project tab (Alex, 2026-09-19: "the
       //    module name in a separate column, as the line number is for the
       //    module tab"). The module tab's rows are all from the one module
       //    the tab is named after, and the unit's own header row already

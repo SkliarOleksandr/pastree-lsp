@@ -39,8 +39,7 @@ unit PasTreeIdePlugin.OutlineRows;
 interface
 
 uses
-  System.SysUtils,
-  System.Generics.Collections;
+  System.SysUtils;
 
 type
   /// <summary>
@@ -52,7 +51,7 @@ type
   /// and the editor agree here) and UnitId = -1; a PROJECT row carries
   /// UnitId/Sym/Node and NO position (Line = 0): LspOutlineTarget places it
   /// when it is chosen. ProjectFile is the .dproj whose server answered -
-  /// what routes the target request back to that server in a group. Key is
+  /// what routes the target request back to that server. Key is
   /// the lower-cased name column (see OutlineNameColumn), computed once here
   /// so the picker's filter does not lower-case 100k strings per keystroke.
   /// </summary>
@@ -95,17 +94,6 @@ function ParseOutlineTable(const AJson, AProjectFile: string):
   TArray<TLspOutlineRow>; overload;
 function ParseOutlineTable(const AJson, AProjectFile: string;
   out AError: string): TArray<TLspOutlineRow>; overload;
-
-/// <summary>
-/// The group merge: rows in the order given (the owner's list first), a row
-/// dropped when an earlier one already names the same declaration - same
-/// unit file, owner, name, head word, kind and node. A unit two projects
-/// compile is the case; the two servers agree on those fields because they
-/// read the same source. Landmarks (module header, include sites)
-/// de-duplicate the same way.
-/// </summary>
-function MergeOutlineRows(
-  const ARows: TArray<TLspOutlineRow>): TArray<TLspOutlineRow>;
 
 implementation
 
@@ -509,43 +497,6 @@ var
   LError: string;
 begin
   Result := ParseOutlineTable(AJson, AProjectFile, LError);
-end;
-
-function MergeOutlineRows(
-  const ARows: TArray<TLspOutlineRow>): TArray<TLspOutlineRow>;
-var
-  LSeen: TDictionary<string, Boolean>;
-  LFiles: TDictionary<string, string>;
-  LIdx, LCount: Integer;
-  LKey, LFile: string;
-begin
-  Result := nil;
-  LCount := 0;
-  SetLength(Result, Length(ARows));
-  LSeen := TDictionary<string, Boolean>.Create(Length(ARows));
-  // The lower-cased file path once per file, not once per row: a unit's
-  // rows all share the same string.
-  LFiles := TDictionary<string, string>.Create;
-  try
-    for LIdx := 0 to High(ARows) do
-    begin
-      if not LFiles.TryGetValue(ARows[LIdx].FilePath, LFile) then
-      begin
-        LFile := LowerCase(ARows[LIdx].FilePath);
-        LFiles.Add(ARows[LIdx].FilePath, LFile);
-      end;
-      LKey := LFile + #1 + ARows[LIdx].Key + #1 + ARows[LIdx].Head + #1 +
-        ARows[LIdx].Kind + #1 + IntToStr(ARows[LIdx].Node);
-      if not LSeen.TryAdd(LKey, True) then
-        Continue;
-      Result[LCount] := ARows[LIdx];
-      Inc(LCount);
-    end;
-  finally
-    LFiles.Free;
-    LSeen.Free;
-  end;
-  SetLength(Result, LCount);
 end;
 
 end.

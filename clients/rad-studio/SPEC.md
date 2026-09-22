@@ -1287,7 +1287,7 @@ the alternative is a wait the user did not ask for.
    only the servers already up were asked, on the reasoning that nine closure
    builds on one keystroke is a hang, not a search; on a nine-project group
    where one project had been touched that searched one project (found on the
-   Go To group tab, 2026-09-18). Now `GroupTargets` asks all of them, starting
+   Go To group tab, 2026-09-18 - that tab itself was withdrawn in 0.47.23). Now `GroupTargets` asks all of them, starting
    a cold project's server ON DEMAND - the first such search on a cold group
    waits for the analyses under the wait dialog; warming every server at group
    open was declined (the machine is the user's), so later searches find them

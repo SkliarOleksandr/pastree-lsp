@@ -2,10 +2,12 @@ unit PasTreeIdePlugin.GoToPicker;
 
 {
   Ctrl+G - the Go To picker (PasTreeIdePlugin.GoToForm) over the active
-  source: the module's outline, the owning project's declarations and the
-  whole group's, one filter box over all three, `line N` when the filter is
-  a number. The dialog is the demo's; this unit is the IDE side of it - the
-  key, the three lists, the landing.
+  source: the module's outline and the owning project's declarations, one
+  filter box over both, `line N` when the filter is a number. The dialog is
+  the demo's; this unit is the IDE side of it - the key, the two lists, the
+  landing. A group-wide tab existed until 0.47.23 and was withdrawn after
+  testing (Alex, 2026-09-22): the project scope is what the picker is for,
+  and a group list cost a fan-out to every project's server.
 
   THE KEY. Ctrl+G, registered with the package's ONE keyboard binding
   (PasTreeIdePlugin.KeyBindings - btPartial, one row on Key Mappings for
@@ -28,12 +30,11 @@ unit PasTreeIdePlugin.GoToPicker;
   Because the dialog no longer disables input for those first milliseconds,
   GBusy is what keeps a second Ctrl+G from starting a second picker.
 
-  The PROJECT and GROUP lists are asked by the picker itself on the first
-  switch to their tab (TGoToListSource), the group one of every project
-  whose server is running (LspOutlineGroup).
+  The PROJECT list is asked by the picker itself on the first switch to its
+  tab (TGoToListSource), of the owning server alone (LspOutlineProject).
 
   THE LANDING. A module row and the `line N` row carry their position; a
-  project or group row is placed by the server that listed it
+  project row is placed by the server that listed it
   (LspOutlineTarget - the picker's TGoToResolve) and only then does the
   dialog close. The jump itself is NavigateHistoryAware, so Alt+Left walks
   back from it like from any other navigation of this package.
@@ -94,29 +95,10 @@ begin
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
-{ The group the IDE has open, and whether it is more than one project - the
-  picker shows its Group tab only then. }
-function GroupInfo(out AGroupName: string): Boolean;
-var
-  LModuleServices: IOTAModuleServices;
-  LGroup: IOTAProjectGroup;
-begin
-  Result := False;
-  AGroupName := '';
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-    Exit;
-  LGroup := LModuleServices.MainProjectGroup;
-  if not Assigned(LGroup) then
-    Exit;
-  AGroupName := TPath.GetFileName(LGroup.FileName);
-  Result := LGroup.ProjectCount > 1;
-end;
-
 procedure ExecuteGoTo(const AView: IOTAEditView);
 var
-  LFile, LProjectName, LGroupName: string;
+  LFile, LProjectName: string;
   LCaretLine, LLineCount: Integer;
-  LHasGroup: Boolean;
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) then
     Exit;
@@ -132,7 +114,6 @@ begin
   LCaretLine := AView.Buffer.EditPosition.Row;
   LLineCount := AView.Buffer.GetLinesInBuffer;
   LProjectName := TPath.GetFileName(LspOwningProjectFile(LFile));
-  LHasGroup := GroupInfo(LGroupName);
 
   // ARMED, not shown (ShowWaitDialogAfter): the outline comes off the
   // server's cache in tens of milliseconds once the project is analyzed,
@@ -175,22 +156,11 @@ begin
           Exit;
         end;
         if ShowGoTo(ARows, LFile, LCaretLine, LLineCount, LProjectName,
-             LGroupName, LHasGroup,
-             // The project and group lists, asked by the picker on the first
-             // switch to their tab. The project list is the owner's alone,
-             // reported as 1 of 1 so the picker's status line reads the same
-             // shape for both.
-             procedure(AScope: TGoToScope; const AOnDone: TLspOutlineGroupProc)
+             // The project list, asked by the picker on the first switch to
+             // its tab - the owner's alone.
+             procedure(AScope: TGoToScope; const AOnDone: TLspOutlineProc)
              begin
-               if AScope = gsGroup then
-                 LspOutlineGroup(LFile, AOnDone)
-               else
-                 LspOutlineProject(LFile,
-                   procedure(ASuccess: Boolean;
-                     const ARows: TArray<TLspOutlineRow>; const AError: string)
-                   begin
-                     AOnDone(ASuccess, ARows, Ord(ASuccess), 1, 0, AError);
-                   end);
+               LspOutlineProject(LFile, AOnDone);
              end,
              // A project row's landing, from the server that listed it.
              procedure(const ARow: TLspOutlineRow; const AOnDone: TLspHitsProc)

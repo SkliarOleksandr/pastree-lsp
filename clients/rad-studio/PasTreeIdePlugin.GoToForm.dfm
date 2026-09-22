@@ -150,8 +150,7 @@ object PasTreeGoToForm: TPasTreeGoToForm
     TabOrder = 1
     Tabs.Strings = (
       'Module'
-      'Project'
-      'Project Group')
+      'Project')
     TabIndex = 0
     TabStop = False
     OnChange = tcScopeChange
