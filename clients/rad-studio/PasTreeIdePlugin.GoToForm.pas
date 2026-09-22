@@ -15,7 +15,7 @@ unit PasTreeIdePlugin.GoToForm;
   the module list, so the same box is the go-to-line command. The row
   nearest ABOVE the caret is selected when the module tab opens, so Ctrl+G
   with an empty box answers "where am I". Each row is drawn by hand
-  (lbVirtualOwnerDraw - a project's fifty thousand rows cost nothing to
+  (a virtual list, PasTreeIdePlugin.ListBox - a project's fifty thousand rows cost nothing to
   list): the head word and the detail in the EDITOR'S syntax colours (the
   live palette the Find References rows paint with, through
   PasTreeIdePlugin.ResultRows - Alex, 2026-09-19: "the keyword colours the
@@ -69,8 +69,9 @@ unit PasTreeIdePlugin.GoToForm;
   TPasOutlineEntry spelled without PasTree - this package must not link it
   (see the .dpk). Kinds are the server's words, matched by string here.
 
-  THE PAINTING DISCIPLINE. The list is buffered and every change to it goes
-  under one redraw lock (BeginListUpdate), and NOTHING in lbItemsDrawItem or
+  THE PAINTING DISCIPLINE. The list (PasTreeIdePlugin.ListBox, ours since
+  2026-09-22) paints one bitmap per WM_PAINT and nothing outside it; every
+  change goes under one update lock (BeginListUpdate), and NOTHING in lbItemsDrawItem or
   in MeasureHeadColumn may talk to a window or to the IDE: a tab read is a
   SendMessage, a palette lookup is a QueryInterface, and either one, done
   per row, is milliseconds per repaint on a slow machine. The cached FScope /
@@ -97,7 +98,8 @@ uses
   Vcl.ExtCtrls,
   Vcl.ComCtrls,
   Vcl.Graphics,
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.ListBox;
 
 type
   TGoToRowKind = (grEntry, grLine);
@@ -141,7 +143,6 @@ type
   TPasTreeGoToForm = class(TForm)
     tcScope: TTabControl;
     edFilter: TEdit;
-    lbItems: TListBox;
     pnlButtons: TPanel;
     sbStatus: TStatusBar;
     chkAll: TCheckBox;
@@ -158,10 +159,6 @@ type
     procedure edFilterChange(Sender: TObject);
     procedure edFilterKeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
-    procedure lbItemsClick(Sender: TObject);
-    procedure lbItemsDblClick(Sender: TObject);
-    procedure lbItemsDrawItem(AControl: TWinControl; AIndex: Integer;
-      ARect: TRect; AState: TOwnerDrawState);
     procedure FilterChanged(Sender: TObject);
     procedure AllChanged(Sender: TObject);
     procedure IncludesChanged(Sender: TObject);
@@ -193,7 +190,16 @@ type
     FQuiet, FStrong: TColor;  // the two row colours, from the IDE's theme
     FScope: TGoToScope;       // the current tab, read once per switch
     FScopeEntries: TArray<TLspOutlineRow>;   // and its list
-    FListLock: Integer;       // WM_SETREDRAW nesting (BeginListUpdate)
+    // The list itself, made in code: a control of ours has no place in the
+    // Form Designer's palette, and the .dfm knows only the tab control it
+    // fills (PasTreeIdePlugin.ListBox).
+    lbItems: TPasTreeListBox;
+    FListLock: Integer;       // BeginListUpdate nesting
+    // The row painter's GDI state, made once per showing (FormShow) and
+    // used raw in lbItemsDrawItem - see the note there.
+    FFontPlain, FFontBold: HFONT;
+    FTextHeight: Integer;
+    FIdentColor, FKeywordColor, FPreprocColor, FMatchColor: TColor;
     FWidths: array[TGoToScope] of TGoToWidths;   // measured once per list
     // A group answer that has not been put on screen yet - see EnsureLoaded.
     FStaged: array[TGoToScope] of TArray<TLspOutlineRow>;
@@ -210,6 +216,13 @@ type
     function Kinds: TGoToKinds;
     function FilterKey: string;
     procedure SyncScope;
+    procedure CreateList;
+    procedure lbItemsClick(Sender: TObject);
+    procedure lbItemsDblClick(Sender: TObject);
+    procedure lbItemsDrawItem(AList: TPasTreeListBox; ACanvas: TCanvas;
+      AIndex: Integer; const ARect: TRect; ASelected: Boolean);
+    procedure PrepareRowPainter;
+    procedure ReleaseRowPainter;
     procedure BeginListUpdate;
     procedure EndListUpdate;
     procedure EnsureLoaded;
@@ -264,7 +277,6 @@ function ShowGoTo(const AEntries: TArray<TLspOutlineRow>;
 implementation
 
 uses
-  Winapi.Messages,   // WM_SETREDRAW (BeginListUpdate)
   System.Math,
   System.UITypes,
   System.IOUtils,
@@ -521,26 +533,45 @@ begin
     tcScope.Tabs.Delete(2);
   tcScope.TabIndex := 0;
   SyncScope;
+  CreateList;
   // One text line plus breathing room, from the font in effect after
   // scaling - the designer cannot state a row height in font terms.
   lbItems.ItemHeight := Abs(Font.Height) + 9;
-  // The rows are painted by hand, one FillRect and a dozen TextOuts each,
-  // and a list box erases its whole client area before the first of them:
-  // on a slow machine the white flash between the erase and the rows is
-  // the flicker of a tab switch (Alex, 2026-09-21). Buffered, the erase
-  // and the rows happen in memory and the screen changes once.
-  //
-  // NOT ENOUGH while typing (Alex, 2026-09-21): the list still flickers as
-  // the filter narrows it. Tried and withdrawn the same day, verified in
-  // the IDE: a TListBox interposer that declined the on-screen
-  // WM_ERASEBKGND (TCustomListBox.WMEraseBkgnd hands it to the LISTBOX
-  // class when DoubleBuffered is on) and added LBS_DISABLENOSCROLL so the
-  // scrollbar's coming and going stopped resizing the client area. No
-  // visible change, so the erase is not where the flash comes from. Next
-  // candidates: the WM_SETREDRAW(1) + RedrawWindow pair in EndListUpdate
-  // (RDW_ERASE | RDW_FRAME), or the LB_SETCOUNT reset of a virtual list.
-  lbItems.DoubleBuffered := True;
   LoadState;
+end;
+
+{ The list, where the .dfm had a TListBox until 2026-09-22 (the same
+  margins and alignment inside the tab control). The row and selection
+  colours come from the IDE's style services when a theme is on, as the two
+  text colours do (RowColors): the control paints them itself, and the
+  system's clWindow on a dark IDE is a white box. }
+procedure TPasTreeGoToForm.CreateList;
+
+  function Themed(AColor: TColor): TColor;
+  var
+    LTheming: IOTAIDEThemingServices;
+  begin
+    Result := AColor;
+    if Supports(BorlandIDEServices, IOTAIDEThemingServices, LTheming) and
+       LTheming.IDEThemingEnabled and Assigned(LTheming.StyleServices) then
+      Result := LTheming.StyleServices.GetSystemColor(AColor);
+  end;
+
+begin
+  lbItems := TPasTreeListBox.Create(Self);
+  lbItems.Name := 'lbItems';
+  lbItems.Parent := tcScope;
+  lbItems.AlignWithMargins := True;
+  lbItems.Margins.SetBounds(4, 2, 4, 4);
+  lbItems.Align := alClient;
+  lbItems.TabOrder := 0;
+  lbItems.ParentFont := True;
+  lbItems.Color := Themed(clWindow);
+  lbItems.SelectionColor := Themed(clHighlight);
+  lbItems.SelectionTextColor := Themed(clHighlightText);
+  lbItems.OnClick := lbItemsClick;
+  lbItems.OnDblClick := lbItemsDblClick;
+  lbItems.OnDrawItem := lbItemsDrawItem;
 end;
 
 { The tab and its list, read ONCE per switch. tcScope.TabIndex is a
@@ -569,16 +600,28 @@ begin
   Result := FScopeEntries;
 end;
 
-{ A tab switch or a landed list is several changes to the list box - the
-  count, the selection, the top row - and each of them repaints it. Held
+{ A tab switch or a landed list is several changes to the list - the count,
+  the selection, the top row - and each of them would repaint it. Held
   between Begin and End they repaint it once. Nested, because a list that
   is already cached answers EnsureLoaded synchronously and its callback
-  refilters inside the switch. }
+  refilters inside the switch.
+
+  A refilter always repaints, whether or not the count changed: the filter
+  `actio` and the filter `action` select the same 4387 rows of AVImark, and
+  the TListBox this control replaced decided by its count, selection and
+  top row alone whether WM_SETREDRAW(1) was worth a repaint - so after the
+  `n` it kept showing the old rows with the old five-letter match (Alex,
+  2026-09-21: "it colours every other time"). The unconditional
+  RedrawWindow that had hidden that was itself a SECOND paint per keystroke
+  (a WM_PAINT counter in the caption read `x2`), two frames and the flicker
+  between them. Virtual TreeView was considered for the replacement and
+  declined: it is a GetIt package, absent from a plain IDE, and the package
+  links rtl/vcl/designide only. }
 procedure TPasTreeGoToForm.BeginListUpdate;
 begin
   Inc(FListLock);
-  if (FListLock = 1) and lbItems.HandleAllocated then
-    SendMessage(lbItems.Handle, WM_SETREDRAW, 0, 0);
+  if FListLock = 1 then
+    lbItems.BeginUpdate;
 end;
 
 procedure TPasTreeGoToForm.EndListUpdate;
@@ -586,11 +629,10 @@ begin
   if FListLock = 0 then
     Exit;
   Dec(FListLock);
-  if (FListLock = 0) and lbItems.HandleAllocated then
+  if FListLock = 0 then
   begin
-    SendMessage(lbItems.Handle, WM_SETREDRAW, 1, 0);
-    RedrawWindow(lbItems.Handle, nil, 0,
-      RDW_INVALIDATE or RDW_ERASE or RDW_FRAME);
+    lbItems.Invalidate;   // the rows may have changed under the same count
+    lbItems.EndUpdate;
   end;
 end;
 
@@ -823,9 +865,53 @@ begin
   // QueryInterface on BorlandIDEServices (PasTreeIdePlugin.ResultRows).
   // Released in FormClose, which a modal form always reaches.
   BeginEditorPalette;
+  PrepareRowPainter;
   MeasureHeadColumn;
   Refilter(True);
   ActiveControl := edFilter;
+end;
+
+{ The row painter's fixed state, once per showing rather than once per run
+  per row: the two fonts (the list's, and the same in bold for the matched
+  letters), the text height, and the four colours that depend only on the
+  palette and the theme. See lbItemsDrawItem for why the fonts are GDI
+  handles and not TFont styles. }
+procedure TPasTreeGoToForm.PrepareRowPainter;
+var
+  LLogFont: TLogFont;
+  LDC: HDC;
+  LOld: HGDIOBJ;
+  LMetrics: TTextMetric;
+begin
+  ReleaseRowPainter;
+  FillChar(LLogFont, SizeOf(LLogFont), 0);
+  GetObject(lbItems.Font.Handle, SizeOf(LLogFont), @LLogFont);
+  FFontPlain := CreateFontIndirect(LLogFont);
+  LLogFont.lfWeight := FW_BOLD;
+  FFontBold := CreateFontIndirect(LLogFont);
+  LDC := GetDC(0);
+  try
+    LOld := SelectObject(LDC, FFontPlain);
+    GetTextMetrics(LDC, LMetrics);
+    FTextHeight := LMetrics.tmHeight;
+    SelectObject(LDC, LOld);
+  finally
+    ReleaseDC(0, LDC);
+  end;
+  FIdentColor := EditorSyntaxColor(atIdentifier, FStrong);
+  FKeywordColor := EditorSyntaxColor(atReservedWord, FStrong);
+  FPreprocColor := EditorSyntaxColor(atPreproc, FStrong);
+  FMatchColor := MatchMarkerColor(FStrong);
+end;
+
+procedure TPasTreeGoToForm.ReleaseRowPainter;
+begin
+  if FFontPlain <> 0 then
+    DeleteObject(FFontPlain);
+  if FFontBold <> 0 then
+    DeleteObject(FFontBold);
+  FFontPlain := 0;
+  FFontBold := 0;
 end;
 
 { The working cursor (arrow with a small hourglass - typing goes on) while
@@ -844,6 +930,7 @@ end;
 procedure TPasTreeGoToForm.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
   Screen.Cursor := crDefault;
+  ReleaseRowPainter;
   EndEditorPalette;
   SaveState;
 end;
@@ -960,8 +1047,12 @@ begin
     FFilterValid[LScope] := True;
   end;
   // Virtual list: the count is the whole update, every row is painted from
-  // FRows on demand.
-  lbItems.Count := Length(FRows);
+  // FRows on demand. LB_SETCOUNT resets the list box - selection, top row,
+  // scroll range - even when the count did not change, and the reset is a
+  // repaint of its own; a same-sized answer keeps the box as it is
+  // (2026-09-21, under test).
+  if lbItems.Count <> Length(FRows) then
+    lbItems.Count := Length(FRows);
   LKeep := -1;
   if ASelectNearCaret and (LScope = gsModule) then
   begin
@@ -1257,25 +1348,57 @@ begin
   ModalResult := mrOk;
 end;
 
-procedure TPasTreeGoToForm.lbItemsDrawItem(AControl: TWinControl;
-  AIndex: Integer; ARect: TRect; AState: TOwnerDrawState);
+procedure TPasTreeGoToForm.lbItemsDrawItem(AList: TPasTreeListBox; ACanvas: TCanvas;
+  AIndex: Integer; const ARect: TRect; ASelected: Boolean);
+{ RAW GDI, NOT TCanvas. A row is a dozen runs of text in three or four
+  colours and two weights, and painted through TCanvas each run cost a
+  Font.Color and Font.Style assignment (a TFont change, and the canvas
+  reselecting its objects on the next call), a TextOut that MEASURES the
+  text again after drawing it (TCanvas.TextOut ends in MoveTo(X +
+  TextWidth)), and our own TextWidth to advance - three GDI text calls and
+  a font reselection per run, ~10 ms for a screen of twenty rows on
+  AVImark (2026-09-21). Here the DC holds one of two fonts made in
+  PrepareRowPainter, the text colour is a SetTextColor, the alignment is
+  TA_UPDATECP so ExtTextOut advances the position itself, and a
+  right-aligned column is TA_RIGHT at its edge - no measuring anywhere.
+  The DC's font, alignment and background mode are put back at the end:
+  the same DC paints the next row through the VCL's own FillRect. }
 var
-  LCanvas: TCanvas;
+  LDC: HDC;
   LRow: TGoToRow;
   LEntries: TArray<TLspOutlineRow>;
   LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce, LMatch: TColor;
-  LNameStyle: TFontStyles;
-  LX, LY, LLineRight, LSaved: Integer;
+  LY, LLineRight, LSaved: Integer;
   LName, LNote: string;
+  LOldFont: HGDIOBJ;
+  LOldAlign, LOldMode: Integer;
+  LFont: HFONT;
 
-  procedure Put(const AText: string; AColor: TColor; AStyle: TFontStyles);
+  procedure UseFont(AFont: HFONT);
+  begin
+    if AFont <> LFont then
+    begin
+      SelectObject(LDC, AFont);
+      LFont := AFont;
+    end;
+  end;
+
+  // The current position - where the next Put starts.
+  procedure At(AX: Integer);
+  begin
+    MoveToEx(LDC, AX, LY, nil);
+  end;
+
+  procedure Put(const AText: string; AColor: TColor; ABold: Boolean);
   begin
     if AText = '' then
       Exit;
-    LCanvas.Font.Color := AColor;
-    LCanvas.Font.Style := AStyle;
-    LCanvas.TextOut(LX, LY, AText);
-    Inc(LX, LCanvas.TextWidth(AText));
+    if ABold then
+      UseFont(FFontBold)
+    else
+      UseFont(FFontPlain);
+    SetTextColor(LDC, ColorToRGB(AColor));
+    ExtTextOut(LDC, 0, 0, 0, nil, PChar(AText), Length(AText), nil);
   end;
 
   // One right-aligned column of width AWidth ending at LLineRight - 6,
@@ -1283,51 +1406,48 @@ var
   // ends at the column's right edge, like the `:N` numbers do (Alex,
   // 2026-09-19: "the unit against the right edge, the section against the
   // unit") - a text wider than the cap loses its start, not its end.
+  // SaveDC/RestoreDC bracket the clip AND the alignment: the DC comes back
+  // in TA_UPDATECP with the font it had, so LFont stays true.
   procedure PutColumn(const AText: string; AWidth: Integer);
   begin
     if (AText = '') or (AWidth <= 0) then
       Exit;
     AWidth := Min(AWidth, FColumnCap);
-    LCanvas.Font.Style := [];
-    LX := LLineRight - 6 - LCanvas.TextWidth(AText);
-    LSaved := SaveDC(LCanvas.Handle);
-    IntersectClipRect(LCanvas.Handle, LLineRight - 6 - AWidth, ARect.Top,
+    UseFont(FFontPlain);
+    LSaved := SaveDC(LDC);
+    IntersectClipRect(LDC, LLineRight - 6 - AWidth, ARect.Top,
       LLineRight - 6, ARect.Bottom);
-    Put(AText, LQuiet, []);
-    RestoreDC(LCanvas.Handle, LSaved);
-    // RestoreDC puts back the DC's text colour from before SaveDC, but the
-    // canvas still believes its Font is selected - so the next Put with the
-    // SAME Font.Color changes nothing and paints in whatever the DC holds.
-    // On the project tab no `:N` precedes the columns, and the section came
-    // out in the list's default black while the unit was grey (2026-09-19).
-    LCanvas.Refresh;
+    SetTextAlign(LDC, TA_RIGHT or TA_TOP);
+    SetTextColor(LDC, ColorToRGB(LQuiet));
+    ExtTextOut(LDC, LLineRight - 6, LY, 0, nil, PChar(AText), Length(AText),
+      nil);
+    RestoreDC(LDC, LSaved);
     LLineRight := LLineRight - 6 - AWidth - 8;
   end;
 
   // A run in the editor's syntax colours (PasTreeIdePlugin.ResultRows, the
   // same palette the Find References rows paint with) - colours only, in
-  // the plain style: bold in this list is the matched letters alone.
-  // Font.Style is the last run's afterwards; every Put sets its own.
+  // the plain weight: bold in this list is the matched letters alone.
   procedure PutSyntax(const AText: string);
   begin
-    LCanvas.Font.Style := [];
-    PaintSyntaxText(LCanvas, LX, LY, AText, LQuiet, LForce, True);
+    UseFont(FFontPlain);
+    PaintSyntaxTextDC(LDC, AText, LQuiet, LForce);
   end;
 
 begin
-  LCanvas := lbItems.Canvas;
-  LCanvas.FillRect(ARect);
-  if (AIndex < 0) or (AIndex > High(FRows)) then
+  ACanvas.FillRect(ARect);
+  if (AIndex < 0) or (AIndex > High(FRows)) or (FFontPlain = 0) then
     Exit;
   LRow := FRows[AIndex];
+  LDC := ACanvas.Handle;
   // A selected row keeps the highlight text colour for everything: it is
   // the only colour guaranteed readable on the highlight background (the
   // list's, a saturated blue - not the editor's own selection colour that
   // the Messages panel rows keep their palette on).
-  if odSelected in AState then
+  if ASelected then
   begin
-    LQuiet := LCanvas.Font.Color;
-    LStrong := LCanvas.Font.Color;
+    LQuiet := ACanvas.Font.Color;
+    LStrong := LQuiet;
     LIdent := LStrong;
     LKeyword := LStrong;
     LPreproc := LStrong;
@@ -1343,109 +1463,119 @@ begin
     // the detail go through the tokenizer (PutSyntax). `include` is neither -
     // there is no such keyword and the path is not a string literal - it is
     // the directive colour, the one the editor paints the whole
-    // `{$INCLUDE ...}` line with.
-    LIdent := EditorSyntaxColor(atIdentifier, LStrong);
-    LKeyword := EditorSyntaxColor(atReservedWord, LStrong);
-    LPreproc := EditorSyntaxColor(atPreproc, LStrong);
+    // `{$INCLUDE ...}` line with. All four fixed per showing
+    // (PrepareRowPainter).
+    LIdent := FIdentColor;
+    LKeyword := FKeywordColor;
+    LPreproc := FPreprocColor;
     LForce := clNone;
     // The matched letters in the Find References marker colour as well as
     // bold - the same "what you typed" mark in both places.
-    LMatch := MatchMarkerColor(LStrong);
+    LMatch := FMatchColor;
   end;
-  LX := ARect.Left + 6;
-  LY := ARect.Top + (ARect.Height - LCanvas.TextHeight('Xg')) div 2;
-  if LRow.Kind = grLine then
-  begin
-    Put('line', LQuiet, []);
-    LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
-    Put(IntToStr(LRow.LineNo), LStrong, [fsBold]);
-    Exit;
-  end;
-  // The tab's list and the tab itself from the cached pair, never through
-  // tcScope.TabIndex: that read is a SendMessage, and this runs once per
-  // row per repaint (SyncScope).
-  LEntries := FScopeEntries;
-  if LRow.Entry > High(LEntries) then
-    Exit;
-  with LEntries[LRow.Entry] do
-  begin
-    // The right-hand columns, drawn FIRST, and the row text is then clipped
-    // short of them, so a long detail runs out under a column instead of
-    // over it. From the edge inwards:
-    //  - the LINE, `:N`, for a row that knows its line (the module tab; a
-    //    project row has no position until it is chosen);
-    //  - the UNIT, on the project and group tabs (Alex, 2026-09-19: "the
-    //    module name in a separate column, as the line number is for the
-    //    module tab"). The module tab's rows are all from the one module
-    //    the tab is named after, and the unit's own header row already IS
-    //    that name - so neither gets the column;
-    //  - the SECTION - interface / implementation, `, declaration` for a
-    //    bodiless routine header (Alex, the same day: "one more column for
-    //    the extra information, second from the right").
-    // Each as wide as its longest text on the tab (MeasureHeadColumn),
-    // capped at a third of the list so one absurd name does not eat the
-    // row (PutColumn).
-    LLineRight := ARect.Right;
-    if Line > 0 then
+  LOldFont := SelectObject(LDC, FFontPlain);
+  LFont := FFontPlain;
+  LOldMode := SetBkMode(LDC, TRANSPARENT);
+  LOldAlign := SetTextAlign(LDC, TA_LEFT or TA_TOP or TA_UPDATECP);
+  try
+    LY := ARect.Top + (ARect.Height - FTextHeight) div 2;
+    At(ARect.Left + 6);
+    if LRow.Kind = grLine then
     begin
-      LNote := ':' + IntToStr(Line);
-      LCanvas.Font.Style := [];
-      LX := ARect.Right - 6 - LCanvas.TextWidth(LNote);
-      Put(LNote, LQuiet, []);
-      LLineRight := ARect.Right - 6 - FLineWidth - 8;
+      Put('line', LQuiet, False);
+      At(ARect.Left + 6 + FHeadWidth + cHeadGap);
+      Put(IntToStr(LRow.LineNo), LStrong, True);
+      Exit;
     end;
-    if (Kind <> 'module') and (FScope <> gsModule) then
-      PutColumn(UnitName, FUnitWidth);
-    PutColumn(SectionColumn(LEntries[LRow.Entry]), FSectionWidth);
-    LX := ARect.Left + 6;
-    LSaved := SaveDC(LCanvas.Handle);
-    IntersectClipRect(LCanvas.Handle, ARect.Left, ARect.Top, LLineRight,
-      ARect.Bottom);
-    // The name column is `Owner.Name` - or, for a landmark, the head word
-    // itself, which then takes the head column and the match highlight, in
-    // the reserved-word colour. `field` is a head word of ours, not a
-    // reserved word, so the tokenizer would paint it as an identifier; it
-    // takes the keyword colour by name (Alex, 2026-09-21: "field in the
-    // same colour as uses / program / type").
-    LName := NameColumn(LEntries[LRow.Entry]);
-    LNameStyle := [];
-    if Kind = 'include' then
+    // The tab's list and the tab itself from the cached pair, never through
+    // tcScope.TabIndex: that read is a SendMessage, and this runs once per
+    // row per repaint (SyncScope).
+    LEntries := FScopeEntries;
+    if LRow.Entry > High(LEntries) then
+      Exit;
+    with LEntries[LRow.Entry] do
     begin
-      Put(Head, LPreproc, []);
-      LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
-      LIdent := LPreproc;
-    end
-    else if Name <> '' then
-    begin
-      if Head = 'field' then
-        Put(Head, LKeyword, [])
+      // The right-hand columns, drawn FIRST, and the row text is then
+      // clipped short of them, so a long detail runs out under a column
+      // instead of over it. From the edge inwards:
+      //  - the LINE, `:N`, for a row that knows its line (the module tab;
+      //    a project row has no position until it is chosen);
+      //  - the UNIT, on the project and group tabs (Alex, 2026-09-19: "the
+      //    module name in a separate column, as the line number is for the
+      //    module tab"). The module tab's rows are all from the one module
+      //    the tab is named after, and the unit's own header row already
+      //    IS that name - so neither gets the column;
+      //  - the SECTION - interface / implementation, `, declaration` for a
+      //    bodiless routine header (Alex, the same day: "one more column
+      //    for the extra information, second from the right").
+      // Each as wide as its longest text on the tab (MeasureHeadColumn),
+      // capped at a third of the list so one absurd name does not eat the
+      // row (PutColumn).
+      LLineRight := ARect.Right;
+      if Line > 0 then
+      begin
+        LNote := ':' + IntToStr(Line);
+        SetTextAlign(LDC, TA_RIGHT or TA_TOP);
+        SetTextColor(LDC, ColorToRGB(LQuiet));
+        ExtTextOut(LDC, ARect.Right - 6, LY, 0, nil, PChar(LNote),
+          Length(LNote), nil);
+        SetTextAlign(LDC, TA_LEFT or TA_TOP or TA_UPDATECP);
+        LLineRight := ARect.Right - 6 - FLineWidth - 8;
+      end;
+      if (Kind <> 'module') and (FScope <> gsModule) then
+        PutColumn(UnitName, FUnitWidth);
+      PutColumn(SectionColumn(LEntries[LRow.Entry]), FSectionWidth);
+      LSaved := SaveDC(LDC);
+      IntersectClipRect(LDC, ARect.Left, ARect.Top, LLineRight, ARect.Bottom);
+      At(ARect.Left + 6);
+      // The name column is `Owner.Name` - or, for a landmark, the head word
+      // itself, which then takes the head column and the match highlight,
+      // in the reserved-word colour. `field` is a head word of ours, not a
+      // reserved word, so the tokenizer would paint it as an identifier; it
+      // takes the keyword colour by name (Alex, 2026-09-21: "field in the
+      // same colour as uses / program / type").
+      LName := NameColumn(LEntries[LRow.Entry]);
+      if Kind = 'include' then
+      begin
+        Put(Head, LPreproc, False);
+        At(ARect.Left + 6 + FHeadWidth + cHeadGap);
+        LIdent := LPreproc;
+      end
+      else if Name <> '' then
+      begin
+        if Head = 'field' then
+          Put(Head, LKeyword, False)
+        else
+          PutSyntax(Head);
+        At(ARect.Left + 6 + FHeadWidth + cHeadGap);
+      end
       else
-        PutSyntax(Head);
-      LX := ARect.Left + 6 + FHeadWidth + cHeadGap;
-    end
-    else
-      LIdent := LKeyword;
-    if LRow.MatchLen > 0 then
-    begin
-      Put(Copy(LName, 1, LRow.MatchFrom), LIdent, LNameStyle);
-      Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LMatch,
-        LNameStyle + [fsBold]);
-      Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LIdent,
-        LNameStyle);
-    end
-    else
-      Put(LName, LIdent, LNameStyle);
-    // The detail spaced the way the source is written: `APath: string`,
-    // `GetIndex(const A: string): Integer`, `CName = 'x'`, `TFoo = class` -
-    // a `:` or `(` right after the name, anything else after one space.
-    // The demo's two spaces before every detail read as `APath : string`
-    // (Alex, 2026-09-21: "Delphi's convention is name-colon-space-type").
-    if Detail <> '' then
-      if CharInSet(Detail[1], [':', '(']) then
-        PutSyntax(Detail)
+        LIdent := LKeyword;
+      if LRow.MatchLen > 0 then
+      begin
+        Put(Copy(LName, 1, LRow.MatchFrom), LIdent, False);
+        Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LMatch, True);
+        Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LIdent,
+          False);
+      end
       else
-        PutSyntax(' ' + Detail);
-    RestoreDC(LCanvas.Handle, LSaved);
+        Put(LName, LIdent, False);
+      // The detail spaced the way the source is written: `APath: string`,
+      // `GetIndex(const A: string): Integer`, `CName = 'x'`, `TFoo = class` -
+      // a `:` or `(` right after the name, anything else after one space.
+      // The demo's two spaces before every detail read as `APath : string`
+      // (Alex, 2026-09-21: "Delphi's convention is name-colon-space-type").
+      if Detail <> '' then
+        if CharInSet(Detail[1], [':', '(']) then
+          PutSyntax(Detail)
+        else
+          PutSyntax(' ' + Detail);
+      RestoreDC(LDC, LSaved);
+    end;
+  finally
+    SetTextAlign(LDC, LOldAlign);
+    SetBkMode(LDC, LOldMode);
+    SelectObject(LDC, LOldFont);
   end;
 end;
 

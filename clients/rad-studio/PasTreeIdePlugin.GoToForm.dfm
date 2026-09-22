@@ -155,24 +155,6 @@ object PasTreeGoToForm: TPasTreeGoToForm
     TabIndex = 0
     TabStop = False
     OnChange = tcScopeChange
-    object lbItems: TListBox
-      AlignWithMargins = True
-      Left = 8
-      Top = 28
-      Width = 864
-      Height = 438
-      Margins.Left = 4
-      Margins.Top = 2
-      Margins.Right = 4
-      Margins.Bottom = 4
-      Style = lbVirtualOwnerDraw
-      Align = alClient
-      ItemHeight = 22
-      TabOrder = 0
-      OnClick = lbItemsClick
-      OnDblClick = lbItemsDblClick
-      OnDrawItem = lbItemsDrawItem
-    end
   end
   object sbStatus: TStatusBar
     Left = 0

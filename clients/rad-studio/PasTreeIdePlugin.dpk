@@ -101,6 +101,7 @@ contains
   { Go To (Ctrl+G): the picker form, copied from PasTree's demo, and the key
     binding that opens it. See PasTreeIdePlugin.GoToForm's header. }
   PasTreeIdePlugin.GoToPicker in 'PasTreeIdePlugin.GoToPicker.pas',
+  PasTreeIdePlugin.ListBox in 'PasTreeIdePlugin.ListBox.pas',
   PasTreeIdePlugin.GoToForm in 'PasTreeIdePlugin.GoToForm.pas' {PasTreeGoToForm},
   { The package's ONE IOTAKeyboardBinding - every feature's key goes through
     it. Its header has why one and not one per feature (0.47.0). }

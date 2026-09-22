@@ -189,7 +189,10 @@ const
   /// SILENT rather than loud without this floor: an older PasTree compiles
   /// the server fine and simply keeps answering F1027 for every compiled-only
   /// unit, and dcuSource would return the file's bytes decoded as text.
-  cMinPasTreeVersion = '0.38.0';
+  /// 0.39.2 (2026-09-22): ProjectOutline rows carry a Detail off the retained
+  /// type descriptors (the type after `: `, `= class` for a struct). Silent
+  /// without it: the project and group tabs of Go To simply show no types.
+  cMinPasTreeVersion = '0.39.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

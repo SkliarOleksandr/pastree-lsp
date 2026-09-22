@@ -73,7 +73,7 @@ unit PasTreeIdePlugin.ResultRows;
 interface
 
 uses
-  Vcl.Graphics, ToolsAPI, ToolsAPI.Editor;
+  Winapi.Windows, Vcl.Graphics, ToolsAPI, ToolsAPI.Editor;
 
 /// <summary>
 /// The tab's first line - "PasTree Find References: ..." - painted bold in
@@ -149,6 +149,20 @@ procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   APlain: Boolean = False);
 
 /// <summary>
+/// PaintSyntaxText on a raw DC, colours only, for a caller that has taken
+/// the row painting away from TCanvas: the DC must hold the font, the
+/// background mode and TA_UPDATECP with the current position at the start
+/// of the text, and each run is one SetTextColor and one ExtTextOut that
+/// advances the position itself. No TCanvas.TextOut - that one measures
+/// the text a second time after drawing it (MoveTo(X + TextWidth)), and
+/// with the caller's own TextWidth that was three GDI text calls per run
+/// where one does (the Go To picker, 2026-09-21: ~10 ms for a screen of
+/// twenty rows on AVImark).
+/// </summary>
+procedure PaintSyntaxTextDC(ADC: HDC; const AText: string; ADefault: TColor;
+  AForceColor: TColor = clNone);
+
+/// <summary>
 /// Holds the editor palette still between Begin and End: the code editor
 /// options interface is fetched once and every colour and style is
 /// remembered the first time it is asked for, instead of a
@@ -167,7 +181,7 @@ procedure EndEditorPalette;
 implementation
 
 uses
-  Winapi.Windows, System.SysUtils, System.Types, System.StrUtils,
+  System.SysUtils, System.Types, System.StrUtils,
   System.UITypes, ToolsAPI.UI;
 
 { ------------------------------------------------------------------------- }
@@ -782,6 +796,32 @@ begin
     LText := Copy(AText, LRun.Start, LRun.Len);
     ACanvas.TextOut(AX, AY, LText);
     Inc(AX, ACanvas.TextWidth(LText));
+  end;
+end;
+
+procedure PaintSyntaxTextDC(ADC: HDC; const AText: string; ADefault: TColor;
+  AForceColor: TColor);
+var
+  LOptions: INTACodeEditorOptions;
+  LHavePalette: Boolean;
+  LRun: TTokenRun;
+  LColor: TColor;
+  LStyle: TFontStyles;
+begin
+  if AText = '' then
+    Exit;
+  LHavePalette := TryEditorOptions(LOptions);
+  for LRun in TokenizeLine(AText) do
+  begin
+    if AForceColor <> clNone then
+      LColor := AForceColor
+    else if LHavePalette then
+      PaletteEntry(LOptions, LRun.Code, LColor, LStyle)
+    else
+      LColor := ADefault;
+    SetTextColor(ADC, ColorToRGB(LColor));
+    // No substring: the run is drawn straight out of AText.
+    ExtTextOut(ADC, 0, 0, 0, nil, @AText[LRun.Start], LRun.Len, nil);
   end;
 end;
 
