@@ -59,6 +59,11 @@ type
     FilePath: string;
     Row: Integer;
     Col: Integer;
+    /// The type names on the hit's LINE as 1-based (column, length) pairs,
+    /// flattened - the server's `typeSpans` member on every result row,
+    /// so a Messages row paints types like the editor does. nil from a
+    /// server that sends none.
+    TypeSpans: TArray<Integer>;
   end;
 
   /// <summary>
@@ -354,6 +359,7 @@ type
     IsDecl: Boolean;
     Snippet: string;
     HiFrom, HiTo: Integer;
+    TypeSpans: TArray<Integer>;   // as TLspHit.TypeSpans
   end;
 
   /// <summary>
@@ -2096,6 +2102,27 @@ end;
 /// with an array, so both shapes are accepted here rather than at two call
 /// sites.
 /// </summary>
+{ AObj's AName member as an integer array - nil when absent or not an
+  array. The type spans of a result row; tolerant of a server without them. }
+function ReadIntArray(AObj: TJSONObject; const AName: string): TArray<Integer>;
+var
+  LArr: TJSONArray;
+  LItem: TJSONValue;
+begin
+  Result := nil;
+  if not AObj.TryGetValue<TJSONArray>(AName, LArr) then
+    Exit;
+  SetLength(Result, LArr.Count);
+  for var LIdx := 0 to LArr.Count - 1 do
+  begin
+    LItem := LArr.Items[LIdx];
+    if LItem is TJSONNumber then
+      Result[LIdx] := TJSONNumber(LItem).AsInt
+    else
+      Result[LIdx] := 0;
+  end;
+end;
+
 function ParseHits(AResult: TJSONValue): TArray<TLspHit>;
 
   function ParseOne(AObj: TJSONObject; out AHit: TLspHit): Boolean;
@@ -2120,6 +2147,7 @@ function ParseHits(AResult: TJSONValue): TArray<TLspHit>;
     if AHit.FilePath = '' then
       Exit;
     LspToIde(LLine, LChar, AHit.Row, AHit.Col);
+    AHit.TypeSpans := ReadIntArray(AObj, 'typeSpans');
     Result := True;
   end;
 
@@ -2689,6 +2717,7 @@ begin
     LEdit.Snippet := LObj.GetValue<string>('snippet', '');
     LEdit.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LEdit.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    LEdit.TypeSpans := ReadIntArray(LObj, 'typeSpans');
     if (LEdit.FilePath = '') or (LEdit.Row < 1) or (LEdit.Col < 1) or
        (LEdit.Len < 1) or (LEdit.OldText = '') or (LEdit.NewText = '') then
       Continue;
@@ -2810,6 +2839,7 @@ begin
     LRow.Snippet := LObj.GetValue<string>('snippet', '');
     LRow.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LRow.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    LRow.Hit.TypeSpans := ReadIntArray(LObj, 'typeSpans');
     if (LRow.Hit.FilePath = '') or (LRow.Hit.Row < 1) or (LRow.Hit.Col < 1) then
       Continue;
     Result[LCount] := LRow;
@@ -2859,6 +2889,7 @@ begin
     LRow.Snippet := LObj.GetValue<string>('snippet', '');
     LRow.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LRow.HiTo := LObj.GetValue<Integer>('hiTo', 0);
+    LRow.Hit.TypeSpans := ReadIntArray(LObj, 'typeSpans');
     Result[LCount] := LRow;
     Inc(LCount);
   end;

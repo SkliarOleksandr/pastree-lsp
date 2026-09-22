@@ -408,7 +408,8 @@ begin
         NewSnippetRow(LEdit.FilePath, LEdit.Row, LEdit.Col,
           TrimRight(LEdit.Snippet), LEdit.HiFrom + 1,
           LEdit.HiTo - LEdit.HiFrom,
-          IfThen(LEdit.IsDecl, 'declaration', '')), LParentRef);
+          IfThen(LEdit.IsDecl, 'declaration', ''), LEdit.TypeSpans),
+        LParentRef);
     end;
   finally
     LFileHeaders.Free;
@@ -1396,4 +1397,4 @@ begin
   GMessageGroup := nil;
 end;
 
-end.
+end.

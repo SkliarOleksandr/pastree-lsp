@@ -301,7 +301,7 @@ begin
       LMatchLen := 0;
   end;
   Result := NewSnippetRow(ARow.Hit.FilePath, ARow.Hit.Row, ARow.Hit.Col,
-    LDisplay, LMatchStart, LMatchLen, RowTag(ARow));
+    LDisplay, LMatchStart, LMatchLen, RowTag(ARow), ARow.Hit.TypeSpans);
 end;
 
 function DistinctFileCount(const ARows: TArray<TLspHierarchyRow>): Integer;

@@ -104,6 +104,14 @@ type
     shape, only the PasTree call differs. }
   TFindSitesKind = (fskAssignments, fskCreations, fskDestructions);
 
+  { One semantic token (HandleSemanticTokens' answer, and the per-line type
+    spans the result surfaces carry). The legend indices live beside the
+    legend constant below. }
+  TSemanticToken = record
+    Line, Col, Len: Integer;      // PasTree 1-based line/col, UTF-16 units
+    TokenType, Modifiers: Integer;
+  end;
+
   TLspServer = class
   private
     FInitialized: Boolean;
@@ -159,6 +167,10 @@ type
     // project (FinalizeAnalysisIfDone), so it is dropped there - and a
     // Ctrl+G that comes back to the Group tab costs the server nothing.
     FOutlineCache: string;
+    // Path (lower-cased, full) -> the file's semantic tokens, for the type
+    // spans every result row carries (LineTypeSpansJson). Dropped with the
+    // outline cache: both are views of one analysis.
+    FLineTokenCache: TDictionary<string, TArray<TSemanticToken>>;
     // The completion seam's engine (PasLsp.Completion) - configuration-
     // derived, so created lazily once and kept for the session.
     FCompletion: TLspCompletionEngine;
@@ -289,6 +301,12 @@ type
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     function HandleSemanticTokens(const AMsg: TLspIncoming): string;
+    function CollectSemanticTokens(const APath: string;
+      AInactive: Boolean): TArray<TSemanticToken>;
+    function LineTypeSpansJson(const APath: string; ALine: Integer): string;
+    function LocationWithTypes(const AFilePath: string;
+      APasLine, APasCol, ALen: Integer): string;
+    function DefineSitesJson(const ASites: TArray<TPasDefineSite>): string;
     function HandleCompletion(const AMsg: TLspIncoming): string;
     function HandleSignatureHelp(const AMsg: TLspIncoming): string;
     function HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
@@ -389,12 +407,6 @@ const
     '"function","method","comment"],' +
     '"tokenModifiers":["declaration","readonly","defaultLibrary"]}';
 
-type
-  TSemanticToken = record
-    Line, Col, Len: Integer;      // PasTree 1-based line/col, UTF-16 units
-    TokenType, Modifiers: Integer;
-  end;
-
 // The legend type and modifiers for a resolved symbol. False for the kinds
 // no editor colours (labels, and the completion-only skKeyword).
 function SemanticTypeOf(const ASym: TSemaSymbol;
@@ -461,6 +473,7 @@ begin
   InvalidateAnalysis;
   FOutgoing.Free;
   FDocs.Free;
+  FLineTokenCache.Free;
   inherited;
 end;
 
@@ -861,6 +874,7 @@ begin
       FreeAndNil(FNav);
       FProject := FSession.TakeProject;
       FOutlineCache := '';   // a new project: the outline table is stale
+      FreeAndNil(FLineTokenCache);
       if FProject <> nil then
       begin
         FNav := NewNavigator;
@@ -1127,6 +1141,7 @@ begin
   begin
     FProject := FSession.TakeProject;
     FOutlineCache := '';   // a new project: the outline table is stale
+    FreeAndNil(FLineTokenCache);
     FreeAndNil(FSession);
     FModuleMode := False;
     if FProject <> nil then
@@ -1149,6 +1164,7 @@ begin
   FreeAndNil(FProject);
   FProject := FSession.TakeProject;
   FOutlineCache := '';   // a new project: the outline table is stale
+  FreeAndNil(FLineTokenCache);
   FreeAndNil(FSession);
   if FProject = nil then
     Exit;
@@ -2182,7 +2198,7 @@ begin
         [PosTag(LPath, LPasLine, LPasCol), LDefName,
          PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
       Exit(BuildResponse(AMsg.IdJson,
-        LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+        LocationWithTypes(LTarget.FilePath, LTarget.Line, LTarget.Col,
           Length(LTarget.Name))));
     end;
     if FNav.IsProjectDefined(LDefName) then
@@ -2255,7 +2271,7 @@ begin
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
-    LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+    LocationWithTypes(LTarget.FilePath, LTarget.Line, LTarget.Col,
       Length(LTarget.Name)));
 end;
 
@@ -2627,6 +2643,17 @@ begin
     AHit.HiTo - AHit.HiFrom);
 end;
 
+{ AObjectJson with a `typeSpans` member added - the line's type names as
+  LineTypeSpansJson spells them - so a result row can paint types like the
+  editor does. A member the protocol does not define, on objects the
+  protocol does (a Location): every other client ignores what it did not
+  ask for, and ours reads it when present. }
+function WithTypeSpans(const AObjectJson, ATypeSpans: string): string;
+begin
+  Result := Copy(AObjectJson, 1, Length(AObjectJson) - 1) +
+    ',"typeSpans":' + ATypeSpans + '}';
+end;
+
 { The rows of FindDefineReferences as plain reference hits. Kind and Active
   are dropped: an LSP Location carries neither, and a `$DEFINE` site is a
   reference like any other (PasTree's own rule - the name can have several
@@ -2730,7 +2757,8 @@ begin
     begin
       if LIdx > 0 then
         LSB.Append(',');
-      LSB.Append(HitLocationJson(LHits[LIdx]));
+      LSB.Append(WithTypeSpans(HitLocationJson(LHits[LIdx]),
+        LineTypeSpansJson(LHits[LIdx].FilePath, LHits[LIdx].Line)));
     end;
     LSB.Append(']');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
@@ -3340,7 +3368,7 @@ begin
         LSB.Append(',');
       LSB.AppendFormat('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
         '"len":%d,"oldText":%s,"newText":%s,"isDecl":%s,"snippet":%s,' +
-        '"hiFrom":%d,"hiTo":%d}',
+        '"hiFrom":%d,"hiTo":%d,"typeSpans":%s}',
         [JsonQuote(PathToUri(LPlan.Edits[LIdx].FilePath)),
          JsonQuote(LPlan.Edits[LIdx].FilePath),
          LPlan.Edits[LIdx].Line, LPlan.Edits[LIdx].Col,
@@ -3349,7 +3377,9 @@ begin
          JsonQuote(EditNewText(LPlan.Edits[LIdx])),
          LowerCase(BoolToStr(LPlan.Edits[LIdx].IsDecl, True)),
          JsonQuote(LPlan.Edits[LIdx].Snippet),
-         LPlan.Edits[LIdx].HiFrom, LPlan.Edits[LIdx].HiTo]);
+         LPlan.Edits[LIdx].HiFrom, LPlan.Edits[LIdx].HiTo,
+         LineTypeSpansJson(LPlan.Edits[LIdx].FilePath,
+           LPlan.Edits[LIdx].Line)]);
     end;
     LSB.Append(']}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
@@ -3509,8 +3539,9 @@ begin
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
-    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
-      cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, '');
+    LJson[LIdx] := WithTypeSpans(HierarchyRowJson(LRows[LIdx].Hit,
+      cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, ''),
+      LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
   Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
 end;
 
@@ -3573,9 +3604,10 @@ begin
     [PosTag(LPath, LPasLine, LPasCol), LWhat, LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
-    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
+    LJson[LIdx] := WithTypeSpans(HierarchyRowJson(LRows[LIdx].Hit,
       cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName,
-      LRows[LIdx].ViaTypeName);
+      LRows[LIdx].ViaTypeName),
+      LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
   Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
 end;
 
@@ -3617,9 +3649,10 @@ begin
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
-    LJson[LIdx] := HierarchyRowJson(LRows[LIdx].Hit,
+    LJson[LIdx] := WithTypeSpans(HierarchyRowJson(LRows[LIdx].Hit,
       cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, '',
-      LRows[LIdx].ParentTypeName, LRows[LIdx].Depth);
+      LRows[LIdx].ParentTypeName, LRows[LIdx].Depth),
+      LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
   Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
 end;
 
@@ -3690,9 +3723,13 @@ begin
     [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   LJson := nil;
   if FNav.DeclHit(LTMid, LSym, LDecl) then
-    LJson := LJson + [HierarchyRowJson(LDecl, 'declaration', '', '')];
+    LJson := LJson + [WithTypeSpans(
+      HierarchyRowJson(LDecl, 'declaration', '', ''),
+      LineTypeSpansJson(LDecl.FilePath, LDecl.Line))];
   for LIdx := 0 to High(LRows) do
-    LJson := LJson + [HierarchyRowJson(LRows[LIdx], cRowWord[AKind], '', '')];
+    LJson := LJson + [WithTypeSpans(
+      HierarchyRowJson(LRows[LIdx], cRowWord[AKind], '', ''),
+      LineTypeSpansJson(LRows[LIdx].FilePath, LRows[LIdx].Line))];
   Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
 end;
 
@@ -3794,14 +3831,19 @@ begin
      ASite.Hit.HiTo]);
 end;
 
-function DefineSitesJson(const ASites: TArray<TPasDefineSite>): string;
+function TLspServer.DefineSitesJson(
+  const ASites: TArray<TPasDefineSite>): string;
 var
   LJson: TArray<string>;
   LIdx: Integer;
 begin
   LJson := nil;
   for LIdx := 0 to High(ASites) do
-    LJson := LJson + [DefineSiteJson(ASites[LIdx])];
+    if ASites[LIdx].Hit.FilePath = '' then
+      LJson := LJson + [DefineSiteJson(ASites[LIdx])]
+    else
+      LJson := LJson + [WithTypeSpans(DefineSiteJson(ASites[LIdx]),
+        LineTypeSpansJson(ASites[LIdx].Hit.FilePath, ASites[LIdx].Hit.Line))];
   Result := '[' + string.Join(',', LJson) + ']';
 end;
 
@@ -4348,7 +4390,7 @@ begin
     [LWhat, PosTag(LPath, LPasLine, LPasCol), LTarget.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
-    LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+    LocationWithTypes(LTarget.FilePath, LTarget.Line, LTarget.Col,
       Length(LTarget.Name)));
 end;
 
@@ -5188,7 +5230,7 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
-      LocationJson(LTarget.FilePath, LTarget.Line, LTarget.Col,
+      LocationWithTypes(LTarget.FilePath, LTarget.Line, LTarget.Col,
         Length(LTarget.Name))));
   end;
 
@@ -5202,7 +5244,7 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
-      LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
+      LocationWithTypes(LHit.FilePath, LHit.Line, LHit.Col,
         LHit.HiTo - LHit.HiFrom)));
   end;
 
@@ -5237,7 +5279,7 @@ begin
         [PosTag(LPath, LPasLine, LPasCol), LName,
          PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
       Exit(BuildResponse(AMsg.IdJson,
-        LocationJson(LHit.FilePath, LHit.Line, LHit.Col,
+        LocationWithTypes(LHit.FilePath, LHit.Line, LHit.Col,
           LHit.HiTo - LHit.HiFrom)));
     end;
   end;
@@ -5285,18 +5327,21 @@ end;
   Columns: token offsets are UTF-16 code units in PasTree (Start/Len into a
   Delphi string), which is exactly LSP's utf-16 positionEncoding, so no
   conversion beyond 1-based -> 0-based. }
-function TLspServer.HandleSemanticTokens(const AMsg: TLspIncoming): string;
+{ Every semantic token of one document, sorted by position and deduplicated
+  (a declaring nkIdent is hit by both passes; the declaration wins). Empty
+  when the file is not in the closure or has no token layer. AInactive adds
+  the $IFDEF'd-out lines as `comment` tokens - the semanticTokens answer
+  wants them, a line's type spans do not. Shared by HandleSemanticTokens and
+  LineTypeSpansJson (the result surfaces' type colouring). }
+function TLspServer.CollectSemanticTokens(const APath: string;
+  AInactive: Boolean): TArray<TSemanticToken>;
 var
   LPath: string;
-  LMid, LFileId, LIdx, LNode, LSymIdx, LFromLine, LToLine, LCount,
-    LLspLine, LLspChar, LPrevLine, LPrevChar, LResMid, LResSym: Integer;
+  LMid, LFileId, LIdx, LNode, LSymIdx, LResMid, LResSym, LCount: Integer;
   LModel: TPasSemaModel;
   LExt: TPasExtRef;
   LTokens: TList<TSemanticToken>;
   LTok: TSemanticToken;
-  LSB: TStringBuilder;
-  LStart: UInt64;
-  LIsRange: Boolean;
 
   // The model's stream for the document's own file - the node token
   // positions are offsets into THIS text.
@@ -5414,32 +5459,15 @@ var
   end;
 
 begin
-  LStart := GetTickCount64;
-  LIsRange := AMsg.Method.EndsWith('/range');
-  LPath := DocPathOf(AMsg.Params);
-  if LPath = '' then
-    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
-      'semanticTokens: textDocument.uri required'));
-  LFromLine := 0;
-  LToLine := MaxInt;
-  if LIsRange then
-  begin
-    LFromLine := AMsg.Params.GetValue<Integer>('range.start.line', 0);
-    LToLine := AMsg.Params.GetValue<Integer>('range.end.line', MaxInt);
-  end;
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  if FNav = nil then
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
-  LMid := FNav.ModelIdOf(LPath);
+  Result := nil;
+  if (FNav = nil) or (FProject = nil) then
+    Exit;
+  LMid := FNav.ModelIdOf(APath);
   if LMid < 0 then
-  begin
-    Log('semanticTokens: file not in the analyzed closure: ' + LPath);
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
-  end;
+    Exit;
   LModel := FProject.Model(LMid);
   if LModel = nil then
-    Exit(BuildResponse(AMsg.IdJson, 'null'));
+    Exit;
   // An open document is never demoted, but the request is legal for any
   // file in the closure - and a demoted model has no token layer to
   // position anything in.
@@ -5447,11 +5475,11 @@ begin
     FProject.EnsureHydrated(LMid);
   if (Length(LModel.Tree.Source.Files) = 0) or
      (Length(LModel.Tree.Source.Visible) = 0) then
-    Exit(BuildResponse(AMsg.IdJson, '{"data":[]}'));
+    Exit;
 
   // Which of the model's files IS this document - normally [0], the main
   // file, but a request for an $I include is a legal request too.
-  LPath := TPath.GetFullPath(LPath);
+  LPath := TPath.GetFullPath(APath);
   LFileId := 0;
   for LIdx := 0 to High(LModel.Tree.Source.FileNames) do
     if SameText(TPath.GetFullPath(LModel.Tree.Source.FileNames[LIdx]), LPath)
@@ -5462,7 +5490,6 @@ begin
     end;
 
   LTokens := TList<TSemanticToken>.Create;
-  LSB := TStringBuilder.Create;
   try
     // 1. declarations
     for LSymIdx := 0 to LModel.SymCount - 1 do
@@ -5491,13 +5518,13 @@ begin
         AddIdent(LNode, LResMid, LResSym, False);
     end;
     // 3. inactive code
-    if LFileId <= High(LModel.Tree.Source.Skipped) then
+    if AInactive and (LFileId <= High(LModel.Tree.Source.Skipped)) then
       for LIdx := 0 to High(LModel.Tree.Source.Skipped[LFileId]) do
         AddInactive(LModel.Tree.Source.Skipped[LFileId][LIdx]);
 
-    // The protocol wants source order; the declaration pass is symbol order
-    // and the skipped regions come last, so sort - declarations first at a
-    // shared position, which is what the duplicate filter below keeps.
+    // Source order; the declaration pass is symbol order and the skipped
+    // regions come last, so sort - declarations first at a shared position,
+    // which is what the duplicate filter keeps.
     LTokens.Sort(TComparer<TSemanticToken>.Construct(
       function(const A, B: TSemanticToken): Integer
       begin
@@ -5508,11 +5535,8 @@ begin
           Result := (B.Modifiers and SM_DECLARATION) -
             (A.Modifiers and SM_DECLARATION);
       end));
-
-    LSB.Append('{"data":[');
+    SetLength(Result, LTokens.Count);
     LCount := 0;
-    LPrevLine := 0;
-    LPrevChar := 0;
     LTok.Line := -1;
     LTok.Col := -1;
     for LIdx := 0 to LTokens.Count - 1 do
@@ -5520,6 +5544,128 @@ begin
       if (LTokens[LIdx].Line = LTok.Line) and (LTokens[LIdx].Col = LTok.Col)
       then
         Continue;                                    // the duplicate filter
+      LTok := LTokens[LIdx];
+      Result[LCount] := LTok;
+      Inc(LCount);
+    end;
+    SetLength(Result, LCount);
+  finally
+    LTokens.Free;
+  end;
+end;
+
+{ The type names on one line of a file, as a JSON array of 1-based
+  (column, length) pairs, flattened - `[5,7,15,7]` - for a result row's
+  snippet; `[]` when the line names none. Every result surface (references,
+  the Find All family, defines, rename) attaches one to each hit so the
+  IDE's Messages rows can paint types like the editor does. The tokens of a
+  file are collected ONCE per analysis and kept in FLineTokenCache - a
+  search answers hundreds of hits in a handful of files, and the collection
+  is a full pass over the model; the cache is dropped when the analysis is
+  replaced (InvalidateAnalysis) or refreshed (PublishDiagnostics). }
+function TLspServer.LineTypeSpansJson(const APath: string;
+  ALine: Integer): string;
+var
+  LKey: string;
+  LTokens: TArray<TSemanticToken>;
+  LLo, LHi, LMid: Integer;
+  LSB: TStringBuilder;
+begin
+  LKey := LowerCase(TPath.GetFullPath(APath));
+  if FLineTokenCache = nil then
+    FLineTokenCache := TDictionary<string, TArray<TSemanticToken>>.Create;
+  if not FLineTokenCache.TryGetValue(LKey, LTokens) then
+  begin
+    LTokens := CollectSemanticTokens(APath, False);
+    FLineTokenCache.Add(LKey, LTokens);
+  end;
+  // The first token of ALine, by binary search on the sorted array.
+  LLo := 0;
+  LHi := Length(LTokens);
+  while LLo < LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if LTokens[LMid].Line < ALine then
+      LLo := LMid + 1
+    else
+      LHi := LMid;
+  end;
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('[');
+    while (LLo < Length(LTokens)) and (LTokens[LLo].Line = ALine) do
+    begin
+      if LTokens[LLo].TokenType in [ST_TYPE, ST_CLASS, ST_ENUM, ST_INTERFACE,
+         ST_STRUCT, ST_TYPE_PARAMETER] then
+      begin
+        if LSB.Length > 1 then
+          LSB.Append(',');
+        LSB.Append(LTokens[LLo].Col).Append(',').Append(LTokens[LLo].Len);
+      end;
+      Inc(LLo);
+    end;
+    LSB.Append(']');
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
+
+{ A single-target answer (definition, declarationAt, typeDefinition) as a
+  Location carrying its line's type spans - the Find References tab shows
+  the declaration row from declarationAt, not from the references list
+  (found on the first live run of the coloured rows, 2026-09-22: every
+  row coloured but that one). }
+function TLspServer.LocationWithTypes(const AFilePath: string;
+  APasLine, APasCol, ALen: Integer): string;
+begin
+  Result := WithTypeSpans(LocationJson(AFilePath, APasLine, APasCol, ALen),
+    LineTypeSpansJson(AFilePath, APasLine));
+end;
+
+function TLspServer.HandleSemanticTokens(const AMsg: TLspIncoming): string;
+var
+  LPath: string;
+  LIdx, LFromLine, LToLine, LCount, LLspLine, LLspChar, LPrevLine,
+    LPrevChar: Integer;
+  LTokens: TArray<TSemanticToken>;
+  LTok: TSemanticToken;
+  LSB: TStringBuilder;
+  LStart: UInt64;
+  LIsRange: Boolean;
+begin
+  LStart := GetTickCount64;
+  LIsRange := AMsg.Method.EndsWith('/range');
+  LPath := DocPathOf(AMsg.Params);
+  if LPath = '' then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'semanticTokens: textDocument.uri required'));
+  LFromLine := 0;
+  LToLine := MaxInt;
+  if LIsRange then
+  begin
+    LFromLine := AMsg.Params.GetValue<Integer>('range.start.line', 0);
+    LToLine := AMsg.Params.GetValue<Integer>('range.end.line', MaxInt);
+  end;
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  if FNav.ModelIdOf(LPath) < 0 then
+  begin
+    Log('semanticTokens: file not in the analyzed closure: ' + LPath);
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  LTokens := CollectSemanticTokens(LPath, True);
+
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append('{"data":[');
+    LCount := 0;
+    LPrevLine := 0;
+    LPrevChar := 0;
+    for LIdx := 0 to High(LTokens) do
+    begin
       LTok := LTokens[LIdx];
       PasTreeToLsp(LTok.Line, LTok.Col, LLspLine, LLspChar);
       if (LLspLine < LFromLine) or (LLspLine > LToLine) then
@@ -5543,7 +5689,6 @@ begin
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
     LSB.Free;
-    LTokens.Free;
   end;
 end;
 

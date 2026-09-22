@@ -104,7 +104,8 @@ function NewFileHeaderRow(const AFilePath: string;
 /// </summary>
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
-  const ATag: string): IOTACustomMessage;
+  const ATag: string; const ATypeSpans: TArray<Integer> = nil)
+  : IOTACustomMessage;
 
 /// <summary>
 /// The colour a Find References row marks its match with - clMaroon, or the
@@ -183,7 +184,8 @@ implementation
 
 uses
   System.SysUtils, System.Types, System.StrUtils,
-  System.UITypes, ToolsAPI.UI;
+  System.UITypes, ToolsAPI.UI,
+  PasTreeIdePlugin.Settings;   // the Highlighting tab's type colour
 
 { ------------------------------------------------------------------------- }
 { The display tokenizer                                                      }
@@ -872,6 +874,7 @@ type
     FCol: Integer;
     FText: string;   // title: the whole line; header: unused; snippet: the raw line text
     FSuffix: string; // snippet: the tag or ''
+    FTypeSpans: TArray<Integer>; // snippet: type names, (col, len) pairs
     FMatchStart: Integer; // 1-based into FText; snippet: the match,
     FMatchLen: Integer;   // title: the orange span; 0 = none
     FCount: Integer; // header only: the [N]
@@ -985,7 +988,8 @@ var
   LHavePalette: Boolean;
   LBaseColor: TColor;
   LBaseStyle: TFontStyles;
-  LBlue, LOrange, LGreen, LMatchColor: TColor;
+  LBlue, LOrange, LGreen, LMatchColor, LTypeColor: TColor;
+  LTypeOn: Boolean;
   LTop, LX: Integer;
 
   procedure Put(const ARun: string; AColor: TColor; AStyle: TFontStyles);
@@ -1020,6 +1024,12 @@ var
         LColor := LOptions.FontColor[LRun.Code];
         LStyle := LOptions.FontStyles[LRun.Code];
       end;
+      // A type name in the Highlighting tab's colour - colour only, as in
+      // the Go To picker: bold here is the match's mark. The spans are the
+      // server's, by column; the tab replacement kept the columns.
+      if LTypeOn and (LRun.Code = atIdentifier) and
+         InTypeSpan(FTypeSpans, LRun.Start) then
+        LColor := LTypeColor;
       // Split the run where it crosses the match boundary, so the marker
       // lands on exactly the identifier and nothing else.
       LFrom := LRun.Start;
@@ -1055,6 +1065,8 @@ begin
   LHavePalette := TryEditorOptions(LOptions);
   LBaseColor := ACanvas.Font.Color;
   LBaseStyle := ACanvas.Font.Style;
+  LTypeOn := TypeHighlightEnabled and (Length(FTypeSpans) > 0);
+  LTypeColor := TypeHighlightColor;
   LBlue := LBaseColor;
   LOrange := LBaseColor;
   LGreen := LBaseColor;
@@ -1171,7 +1183,7 @@ end;
 
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
-  const ATag: string): IOTACustomMessage;
+  const ATag: string; const ATypeSpans: TArray<Integer>): IOTACustomMessage;
 var
   LRow: TResultRow;
 begin
@@ -1179,6 +1191,7 @@ begin
   LRow.FFilePath := AFilePath;
   LRow.FLine := ALine;
   LRow.FCol := ACol;
+  LRow.FTypeSpans := ATypeSpans;
   // TextOut does not expand tabs - it paints them as boxes. Tabs become
   // single spaces, 1:1, so the match offsets keep meaning what they meant;
   // a tab-indented line ends up narrower than in the editor, which is what

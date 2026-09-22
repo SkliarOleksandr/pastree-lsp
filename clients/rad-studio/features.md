@@ -224,7 +224,9 @@ colouring tracks the analysis: it arrives with the first repaint after a
 module opens and refreshes after every re-analysis, keeping the previous marks
 in between rather than flickering. The Go To picker paints the same names in
 the same colour - a type row's name, a member's owner, the types inside the
-detail column - colour only, since bold there marks the match. The
+detail column - colour only, since bold there marks the match; so do the
+Messages rows of Find References, the Find All family, Find Defines and
+Rename, whose every hit carries its line's type names from the server. The
 Highlighting tab of the settings holds the switch, the colour, bold, italic
 and underline, with a preview; a change applies to every open editor on OK.
 

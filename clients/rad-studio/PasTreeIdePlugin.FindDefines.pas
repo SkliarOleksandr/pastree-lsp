@@ -248,7 +248,8 @@ begin
       LDisplay := DisplaySnippet(LRow, LMatchStart, LMatchLen);
       LMessageServices.AddCustomMessage(
         NewSnippetRow(LRow.Hit.FilePath, LRow.Hit.Row, LRow.Hit.Col,
-          LDisplay, LMatchStart, LMatchLen, OriginTag(LRow)),
+          LDisplay, LMatchStart, LMatchLen, OriginTag(LRow),
+          LRow.Hit.TypeSpans),
         LParentRef);
     end;
   finally
@@ -284,7 +285,8 @@ begin
     LDisplay := DisplaySnippet(LRow, LMatchStart, LMatchLen);
     LMessageServices.AddCustomMessagePtr(
       NewSnippetRow(LRow.Hit.FilePath, LRow.Hit.Row, LRow.Hit.Col,
-        LDisplay, LMatchStart, LMatchLen, OriginTag(LRow)),
+        LDisplay, LMatchStart, LMatchLen, OriginTag(LRow),
+        LRow.Hit.TypeSpans),
       LGroup);
   end;
   LMessageServices.ShowMessageView(LGroup);

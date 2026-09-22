@@ -1789,6 +1789,7 @@ const
   cDeclaration = 1; cReadonly = 2; cDefaultLibrary = 4;
 var
   LUnitFile: string;
+  LLine, LChar: Integer;
   LParams, LDoc, LRange, LPos: TJSONObject;
   LLines, LChars, LLens, LTypes, LMods: TArray<Integer>;
   LCount: Integer;
@@ -1935,6 +1936,18 @@ begin
   // A LIBRARY ancestor (`class(TInterfacedObject)`) is LspProjectSmoke's
   // check: this fixture project has no RTL on its path, so System's names
   // resolve to nothing here, for definition and tokens alike.
+
+  // Every result row carries the type names of ITS LINE (`typeSpans`, 1-based
+  // column and length pairs), so the IDE's Messages rows paint types like
+  // the editor. References of TBox: its declaration line `  TBox = record`
+  // names TBox at column 3.
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  FindPos(LUnitFile, 'TBox = record', 'TBox', LLine, LChar);
+  Check(Ask('textDocument/references',
+    PositionParams(LUnitFile, LLine, LChar, True)),
+    'references on TBox answered');
+  Check(GOk and GResultJson.Contains('"typeSpans":[3,4'),
+    'and the declaration row carries TBox as a type span at column 3');
 end;
 
 { 5d-ter. rename: prepareRename, textDocument/rename and pastree/renamePlan.

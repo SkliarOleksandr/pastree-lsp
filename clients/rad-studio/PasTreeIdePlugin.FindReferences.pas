@@ -312,7 +312,7 @@ var
     end;
     LMessageServices.AddCustomMessage(
       NewSnippetRow(AHit.FilePath, AHit.Row, AHit.Col, LDisplay,
-        LMatchStart, LMatchLen, ATag), AParent);
+        LMatchStart, LMatchLen, ATag, AHit.TypeSpans), AParent);
   end;
 
 begin
