@@ -1379,6 +1379,15 @@ begin
   FState := lcsFailed;
   Log(Format('server connection lost: %s (stderr: %s)',
     [AReason, StdErrWhere]));
+  // INTO THE SERVER'S LOG FILE AS WELL, directly - the server that would have
+  // written it is the thing that just died, and the Build tab line above is
+  // gone with the IDE session. Without this line a log shows a fresh server
+  // start with nothing between it and the previous one's last quiet line,
+  // and the death is invisible (AVImark report, 2026-09-22). Unconditional on
+  // the advanced switch: one line per death is not volume.
+  AppendIdeLogLine(FOptions.LogFile,
+    'server connection lost: ' + AReason
+    + ' - the next request starts a new server');
   FOutbox.Clear;
   FailAllPending('server connection lost: ' + AReason);
   // FConn is deliberately NOT freed here - see EnsureStarted for why.

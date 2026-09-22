@@ -53,6 +53,16 @@ procedure TimingLog(const ALine: string);
 procedure TimingLogFmt(const AFormat: string; const AArgs: array of const);
 
 /// <summary>
+/// The same append, to an explicit path, regardless of the timing switch -
+/// for the few lines that must reach the file even with advanced logging
+/// off. The one so far is "server connection lost": the server that could
+/// have logged its own death is the thing that just died, and on 2026-09-22
+/// an AVImark log showed a fresh server start with nothing at all between it
+/// and the previous one's last quiet line, so the death itself was invisible.
+/// </summary>
+procedure AppendIdeLogLine(const APath, ALine: string);
+
+/// <summary>
 /// A monotonic millisecond clock for elapsed times (QueryPerformanceCounter
 /// under the hood, so sub-millisecond stages round honestly rather than to
 /// the 15 ms of GetTickCount).
@@ -105,18 +115,18 @@ begin
   Result := Ms(TimingNowMs - AStartMs);
 end;
 
-procedure TimingLog(const ALine: string);
+procedure AppendIdeLogLine(const APath, ALine: string);
 var
   LFile: THandle;
   LBytes: TBytes;
   LWritten: DWORD;
   LStamp: string;
 begin
-  if GPath = '' then
+  if APath = '' then
     Exit;
   try
     LStamp := FormatDateTime('hh:nn:ss.zzz', Now, TFormatSettings.Invariant);
-    LFile := CreateFile(PChar(GPath), FILE_APPEND_DATA,
+    LFile := CreateFile(PChar(APath), FILE_APPEND_DATA,
       FILE_SHARE_READ or FILE_SHARE_WRITE, nil, OPEN_ALWAYS,
       FILE_ATTRIBUTE_NORMAL, 0);
     if LFile = INVALID_HANDLE_VALUE then
@@ -131,6 +141,11 @@ begin
   except
     // Swallowed by design - see the unit header.
   end;
+end;
+
+procedure TimingLog(const ALine: string);
+begin
+  AppendIdeLogLine(GPath, ALine);
 end;
 
 procedure TimingLogFmt(const AFormat: string; const AArgs: array of const);

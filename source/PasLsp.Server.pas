@@ -44,6 +44,7 @@ interface
 
 uses
   Winapi.Windows,
+  Winapi.PsAPI,
   System.SysUtils,
   System.StrUtils,
   System.Classes,
@@ -350,6 +351,9 @@ type
   end;
 
 implementation
+
+// Defined beside StateLine, used earlier by FinalizeAnalysisIfDone.
+function MemoryLine: string; forward;
 
 { Semantic tokens legend - the indices the ST_/SM_ constants encode MUST match
   the array positions advertised in HandleInitialize, which is why both live
@@ -1163,9 +1167,10 @@ begin
   EndProgress(Format('%d units in %d ms',
     [FProject.ModelCount, GetTickCount64 - FBuildStart]));
   Log(Format('analysis %s: %d units in %d ms, %d diagnostics in closure;'
-    + ' stages %s',
+    + ' stages %s %s',
     [IfThen(LWasModule, 'done (incremental)', 'done'), FProject.ModelCount,
-     GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings]));
+     GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings,
+     MemoryLine]));
   // Every unit and every diagnostic, not just the open documents' - see
   // LogParseRecord for why that difference is the whole point.
   //
@@ -1623,6 +1628,41 @@ begin
   Result.LibraryPaths := FLibraryPaths;
 end;
 
+{ This process's memory and the system's remaining commit, in MB, for the two
+  lines a memory question is asked of: "analysis done" (how much one closure
+  costs on THIS machine) and "EXCEPTION in" (what was left when it failed).
+  Added after the 2026-09-22 AVImark report: two EOutOfMemory in one
+  millisecond on different threads of a Win64 process on a 32 GB machine,
+  and not one number anywhere in the log to say whether the process, the
+  system, or a bogus allocation size was to blame. In a project group there
+  is one server per project, each holding its own closure, so the process
+  figure alone cannot answer that - the system's free commit is what says
+  whether the neighbours had already taken the rest. Never raises: it runs
+  while unwinding faults. }
+function MemoryLine: string;
+var
+  LCounters: TProcessMemoryCounters;
+  LStatus: TMemoryStatusEx;
+begin
+  Result := '';
+  try
+    FillChar(LCounters, SizeOf(LCounters), 0);
+    LCounters.cb := SizeOf(LCounters);
+    if GetProcessMemoryInfo(GetCurrentProcess, @LCounters, SizeOf(LCounters)) then
+      Result := Format('mem ws=%dMB peak=%dMB commit=%dMB',
+        [LCounters.WorkingSetSize shr 20, LCounters.PeakWorkingSetSize shr 20,
+         LCounters.PagefileUsage shr 20]);
+    FillChar(LStatus, SizeOf(LStatus), 0);
+    LStatus.dwLength := SizeOf(LStatus);
+    if GlobalMemoryStatusEx(LStatus) then
+      Result := Result + Format(' sys-free phys=%dMB commit=%dMB load=%d%%',
+        [LStatus.ullAvailPhys shr 20, LStatus.ullAvailPageFile shr 20,
+         LStatus.dwMemoryLoad]);
+  except
+    // A diagnostic must not become the second failure.
+  end;
+end;
+
 function TLspServer.StateLine: string;
 var
   LSession, LProject: string;
@@ -1640,9 +1680,9 @@ begin
     LProject := 'none'
   else
     LProject := Format('%d units', [FProject.ModelCount]);
-  Result := Format('session=%s project=%s docs=%d dirty=%s pending=%s',
+  Result := Format('session=%s project=%s docs=%d dirty=%s pending=%s %s',
     [LSession, LProject, FDocs.Count, BoolToStr(FDirty, True),
-     BoolToStr(FPendingDue <> 0, True)]);
+     BoolToStr(FPendingDue <> 0, True), MemoryLine]);
 end;
 
 procedure TLspServer.Idle;

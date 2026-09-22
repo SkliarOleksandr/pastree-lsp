@@ -731,12 +731,31 @@ begin
 end;
 
 procedure TLspConnection.DispatchGone(const AReason: string);
+var
+  LReason: string;
+  LCode: DWORD;
 begin
   if FGoneReported then
     Exit;
   FGoneReported := True;
+  // The exit code, when the child has one: it is the only trace a crash
+  // leaves. An unhandled exception in a console process ends it with the
+  // exception code (0xC0000005 for an access violation, 0xC00000FD for a
+  // stack overflow), and an RTL fault that reached the top exits with 1 -
+  // whereas EOF with STILL_ACTIVE means the pipe closed under a live server,
+  // which is a different investigation.
+  LReason := AReason;
+  if LReason = '' then
+    LReason := 'pipe closed';
+  if (FProcess <> 0) and GetExitCodeProcess(FProcess, LCode) then
+  begin
+    if LCode = STILL_ACTIVE then
+      LReason := LReason + ', process still running'
+    else
+      LReason := LReason + Format(', exit code 0x%.8X (%d)', [LCode, LCode]);
+  end;
   if Assigned(FOnGone) then
-    FOnGone(AReason);
+    FOnGone(LReason);
 end;
 
 function TLspConnection.Send(const AJson: string): Boolean;
