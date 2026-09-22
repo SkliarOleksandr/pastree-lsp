@@ -3953,9 +3953,11 @@ end;
     "scope": "project"
     "kinds": [...], "heads": [...], "sections": [...], "owners": [...]
     "files": [[uri, unitName, unitId], ...]
-    "rows": [[kind, head, owner, "Name", "detail", section, isImpl, file, sym, node, line, col], ...]
+    "rows": [[kind, head, owner, "Name", "detail", section, isImpl, file, sym, node, line, col, [typeStart, typeLen, ...]], ...]
 
-  kind/head/owner/section/file are indices into the tables; isImpl is 0/1.
+  kind/head/owner/section/file are indices into the tables; isImpl is 0/1;
+  the last element is the detail's type names as 1-based (start, len)
+  pairs, flattened, empty when it names none (PasTree's DetailTypes).
   Same list: ~8 MB, and the client reads it in one pass
   (PasTreeIdePlugin.OutlineRows, the reader; TLspClient.RequestRaw hands it
   the text without a DOM). Kinds, heads and sections still travel as WORDS
@@ -3970,7 +3972,7 @@ const
     'implementation', 'initialization', 'finalization');
 var
   LScope, LPath, LItem: string;
-  LMid, LIdx, LTable: Integer;
+  LMid, LIdx, LTable, LSpan: Integer;
   LMids: TArray<Integer>;
   LEntries: TArray<TPasOutlineEntry>;
   LBuf: TJsonBuf;
@@ -4170,7 +4172,20 @@ begin
         LBuf.AddInt(Line);
         LBuf.AddChar(',');
         LBuf.AddInt(Col);
-        LBuf.AddChar(']');
+        // 13th: the detail's type names, [start, len, start, len...],
+        // 1-based into the detail (PasTree 0.41.0, DetailTypes) - what the
+        // picker paints in its type colour. Present on every row so the
+        // reader's shape is one; empty when the detail names no type.
+        LBuf.Add(',[');
+        for LSpan := 0 to High(DetailTypes) do
+        begin
+          if LSpan > 0 then
+            LBuf.AddChar(',');
+          LBuf.AddInt(DetailTypes[LSpan].Start);
+          LBuf.AddChar(',');
+          LBuf.AddInt(DetailTypes[LSpan].Len);
+        end;
+        LBuf.Add(']]');
       end;
     LBuf.Add(']}');
     // Two times, because they are two different problems: the list is
@@ -5274,7 +5289,7 @@ function TLspServer.HandleSemanticTokens(const AMsg: TLspIncoming): string;
 var
   LPath: string;
   LMid, LFileId, LIdx, LNode, LSymIdx, LFromLine, LToLine, LCount,
-    LLspLine, LLspChar, LPrevLine, LPrevChar: Integer;
+    LLspLine, LLspChar, LPrevLine, LPrevChar, LResMid, LResSym: Integer;
   LModel: TPasSemaModel;
   LExt: TPasExtRef;
   LTokens: TList<TSemanticToken>;
@@ -5329,6 +5344,29 @@ var
     LOne.TokenType := LType;
     LOne.Modifiers := LMods;
     LTokens.Add(LOne);
+  end;
+
+  // The navigator's answer for the identifier at ANode's token - SymbolAt,
+  // the Ctrl+Click resolution, by position, since the node-level resolver
+  // is the navigator's private business. Only for nodes neither map knows.
+  function NavResolve(ANode: Integer; out AMid, ASym: Integer): Boolean;
+  var
+    LVisIdx, LLine, LCol: Integer;
+    LVis: TPasVisibleToken;
+    LName: string;
+  begin
+    Result := False;
+    if (FNav = nil) or (ANode < 0) or (ANode > High(LModel.Tree.Nodes)) then
+      Exit;
+    LVisIdx := LModel.Tree.Nodes[ANode].FirstToken;
+    if (LVisIdx < 0) or (LVisIdx > High(LModel.Tree.Source.Visible)) then
+      Exit;
+    LVis := LModel.Tree.Source.Visible[LVisIdx];
+    if (LVis.FileId <> LFileId) or (LVis.TokenIndex < 0) or
+       (LVis.TokenIndex > High(Stream.Tokens)) then
+      Exit;
+    Stream.OffsetToLineCol(Stream.Tokens[LVis.TokenIndex].Start, LLine, LCol);
+    Result := FNav.SymbolAt(LMid, LLine, LCol, AMid, ASym, LName);
   end;
 
   // A skipped ($IFDEF'd-out) region as comment tokens, one per covered line,
@@ -5443,7 +5481,14 @@ begin
         AddIdent(LNode, LMid, LSymIdx, False)
       else if (LModel.ExtRefMap <> nil) and
               LModel.ExtRefMap.TryGetValue(LNode, LExt) then
-        AddIdent(LNode, LExt.UnitId, LExt.Sym, False);
+        AddIdent(LNode, LExt.UnitId, LExt.Sym, False)
+      // Neither map: the navigator's own resolution, which is what
+      // Ctrl+Click does - it also knows the names the two maps do not
+      // carry, a class header's heritage list first of all (`TDog =
+      // class(TAnimal)` painted TAnimal in nothing on the first live run,
+      // 2026-09-22, while the same name in a field's type coloured).
+      else if NavResolve(LNode, LResMid, LResSym) then
+        AddIdent(LNode, LResMid, LResSym, False);
     end;
     // 3. inactive code
     if LFileId <= High(LModel.Tree.Source.Skipped) then

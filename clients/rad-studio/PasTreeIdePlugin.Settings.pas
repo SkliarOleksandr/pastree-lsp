@@ -31,6 +31,10 @@ unit PasTreeIdePlugin.Settings;
 
 interface
 
+uses
+  System.SysUtils,
+  System.UITypes;   // TColor and TFontStyles without dragging in the VCL
+
 /// <summary>
 /// Whether we replace the IDE's Structure pane content for Pascal sources
 /// (PasTreeIdePlugin.Outline). False leaves the pane to the IDE's own
@@ -211,15 +215,34 @@ type
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
     ClearLogOnOpen: Boolean;
+    // Highlighting tab: a type name painted in its own colour and style
+    // wherever the analysis resolved one (PasTreeIdePlugin.SemanticPaint).
+    HighlightTypes: Boolean;
+    TypeColor: TColor;
+    TypeFontStyle: TFontStyles;
   end;
 
 function LoadSettings: TPasTreeSettings;
 procedure SaveSettings(const ASettings: TPasTreeSettings);
 
+/// <summary>
+/// The Highlighting tab as the paint path reads it - per syntax run per
+/// repaint, so all three come from the cached record, no registry read.
+/// </summary>
+function TypeHighlightEnabled: Boolean;
+function TypeHighlightColor: TColor;
+function TypeHighlightStyle: TFontStyles;
+
+/// <summary>
+/// Registers the ONE listener called (main thread) after the dialog saved -
+/// the colouring layer repaints every open editor with the new colour, so a
+/// change shows without a restart. nil unregisters.
+/// </summary>
+procedure SetSettingsSavedListener(const AListener: TProc);
+
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.Win.Registry,
   Winapi.Windows,
@@ -244,8 +267,15 @@ const
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
   cValueClearLogOnOpen = 'ClearLogOnProjectOpen';
+  cValueHighlightTypes = 'HighlightTypes';
+  cValueTypeColor = 'TypeColor';
+  cValueTypeFontStyle = 'TypeFontStyle';
+  // Teal, BGR - the PasTree demo's default, readable on both IDE themes.
+  cDefaultTypeColor = TColor($00808000);
 
 var
+  // See SetSettingsSavedListener.
+  GSettingsSavedListener: TProc;
   // The in-memory copy. Loaded on first read, replaced on every save, so a
   // gesture never pays for a registry round trip and never reads a stale
   // value either.
@@ -304,6 +334,27 @@ begin
     + cSettingsKey;
 end;
 
+{ TFontStyles <-> one registry integer: bit 0 bold, 1 italic, 2 underline,
+  3 strikeout - Ord(TFontStyle), and stable for as long as the enum is. }
+function StyleBits(AStyles: TFontStyles): Integer;
+var
+  LStyle: TFontStyle;
+begin
+  Result := 0;
+  for LStyle in AStyles do
+    Result := Result or (1 shl Ord(LStyle));
+end;
+
+function StylesOf(ABits: Integer): TFontStyles;
+var
+  LStyle: TFontStyle;
+begin
+  Result := [];
+  for LStyle := Low(TFontStyle) to High(TFontStyle) do
+    if ABits and (1 shl Ord(LStyle)) <> 0 then
+      Include(Result, LStyle);
+end;
+
 function LoadSettings: TPasTreeSettings;
 var
   LReg: TRegistry;
@@ -326,6 +377,19 @@ var
     end;
   end;
 
+  function ReadInt(ALReg: TRegistry; const AName: string;
+    ADefault: Integer): Integer;
+  begin
+    Result := ADefault;
+    if not ALReg.ValueExists(AName) then
+      Exit;
+    try
+      Result := ALReg.ReadInteger(AName);
+    except
+      Result := ADefault;
+    end;
+  end;
+
 begin
   // DEFAULTS FIRST, so every early exit below lands on them.
   Result.OverrideStructureView := True;
@@ -340,6 +404,9 @@ begin
   // See AdvancedLoggingEnabled: the one default that is False.
   Result.AdvancedLogging := False;
   Result.ClearLogOnOpen := True;
+  Result.HighlightTypes := True;
+  Result.TypeColor := cDefaultTypeColor;
+  Result.TypeFontStyle := [];
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -351,6 +418,11 @@ begin
     if not LReg.OpenKeyReadOnly(LKey) then
       Exit;   // never saved - the defaults stand
     try
+      Result.HighlightTypes :=
+        ReadFlag(LReg, cValueHighlightTypes, Result.HighlightTypes);
+      Result.TypeColor :=
+        TColor(ReadInt(LReg, cValueTypeColor, Integer(Result.TypeColor)));
+      Result.TypeFontStyle := StylesOf(ReadInt(LReg, cValueTypeFontStyle, 0));
       Result.OverrideStructureView :=
         ReadFlag(LReg, cValueStructureView, Result.OverrideStructureView);
       Result.CtrlClickNavigation :=
@@ -419,6 +491,10 @@ begin
           Ord(ASettings.AdvancedLogging));
         LReg.WriteInteger(cValueClearLogOnOpen,
           Ord(ASettings.ClearLogOnOpen));
+        LReg.WriteInteger(cValueHighlightTypes, Ord(ASettings.HighlightTypes));
+        LReg.WriteInteger(cValueTypeColor, Integer(ASettings.TypeColor));
+        LReg.WriteInteger(cValueTypeFontStyle,
+          StyleBits(ASettings.TypeFontStyle));
       finally
         LReg.CloseKey;
       end;
@@ -551,9 +627,30 @@ begin
   Result := CurrentSettings.EnableLogging and CurrentSettings.ClearLogOnOpen;
 end;
 
+function TypeHighlightEnabled: Boolean;
+begin
+  Result := CurrentSettings.HighlightTypes;
+end;
+
+function TypeHighlightColor: TColor;
+begin
+  Result := CurrentSettings.TypeColor;
+end;
+
+function TypeHighlightStyle: TFontStyles;
+begin
+  Result := CurrentSettings.TypeFontStyle;
+end;
+
+procedure SetSettingsSavedListener(const AListener: TProc);
+begin
+  GSettingsSavedListener := AListener;
+end;
+
 procedure ShowSettingsDialog;
 begin
-  ExecuteSettingsDialog;
+  if ExecuteSettingsDialog and Assigned(GSettingsSavedListener) then
+    GSettingsSavedListener;
 end;
 
 { TMenuHandler }

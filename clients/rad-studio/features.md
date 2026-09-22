@@ -212,6 +212,22 @@ insert, and this is the one with an off switch.
 
 ## Diagnostics and feedback
 
+### Type names in their own colour
+
+Every identifier the analysis resolved to a type - in a declaration, a cast,
+`TFoo.Create`, `SizeOf(TFoo)`, a class header's ancestor, a generic argument,
+built-in types included - is painted in a colour and style of your choosing
+over the editor's own highlighting, which cannot tell `TCount` from `Count`.
+The classification is the server's semantic tokens, the same identity
+Ctrl+Click follows, so what colours as a type is what navigates to one. The
+colouring tracks the analysis: it arrives with the first repaint after a
+module opens and refreshes after every re-analysis, keeping the previous marks
+in between rather than flickering. The Go To picker paints the same names in
+the same colour - a type row's name, a member's owner, the types inside the
+detail column - colour only, since bold there marks the match. The
+Highlighting tab of the settings holds the switch, the colour, bold, italic
+and underline, with a preview; a change applies to every open editor on OK.
+
 ### Live error squiggles
 
 Errors and warnings from the analysis are painted as wavy underlines directly in
@@ -260,8 +276,8 @@ switch.
 
 ### Settings dialog and splash line
 
-Tools > PasTree > Settings holds every switch above, on three tabs - Navigation,
-Editing, Diagnostics - and is themed through the IDE's own theming services, so
+Tools > PasTree > Settings holds every switch above, on four tabs - Navigation,
+Editing, Diagnostics, Highlighting - and is themed through the IDE's own theming services, so
 it is not a bright form in a dark IDE. It also shows the compiled-in version and
 the loaded BPL's own file timestamp, which together answer "is the package the
 IDE loaded the one I just built?". The same question gets an earlier answer on

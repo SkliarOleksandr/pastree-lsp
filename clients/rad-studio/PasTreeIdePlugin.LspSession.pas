@@ -458,6 +458,25 @@ type
   end;
 
   /// <summary>
+  /// One semantic token of a document (textDocument/semanticTokens/full), in
+  /// IDE coordinates (1-based row and columns, ColTo exclusive), sorted by
+  /// position. TokenType indexes the server's legend - the standard names in
+  /// the order PasLsp.Server advertises them (namespace 0, type 1, class 2,
+  /// enum 3, interface 4, struct 5, typeParameter 6, parameter 7, variable 8,
+  /// property 9, enumMember 10, function 11, method 12, comment 13);
+  /// Modifiers is the legend's bit set (declaration 1, readonly 2,
+  /// defaultLibrary 4). Read by the semantic colouring layer
+  /// (PasTreeIdePlugin.SemanticPaint).
+  /// </summary>
+  TLspSemanticToken = record
+    Row: Integer;
+    ColFrom: Integer;
+    ColTo: Integer;
+    TokenType: Integer;
+    Modifiers: Integer;
+  end;
+
+  /// <summary>
   /// Hover delivery: AText is what the IDE's hint surface should show, and it
   /// is HTML whenever the server sent its own `pastreeHtml` page - which is
   /// the normal case, because the IDE's tooltip Help Insight is an HTML
@@ -653,12 +672,44 @@ type
   TLspDiagnosticsChangedProc = reference to procedure(const APath: string);
 
 /// <summary>
-/// Registers the ONE listener called (main thread) right after each
-/// publishDiagnostics lands in the cache - the painted-squiggle layer's
-/// repaint trigger. nil unregisters. Deliberately single: the day a second
-/// consumer exists, this becomes a list, not a second variable.
+/// Registers a listener called (main thread) right after each
+/// publishDiagnostics lands in the cache; returns the handle that removes
+/// it. Two consumers today: the painted squiggles repaint, the semantic
+/// colouring asks for fresh tokens (it was a single variable until the
+/// second one arrived, 2026-09-22). A handle rather than the procedure
+/// itself because two `reference to` values wrapping the same plain
+/// procedure do not compare equal.
 /// </summary>
-procedure LspSetDiagnosticsChangedListener(
+function LspAddDiagnosticsChangedListener(
+  const AListener: TLspDiagnosticsChangedProc): Integer;
+procedure LspRemoveDiagnosticsChangedListener(AHandle: Integer);
+
+/// <summary>
+/// The last semantic tokens the server answered for APath, in IDE
+/// coordinates. False when nothing has been answered yet (the request may
+/// be in flight). Read per syntax run during a repaint, so it never starts
+/// a session - routed like LspTryGetDiagnostics.
+/// </summary>
+function LspTryGetSemanticTokens(const APath: string;
+  out ATokens: TArray<TLspSemanticToken>): Boolean;
+
+/// <summary>
+/// Asks the owning RUNNING server for APath's semantic tokens; the answer
+/// lands in the cache and the tokens-changed listener fires (main thread).
+/// A no-op with no session, a session still in its handshake, or a request
+/// for that file already in flight - so a paint may call it freely, and it
+/// never starts a server. The previous answer stays in the cache until the
+/// new one replaces it: clearing it would flicker every type name in the
+/// file between an edit and the re-analysis.
+/// </summary>
+procedure LspRefreshSemanticTokens(const APath: string);
+
+/// <summary>
+/// Registers the ONE listener called (main thread) after each semantic
+/// tokens answer lands - the colouring layer's repaint trigger. nil
+/// unregisters.
+/// </summary>
+procedure LspSetSemanticTokensChangedListener(
   const AListener: TLspDiagnosticsChangedProc);
 
 /// <summary>
@@ -1017,6 +1068,10 @@ type
     // Path (lower-cased, full) -> the server's last publishDiagnostics for
     // it. Filled by the notification handler, read by the file-trait spike.
     FDiagnostics: TDictionary<string, TArray<TLspDiagnostic>>;
+    // Path (lower-cased, full) -> the server's last semanticTokens/full
+    // answer, decoded; and the paths with such a request in flight.
+    FSemanticTokens: TDictionary<string, TArray<TLspSemanticToken>>;
+    FSemanticPending: TDictionary<string, Int64>;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -1102,6 +1157,9 @@ type
     function TryGetSentText(const APath: string; out AText: string): Boolean;
     function TryGetDiagnostics(const APath: string;
       out ADiags: TArray<TLspDiagnostic>): Boolean;
+    function TryGetSemanticTokens(const APath: string;
+      out ATokens: TArray<TLspSemanticToken>): Boolean;
+    procedure RefreshSemanticTokens(const APath: string);
     procedure IdleSync(const APath: string);
   end;
 
@@ -1198,9 +1256,14 @@ var
     commit, not this one (SPEC.md, "Still to build" item 2). }
   GSession: TLspSession;
   GPool: TLspSessionPool;
-  // The painted-squiggle layer's repaint trigger; see
-  // LspSetDiagnosticsChangedListener.
-  GDiagnosticsListener: TLspDiagnosticsChangedProc;
+  // The publishDiagnostics listeners by handle; see
+  // LspAddDiagnosticsChangedListener. Created on first Add, freed in the
+  // unit's finalization.
+  GDiagnosticsListeners: TDictionary<Integer, TLspDiagnosticsChangedProc>;
+  GNextListenerHandle: Integer = 1;
+  // The semantic colouring layer's repaint trigger; see
+  // LspSetSemanticTokensChangedListener.
+  GSemanticTokensListener: TLspDiagnosticsChangedProc;
   // The generated .dcu tabs' teardown trigger; see
   // LspSetSessionRestartListener.
   GSessionRestartListener: TProc;
@@ -1585,6 +1648,8 @@ begin
   FreeAndNil(FClient);
   FreeAndNil(FDocs);
   FreeAndNil(FDiagnostics);
+  FreeAndNil(FSemanticTokens);
+  FreeAndNil(FSemanticPending);
   inherited;
 end;
 
@@ -1600,6 +1665,7 @@ var
   LDiags: TArray<TLspDiagnostic>;
   LDiag: TLspDiagnostic;
   LLine, LChar, LCount, LDummyRow: Integer;
+  LListener: TLspDiagnosticsChangedProc;
 begin
   if (AParams = nil) or
      not AParams.TryGetValue<string>('uri', LUri) then
@@ -1633,8 +1699,10 @@ begin
   if FDiagnostics = nil then
     FDiagnostics := TDictionary<string, TArray<TLspDiagnostic>>.Create;
   FDiagnostics.AddOrSetValue(LowerCase(LPath), LDiags);
-  if Assigned(GDiagnosticsListener) then
-    GDiagnosticsListener(LPath);
+  if Assigned(GDiagnosticsListeners) then
+    // Over a snapshot: a listener may add or remove one while called.
+    for LListener in GDiagnosticsListeners.Values.ToArray do
+      LListener(LPath);
 end;
 
 function TLspSession.TryGetDiagnostics(const APath: string;
@@ -1643,6 +1711,93 @@ begin
   ADiags := nil;
   Result := (FDiagnostics <> nil) and
     FDiagnostics.TryGetValue(LowerCase(APath), ADiags);
+end;
+
+function TLspSession.TryGetSemanticTokens(const APath: string;
+  out ATokens: TArray<TLspSemanticToken>): Boolean;
+begin
+  ATokens := nil;
+  Result := (FSemanticTokens <> nil) and
+    FSemanticTokens.TryGetValue(LowerCase(APath), ATokens);
+end;
+
+{ textDocument/semanticTokens/full for one file. The answer's `data` is the
+  protocol's flat integer array, five per token, line and start column
+  DELTA-encoded against the previous token (start relative to the previous
+  token's start when on the same line, to the line start otherwise), all
+  0-based UTF-16 - decoded here into absolute IDE rows and columns once, so
+  the paint path only ever compares integers. A cancelled or failed answer
+  leaves the previous tokens in place (see the interface note). }
+procedure TLspSession.RefreshSemanticTokens(const APath: string);
+var
+  LKey: string;
+  LParams, LDoc: TJSONObject;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if FDestroying or not Assigned(FClient) or (FClient.State <> lcsReady) then
+    Exit;
+  LKey := LowerCase(APath);
+  if FSemanticPending = nil then
+    FSemanticPending := TDictionary<string, Int64>.Create;
+  if FSemanticPending.ContainsKey(LKey) then
+    Exit;
+
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(APath));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/semanticTokens/full', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LData: TJSONArray;
+      LTokens: TArray<TLspSemanticToken>;
+      LIdx, LCount, LLine, LChar, LLen, LDummyRow: Integer;
+
+      function IntAt(AIndex: Integer): Integer;
+      begin
+        if LData.Items[AIndex] is TJSONNumber then
+          Result := TJSONNumber(LData.Items[AIndex]).AsInt
+        else
+          Result := 0;
+      end;
+
+    begin
+      if FDestroying then
+        Exit;
+      if Assigned(FSemanticPending) then
+        FSemanticPending.Remove(LKey);
+      if not ASuccess or (AResult = nil) or
+         not AResult.TryGetValue<TJSONArray>('data', LData) then
+        Exit;
+      SetLength(LTokens, LData.Count div 5);
+      LCount := 0;
+      LLine := 0;
+      LChar := 0;
+      LIdx := 0;
+      while LIdx + 4 < LData.Count do
+      begin
+        if IntAt(LIdx) <> 0 then
+          LChar := 0;
+        Inc(LLine, IntAt(LIdx));
+        Inc(LChar, IntAt(LIdx + 1));
+        LLen := IntAt(LIdx + 2);
+        LspToIde(LLine, LChar, LTokens[LCount].Row, LTokens[LCount].ColFrom);
+        LspToIde(LLine, LChar + LLen, LDummyRow, LTokens[LCount].ColTo);
+        LTokens[LCount].TokenType := IntAt(LIdx + 3);
+        LTokens[LCount].Modifiers := IntAt(LIdx + 4);
+        Inc(LCount);
+        Inc(LIdx, 5);
+      end;
+      SetLength(LTokens, LCount);
+      if FSemanticTokens = nil then
+        FSemanticTokens := TDictionary<string, TArray<TLspSemanticToken>>.Create;
+      FSemanticTokens.AddOrSetValue(LKey, LTokens);
+      if Assigned(GSemanticTokensListener) then
+        GSemanticTokensListener(APath);
+    end);
+  FSemanticPending.AddOrSetValue(LKey, LIssuedId);
 end;
 
 { WHICH RAD STUDIO IS RUNNING THIS, to the update - "13.0" and "13.1" are one
@@ -4582,10 +4737,53 @@ begin
   Result := Assigned(LSession) and LSession.TryGetDiagnostics(APath, ADiags);
 end;
 
-procedure LspSetDiagnosticsChangedListener(
+function LspAddDiagnosticsChangedListener(
+  const AListener: TLspDiagnosticsChangedProc): Integer;
+begin
+  if GDiagnosticsListeners = nil then
+    GDiagnosticsListeners :=
+      TDictionary<Integer, TLspDiagnosticsChangedProc>.Create;
+  Result := GNextListenerHandle;
+  Inc(GNextListenerHandle);
+  GDiagnosticsListeners.Add(Result, AListener);
+end;
+
+procedure LspRemoveDiagnosticsChangedListener(AHandle: Integer);
+begin
+  if Assigned(GDiagnosticsListeners) then
+    GDiagnosticsListeners.Remove(AHandle);
+end;
+
+function LspTryGetSemanticTokens(const APath: string;
+  out ATokens: TArray<TLspSemanticToken>): Boolean;
+var
+  LSession: TLspSession;
+begin
+  ATokens := nil;
+  if not Assigned(GPool) then
+    Exit(False);
+  // Routed without creating a session, exactly as LspTryGetDiagnostics:
+  // this runs per syntax run during a repaint.
+  LSession := GPool.SessionForFile(APath, False);
+  Result := Assigned(LSession) and
+    LSession.TryGetSemanticTokens(APath, ATokens);
+end;
+
+procedure LspRefreshSemanticTokens(const APath: string);
+var
+  LSession: TLspSession;
+begin
+  if not Assigned(GPool) then
+    Exit;
+  LSession := GPool.SessionForFile(APath, False);
+  if Assigned(LSession) then
+    LSession.RefreshSemanticTokens(APath);
+end;
+
+procedure LspSetSemanticTokensChangedListener(
   const AListener: TLspDiagnosticsChangedProc);
 begin
-  GDiagnosticsListener := AListener;
+  GSemanticTokensListener := AListener;
 end;
 
 procedure LspSetSessionRestartListener(const AListener: TProc);
@@ -4764,5 +4962,10 @@ begin
   if not TryReadTextNoBom(AFileName, Result) then
     Result := '';
 end;
+
+initialization
+
+finalization
+  FreeAndNil(GDiagnosticsListeners);
 
 end.

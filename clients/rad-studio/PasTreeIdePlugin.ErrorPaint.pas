@@ -59,6 +59,7 @@ var
   // variable would neither own nor release it.
   GNotifier: INTACodeEditorEvents;
   GNotifierIndex: Integer = -1;
+  GListener: Integer = 0;   // LspAddDiagnosticsChangedListener handle
 
 { Severity -> underline color: LSP 1 error, 2 warning, 3 information, 4 hint -
   the same red/orange/gray family the IDE's own Error Insight draws, with the
@@ -218,14 +219,15 @@ begin
     GNotifier := nil;   // refcount frees it
     Exit;
   end;
-  LspSetDiagnosticsChangedListener(InvalidateViewsOf);
+  GListener := LspAddDiagnosticsChangedListener(InvalidateViewsOf);
 end;
 
 procedure FinalizeErrorPaint;
 var
   LServices: INTACodeEditorServices;
 begin
-  LspSetDiagnosticsChangedListener(nil);
+  LspRemoveDiagnosticsChangedListener(GListener);
+  GListener := 0;
   if GNotifierIndex < 0 then
     Exit;
   if Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then

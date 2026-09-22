@@ -73,7 +73,8 @@ uses
   PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.IdleSync,
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.SemanticPaint,
+  PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ClassComplete,
@@ -819,6 +820,8 @@ begin
   // the module answers that interface natively; SPEC.md, closed
   // experiment.)
   InitializeErrorPaint;
+  // Type names in their own colour, from the server's semantic tokens.
+  InitializeSemanticPaint;
   // Idle-debounced didChange - keeps the squiggles (and every other answer)
   // tracking the buffer as it is typed, not as it was last saved.
   InitializeIdleSync;
@@ -911,6 +914,7 @@ begin
   // The idle timer before the session: a tick after FinalizeLspSession
   // would sync against a dead client.
   FinalizeIdleSync;
+  FinalizeSemanticPaint;
   FinalizeErrorPaint;
   FinalizeRename;
   FinalizeFindReferencesMessageGroup;

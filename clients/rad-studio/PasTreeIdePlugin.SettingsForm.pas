@@ -46,6 +46,7 @@ interface
 
 uses
   System.Classes,
+  System.UITypes,
   Vcl.Controls,
   Vcl.Forms,
   Vcl.StdCtrls,
@@ -86,10 +87,24 @@ type
     lblAdvancedLoggingHint: TLabel;
     chkClearLogOnOpen: TCheckBox;
     lblClearLogOnOpenHint: TLabel;
+    tsHighlighting: TTabSheet;
+    chkHighlightTypes: TCheckBox;
+    lblTypeColor: TLabel;
+    cbxTypeColor: TColorBox;
+    chkTypeBold: TCheckBox;
+    chkTypeItalic: TCheckBox;
+    chkTypeUnderline: TCheckBox;
+    lblPreview: TLabel;
+    pbxPreview: TPaintBox;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
     procedure chkLoggingClick(Sender: TObject);
+    procedure chkHighlightTypesClick(Sender: TObject);
+    procedure TypeStyleChanged(Sender: TObject);
+    procedure pbxPreviewPaint(Sender: TObject);
+  private
+    function TypeStyles: TFontStyles;
   end;
 
 var
@@ -116,9 +131,10 @@ implementation
 
 uses
   System.SysUtils,
-  System.UITypes,
   Winapi.Windows,
   Winapi.ShellAPI,
+  Vcl.Graphics,
+  Vcl.Themes,
   ToolsAPI,
   PasLsp.ProductVersion,
   PasTreeIdePlugin.Settings;
@@ -147,6 +163,78 @@ begin
   lblAdvancedLoggingHint.Enabled := chkLogging.Checked;
   chkClearLogOnOpen.Enabled := chkLogging.Checked;
   lblClearLogOnOpenHint.Enabled := chkLogging.Checked;
+end;
+
+procedure TPasTreeSettingsForm.chkHighlightTypesClick(Sender: TObject);
+begin
+  lblTypeColor.Enabled := chkHighlightTypes.Checked;
+  cbxTypeColor.Enabled := chkHighlightTypes.Checked;
+  chkTypeBold.Enabled := chkHighlightTypes.Checked;
+  chkTypeItalic.Enabled := chkHighlightTypes.Checked;
+  chkTypeUnderline.Enabled := chkHighlightTypes.Checked;
+  lblPreview.Enabled := chkHighlightTypes.Checked;
+  pbxPreview.Invalidate;
+end;
+
+procedure TPasTreeSettingsForm.TypeStyleChanged(Sender: TObject);
+begin
+  pbxPreview.Invalidate;
+end;
+
+function TPasTreeSettingsForm.TypeStyles: TFontStyles;
+begin
+  Result := [];
+  if chkTypeBold.Checked then
+    Include(Result, fsBold);
+  if chkTypeItalic.Checked then
+    Include(Result, fsItalic);
+  if chkTypeUnderline.Checked then
+    Include(Result, fsUnderline);
+end;
+
+{ One declaration in the editor's font, the type names in the chosen colour
+  and style, the rest in the window text colour - what the editor will show
+  after OK. Themed through StyleServices, as the rest of the form is. }
+procedure TPasTreeSettingsForm.pbxPreviewPaint(Sender: TObject);
+var
+  LCanvas: TCanvas;
+  LX, LY: Integer;
+  LPlain: TColor;
+
+  procedure Put(const AText: string; AType: Boolean);
+  begin
+    if AType and chkHighlightTypes.Checked then
+    begin
+      LCanvas.Font.Color := cbxTypeColor.Selected;
+      LCanvas.Font.Style := TypeStyles;
+    end
+    else
+    begin
+      LCanvas.Font.Color := LPlain;
+      LCanvas.Font.Style := [];
+    end;
+    LCanvas.TextOut(LX, LY, AText);
+    Inc(LX, LCanvas.TextWidth(AText));
+  end;
+
+begin
+  LCanvas := pbxPreview.Canvas;
+  LCanvas.Brush.Color := StyleServices.GetSystemColor(clWindow);
+  LCanvas.FillRect(pbxPreview.ClientRect);
+  LPlain := StyleServices.GetSystemColor(clWindowText);
+  LCanvas.Font.Name := 'Consolas';
+  LCanvas.Font.Size := 10;
+  LCanvas.Brush.Style := bsClear;
+  LX := 8;
+  LY := (pbxPreview.Height - LCanvas.TextHeight('Tg')) div 2;
+  Put('FItems: ', False);
+  Put('TList', True);
+  Put('<', False);
+  Put('TItem', True);
+  Put('>; Count: ', False);
+  Put('Integer', True);
+  Put(';', False);
+  LCanvas.Brush.Style := bsSolid;
 end;
 
 function ExecuteSettingsDialog: Boolean;
@@ -209,9 +297,15 @@ begin
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
     LForm.chkClearLogOnOpen.Checked := LSettings.ClearLogOnOpen;
+    LForm.chkHighlightTypes.Checked := LSettings.HighlightTypes;
+    LForm.cbxTypeColor.Selected := LSettings.TypeColor;
+    LForm.chkTypeBold.Checked := fsBold in LSettings.TypeFontStyle;
+    LForm.chkTypeItalic.Checked := fsItalic in LSettings.TypeFontStyle;
+    LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
+    LForm.chkHighlightTypesClick(nil);
 
     if LForm.ShowModal <> mrOk then
       Exit;
@@ -226,6 +320,9 @@ begin
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
     LSettings.ClearLogOnOpen := LForm.chkClearLogOnOpen.Checked;
+    LSettings.HighlightTypes := LForm.chkHighlightTypes.Checked;
+    LSettings.TypeColor := LForm.cbxTypeColor.Selected;
+    LSettings.TypeFontStyle := LForm.TypeStyles;
     SaveSettings(LSettings);
     Result := True;
   finally

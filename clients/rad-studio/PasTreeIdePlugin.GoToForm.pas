@@ -194,6 +194,11 @@ type
     // The row painter's GDI state, made once per showing (FormShow) and
     // used raw in lbItemsDrawItem - see the note there.
     FFontPlain, FFontBold: HFONT;
+    // The Highlighting tab as this list paints it: the type COLOUR and its
+    // switch, never the style - bold in this list is the matched letters
+    // alone (Alex, 2026-09-22), as it already was for the keywords.
+    FTypeColor: TColor;
+    FTypeOn: Boolean;
     FTextHeight: Integer;
     FIdentColor, FKeywordColor, FPreprocColor, FMatchColor: TColor;
     FWidths: array[TGoToScope] of TGoToWidths;   // measured once per list
@@ -811,6 +816,8 @@ begin
   FFontPlain := CreateFontIndirect(LLogFont);
   LLogFont.lfWeight := FW_BOLD;
   FFontBold := CreateFontIndirect(LLogFont);
+  FTypeOn := TypeHighlightEnabled;
+  FTypeColor := TypeHighlightColor;
   LDC := GetDC(0);
   try
     LOld := SelectObject(LDC, FFontPlain);
@@ -1277,11 +1284,12 @@ var
   LDC: HDC;
   LRow: TGoToRow;
   LEntries: TArray<TLspOutlineRow>;
-  LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce, LMatch: TColor;
-  LY, LLineRight, LSaved: Integer;
+  LQuiet, LStrong, LIdent, LKeyword, LPreproc, LForce, LMatch, LType: TColor;
+  LY, LLineRight, LSaved, LIdx: Integer;
   LName, LNote: string;
   LOldFont: HGDIOBJ;
   LOldAlign, LOldMode: Integer;
+  LSpans: TArray<Integer>;
   LFont: HFONT;
 
   procedure UseFont(AFont: HFONT);
@@ -1299,16 +1307,79 @@ var
     MoveToEx(LDC, AX, LY, nil);
   end;
 
-  procedure Put(const AText: string; AColor: TColor; ABold: Boolean);
+  procedure PutWith(const AText: string; AColor: TColor; AFont: HFONT);
   begin
     if AText = '' then
       Exit;
-    if ABold then
-      UseFont(FFontBold)
-    else
-      UseFont(FFontPlain);
+    UseFont(AFont);
     SetTextColor(LDC, ColorToRGB(AColor));
     ExtTextOut(LDC, 0, 0, 0, nil, PChar(AText), Length(AText), nil);
+  end;
+
+  procedure Put(const AText: string; AColor: TColor; ABold: Boolean);
+  begin
+    if ABold then
+      PutWith(AText, AColor, FFontBold)
+    else
+      PutWith(AText, AColor, FFontPlain);
+  end;
+
+  // The name column, `Owner.Name` or `Name`: the owner is always a type
+  // (a struct's member), the name is one when the row declares a type,
+  // both in the Highlighting tab's colour and font; the dot and any other
+  // name in the identifier colour. The matched letters keep their own
+  // mark - bold in the match colour - over whatever segment they fall on,
+  // so the segments are cut at the match's edges too.
+  procedure PutName(const AName: string; AOwnerLen: Integer;
+    ANameIsType: Boolean);
+  var
+    LPos, LSegEnd, LMatchEnd: Integer;
+    LColor: TColor;
+    LFontH: HFONT;
+  begin
+    LMatchEnd := LRow.MatchFrom + LRow.MatchLen;   // 0-based, exclusive
+    LPos := 0;
+    while LPos < Length(AName) do
+    begin
+      if LPos < AOwnerLen then
+      begin
+        LSegEnd := AOwnerLen;
+        LColor := LType;
+        LFontH := FFontPlain;
+      end
+      else if (AOwnerLen > 0) and (LPos = AOwnerLen) then
+      begin
+        LSegEnd := AOwnerLen + 1;   // the dot
+        LColor := LIdent;
+        LFontH := FFontPlain;
+      end
+      else
+      begin
+        LSegEnd := Length(AName);
+        if ANameIsType then
+        begin
+          LColor := LType;
+          LFontH := FFontPlain;
+        end
+        else
+        begin
+          LColor := LIdent;
+          LFontH := FFontPlain;
+        end;
+      end;
+      if (LRow.MatchLen > 0) and (LPos < LMatchEnd) and
+         (LSegEnd > LRow.MatchFrom) then
+        if LPos < LRow.MatchFrom then
+          LSegEnd := Min(LSegEnd, LRow.MatchFrom)   // up to the match
+        else
+        begin
+          LSegEnd := Min(LSegEnd, LMatchEnd);        // inside the match
+          LColor := LMatch;
+          LFontH := FFontBold;
+        end;
+      PutWith(Copy(AName, LPos + 1, LSegEnd - LPos), LColor, LFontH);
+      LPos := LSegEnd;
+    end;
   end;
 
   // One right-aligned column of width AWidth ending at LLineRight - 6,
@@ -1338,10 +1409,11 @@ var
   // A run in the editor's syntax colours (PasTreeIdePlugin.ResultRows, the
   // same palette the Find References rows paint with) - colours only, in
   // the plain weight: bold in this list is the matched letters alone.
-  procedure PutSyntax(const AText: string);
+  procedure PutSyntax(const AText: string;
+    const ATypeSpans: TArray<Integer> = nil);
   begin
     UseFont(FFontPlain);
-    PaintSyntaxTextDC(LDC, AText, LQuiet, LForce);
+    PaintSyntaxTextDC(LDC, AText, LQuiet, LForce, ATypeSpans, LType);
   end;
 
 begin
@@ -1363,11 +1435,19 @@ begin
     LPreproc := LStrong;
     LForce := LStrong;
     LMatch := LStrong;
+    LType := clNone;   // no type mark on the selection (PaintSyntaxTextDC)
   end
   else
   begin
     LQuiet := FQuiet;
     LStrong := FStrong;
+    // Type names in the editor's type colour, when the Highlighting tab
+    // says so; otherwise they are identifiers like any other. Colour only:
+    // the tab's style is the editor's, this list keeps bold for the match.
+    if FTypeOn then
+      LType := FTypeColor
+    else
+      LType := clNone;
     // The name column is an identifier and a landmark is a reserved word,
     // in the editor's live colours for those classes; the head word and
     // the detail go through the tokenizer (PutSyntax). `include` is neither -
@@ -1461,25 +1541,34 @@ begin
       end
       else
         LIdent := LKeyword;
-      if LRow.MatchLen > 0 then
-      begin
-        Put(Copy(LName, 1, LRow.MatchFrom), LIdent, False);
-        Put(Copy(LName, LRow.MatchFrom + 1, LRow.MatchLen), LMatch, True);
-        Put(Copy(LName, LRow.MatchFrom + LRow.MatchLen + 1, MaxInt), LIdent,
-          False);
-      end
+      // LType = clNone (selected, or the switch off) paints the name column
+      // in the identifier colour throughout.
+      if LType = clNone then
+        PutName(LName, 0, False)
+      else if (Owner <> '') and (Name <> '') then
+        PutName(LName, Length(Owner), Kind = 'type')
       else
-        Put(LName, LIdent, False);
+        PutName(LName, 0, (Name <> '') and (Kind = 'type'));
       // The detail spaced the way the source is written: `APath: string`,
       // `GetIndex(const A: string): Integer`, `CName = 'x'`, `TFoo = class` -
       // a `:` or `(` right after the name, anything else after one space.
       // The demo's two spaces before every detail read as `APath : string`
       // (Alex, 2026-09-21: "Delphi's convention is name-colon-space-type").
+      // The type spans are 1-based into Detail; the added space shifts them.
       if Detail <> '' then
         if CharInSet(Detail[1], [':', '(']) then
-          PutSyntax(Detail)
+          PutSyntax(Detail, TypeSpans)
         else
-          PutSyntax(' ' + Detail);
+        begin
+          LSpans := Copy(TypeSpans);
+          LIdx := 0;
+          while LIdx < Length(LSpans) do
+          begin
+            Inc(LSpans[LIdx]);
+            Inc(LIdx, 2);
+          end;
+          PutSyntax(' ' + Detail, LSpans);
+        end;
       RestoreDC(LDC, LSaved);
     end;
   finally

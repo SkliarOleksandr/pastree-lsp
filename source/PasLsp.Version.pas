@@ -192,7 +192,11 @@ const
   /// 0.39.2 (2026-09-22): ProjectOutline rows carry a Detail off the retained
   /// type descriptors (the type after `: `, `= class` for a struct). Silent
   /// without it: the project and group tabs of Go To simply show no types.
-  cMinPasTreeVersion = '0.39.2';
+  /// 0.41.0 (2026-09-22): outline rows carry DetailTypes, the type names
+  /// inside Detail - the 13th element of pastree/outline's rows. Not silent
+  /// (the field is a compile error without it), listed so the reason is
+  /// on record beside the others.
+  cMinPasTreeVersion = '0.41.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

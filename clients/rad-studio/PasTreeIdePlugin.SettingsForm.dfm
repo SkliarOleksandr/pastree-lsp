@@ -311,6 +311,78 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 2
       end
     end
+    object tsHighlighting: TTabSheet
+      Caption = 'Highlighting'
+      ImageIndex = 3
+      object lblTypeColor: TLabel
+        Left = 26
+        Top = 46
+        Width = 32
+        Height = 15
+        Caption = 'Color:'
+      end
+      object lblPreview: TLabel
+        Left = 26
+        Top = 98
+        Width = 44
+        Height = 15
+        Caption = 'Preview:'
+      end
+      object pbxPreview: TPaintBox
+        Left = 26
+        Top = 118
+        Width = 405
+        Height = 40
+        OnPaint = pbxPreviewPaint
+      end
+      object chkHighlightTypes: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Color type names in the editor'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
+        OnClick = chkHighlightTypesClick
+      end
+      object cbxTypeColor: TColorBox
+        Left = 64
+        Top = 43
+        Width = 200
+        Height = 22
+        Style = [cbStandardColors, cbExtendedColors, cbCustomColor, cbPrettyNames]
+        TabOrder = 1
+        OnChange = TypeStyleChanged
+      end
+      object chkTypeBold: TCheckBox
+        Left = 64
+        Top = 71
+        Width = 51
+        Height = 17
+        Caption = 'Bold'
+        TabOrder = 2
+        OnClick = TypeStyleChanged
+      end
+      object chkTypeItalic: TCheckBox
+        Left = 121
+        Top = 71
+        Width = 54
+        Height = 17
+        Caption = 'Italic'
+        TabOrder = 3
+        OnClick = TypeStyleChanged
+      end
+      object chkTypeUnderline: TCheckBox
+        Left = 183
+        Top = 71
+        Width = 81
+        Height = 17
+        Caption = 'Underline'
+        TabOrder = 4
+        OnClick = TypeStyleChanged
+      end
+    end
   end
   object btnOK: TButton
     Left = 312

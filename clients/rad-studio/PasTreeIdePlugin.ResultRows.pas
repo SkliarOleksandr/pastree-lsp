@@ -160,7 +160,8 @@ procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
 /// twenty rows on AVImark).
 /// </summary>
 procedure PaintSyntaxTextDC(ADC: HDC; const AText: string; ADefault: TColor;
-  AForceColor: TColor = clNone);
+  AForceColor: TColor = clNone; const ATypeSpans: TArray<Integer> = nil;
+  ATypeColor: TColor = clNone; ATypeFont: HFONT = 0);
 
 /// <summary>
 /// Holds the editor palette still between Begin and End: the code editor
@@ -799,29 +800,62 @@ begin
   end;
 end;
 
+{ A run's type-span test: an identifier run whose start lies inside one of
+  the (start, length) pairs. The spans come from the analysis (the outline
+  table's type spans), the runs from the lexical tokenizer, and they line
+  up because both are over the same detail text - a type name is always
+  one identifier run. }
+function InTypeSpan(const ASpans: TArray<Integer>; AStart: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  LIdx := 0;
+  while LIdx + 1 < Length(ASpans) do
+  begin
+    if (AStart >= ASpans[LIdx]) and (AStart < ASpans[LIdx] + ASpans[LIdx + 1])
+    then
+      Exit(True);
+    Inc(LIdx, 2);
+  end;
+end;
+
 procedure PaintSyntaxTextDC(ADC: HDC; const AText: string; ADefault: TColor;
-  AForceColor: TColor);
+  AForceColor: TColor; const ATypeSpans: TArray<Integer>;
+  ATypeColor: TColor; ATypeFont: HFONT);
 var
   LOptions: INTACodeEditorOptions;
-  LHavePalette: Boolean;
+  LHavePalette, LIsType: Boolean;
   LRun: TTokenRun;
   LColor: TColor;
   LStyle: TFontStyles;
+  LOldFont: HFONT;
 begin
   if AText = '' then
     Exit;
   LHavePalette := TryEditorOptions(LOptions);
   for LRun in TokenizeLine(AText) do
   begin
+    // A type name in the Highlighting tab's colour and style, on top of the
+    // editor palette, unless one colour is forced (a selected row).
+    LIsType := (AForceColor = clNone) and (ATypeColor <> clNone) and
+      (LRun.Code = atIdentifier) and InTypeSpan(ATypeSpans, LRun.Start);
     if AForceColor <> clNone then
       LColor := AForceColor
+    else if LIsType then
+      LColor := ATypeColor
     else if LHavePalette then
       PaletteEntry(LOptions, LRun.Code, LColor, LStyle)
     else
       LColor := ADefault;
     SetTextColor(ADC, ColorToRGB(LColor));
+    LOldFont := 0;
+    if LIsType and (ATypeFont <> 0) then
+      LOldFont := SelectObject(ADC, ATypeFont);
     // No substring: the run is drawn straight out of AText.
     ExtTextOut(ADC, 0, 0, 0, nil, @AText[LRun.Start], LRun.Len, nil);
+    if LOldFont <> 0 then
+      SelectObject(ADC, LOldFont);
   end;
 end;
 

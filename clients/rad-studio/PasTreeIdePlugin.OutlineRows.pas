@@ -72,6 +72,10 @@ type
     UnitName: string;
     ProjectFile: string;
     Key: string;
+    /// The type names inside Detail as (start, length) pairs, 1-based into
+    /// Detail, flattened - [s1, l1, s2, l2, ...]. nil when the server sent
+    /// no 13th element (a PasTree before outline type spans).
+    TypeSpans: TArray<Integer>;
   end;
 
   EOutlineTable = class(Exception);
@@ -433,6 +437,22 @@ var
       LRow.Line := S.ReadInt;
       S.Expect(',');
       LRow.Col := S.ReadInt;
+      // Optional 13th element: the detail's type spans, [s, l, s, l...].
+      LRow.TypeSpans := nil;
+      S.SkipWs;
+      if S.TryConsume(',') then
+      begin
+        S.Expect('[');
+        S.SkipWs;
+        if not S.TryConsume(']') then
+        begin
+          repeat
+            LRow.TypeSpans := LRow.TypeSpans + [S.ReadInt];
+            S.SkipWs;
+          until not S.TryConsume(',');
+          S.Expect(']');
+        end;
+      end;
       S.Expect(']');
       LRow.Key := LowerCase(OutlineNameColumn(LRow));
       Result[LCount] := LRow;

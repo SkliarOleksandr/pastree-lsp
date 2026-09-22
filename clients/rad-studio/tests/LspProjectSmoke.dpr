@@ -205,11 +205,59 @@ begin
   GLogPath := Result.LogFile;
 end;
 
+{ semanticTokens/range params for one whole line of AFile (0-based). }
+function RangeParams(const AFile: string; ALine: Integer): TJSONObject;
+var
+  LDoc, LRange: TJSONObject;
+begin
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFile));
+  LRange := TJSONObject.Create;
+  LRange.AddPair('start', TJSONObject.Create
+    .AddPair('line', TJSONNumber.Create(ALine))
+    .AddPair('character', TJSONNumber.Create(0)));
+  LRange.AddPair('end', TJSONObject.Create
+    .AddPair('line', TJSONNumber.Create(ALine))
+    .AddPair('character', TJSONNumber.Create(200)));
+  Result := TJSONObject.Create;
+  Result.AddPair('textDocument', LDoc);
+  Result.AddPair('range', LRange);
+end;
+
+{ True when the semanticTokens answer AJson holds a token of ALen characters
+  and legend type AType. The protocol's flat array is five integers per
+  token - deltaLine, deltaStart, length, type, modifiers - so length and type
+  are read at fixed offsets, no position decoding needed. }
+function HasToken(const AJson: string; ALen, AType: Integer): Boolean;
+var
+  LFrom, LTo, LIdx: Integer;
+  LParts: TArray<string>;
+begin
+  Result := False;
+  LFrom := AJson.IndexOf('"data":[');
+  if LFrom < 0 then
+    Exit;
+  LFrom := LFrom + Length('"data":[');
+  LTo := AJson.IndexOf(']', LFrom);
+  if LTo < 0 then
+    Exit;
+  LParts := AJson.Substring(LFrom, LTo - LFrom).Split([',']);
+  LIdx := 0;
+  while LIdx + 4 < Length(LParts) do
+  begin
+    if (StrToIntDef(LParts[LIdx + 2].Trim, -1) = ALen) and
+       (StrToIntDef(LParts[LIdx + 3].Trim, -1) = AType) then
+      Exit(True);
+    Inc(LIdx, 5);
+  end;
+end;
+
 procedure Run(const AExe, AIdeRoot: string);
 var
-  LWizard: string;
+  LWizard, LErrorPaint: string;
   LLine, LChar: Integer;
   LOptions: TLspInitOptions;
+
 begin
   LWizard := TPath.Combine(GRepoDir, 'PasTreeIdePlugin.Wizard.pas');
 
@@ -262,6 +310,32 @@ begin
     'definition answered');
   Check(GOk and GResultJson.ToLower.Contains('wizard.pas'),
     'TMenuManager resolves inside the package''s own unit');
+
+  // A class header's ancestor from a LIBRARY unit (ToolsAPI.Editor), which
+  // the client harness cannot exercise - its fixture project has no RTL on
+  // the path. First live run of the colouring (0.48.1) painted
+  // `class(TWinControl)` in nothing while the same name in a field's type
+  // coloured. Semantic tokens and Ctrl+Click promise the same answer.
+  Writeln;
+  Writeln('=== an ancestor from a library unit: class(TNTACodeEditorNotifier) ===');
+  LErrorPaint := TPath.Combine(GRepoDir, 'PasTreeIdePlugin.ErrorPaint.pas');
+  FindPos(LErrorPaint, 'TPasErrorPaintNotifier = class(TNTACodeEditorNotifier)',
+    'TNTACodeEditorNotifier', LLine, LChar);
+  Check(Ask('textDocument/definition',
+    PositionParams(LErrorPaint, LLine, LChar)), 'definition answered');
+  Check(GOk and GResultJson.ToLower.Contains('toolsapi.editor'),
+    'TNTACodeEditorNotifier resolves into ToolsAPI.Editor');
+  Check(Ask('textDocument/semanticTokens/range', RangeParams(LErrorPaint, LLine)),
+    'semanticTokens/range answered for that line');
+  Check(GOk and HasToken(GResultJson, Length('TNTACodeEditorNotifier'), 2),
+    'and the ancestor is a `class` token (length 22, type 2)');
+  // The same with the document OPEN, as the IDE has it - the live path
+  // re-analyses an open document incrementally.
+  DidOpen(LErrorPaint);
+  Check(Ask('textDocument/semanticTokens/range', RangeParams(LErrorPaint, LLine)),
+    'semanticTokens/range answered again with the document open');
+  Check(GOk and HasToken(GResultJson, Length('TNTACodeEditorNotifier'), 2),
+    'and the ancestor is still a `class` token');
 end;
 
 var

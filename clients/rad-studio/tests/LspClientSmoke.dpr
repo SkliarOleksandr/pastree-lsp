@@ -1784,7 +1784,8 @@ end;
 procedure TestSemanticTokens;
 const
   // Legend indices, as advertised in the server's initialize answer.
-  cType = 1; cStruct = 5; cParameter = 7; cVariable = 8; cFunction = 11;
+  cType = 1; cClass = 2; cStruct = 5; cParameter = 7; cVariable = 8;
+  cFunction = 11;
   cDeclaration = 1; cReadonly = 2; cDefaultLibrary = 4;
 var
   LUnitFile: string;
@@ -1917,6 +1918,23 @@ begin
     if LLines[LI] = 20 then
       Inc(LOnLine);
   Check(LOnLine = LCount, 'every one of them on the requested line');
+
+  // A class header's heritage list is resolved by the navigator, not by
+  // the two reference maps - the first live run coloured `class(TAnimal)`
+  // in nothing while a field of the same type coloured (2026-09-22).
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoFindAll.pas');
+  Check(Ask('textDocument/semanticTokens/full', DocParams),
+    'semanticTokens/full answered for DemoFindAll');
+  LDecoded := GOk and Decode;
+  Check(LDecoded and (LCount > 0), 'and decoded');
+  CheckToken(36, 15, 7, cClass, 0, 'TAnimal in `TDog = class(TAnimal)`');
+  // The same for an ancestor from ANOTHER unit - the live run of 0.48.1
+  // coloured `class(TAnimal)` and still not `class(TWinControl)`.
+  CheckToken(52, 20, 6, cClass, 0,
+    'TShape (DemoHierarchy) in `TFarShape = class(TShape)`');
+  // A LIBRARY ancestor (`class(TInterfacedObject)`) is LspProjectSmoke's
+  // check: this fixture project has no RTL on its path, so System's names
+  // resolve to nothing here, for definition and tokens alike.
 end;
 
 { 5d-ter. rename: prepareRename, textDocument/rename and pastree/renamePlan.
