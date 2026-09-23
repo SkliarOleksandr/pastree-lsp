@@ -4532,14 +4532,17 @@ end;
 
   Like completion, it must NOT call WaitAnalyzed: the whole point is the
   declaration typed a second ago, which no rebuild has seen. It is a parse of
-  the live buffer, nothing more - the answer never depends on the closure. }
+  the live buffer; the last-good analysis, when there is one, is asked only
+  whether a property's accessor name is inherited from another unit. }
 function TLspServer.HandleClassComplete(const AMsg: TLspIncoming): string;
 var
-  LPath, LText, LEdits, LNames: string;
+  LPath, LText, LEdits, LNames, LCaretJson: string;
   LDoc: TLspDocument;
   LAnswer: TLspClassCompleteAnswer;
-  LIdx, LCaretLine, LCaretChar, LLine, LChar, LPasLine, LPasCol: Integer;
+  LIdx, LCaretLine, LCaretChar, LLine, LChar, LPasLine, LPasCol,
+    LMid: Integer;
   LStart: UInt64;
+  LBodyOrder: TLspBodyOrder;
 begin
   LPath := DocPathOf(AMsg.Params);
   if LPath = '' then
@@ -4569,7 +4572,24 @@ begin
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
       FDefines);
   SyncCompletionOverlays;
-  LAnswer := FCompletion.ClassCompleteAt(LPath, LText, LPasLine, LPasCol);
+  // `bodyOrder`: where a new body goes among its type's existing ones -
+  // "alphabetical" (the default, the native command's) or "declaration".
+  LBodyOrder := boAlphabetical;
+  if SameText(AMsg.Params.GetValue<string>('bodyOrder', ''),
+       'declaration') then
+    LBodyOrder := boDeclaration;
+  // The last-good analysis, when it holds this file, bridged exactly as
+  // completion bridges it - asked only whether a name a property points at
+  // is inherited from another unit. Never waited for, for the reason above.
+  LMid := -1;
+  if FNav <> nil then
+    LMid := FNav.ModelIdOf(LPath);
+  if (FProject <> nil) and (LMid >= 0) then
+    LAnswer := FCompletion.ClassCompleteAt(LPath, LText, LPasLine, LPasCol,
+      FProject, LMid, LBodyOrder)
+  else
+    LAnswer := FCompletion.ClassCompleteAt(LPath, LText, LPasLine, LPasCol,
+      nil, -1, LBodyOrder);
 
   LEdits := '';
   for LIdx := 0 to High(LAnswer.Edits) do
@@ -4587,17 +4607,23 @@ begin
       LNames := LNames + ', ';
     LNames := LNames + LAnswer.Edits[LIdx].Name;
   end;
-  LCaretLine := 0;
-  LCaretChar := 0;
+  // NO CARET is `null`, never line 0 / character 0: LSP line 0 is the unit's
+  // first line, and the RAD client read the old zero pair as exactly that -
+  // the caret jumped to the top of the unit after a press that wrote only a
+  // field (Alex, 2026-09-23).
+  LCaretJson := 'null';
   if LAnswer.CaretLine > 0 then
+  begin
     PasTreeToLsp(LAnswer.CaretLine, LAnswer.CaretCol, LCaretLine, LCaretChar);
+    LCaretJson := Format('{"line":%d,"character":%d}',
+      [LCaretLine, LCaretChar]);
+  end;
   Log(Format('classComplete: %s(%d,%d) -> %d edit(s) in %d ms (%s)',
     [TPath.GetFileName(LPath), LPasLine, LPasCol, Length(LAnswer.Edits),
      GetTickCount64 - LStart, LAnswer.Provider]));
   Result := BuildResponse(AMsg.IdJson, Format(
-    '{"edits":[%s],"caret":{"line":%d,"character":%d},' +
-    '"names":%s,"count":%d,"provider":%s}',
-    [LEdits, LCaretLine, LCaretChar, JsonQuote(LNames),
+    '{"edits":[%s],"caret":%s,"names":%s,"count":%d,"provider":%s}',
+    [LEdits, LCaretJson, JsonQuote(LNames),
      Length(LAnswer.Edits), JsonQuote(LAnswer.Provider)]));
 end;
 
@@ -4804,12 +4830,13 @@ var
     then
       Exit;
     LScope := LModel.Scopes[AScopeIdx];
-    // A scope's containers are created LAZILY by the model (Names/Symbols are
-    // nil until something is declared into it), so an EMPTY scope has no list
-    // at all - reading Count there is an access violation, not an empty loop.
-    // Cost of learning this: every documentSymbol answered with an
-    // EAccessViolation once a closure contained such a scope (2026-08-23).
-    if (LScope = nil) or (LScope.Symbols = nil) then
+    // An EMPTY scope. Until PasTree 0.42.0 its containers were lazy objects,
+    // nil until something was declared into it, and reading Count there was
+    // an access violation - every documentSymbol answered with one once a
+    // closure held such a scope (2026-08-23). Since 0.42.0 Symbols is a
+    // record (TSemaSymList) and empty means Count = 0; cMinPasTreeVersion
+    // keeps an older library from linking against this test.
+    if (LScope = nil) or (LScope.Symbols.Count = 0) then
       Exit;
     LSB := TStringBuilder.Create;
     try

@@ -81,6 +81,8 @@ type
     lblBlockCompletionHint: TLabel;
     chkClassComplete: TCheckBox;
     lblClassCompleteHint: TLabel;
+    lblClassCompleteOrder: TLabel;
+    cbxClassCompleteOrder: TComboBox;
     chkLogging: TCheckBox;
     lblLoggingHint: TLabel;
     chkAdvancedLogging: TCheckBox;
@@ -100,6 +102,7 @@ type
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
     procedure chkLoggingClick(Sender: TObject);
+    procedure chkClassCompleteClick(Sender: TObject);
     procedure chkHighlightTypesClick(Sender: TObject);
     procedure TypeStyleChanged(Sender: TObject);
     procedure pbxPreviewPaint(Sender: TObject);
@@ -163,6 +166,14 @@ begin
   lblAdvancedLoggingHint.Enabled := chkLogging.Checked;
   chkClearLogOnOpen.Enabled := chkLogging.Checked;
   lblClearLogOnOpenHint.Enabled := chkLogging.Checked;
+end;
+
+{ The body order means nothing when Ctrl+Shift+C is the IDE's own - greyed
+  for chkLoggingClick's reason, its value kept for the same one. }
+procedure TPasTreeSettingsForm.chkClassCompleteClick(Sender: TObject);
+begin
+  lblClassCompleteOrder.Enabled := chkClassComplete.Checked;
+  cbxClassCompleteOrder.Enabled := chkClassComplete.Checked;
 end;
 
 procedure TPasTreeSettingsForm.chkHighlightTypesClick(Sender: TObject);
@@ -293,6 +304,8 @@ begin
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
+    LForm.cbxClassCompleteOrder.ItemIndex :=
+      Ord(LSettings.ClassCompleteDeclOrder);
     LForm.chkGoTo.Checked := LSettings.EnableGoTo;
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
@@ -305,6 +318,7 @@ begin
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
+    LForm.chkClassCompleteClick(nil);
     LForm.chkHighlightTypesClick(nil);
 
     if LForm.ShowModal <> mrOk then
@@ -316,6 +330,8 @@ begin
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;
+    LSettings.ClassCompleteDeclOrder :=
+      LForm.cbxClassCompleteOrder.ItemIndex = 1;
     LSettings.EnableGoTo := LForm.chkGoTo.Checked;
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;

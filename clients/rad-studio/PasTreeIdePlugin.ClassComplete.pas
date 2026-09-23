@@ -36,8 +36,9 @@ unit PasTreeIdePlugin.ClassComplete;
   APPLYING THE EDITS goes through an UNDOABLE EDIT WRITER, in ascending
   position order - see ApplyClassComplete for why the editor's own InsertText
   is the wrong tool here (auto-indent) and why ascending is the only order a
-  writer allows. The caret then goes where the server said, which is the empty
-  body line of the first generated routine.
+  writer allows. The caret then goes where the server said - the topmost
+  generated body, or the new declaration or field - as a JUMP in the IDE's
+  history, so Alt+Left returns to where the key was pressed (2026-09-23).
 }
 
 interface
@@ -54,7 +55,7 @@ uses
   Winapi.Windows,
   Vcl.Menus,
   ToolsAPI,
-  PasTreeIdePlugin.GotoDeclaration,   // MoveCaretCentred
+  PasTreeIdePlugin.GotoDeclaration,   // MoveCaretCentred/WithHistory
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.Settings,
@@ -85,10 +86,53 @@ begin
   LspLogToServer(AMessage);
 end;
 
+{ Where the caret the key was pressed at, (ARow, ACol) in the buffer the
+  server answered about, sits once AEdits are in - the "from" of the history
+  entry, which has to name the text as it is AFTER the edit. An edit above it
+  pushes it down by its line breaks; one earlier on its own line pushes it
+  right (or, spanning lines, down and onto the edit's last line). An edit AT
+  the caret leaves it in front of the new text, on the line it was typed on.
+  Edits are ascending and all in the one snapshot's coordinates, so each is
+  compared with the caret's ORIGINAL position. }
+procedure CaretAfterEdits(const AEdits: TArray<TLspClassEditIde>;
+  var ARow, ACol: Integer);
+var
+  LIdx, LChar, LBreaks, LLastLine, LOrigRow, LOrigCol: Integer;
+  LText: string;
+begin
+  LOrigRow := ARow;
+  LOrigCol := ACol;
+  for LIdx := 0 to High(AEdits) do
+  begin
+    LText := AEdits[LIdx].Text;
+    LBreaks := 0;
+    LLastLine := 1;   // 1-based start of the text's last line
+    for LChar := 1 to Length(LText) do
+      if LText[LChar] = #10 then
+      begin
+        Inc(LBreaks);
+        LLastLine := LChar + 1;
+      end;
+    if AEdits[LIdx].Row < LOrigRow then
+      Inc(ARow, LBreaks)
+    else if (AEdits[LIdx].Row = LOrigRow) and
+            (AEdits[LIdx].Col < LOrigCol) then
+      if LBreaks = 0 then
+        Inc(ACol, Length(LText))
+      else
+      begin
+        Inc(ARow, LBreaks);
+        ACol := (LOrigCol - AEdits[LIdx].Col) + (Length(LText) - LLastLine + 1)
+          + 1;
+      end;
+  end;
+end;
+
 { The answer, applied to the buffer. One place, so the ordering rule and the
-  caret rule are stated once. }
+  caret rule are stated once. (AFromRow, AFromCol) is where the key was
+  pressed, in the buffer the answer describes. }
 procedure ApplyClassComplete(const AView: IOTAEditView;
-  const AAnswer: TLspClassComplete);
+  const AAnswer: TLspClassComplete; AFromRow, AFromCol: Integer);
 var
   LIdx: Integer;
   LWriter: IOTAEditWriter;
@@ -137,9 +181,19 @@ begin
     LWriter := nil;   // the writer commits on release
   end;
   // Centred, the way Go To Declaration lands - not a bare Move, which leaves
-  // the new line on the view's first row (Alex, 2026-09-05).
+  // the new line on the view's first row (Alex, 2026-09-05). And recorded as
+  // a JUMP, so Alt+Left returns to where the key was pressed - the property,
+  // the declaration - the way it does after Ctrl+Click (Alex, 2026-09-23).
+  // No caret, no jump, no entry.
   if AAnswer.CaretRow > 0 then
-    MoveCaretCentred(AView, AAnswer.CaretRow, AAnswer.CaretCol);
+    if AFromRow > 0 then
+    begin
+      CaretAfterEdits(AAnswer.Edits, AFromRow, AFromCol);
+      MoveCaretWithHistory(AView, AFromRow, AFromCol, AAnswer.CaretRow,
+        AAnswer.CaretCol);
+    end
+    else
+      MoveCaretCentred(AView, AAnswer.CaretRow, AAnswer.CaretCol);
   // The insertion came from a keystroke with no visible cause; repaint now
   // rather than at the next natural refresh.
   AView.Paint;
@@ -216,7 +270,7 @@ begin
           + ' was answering - nothing was inserted. Press Ctrl+Shift+C again.');
         Exit;
       end;
-      ApplyClassComplete(AView, AAnswer);
+      ApplyClassComplete(AView, AAnswer, LRow, LCol);
       LogTrace('class completion: implemented ' + AAnswer.Names);
     end);
 end;

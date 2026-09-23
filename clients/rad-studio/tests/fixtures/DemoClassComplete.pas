@@ -77,9 +77,9 @@ type
     { Indexed: the index parameters ride into both accessors, the setter's
       value last. }
     property Items[Index: Integer]: string read GetItem write SetItem;
-    { NEITHER read nor write - the shape typed first. Both accessors are
-      synthesized from the name, and `read GetPlain write SetPlain` is written
-      into this line. }
+    { NEITHER read nor write - the shape typed first. Completed as the
+      native command does: `read FPlain write SetPlain` into this line, a
+      field, and a setter that assigns it. }
     property Plain: Integer;
     { A read-only property is a DECISION, not an omission: nothing is added. }
     property ReadOnlyOne: Integer read FKnown;

@@ -177,10 +177,15 @@ words.
 Generates the missing implementation bodies for declared methods and property
 accessors, replacing the native command rather than sitting beside it. Unlike
 the native one, it also covers free routines declared in a unit's interface
-section, and it is not gated on the Insight Provider selection. The edits are
-applied as one undoable step and the caret lands on the empty body line of the
-first routine generated; ordinary outcomes such as "nothing to implement" go to
-the log rather than to the Build tab, which is read for compiler errors.
+section, and it is not gated on the Insight Provider selection. A bare
+`property Name: string;` becomes `read FName write SetName`, with the field and
+a setter that assigns it, as the native command writes it. New bodies go next
+to the type's existing ones - alphabetically, or in declaration order (Settings,
+Editing tab) - and a type's first body gets the native `{ TFoo }` comment above
+it. The edits are applied as one undoable step and the caret lands on the body
+line of the topmost routine generated; ordinary outcomes such as "nothing to
+implement" go to the log rather than to the Build tab, which is read for
+compiler errors.
 
 ### Prototype sync
 

@@ -223,7 +223,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/prepareRename` | the identifier's own span, and the earliest refusal |
 | `textDocument/rename` | symbol: `changes`; unit: `documentChanges` with a `rename` file operation |
 | `textDocument/onTypeFormatting` | block completion: `\n` is the one trigger; Enter after an unclosed opener answers up to TWO TextEdits - the caret line re-indented to the body indent, then the closer ([PasLsp.BlockClose](source/PasLsp.BlockClose.pas)) |
-| `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C) |
+| `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C). Optional `position` (the scope, see below) and `bodyOrder` - `alphabetical` (default) or `declaration`, where a new body goes among its type's existing ones |
 | `pastree/syncPrototypes` | OURS, not LSP: the routine at a position, its signature mirrored onto its other half (the first half of Ctrl+Shift+C in the RAD Studio client). At most one edit, and unlike classComplete's it REPLACES - the range has a real end ([PasLsp.SyncPrototypes](source/PasLsp.SyncPrototypes.pas)) |
 | `pastree/annotateArgs` | OURS, not LSP: the parameter names of the call at a position, as zero-length insertions of `{Name:} ` in front of each argument, `{var} `/`{out} ` in front of that for a by-reference parameter (never `{const}`). The caret INSIDE the argument list means the one argument it is in (`scope` `one`); ON the routine's name means every argument (`all`); `""` is no call. Optional params override the caret: `mode` `all` / `anonymous` (only arguments that do not name themselves - not a plain identifier or member chain) / `current` (refused with the caret on the name); `byRef` (default true) for the `{var}`/`{out}` marks; `multiline` (default false) puts every argument on its own line under the call - then each edit REPLACES the whitespace in front of the argument (a real range end, like syncPrototypes) with the line break, the indent and the annotation, and an argument already on its own line is left there. The overload is the resolver's own choice when it made one (PasTree 0.29.0 `TPasCallInfo.BoundExact`), else the single family member fitting the argument count, else a refusal by count - a wrong name reads as documentation. Idempotent (an argument already carrying a `{...:}` or `{var}`/`{out}` comment gets nothing more); intrinsics are named from the engine's signature table (`Inc(var X[; N])` - optional groups taken as the argument count allows, a variadic `Args`/`...` tail left nameless); procedural values and named arguments are refused or skipped by name in `provider` ([PasLsp.AnnotateArgs](source/PasLsp.AnnotateArgs.pas)). No WaitAnalyzed, for classComplete's reason. Also rides `pastree/findAllAt` as `annotate` so a menu can caption itself |
 | `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
@@ -278,16 +278,23 @@ clients with no caret to offer.
 **What it must not invent - inherited members.** `read FX` on a class whose
 PARENT declares FX names nothing missing. Ancestors declared in this unit are
 walked (`WalkAncestors`) and their members count as present. An ancestor from
-another unit cannot be seen, so there the rule is conservative: a FIELD-shaped
-name is left alone (it is the parent's field until proven otherwise - the
-eight `Code: string` fields written into `TLabNameObject`'s descendants in
+another unit is invisible to the parse, so since 2026-09-23 the last-good
+analysis is asked instead (`TLspClassCompleteOptions.Probe`, bridged exactly
+as completion is, never waited for): the completion engine's own accessor
+position (`ccPropRead`/`ccPropWrite`) lists the fields and methods the
+property can point at - own and inherited, through the bridge, visibility
+applied - and a name on that list is not declared. So a protected field of a
+foreign base is left alone while its PRIVATE one (invisible from here) gets a
+field of its own, as the compiler would need. Only a file the analysis does
+not hold keeps the conservative rule of before: a FIELD-shaped name is left
+alone (it is the parent's field until proven otherwise - the eight
+`Code: string` fields written into `TLabNameObject`'s descendants in
 uaviTypes.pas were exactly that), a Get/Set-shaped name still gets its method
 (pointing a new property at a foreign base's accessor is not how anyone writes
 Delphi), a bare property is still completed, and an interface with a foreign
 base gets nothing (its specifiers are methods, and the base declaring the
-getter is the common case). No resolver: a parse of the live buffer cannot
-have one, and the honest answer without it is "I cannot see, so I do not
-write".
+getter is the common case). That rule is why, with no probe, `read FName` on a
+TForm descendant declared nothing - the case that asked for the probe.
 
 **Directives travel one way only.** A generated IMPLEMENTATION carries none
 of them: not one is required on a body, several are an outright error there
@@ -304,16 +311,32 @@ different one to every caller. See `BuildHeader`'s `AKeepDirectives`.
 **Handled:**
 
 - A method declared on a `class`/`record`/`object`/`helper` type with no body
-  gets a stub appended at the end of the implementation section, qualified
-  (`TFoo.Bar`), nested types included (`TOuter.TInner.Method`).
+  gets a stub, qualified (`TFoo.Bar`), nested types included
+  (`TOuter.TInner.Method`), placed among the type's EXISTING bodies by the
+  request's `bodyOrder` (`PlaceBodies`). `alphabetical`, the default and the
+  native order: after the existing body with the greatest name not above the
+  new one's (the last of equals, so an overload follows its siblings), or in
+  front of the smallest when the new one sorts first. `declaration`: after
+  the body of the nearest EARLIER declaration that has one, else in front of
+  the nearest later one's. "In front of" climbs over the comment lines
+  directly above that body - a doc comment stays with its routine - and stops
+  at a blank line. A type with no body yet gets a block at the section's
+  end, opened by the native command's comment naming the type and a blank
+  line. A free routine's neighbours are the bodies of the other free routines
+  the unit declares; it gets no such comment. Until 2026-09-23 every stub went
+  to the section's end, which is where nobody keeps a class's methods.
 - A free routine declared in the interface section, same treatment - the
   native class completion skips these; this one does not, because "declared,
   no body" is one question regardless of what the declaration belongs to.
 - A `forward`-declared routine is just a declaration with no body, so it goes
   through the same path as any other.
-- A property with neither `read` nor `write` gets both accessors synthesized
-  (`GetFoo`/`SetFoo`, or a field if the name is not `Get`/`Set`-shaped), the
-  property line updated with the specifiers, and (for methods) a body stub.
+- A property with neither `read` nor `write` is completed as the native
+  command completes it: `read FFoo write SetFoo`, the field declared, the
+  setter declared and given a body that assigns the field. Both accessors are
+  methods (`GetFoo`/`SetFoo`) where no field can stand - an interface, a
+  helper, an indexed property. A class property's field is a `class var` and
+  its accessors `static`. Any generated setter of a property whose `read`
+  names a field writes that field.
 - An `interface` type's bare properties get accessor METHODS declared (an
   interface has no fields to point at) but no bodies - its implementors write
   those.
@@ -345,8 +368,13 @@ already has (`public`/`protected`/`published`) - a reader expects private
 members first, and appending after would instead bury the new member behind
 everything the type already declares; failing that - no visibility sections
 at all, only bare fields/methods in the type's implicit default section, or an
-empty type - right before the type's `end`. See `MemberInsertPos` in
-`source/PasLsp.ClassComplete.pas`, the one function both passes call.
+empty type - right before the type's `end`. An EMPTY private section is used as
+it is. FIELDS go elsewhere in the same section, because a field after a method
+or property is E2169: after its LEADING run of fields (right after the keyword
+when it opens with something else) - an instance field ahead of any
+`class var` block in that run, which would make it class-side, a class var
+after the whole run. In a new section, fields come first. See `MemberAnchorsOf`
+in `source/PasLsp.ClassComplete.pas`, the one function both passes call.
 
 **What the same idea looks like elsewhere.** IntelliJ-family IDEs and
 rust-analyzer both offer the orphan-implementation direction as a quick-fix

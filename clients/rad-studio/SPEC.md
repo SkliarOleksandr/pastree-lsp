@@ -664,8 +664,10 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    interface type's methods, and nested `forward`s. `class` and `static`
    come back on the header because they must (both were lost in the first
    run: `class` is not in the routine node's span, it is `Aux=1`).
-   Bodies land at the end of the implementation section in declaration
-   order, caret on the first empty body line. `PasTreeIdePlugin.ClassComplete`
+   Bodies land next to their type's existing bodies - alphabetically by
+   default, in declaration order by choice (see the 2026-09-23 revision
+   below; until then, at the end of the implementation section) - caret on
+   the topmost new body line. `PasTreeIdePlugin.ClassComplete`
    is the binding; `krHandled` unconditionally, so a decline can never fall
    through to the native one behind the user's back. **Switchable off** since
    2026-09-01 as **Complete Class At Cursor** in the Overrides group, which
@@ -693,14 +695,35 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    could take, so one rule covers both. A property with EITHER specifier is
    left alone: a read-only property is a design, not an omission.
 
+   **Revised 2026-09-23 (v0.52.0), asked by Alex - native parity in three
+   places.** (a) A bare property in a class/record/object now completes the
+   way the native command does: `read FX write SetX`, a field `FX` and a
+   setter whose body is `FX := Value;` (any generated setter of a property
+   that reads a field writes it). Methods both ways stay for an interface, a
+   helper (no instance fields) and an indexed property (no field has an
+   index). A class property gets a `class var` and `static` class accessors
+   (E2355 otherwise). (b) Bodies go next to the type's existing bodies, not
+   to the unit's end: alphabetically (the default - the native order) or in
+   declaration order, the Editing tab's **New method bodies go** choice,
+   sent as `bodyOrder`. (c) A type's FIRST body opens with the native
+   command's comment naming the type, one blank line above it. Fields also
+   got a place of their own (a field after a method is E2169) and an edit
+   kind of their own, `field`. And an ancestor in another unit is no longer
+   a blind spot: the last analysis is asked whether an accessor name is
+   inherited and visible, so `read FName` on a TForm descendant declares
+   `FName` again (it had been left alone since uaviTypes, 2026-09-05) - the
+   conservative rule remains only for a file outside the analysis.
+   Server-side rules: `SPEC.md`, class completion scenarios.
+
    **Interface properties** take part as well, with two differences that
    follow from what an interface is: an accessor there can only be a METHOD
    (no fields exist to point at), and it gets NO body - its implementors
    write those. Members land before the interface's `end`, after its last
    member, with no `private` to write.
 
-   One edit per PLACE, never per routine: all bodies in one insertion, each
-   type's members in one more, each completed property line one more. Which is
+   One edit per PLACE, never per routine: the bodies at each insertion point
+   in one insertion, each type's fields and its methods in one more each,
+   each completed property line one more. Which is
    why the answer is a list, sorted ascending - the writer applies them in
    that order (see the client's ApplyClassComplete), and the caret's line is
    corrected for the lines the earlier edits add above it.
@@ -740,7 +763,8 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
    7. Several edits can share ONE position (a property that is the last
       member of its section anchors all three there), and an unstable sort
       then wrote `procedure SetXX(const Value: Integer); read GetXX write
-      SetXX;`. `CompareClassEdits` fixes the order: spec, semi, member, body.
+      SetXX;`. `CompareClassEdits` fixes the order: spec, semi, field,
+      member, body.
 
    **PROTOTYPE SYNC, the second half of the key - DELIVERED AND VERIFIED
    LIVE 2026-09-01 (v0.25.0 → v0.26.2).** Ctrl+Shift+C now does two things:

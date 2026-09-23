@@ -205,9 +205,28 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           're onto the routine'#39's other half. Off leaves the key to the IDE.'
         WordWrap = True
       end
+      object lblClassCompleteOrder: TLabel
+        Left = 35
+        Top = 149
+        Width = 108
+        Height = 15
+        Caption = 'New method bodies go'
+        FocusControl = cbxClassCompleteOrder
+      end
+      object cbxClassCompleteOrder: TComboBox
+        Left = 170
+        Top = 145
+        Width = 270
+        Height = 23
+        Style = csDropDownList
+        TabOrder = 2
+        Items.Strings = (
+          'In alphabetical order (like Delphi)'
+          'In declaration order')
+      end
       object lblBlockCompletionHint: TLabel
         Left = 35
-        Top = 181
+        Top = 211
         Width = 405
         Height = 30
         Caption =
@@ -234,16 +253,17 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Checked = True
         State = cbChecked
         TabOrder = 1
+        OnClick = chkClassCompleteClick
       end
       object chkBlockCompletion: TCheckBox
         Left = 16
-        Top = 160
+        Top = 190
         Width = 430
         Height = 17
         Caption = 'Block completion (Enter after begin/try/case/repeat)'
         Checked = True
         State = cbChecked
-        TabOrder = 2
+        TabOrder = 3
       end
     end
     object tsDiagnostics: TTabSheet

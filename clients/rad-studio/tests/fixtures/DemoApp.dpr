@@ -17,7 +17,9 @@ uses
   DemoHierarchy in 'DemoHierarchy.pas',
   DemoFindAll in 'DemoFindAll.pas',
   DemoDefines in 'DemoDefines.pas',
-  DemoDcu in 'DemoDcu.pas';
+  DemoDcu in 'DemoDcu.pas',
+  DemoClassCompleteBase in 'DemoClassCompleteBase.pas',
+  DemoClassCompleteForeign in 'DemoClassCompleteForeign.pas';
 
 var
   LDerived: TDerived;

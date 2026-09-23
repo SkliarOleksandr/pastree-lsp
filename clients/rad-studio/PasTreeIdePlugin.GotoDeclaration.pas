@@ -158,9 +158,20 @@ procedure NavigateHistoryAware(const AFileName: string; ARow, ACol: Integer);
 /// Declaration does. A bare IOTAEditPosition.Move scrolls only as far as it
 /// must and leaves the line on the view's first row (Alex, 2026-09-05);
 /// GotoLine is the call that centres, and MoveViewToCursor makes the view
-/// follow. No history entry: an edit is not a jump to come back from.
+/// follow. No history entry - MoveCaretWithHistory is the one that records
+/// one.
 /// </summary>
 procedure MoveCaretCentred(const AView: IOTAEditView; ARow, ACol: Integer);
+
+/// <summary>
+/// MoveCaretCentred plus an Alt+Left/Alt+Right entry, from (AFromRow,
+/// AFromCol) to (AToRow, AToCol), both in AView's own file and both in the
+/// text as it is NOW. Class completion's jump to the code it just wrote goes
+/// through this, so Back returns to where the key was pressed, the way it
+/// does after Ctrl+Click (Alex, 2026-09-23).
+/// </summary>
+procedure MoveCaretWithHistory(const AView: IOTAEditView;
+  AFromRow, AFromCol, AToRow, AToCol: Integer);
 
 implementation
 
@@ -451,6 +462,32 @@ begin
   end
   else
     NavigateToPosition(AToFile, AToRow, AToCol);
+end;
+
+procedure MoveCaretWithHistory(const AView: IOTAEditView;
+  AFromRow, AFromCol, AToRow, AToCol: Integer);
+var
+  LHistoryServices: IOTAHistoryServices;
+  LCurItem, LNewItem: IOTAHistoryItem;
+begin
+  if not Assigned(AView) or not Assigned(AView.Buffer) then
+    Exit;
+  // Registered exactly as PushHistoryAndNavigate registers a jump - and for
+  // its reason NOT through IOTAHistoryServices.Execute, which re-finds the
+  // position by IsEqual and can land the stack pointer on an older match.
+  if Supports(BorlandIDEServices, IOTAHistoryServices, LHistoryServices) then
+  begin
+    LCurItem := TPasHistoryItem.Create(AView.Buffer.FileName, AFromRow,
+      AFromCol);
+    LNewItem := TPasHistoryItem.Create(AView.Buffer.FileName, AToRow, AToCol);
+    LHistoryServices.AddHistoryItem(LCurItem, LNewItem);
+    TrackHistoryItem(LCurItem);
+    TrackHistoryItem(LNewItem);
+  end;
+  // The move itself is MoveCaretCentred rather than LNewItem.Execute: the
+  // view is already the one the edit went into, and this is the landing the
+  // class-completion caret was tuned on (2026-09-05).
+  MoveCaretCentred(AView, AToRow, AToCol);
 end;
 
 /// <summary>

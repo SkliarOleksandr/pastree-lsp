@@ -2114,6 +2114,7 @@ procedure TestClassComplete;
 var
   LFile: string;
   LParams, LDoc: TJSONObject;
+  LLine, LChar: Integer;
 begin
   Writeln;
   Writeln('=== 5f. classComplete implements what is declared, once ===');
@@ -2123,12 +2124,14 @@ begin
   LDoc.AddPair('uri', PathToLspUri(LFile));
   LParams.AddPair('textDocument', LDoc);
   Check(Ask('pastree/classComplete', LParams), 'classComplete answered');
-  // Six edits for this fixture, one per PLACE and never one per routine:
-  // every body in ONE insertion at the end of the implementation section, the
-  // members of TProps, IWorker and TOrphanHost, and the `read`/`write`
-  // written into the two bare property lines.
-  Check(GOk and GResultJson.Contains('"count":6'),
-    'one edit per place: bodies together, each type''s members together');
+  // Eleven edits for this fixture, one per PLACE and never one per routine:
+  // five body insertion points (after TBase.Done, after TBase.Overloaded,
+  // before and after TProps.GetKnown, the section's end), TProps' fields and
+  // its methods, the members of IWorker and TOrphanHost, and the
+  // `read`/`write` written into the two bare property lines.
+  Check(GOk and GResultJson.Contains('"count":11'),
+    'one edit per place: each insertion point''s bodies together, each '
+    + 'type''s fields and methods together');
   Check(GOk and GResultJson.Contains(
     'procedure TBase.Missing(const A: string; B: Integer);'),
     'the missing method, with its parameter list verbatim');
@@ -2168,8 +2171,30 @@ begin
     + 'interface');
   // The first body must be separated from the code above it, which needs TWO
   // line breaks: the insertion point sits at the end of an existing line.
-  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nprocedure'),
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nclass function'),
     'the first body opens with a blank line, not against the previous end');
+
+  // --- where the bodies go: ALPHABETICALLY among the type's own (the
+  // default, and the native command's order) - not at the unit's end ---
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nclass function '
+    + 'TBase.Make: TBase;\r\nbegin\r\n  \r\nend;\r\n\r\nprocedure '
+    + 'TBase.Missing(const A: string; B: Integer);\r\nbegin\r\n  \r\nend;'
+    + '\r\n\r\nprocedure TBase.NeedsBody(A: Integer);'),
+    'Make, Missing and NeedsBody sort after the existing Done, in order, as '
+    + 'one edit');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"\r\n\r\nfunction TBase.Overloaded(A: Integer): Integer;'),
+    'a new overload goes after the overload that already has a body');
+  Check(GOk and GResultJson.Contains('"newText":"function TProps.GetItem('
+    + 'Index: Integer): string;\r\nbegin\r\n  \r\nend;\r\n\r\n"'),
+    'a name sorting ahead of every existing body goes IN FRONT of the first '
+    + 'one, closed by a blank line');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\n{ TStack<T> }\r\n'
+    + '\r\nprocedure TStack<T>.Push'),
+    'a type with no body yet gets a block of its own, opened by its name in '
+    + 'a comment and a blank line - as the native command writes it');
+  Check(GOk and not GResultJson.Contains('{ FreeRoutine }'),
+    'a free routine belongs to no type, so no such comment');
 
   // --- property accessors: a SECOND edit, into the type's private section ---
   Check(GOk and GResultJson.Contains('"kind":"member"'),
@@ -2198,11 +2223,24 @@ begin
   // --- a property with NEITHER read nor write, and interface properties ---
   Check(GOk and GResultJson.Contains('"kind":"spec"'),
     'completing a bare property is an edit into the property line itself');
-  Check(GOk and GResultJson.Contains(' read GetPlain write SetPlain'),
+  Check(GOk and GResultJson.Contains(' read FPlain write SetPlain'),
     'and it points the property at the accessors it just declared');
-  Check(GOk and GResultJson.Contains('function GetPlain: Integer;')
-    and GResultJson.Contains('function TProps.GetPlain: Integer;'),
-    'a bare property in a CLASS gets methods, declared and implemented');
+  Check(GOk and GResultJson.Contains('FPlain: Integer;","kind":"field"')
+    and GResultJson.Contains('procedure SetPlain(const Value: Integer);')
+    and not GResultJson.Contains('GetPlain'),
+    'a bare property in a CLASS reads a new field and writes through a '
+    + 'setter - the native command''s shape (Alex, 2026-09-23)');
+  Check(GOk and GResultJson.Contains('procedure TProps.SetPlain(const Value: '
+    + 'Integer);\r\nbegin\r\n  FPlain := Value;\r\nend;'),
+    'and that setter''s body assigns the field');
+  // Fields have a place of their own: after the section's leading fields,
+  // not after its methods (a field after a method is E2169).
+  FindPos(LFile, 'FKnown: Integer;', 'FKnown', LLine, LChar);
+  Check(GOk and GResultJson.Contains(Format('{"line":%d,"character":20},'
+    + '"end":{"line":%d,"character":20}},"newText":"\r\n    FBacked: '
+    + 'Integer;\r\n    FPlain: Integer;","kind":"field"', [LLine, LLine])),
+    'new fields go right after the existing field, ahead of the private '
+    + 'methods');
   Check(GOk and not GResultJson.Contains('ReadOnlyOne'),
     'a read-only property is a decision, not an omission - untouched');
   // An interface: accessors are METHODS whatever they are called (no fields
@@ -2306,6 +2344,8 @@ begin
   Check(GOk and GResultJson.Contains('"count":0')
     and GResultJson.Contains('not in a class or a routine'),
     'and that is a refusal that says so, not the whole unit');
+  Check(GOk and GResultJson.Contains('"caret":null'),
+    'with NO caret - null, not {0,0}, which is the unit''s first line');
 end;
 
 { 5k. what class completion must NOT invent - inherited members - and where
@@ -2337,7 +2377,7 @@ begin
     + 'it is the parent''s field until proven otherwise (uaviTypes.pas)');
   Check(GOk and GResultJson.Contains('function GetThing: Integer;'),
     'a Get-shaped name there still gets its method');
-  Check(GOk and GResultJson.Contains(' read GetBare write SetBare'),
+  Check(GOk and GResultJson.Contains(' read FBare write SetBare'),
     'and a bare property there is still completed');
   // Interfaces: the getter comes from the base interface.
   Check(GOk and not GResultJson.Contains('GetV'),
@@ -2352,6 +2392,152 @@ begin
     + '"newText":"\r\n    function GetZ: Integer;"', [LLine, LLine])),
     'a member added after a field goes after the field''s `;` - no `;;`, '
     + 'no unterminated field');
+end;
+
+{ Asks pastree/classComplete about a whole fixture (no position), with an
+  explicit `bodyOrder` unless ABodyOrder is ''. }
+function AskClassComplete(const AFixture, ABodyOrder: string): Boolean;
+var
+  LParams, LDoc: TJSONObject;
+begin
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(TPath.Combine(GFixtureDir, AFixture)));
+  LParams.AddPair('textDocument', LDoc);
+  if ABodyOrder <> '' then
+    LParams.AddPair('bodyOrder', ABodyOrder);
+  Result := Ask('pastree/classComplete', LParams);
+end;
+
+{ 5o. The OTHER body order - `bodyOrder: declaration` - on the same fixture as
+  5f: a body goes after the body of the nearest EARLIER declaration that has
+  one (Alex, 2026-09-23). }
+procedure TestClassCompleteDeclOrder;
+begin
+  Writeln;
+  Writeln('=== 5o. classComplete in declaration order ===');
+  Check(AskClassComplete('DemoClassComplete.pas', 'declaration'),
+    'classComplete answered');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nprocedure '
+    + 'TBase.Missing(const A: string; B: Integer);\r\nbegin\r\n  \r\nend;'
+    + '\r\n\r\nclass function TBase.Make: TBase;'),
+    'Missing and Make both follow Done, the nearest earlier declaration with '
+    + 'a body - and in the order they are declared');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"\r\n\r\nprocedure TBase.NeedsBody(A: Integer);'),
+    'NeedsBody follows Defaulted, declared right before it, in an edit of '
+    + 'its own');
+  Check(GOk and GResultJson.Contains('"newText":"\r\n\r\nfunction '
+    + 'TProps.GetMissing: string;\r\nbegin\r\n  \r\nend;\r\n\r\nprocedure '
+    + 'TProps.SetMissing(const Value: string);\r\nbegin\r\n  \r\nend;\r\n'
+    + '\r\nfunction TProps.GetItem(Index: Integer): string;'),
+    'the accessors follow GetKnown in property order, not by name');
+  Check(GOk and not GResultJson.Contains('"newText":"function TProps.GetItem'),
+    'so nothing goes in front of an existing body here');
+end;
+
+{ 5n. Where FIELDS go, and bodies placed around a documented one - see the
+  fixture's header. }
+procedure TestClassCompleteFields;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5n. classComplete puts fields where fields may stand ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassCompleteFields.pas');
+  Check(AskClassComplete('DemoClassCompleteFields.pas', ''),
+    'classComplete answered');
+  FindPos(LFile, 'FFirst: Integer;', 'FFirst', LLine, LChar);
+  Check(GOk and GResultJson.Contains(Format('{"line":%d,"character":20},'
+    + '"end":{"line":%d,"character":20}},"newText":"\r\n    FName: '
+    + 'string;","kind":"field"', [LLine, LLine])),
+    'an instance field goes after the leading instance field - AHEAD of the '
+    + 'class var block, which would make it class-side');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"\r\n    class var FTotal: Integer;","kind":"field"'),
+    'a class property''s field is a class var, after the class var block');
+  Check(GOk and GResultJson.Contains(
+    'class procedure SetTotal(const Value: Integer); static;'),
+    'and its setter a class STATIC method - E2355 otherwise');
+  Check(GOk and GResultJson.Contains('class procedure TFields.SetTotal(const '
+    + 'Value: Integer);\r\nbegin\r\n  FTotal := Value;\r\nend;'),
+    'whose body keeps `class`, drops `static` and writes the field');
+  Check(GOk and GResultJson.Contains(' read GetItems write SetItems'),
+    'an indexed bare property takes methods both ways - no field has an '
+    + 'index');
+  Check(GOk and not GResultJson.Contains('FCounter'),
+    'a class var already declared is seen, and not declared again');
+  // The empty private section.
+  Check(GOk and not GResultJson.Contains('"newText":"private'),
+    'an EMPTY private section is used, not a second one written');
+  FindPos(LFile, 'TEmptyPrivate = class', 'TEmptyPrivate', LLine, LChar);
+  Check(GOk and GResultJson.Contains(Format('{"line":%d,"character":9},'
+    + '"end":{"line":%d,"character":9}},"newText":"\r\n    FSize: Integer;"',
+    [LLine + 1, LLine + 1])),
+    'its new field goes right after its keyword');
+  // Bodies around the documented one.
+  FindPos(LFile, 'Documents the one existing body', 'Documents', LLine,
+    LChar);
+  Check(GOk and GResultJson.Contains(Format('{"line":%d,"character":0},'
+    + '"end":{"line":%d,"character":0}},"newText":"function '
+    + 'TFields.GetItems(Index: Integer): string;', [LLine, LLine])),
+    'a body sorting first goes above the comment on the first body, not '
+    + 'between the two');
+  // TFields.Helper is also the section's last body, so the stubs after it
+  // and TEmptyPrivate's new block share one position - one edit, the
+  // anchored stubs first.
+  Check(GOk and GResultJson.Contains('FTotal := Value;\r\nend;\r\n\r\n'
+    + '{ TEmptyPrivate }\r\n\r\nprocedure TEmptyPrivate.SetSize'),
+    'and a type with no bodies gets its own block, after the stubs placed '
+    + 'next to an existing body at the same position');
+end;
+
+{ 5p. An ancestor in ANOTHER unit: the last analysis decides what is
+  inherited, where the buffer alone would have to guess (5k). Needs the
+  analysis to be up, which every earlier section has waited for. }
+procedure TestClassCompleteForeign;
+begin
+  Writeln;
+  Writeln('=== 5p. classComplete asks the analysis about a foreign '
+    + 'ancestor ===');
+  Check(AskClassComplete('DemoClassCompleteForeign.pas', ''),
+    'classComplete answered');
+  Check(GOk and not GResultJson.Contains('FShared'),
+    'a protected field the ancestor declares is not declared again');
+  Check(GOk and not GResultJson.Contains('GetShared'),
+    'nor is its protected getter');
+  Check(GOk and GResultJson.Contains('FHidden: Integer;'),
+    'the ancestor''s PRIVATE field is invisible here, so the property gets '
+    + 'a field of its own');
+  Check(GOk and GResultJson.Contains('FOwn: string;')
+    and GResultJson.Contains('procedure SetOwn(const Value: string);'),
+    'a name nobody declares gets its field and its setter');
+  Check(GOk and GResultJson.Contains('procedure TCcChild.SetOwn(const Value: '
+    + 'string);\r\nbegin\r\n  FOwn := Value;\r\nend;'),
+    'and the setter writes the field the property reads');
+end;
+
+{ 5q. classComplete when the ONLY edit is a field: the caret goes on it.
+  Until 0.52.1 this answered caret 0,0 for "none", which the RAD client
+  read as the unit's first line. }
+procedure TestClassCompleteFieldOnlyCaret;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5q. classComplete puts the caret on a lone new field ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoClassCompleteFieldOnly.pas');
+  Check(AskClassComplete('DemoClassCompleteFieldOnly.pas', ''),
+    'classComplete answered');
+  FindPos(LFile, 'FA: Integer;', 'FA', LLine, LChar);
+  Check(GOk and GResultJson.Contains('"count":1')
+    and GResultJson.Contains('"newText":"\r\n    FWanted: Integer;"'),
+    'one edit: the field');
+  Check(GOk and GResultJson.Contains(Format(
+    '"caret":{"line":%d,"character":4}', [LLine + 1])),
+    'and the caret on its NAME, the line below FA - not the unit''s start');
 end;
 
 { 5i. classComplete when the ONLY thing to do is write an orphan's
@@ -2862,9 +3048,10 @@ begin
     'the missing semicolon comes back as an edit of its own');
   Check(GOk and GResultJson.Contains('"kind":"semi"'),
     'named as the repair it is');
-  Check(GOk and GResultJson.Contains(' read GetXX write SetXX'),
+  Check(GOk and GResultJson.Contains(' read FXX write SetXX'),
     'and the property is completed off the REPAIRED parse');
-  Check(GOk and GResultJson.Contains('function TSemi.GetXX: Integer;'),
+  Check(GOk and GResultJson.Contains(
+    'procedure TSemi.SetXX(const Value: Integer);'),
     'with bodies for the accessors it declared');
   Check(GOk and not GResultJson.Contains('TSemi.Done'),
     'and the one implemented method is still recognised as implemented');
@@ -2874,13 +3061,13 @@ begin
   // new members - the array order IS the apply order.
   // Positions RELATIVE to TLast's own specifier edit: the fixture has two
   // semicolon repairs, and the first one belongs to the other class.
-  LAt := Pos(' read GetYY write SetYY', GResultJson);
-  Check(GOk and (LAt > 0) and (LAt < Pos('function GetYY: Integer;',
+  LAt := Pos(' read FYY write SetYY', GResultJson);
+  Check(GOk and (LAt > 0) and (LAt < Pos('procedure SetYY(const Value: Integer);',
     GResultJson)),
     'at one position the specifiers go before the new members');
   Check(GOk and (LAt > 0) and
     (Pos('"newText":";"', GResultJson, LAt) <
-     Pos('function GetYY: Integer;', GResultJson)),
+     Pos('procedure SetYY(const Value: Integer);', GResultJson)),
     'and the semicolon closes the declaration before those members');
 
   Check(AskAbout('DemoClassCompleteBroken.pas'), 'answered for the broken one');
@@ -3317,6 +3504,10 @@ begin
       TestClassComplete;
       TestClassCompleteScope;
       TestClassCompleteInherited;
+      TestClassCompleteDeclOrder;
+      TestClassCompleteFields;
+      TestClassCompleteForeign;
+      TestClassCompleteFieldOnlyCaret;
       TestClassCompleteOrphanCaret;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;

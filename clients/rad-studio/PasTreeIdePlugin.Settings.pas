@@ -120,6 +120,14 @@ function FindAllEnabled: Boolean;
 function ClassCompleteEnabled: Boolean;
 
 /// <summary>
+/// Where class completion puts a new body: True = after the body of the
+/// nearest earlier declaration, False = alphabetically among the type's
+/// bodies (the default - what the native command does). See
+/// PasLsp.ClassComplete.PlaceBodies.
+/// </summary>
+function ClassCompleteDeclarationOrder: Boolean;
+
+/// <summary>
 /// Whether Ctrl+G is ours - the Go To picker (PasTreeIdePlugin.GoToPicker). False
 /// hands the keystroke back to the IDE, whatever the user's keymap binds it
 /// to: the same off-switch shape as the decl/impl toggle.
@@ -218,6 +226,10 @@ type
     EnableFindAll: Boolean;
     EnableBlockCompletion: Boolean;
     EnableClassComplete: Boolean;
+    // Where Ctrl+Shift+C puts a new body among its type's existing ones:
+    // False = alphabetically (the native command's order, the default),
+    // True = in declaration order. Sent as the request's `bodyOrder`.
+    ClassCompleteDeclOrder: Boolean;
     EnableGoTo: Boolean;
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
@@ -270,6 +282,7 @@ const
   cValueFindAll = 'EnableFindAll';
   cValueBlockCompletion = 'EnableBlockCompletion';
   cValueClassComplete = 'EnableClassComplete';
+  cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
   cValueGoTo = 'EnableGoTo';
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
@@ -406,6 +419,7 @@ begin
   Result.EnableFindAll := True;
   Result.EnableBlockCompletion := True;
   Result.EnableClassComplete := True;
+  Result.ClassCompleteDeclOrder := False;
   Result.EnableGoTo := True;
   Result.EnableLogging := True;
   // See AdvancedLoggingEnabled: the one default that is False.
@@ -444,6 +458,8 @@ begin
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
       Result.EnableClassComplete :=
         ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
+      Result.ClassCompleteDeclOrder := ReadFlag(LReg,
+        cValueClassCompleteOrder, Result.ClassCompleteDeclOrder);
       Result.EnableGoTo := ReadFlag(LReg, cValueGoTo, Result.EnableGoTo);
       Result.EnableLogging :=
         ReadFlag(LReg, cValueLogging, Result.EnableLogging);
@@ -492,6 +508,8 @@ begin
           Ord(ASettings.EnableBlockCompletion));
         LReg.WriteInteger(cValueClassComplete,
           Ord(ASettings.EnableClassComplete));
+        LReg.WriteInteger(cValueClassCompleteOrder,
+          Ord(ASettings.ClassCompleteDeclOrder));
         LReg.WriteInteger(cValueGoTo, Ord(ASettings.EnableGoTo));
         LReg.WriteInteger(cValueLogging, Ord(ASettings.EnableLogging));
         LReg.WriteInteger(cValueAdvancedLogging,
@@ -561,6 +579,11 @@ end;
 function ClassCompleteEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableClassComplete;
+end;
+
+function ClassCompleteDeclarationOrder: Boolean;
+begin
+  Result := CurrentSettings.ClassCompleteDeclOrder;
 end;
 
 function GoToEnabled: Boolean;

@@ -2381,10 +2381,17 @@ begin
     Exit;
   Result.Names := AResult.GetValue<string>('names', '');
   Result.Provider := AResult.GetValue<string>('provider', '');
-  LLine := AResult.GetValue<Integer>('caret.line', -1);
-  LChar := AResult.GetValue<Integer>('caret.character', -1);
-  if (LLine >= 0) and (LChar >= 0) then
-    LspToIde(LLine, LChar, Result.CaretRow, Result.CaretCol);
+  // `caret` is null when it should stay where it is (CaretRow 0). Read from
+  // an object only: the {0,0} this server used to send for "none" is LSP
+  // line 0, the unit's first line - and moving there after a press that
+  // wrote only a field is the bug this replaced (Alex, 2026-09-23).
+  if AResult.TryGetValue<TJSONObject>('caret', LStart) then
+  begin
+    LLine := LStart.GetValue<Integer>('line', -1);
+    LChar := LStart.GetValue<Integer>('character', -1);
+    if (LLine >= 0) and (LChar >= 0) then
+      LspToIde(LLine, LChar, Result.CaretRow, Result.CaretCol);
+  end;
   if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
     Exit;
   SetLength(Result.Edits, LEdits.Count);
@@ -2440,6 +2447,13 @@ begin
     LPos.AddPair('character', TJSONNumber.Create(LChar));
     LParams.AddPair('position', LPos);
   end;
+  // Where a new body goes among its type's existing ones - the Editing tab's
+  // choice. The server's default is alphabetical, so that one is sent too,
+  // explicitly: the setting is the truth, not the server's default.
+  if ClassCompleteDeclarationOrder then
+    LParams.AddPair('bodyOrder', 'declaration')
+  else
+    LParams.AddPair('bodyOrder', 'alphabetical');
   // No supersede slot: this is a deliberate keystroke, not a stream of
   // per-character questions, and two presses mean two answers.
   FClient.Request('pastree/classComplete', LParams,

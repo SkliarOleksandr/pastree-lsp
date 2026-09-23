@@ -152,11 +152,14 @@ dependency. A third shared unit is a real decision, not a convenience.
 
 ## Two traps in code that look like other bugs
 
-**An empty scope has no lists.** `TSemaScope.Symbols` and `.Names` are lazy and
-legally `nil`, so `LScope.Symbols.Count` is an access violation rather than an
-empty loop. Check for `nil` before iterating any scope container, and cover a
-new model-walking handler with a harness request - an uncovered
-`documentSymbol` shipped this crash to a user on 2026-08-23.
+**An empty scope is `Count = 0` - it used to be `nil`.** Until PasTree 0.42.0
+`TSemaScope.Symbols` and `.Names` were lazy objects, legally `nil`, and
+`LScope.Symbols.Count` was an access violation rather than an empty loop - an
+uncovered `documentSymbol` shipped that crash to a user on 2026-08-23. Since
+0.42.0 they are records (`TSemaSymList`, `TSemaNames`) and never `nil`;
+`cMinPasTreeVersion` is 0.42.0 so no older library links against code that
+tests `Count` alone. The lesson that outlives the API: cover a new
+model-walking handler with a harness request, empty scopes included.
 
 **Assume a BOM.** Delphi writes UTF-8-with-BOM by default, so a leading BOM is
 the common case and never content. Never hand-roll it: go through

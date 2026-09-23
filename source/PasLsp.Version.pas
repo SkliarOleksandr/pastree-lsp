@@ -196,7 +196,11 @@ const
   /// inside Detail - the 13th element of pastree/outline's rows. Not silent
   /// (the field is a compile error without it), listed so the reason is
   /// on record beside the others.
-  cMinPasTreeVersion = '0.41.0';
+  /// 0.42.0 (2026-09-23): a scope's Names/Symbols are records, never nil -
+  /// an empty scope is Count = 0. Silent without it: the documentSymbol walk
+  /// no longer tests for nil, and against an older library an empty scope's
+  /// Count is the 2026-08-23 access violation again.
+  cMinPasTreeVersion = '0.42.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

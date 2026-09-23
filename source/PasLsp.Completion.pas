@@ -129,12 +129,16 @@ type
       AProjectMid: Integer): TLspSignatureHelpAnswer;
     { Class completion over the same live overlay text: the declarations of
       AFileName that have no implementation, as text to insert (see
-      PasLsp.ClassComplete for what counts and what does not). No project
-      bridge and no position - the question is about ONE buffer as a whole,
-      and the answer must see declarations the last analysis never has:
-      the user pressed the key because they just typed one. }
+      PasLsp.ClassComplete for what counts and what does not). The answer is
+      the buffer's, because it must see declarations the last analysis never
+      has - the user pressed the key because they just typed one. AProject/
+      AProjectMid (nil/-1 = none) are asked ONE thing only: whether a name a
+      property points at is inherited from an ancestor in another unit, which
+      the buffer alone cannot see. }
     function ClassCompleteAt(const AFileName, AText: string;
-      APasLine, APasCol: Integer): TLspClassCompleteAnswer;
+      APasLine, APasCol: Integer; AProject: TPasSemaProject;
+      AProjectMid: Integer; ABodyOrder: TLspBodyOrder):
+      TLspClassCompleteAnswer;
     { Prototype sync at a position: the routine under the caret, mirrored onto
       its other half (PasLsp.SyncPrototypes). Same live-buffer, parse-only
       reading as class completion - and for the sharper version of the same
@@ -759,7 +763,8 @@ begin
 end;
 
 function TLspCompletionEngine.ClassCompleteAt(const AFileName, AText: string;
-  APasLine, APasCol: Integer): TLspClassCompleteAnswer;
+  APasLine, APasCol: Integer; AProject: TPasSemaProject;
+  AProjectMid: Integer; ABodyOrder: TLspBodyOrder): TLspClassCompleteAnswer;
 var
   LPre: TPasPreprocessed;
   LTree: TPasTree;
@@ -768,11 +773,13 @@ var
   LEdit: TLspClassEdit;
   LFixed, LNext: string;
   LIdx, LLine, LCol: Integer;
+  LOptions: TLspClassCompleteOptions;
+  LModel: TPasSemaModel;
 begin
-  // Parse only - no resolver, no bridge. Class completion is a question about
-  // DECLARATIONS AND BODIES, which the CST answers on its own; running the
-  // resolver for it would buy nothing and cost the analysis of every unit the
-  // file uses.
+  // Parse first - class completion is a question about DECLARATIONS AND
+  // BODIES, which the CST answers on its own. The resolver runs only if the
+  // probe below is actually asked, which is only for a type with an ancestor
+  // in another unit.
   LPre := FPreprocessor.ProcessText(AFileName, AText);
   LTree := TPasParser.ParseFile(LPre, LDiags);
   { A BROKEN PARSE GENERATES NOTHING - except for the one break this feature
@@ -830,7 +837,49 @@ begin
   // typed on its line, so a caret at or left of it is unmoved, and one to the
   // right of it on the same line is off by one column - which cannot move
   // it out of the type or routine it was in. Good enough to name the scope.
-  Result := ClassCompleteFor(LTree, APasLine, APasCol);
+  LOptions := Default(TLspClassCompleteOptions);
+  LOptions.BodyOrder := ABodyOrder;
+  LModel := nil;
+  try
+    { THE PROBE: is a name `read`/`write` points at already a member the
+      property can use - the type's own or any ancestor's, visible from here?
+      Answered by the completion engine's own accessor position (ccPropRead/
+      ccPropWrite), which walks the struct chain through the bridge into the
+      unit that declares the ancestor and applies visibility - so a private
+      field of a base in another unit counts as absent, which is what the
+      compiler thinks too. Without it every property on a TForm or
+      TInterfacedObject descendant pointing at a new field got nothing: an
+      ancestor in another unit is unknown to the parse, and an unknown
+      ancestor may be the field's owner (PasLsp.ClassComplete, uaviTypes).
+      Only with a bridge - a standalone file keeps the conservative rule. }
+    if AProject <> nil then
+      LOptions.Probe :=
+        function(ALine, ACol: Integer; const AName: string): Boolean
+        var
+          LCompletion: TPasCompletion;
+          LContext: TPasComplContext;
+          LItems: TArray<TPasComplItem>;
+          LItem: Integer;
+        begin
+          Result := False;
+          if LModel = nil then
+            LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+          LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
+          try
+            if not LCompletion.CompleteAt(ALine, ACol, LContext, LItems) or
+               not (LContext in [ccPropRead, ccPropWrite]) then
+              Exit;
+            for LItem := 0 to High(LItems) do
+              if SameText(LItems[LItem].Name, AName) then
+                Exit(True);
+          finally
+            LCompletion.Free;
+          end;
+        end;
+    Result := ClassCompleteFor(LTree, APasLine, APasCol, LOptions);
+  finally
+    LModel.Free;
+  end;
   // The answer's positions are in the REPAIRED text; the client edits the
   // original. MergeSemicolonRepairs maps them back and adds the semicolons.
   MergeSemicolonRepairs(Result, LRepairs);
