@@ -992,17 +992,49 @@ var
   LTypeOn: Boolean;
   LTop, LX: Integer;
 
+  { One run at LX. Drawn with its glyph positions PINNED to the advances the
+    measurement returned (ExtTextOut's lpDx), transparent over the row
+    FillRect already painted. Under GDI scaling - RAD Studio started "DPI
+    Unaware" on a scaled monitor (12.3, 2026-09-24) - GDI renders the glyphs
+    at the monitor's size while every metric stays in 96-DPI units, so a
+    free-running TextOut came out wider than its TextWidth, and the next
+    run's opaque background cut the tail off the last glyph: `0;` read as
+    `(;`, `FIndex;` as `Finde>;`. The pinned positions keep the painted run
+    as wide as the measured one; the transparent mode keeps any leftover
+    overhang of a last glyph from being erased by its neighbour. }
   procedure Put(const ARun: string; AColor: TColor; AStyle: TFontStyles);
+  var
+    LDC: HDC;
+    LDx: TArray<Integer>;
+    LSize: TSize;
+    I: Integer;
   begin
     if ARun = '' then
       Exit;
     ACanvas.Font.Style := AStyle;
     if ADoDraw then
-    begin
       ACanvas.Font.Color := AColor;
-      ACanvas.TextOut(LX, LTop, ARun);
+    // Handle realizes the font (and its colour) in the DC.
+    LDC := ACanvas.Handle;
+    SetLength(LDx, Length(ARun));
+    if not GetTextExtentExPoint(LDC, PChar(ARun), Length(ARun), 0, nil,
+      @LDx[0], LSize) then
+    begin
+      // No extents: the plain path, measured the plain way.
+      if ADoDraw then
+        ExtTextOut(LDC, LX, LTop, 0, nil, PChar(ARun), Length(ARun), nil);
+      Inc(LX, ACanvas.TextWidth(ARun));
+      Exit;
     end;
-    Inc(LX, ACanvas.TextWidth(ARun));
+    if ADoDraw then
+    begin
+      // The partial extents are cumulative; lpDx wants each glyph's own.
+      for I := High(LDx) downto 1 do
+        Dec(LDx[I], LDx[I - 1]);
+      SetBkMode(LDC, TRANSPARENT);
+      ExtTextOut(LDC, LX, LTop, 0, nil, PChar(ARun), Length(ARun), @LDx[0]);
+    end;
+    Inc(LX, LSize.cx);
   end;
 
   procedure PutSnippet;
@@ -1061,6 +1093,7 @@ var
 
 var
   LUI: INTAIDEUIServices;
+  LOldBkMode: Integer;
 begin
   LHavePalette := TryEditorOptions(LOptions);
   LBaseColor := ACanvas.Font.Color;
@@ -1080,12 +1113,15 @@ begin
   LTop := ARect.Top + (ARect.Height - ACanvas.TextHeight('Ag')) div 2;
   LX := ARect.Left + cPad;
 
+  LOldBkMode := 0;
   if ADoDraw then
   begin
-    // The brush arrives prepared (selection highlight included). TextOut
-    // paints with it too, which is what keeps the selection bar visible
-    // behind the text - no bsClear here.
+    // The brush arrives prepared (selection highlight included), and this
+    // fill is what keeps the selection bar behind the text - the runs are
+    // drawn transparent over it (Put). The panel's background mode is put
+    // back at the end.
     ACanvas.FillRect(ARect);
+    LOldBkMode := GetBkMode(ACanvas.Handle);
   end;
 
   if FIsTitle then
@@ -1128,6 +1164,8 @@ begin
   end;
 
   // Leave the canvas the way the panel prepared it.
+  if LOldBkMode <> 0 then
+    SetBkMode(ACanvas.Handle, LOldBkMode);
   ACanvas.Font.Color := LBaseColor;
   ACanvas.Font.Style := LBaseStyle;
   AWidth := LX + cPad - ARect.Left;
