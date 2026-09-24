@@ -128,6 +128,18 @@ type
     function SyncOne(const APath: string): Boolean;
 
     /// <summary>
+    /// SyncOne for a buffer the IDE has just RELOADED from disk: the same
+    /// didChange, but with the text read from the FILE, because the buffer
+    /// holds exactly that and must not be touched yet. Reading it through
+    /// IOTAEditorContent within a moment of the reload is what put the caret
+    /// on line 1 (2026-09-24: at 70 ms after the reload it did, at 260 ms it
+    /// did not) - the IDE restores the view position after the reload, and a
+    /// read in between loses it. False when the server does not hold APath;
+    /// the caller then reports it as changed on disk instead.
+    /// </summary>
+    function SyncFromDisk(const APath: string): Boolean;
+
+    /// <summary>
     /// Re-opens every tracked document from scratch. Hook this to
     /// TLspClient.OnReady: a restarted server has no documents at all, and
     /// would otherwise answer from whatever is on disk.
@@ -908,6 +920,45 @@ begin
   TimingLogFmt('sync-one %s: read %s (content %s), compare+send %s',
     [ExtractFileName(APath), Ms(LRead - LStart), Ms(LCost.ContentMs),
      TimingSince(LRead)]);
+end;
+
+function TLspDocumentSync.SyncFromDisk(const APath: string): Boolean;
+var
+  LKnown: TSentDocument;
+  LText: string;
+  LStart, LSendStart: Double;
+begin
+  Result := FSent.TryGetValue(LowerCase(APath), LKnown);
+  if not Result then
+    Exit;
+  LStart := TimingNowMs;
+  // Stamps first, as everywhere: the file as of this read, and the buffer
+  // count it matches - a keystroke after it is newer and re-read.
+  LKnown.ReadStamp := ModCountOf(LowerCase(APath));
+  LKnown.DiskStamp := DiskStampOf(APath);
+  if not TryReadTextNoBom(APath, LText) then
+  begin
+    // Unreadable: stale stamps, so the next Sync reads the buffer instead.
+    LKnown.DiskStamp := 0;
+    Exit;
+  end;
+  if LKnown.Text = LText then
+  begin
+    TimingLogFmt('sync-from-disk %s: unchanged, read %s',
+      [ExtractFileName(APath), TimingSince(LStart)]);
+    Exit;
+  end;
+  Inc(LKnown.Version);
+  LKnown.Text := LText;
+  if FClient.IsReady then
+  begin
+    LSendStart := TimingNowMs;
+    SendDidChange(LKnown.Path, LKnown.Text, LKnown.Version);
+    LogSent('didChange', LKnown.Path, LKnown.Version, Length(LKnown.Text),
+      LSendStart);
+  end;
+  TimingLogFmt('sync-from-disk %s: total %s',
+    [ExtractFileName(APath), TimingSince(LStart)]);
 end;
 
 procedure TLspDocumentSync.ResendAll;

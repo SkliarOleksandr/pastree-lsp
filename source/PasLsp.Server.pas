@@ -185,6 +185,23 @@ type
     FPendingDue: UInt64;            // GetTickCount64 deadline; 0 = nothing
     FPendingPriority: string;
     FBuildStart: UInt64;            // for the analysis-done log line
+    // WHEN THE ANALYZED PROJECT LAST READ THE DISK: the wall-clock start of
+    // the full rebuild that produced FProject (FBuildDiskReadAt while one
+    // runs). An incremental run reads no disk and leaves it alone. HandleDidOpen
+    // asks it: a document whose text matches the disk is only "nothing new"
+    // if the disk has not moved since the analysis read it - a file rewritten
+    // outside the editor and then opened (RAD Studio reloading it, 2026-09-24)
+    // matches the NEW disk text the analysis never saw.
+    FDiskReadAt: TDateTime;
+    FBuildDiskReadAt: TDateTime;
+    // A FILE MOVED ON DISK since the last full rebuild started, and the
+    // overlay signature cannot show it: it describes only documents that
+    // differ from disk. Without this the two "nothing changed" gates -
+    // FlushPending's drop and the mid-build "changed back" - threw away the
+    // very rebuild a disk change had scheduled ("scheduled rebuild dropped:
+    // the analyzed inputs did not change", 2026-09-24). Set with the
+    // schedule, cleared when a full rebuild starts reading.
+    FDiskMoved: Boolean;
     // THE IDLE FAULT THAT REPEATS. A permanent failure inside the idle path
     // fires on every 50ms tick and never clears, so it writes the same line
     // some fifteen times a second for as long as the session lives - 295
@@ -254,6 +271,7 @@ type
     function OverlaySignature: string;
     function OverlayParts: TArray<string>;
     function AffectsAnalysis(const APath: string): Boolean;
+    function DiskNewerThanAnalysis(const APath: string): Boolean;
     function SingleChangedDoc(out APath: string): Boolean;
     function TryStartModuleAnalysis: Boolean;
     procedure StartProgress(const ATitle: string);
@@ -974,11 +992,13 @@ begin
   for LDoc in FDocs.All do
     FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
   FDirty := False;   // this session covers everything up to now
+  FDiskMoved := False;   // and reads every file itself
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
   FStartedParts := OverlayParts;
   FStartedSignature := string.Join(',', FStartedParts);
   FBuildStart := GetTickCount64;
+  FBuildDiskReadAt := Now;   // before the worker reads anything
   StartProgress('PasTree: analyzing');
   // "full rebuild" spelled out on purpose: this is the line that tells a
   // full rebuild from the incremental one TryStartModuleAnalysis logs, which
@@ -1019,7 +1039,7 @@ begin
   // that is computed from text the editor no longer holds, until the next
   // real edit. Type a character, start a build, Ctrl+Z: that is the whole
   // repro, and it is silent.
-  if (FProject <> nil) and (FSession = nil) and
+  if (FProject <> nil) and (FSession = nil) and not FDiskMoved and
      (OverlaySignature = FBuiltSignature) then
   begin
     Log('scheduled rebuild dropped: the analyzed inputs did not change');
@@ -1182,6 +1202,8 @@ begin
   FBuiltParts := FStartedParts;
   LWasModule := FModuleMode;
   FModuleMode := False;
+  if not LWasModule then
+    FDiskReadAt := FBuildDiskReadAt;
   // The whole-closure diagnostic count (open docs get theirs listed by
   // PublishDiagnostics below): a healthy run on a fully-pathed project is
   // near zero, so a big number here means missing search paths (F1027
@@ -1236,7 +1258,7 @@ begin
     // second FULL rebuild for an edit that no longer exists - the same trap
     // FlushPending's drop guards against, reached from the other side now
     // that an in-flight full build is left to finish instead of restarted.
-    if OverlaySignature = FBuiltSignature then
+    if (OverlaySignature = FBuiltSignature) and not FDiskMoved then
     begin
       Log('documents changed mid-build and changed back - result is current');
       FDirty := False;
@@ -1341,6 +1363,21 @@ end;
 function TLspServer.AffectsAnalysis(const APath: string): Boolean;
 begin
   Result := (FProject = nil) or (FProject.ModelIdOf(APath) >= 0);
+end;
+
+{ Was APath written after the newest analysis read the disk? The running full
+  build counts - it reads the file itself - so a rebuild already under way
+  covers a change made before it started. One stat call. False when nothing
+  has read the disk yet (the first build is scheduled on its own) or the
+  file has no readable date. }
+function TLspServer.DiskNewerThanAnalysis(const APath: string): Boolean;
+var
+  LReadAt, LAge: TDateTime;
+begin
+  LReadAt := FDiskReadAt;
+  if (FSession <> nil) and not FModuleMode then
+    LReadAt := FBuildDiskReadAt;
+  Result := (LReadAt > 0) and FileAge(APath, LAge) and (LAge > LReadAt);
 end;
 
 function TLspServer.OverlayParts: TArray<string>;
@@ -2124,6 +2161,17 @@ begin
   if (LDiffers and AffectsAnalysis(LPath)) or
      ((FProject = nil) and (FSession = nil)) then
     ScheduleAnalysis(LPath)
+  else if not LDiffers and DiskNewerThanAnalysis(LPath) and
+     AffectsAnalysis(LPath) then
+  begin
+    // Same as the disk, but not as the disk the analysis READ: the file was
+    // rewritten after it (see FDiskReadAt). A full rebuild, not the module
+    // fast path - no overlay changed, so SingleChangedDoc sees nothing - and
+    // the parse donor keeps it to this one unit's parse.
+    Log('  changed on disk since the analysis read it - rebuild scheduled');
+    FDiskMoved := True;
+    ScheduleAnalysis(LPath);
+  end
   else
   begin
     if LDiffers then
@@ -5284,11 +5332,21 @@ begin
       Log('watched: ' + TPath.GetFileName(LPath) +
         ' changed on disk but is open here - overlay still wins');
     end
+    else if (LItem.GetValue<Integer>('type', 0) = 2) and
+       not AffectsAnalysis(LPath) then
+      // A REWRITTEN file this closure never read changes nothing here. The
+      // RAD Studio client tells every running server about a reload (it
+      // cannot know which projects compile the file), and a group of nine
+      // must not answer with nine full rebuilds. Created and deleted files
+      // still rebuild: either can change how a unit name resolves.
+      Log('watched: ' + TPath.GetFileName(LPath) +
+        ' changed on disk, outside this closure - no rebuild')
     else
       LRebuild := True;
   end;
   if LRebuild then
   begin
+    FDiskMoved := True;
     Log(Format('watched: %d file(s) changed on disk - rebuild scheduled',
       [LTouched]));
     ScheduleAnalysis('');

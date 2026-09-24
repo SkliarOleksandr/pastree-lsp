@@ -61,6 +61,7 @@ uses
   ToolsAPI.Editor,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Settings;
 
 type
@@ -74,6 +75,8 @@ type
       const AHilight, ABeforeEvent: Boolean;
       var AAllowDefaultPainting: Boolean;
       const AContext: INTACodeEditorPaintContext);
+    procedure HandleBeginPaint(const AEditor: TWinControl;
+      const AForceFullRepaint: Boolean);
   end;
 
 const
@@ -129,11 +132,30 @@ begin
   // The base class dispatches through event properties, not virtuals -
   // AllowedEvents is the only override, the handler rides the property.
   OnEditorPaintText := HandlePaintText;
+  OnEditorBeginPaint := HandleBeginPaint;
 end;
 
 function TPasSemanticPaintNotifier.AllowedEvents: TCodeEditorEvents;
 begin
-  Result := [cevPaintTextEvents];
+  Result := [cevPaintTextEvents, cevBeginEndPaintEvents];
+end;
+
+{ Before the view paints: a buffer the IDE reloaded from disk repaints, and
+  this is the one moment sure to follow the reload. Nothing reports the
+  reload itself (see PasTreeIdePlugin.IdleSync), so without this the server
+  keeps the old text and every type name after the change is painted at the
+  old columns. Here rather than in a notifier of its own: one code-editor
+  notifier fewer to tear down. Runs whether or not the colouring is on - the
+  squiggles need the new text just as much. }
+procedure TPasSemanticPaintNotifier.HandleBeginPaint(
+  const AEditor: TWinControl; const AForceFullRepaint: Boolean);
+var
+  LServices: INTACodeEditorServices;
+begin
+  if (AEditor = nil) or
+     not Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
+    Exit;
+  CheckBufferReloaded(LServices.GetViewForEditor(AEditor));
 end;
 
 procedure TPasSemanticPaintNotifier.HandlePaintText(const ARect: TRect;

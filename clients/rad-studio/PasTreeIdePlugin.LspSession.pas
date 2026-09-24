@@ -755,6 +755,15 @@ procedure LspSetSemanticTokensChangedListener(
 procedure LspIdleSync(const APaths: TArray<string>);
 
 /// <summary>
+/// The IDE reloaded these buffers from disk. Every ready session is told
+/// without reading a single buffer (see TLspDocumentSync.SyncFromDisk on
+/// why): a document it holds gets didChange with the file's text, any other
+/// path a didChangeWatchedFiles, which a server outside whose closure the
+/// file lies ignores. Passive like LspIdleSync - starts no server.
+/// </summary>
+procedure LspReloadedFromDisk(const APaths: TArray<string>);
+
+/// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
 /// logged server-side) - the data behind the IDE Insight (Ctrl+.) category.
 /// The answer can be tens of thousands of records; callers cache it rather
@@ -1191,6 +1200,7 @@ type
       out ATokens: TArray<TLspSemanticToken>): Boolean;
     procedure RefreshSemanticTokens(const APath: string);
     procedure IdleSync(const APath: string);
+    procedure ReloadedFromDisk(const APath: string);
   end;
 
   { THE SESSIONS OF AN OPEN PROJECT GROUP - one per project, one server
@@ -4933,6 +4943,29 @@ begin
   // opening it is Sync's job. See LspIdleSync on what the full pass costs.
   if not FDocs.SyncOne(APath) then
     FDocs.Sync;
+end;
+
+procedure TLspSession.ReloadedFromDisk(const APath: string);
+begin
+  // As passive as IdleSync, and it must also never fall back to Sync: that
+  // reads every open buffer, the reloaded one included.
+  if (FClient = nil) or not FClient.IsReady or (FDocs = nil) or
+     FDestroying then
+    Exit;
+  if not FDocs.SyncFromDisk(APath) then
+    FilesChangedOnDisk([APath]);
+end;
+
+procedure LspReloadedFromDisk(const APaths: TArray<string>);
+var
+  LPath: string;
+  LSession: TLspSession;
+begin
+  if not Assigned(GPool) then
+    Exit;
+  for LSession in GPool.ReadySessions do
+    for LPath in APaths do
+      LSession.ReloadedFromDisk(LPath);
 end;
 
 procedure LspIdleSync(const APaths: TArray<string>);
