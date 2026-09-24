@@ -5541,8 +5541,7 @@ begin
         LSymIdx := LModel.RefMap[LNode];
       if LSymIdx <> NIL_SYM then
         AddIdent(LNode, LMid, LSymIdx, False)
-      else if (LModel.ExtRefMap <> nil) and
-              LModel.ExtRefMap.TryGetValue(LNode, LExt) then
+      else if LModel.ExtRefMap.TryGetValue(LNode, LExt) then
         AddIdent(LNode, LExt.UnitId, LExt.Sym, False)
       // Neither map: the navigator's own resolution, which is what
       // Ctrl+Click does - it also knows the names the two maps do not

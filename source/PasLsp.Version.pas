@@ -200,7 +200,11 @@ const
   /// an empty scope is Count = 0. Silent without it: the documentSymbol walk
   /// no longer tests for nil, and against an older library an empty scope's
   /// Count is the 2026-08-23 access violation again.
-  cMinPasTreeVersion = '0.42.0';
+  /// 0.46.1 (2026-09-24): the decl<->impl toggle pairs the methods of a
+  /// class that carries attributes (`[TableAttr('T')] TFoo = class`).
+  /// Silent without it: Ctrl+Shift+Up/Down does nothing in such a class and
+  /// the log says only `nothing to toggle to at that position`.
+  cMinPasTreeVersion = '0.46.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
