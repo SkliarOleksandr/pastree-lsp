@@ -806,7 +806,15 @@ begin
   // Registers the Code Insight manager; inert until the user selects
   // "PasTree" as the Insight Provider in Options - and since phase C that
   // selection is what carries ALL declaration navigation.
-  InitializeCodeInsight;
+  //
+  // DISABLED FOR NOW (Alex, 2026-09-24): the manager is not registered, so
+  // "PasTree" does not appear in the Insight Provider combobox at all and
+  // DelphiLSP keeps completion, hints and parameter insight. Everything that
+  // asks about it degrades on its own: PasTreeIsActiveInsightProvider answers
+  // False (so the Ctrl+Click override below always runs),
+  // CheckInsightProviderSelected exits on GAlive, FinalizeCodeInsight skips
+  // the unregister at index -1. Uncomment to bring it back.
+  // InitializeCodeInsight;
   // Ctrl+Click in the editor, as a mouse override independent of the Insight
   // Provider selection - for the users who cannot give that combobox up (RAD
   // Studio gates part of the editor UI on DelphiLSP being the provider). It
@@ -818,8 +826,11 @@ begin
   // Painted error squiggles over the server's pushed diagnostics. (The
   // native IOTAModuleErrors trait was spiked and ruled out 2026-08-22 -
   // the module answers that interface natively; SPEC.md, closed
-  // experiment.)
+  // experiment.) Drawn only when the settings choose them over the IDE's
+  // Error Insight - and the IDE's level is put in step with that choice here,
+  // once per start, in case Tools > Options changed it since.
   InitializeErrorPaint;
+  ApplyErrorInsightChoice;
   // Type names in their own colour, from the server's semantic tokens.
   InitializeSemanticPaint;
   // Idle-debounced didChange - keeps the squiggles (and every other answer)

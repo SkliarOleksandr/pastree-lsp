@@ -98,6 +98,9 @@ type
     chkTypeUnderline: TCheckBox;
     lblPreview: TLabel;
     pbxPreview: TPaintBox;
+    lblErrorSquiggles: TLabel;
+    cbxErrorSquiggles: TComboBox;
+    lblErrorSquigglesHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
@@ -315,6 +318,7 @@ begin
     LForm.chkTypeBold.Checked := fsBold in LSettings.TypeFontStyle;
     LForm.chkTypeItalic.Checked := fsItalic in LSettings.TypeFontStyle;
     LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
+    LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -339,6 +343,7 @@ begin
     LSettings.HighlightTypes := LForm.chkHighlightTypes.Checked;
     LSettings.TypeColor := LForm.cbxTypeColor.Selected;
     LSettings.TypeFontStyle := LForm.TypeStyles;
+    LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
     SaveSettings(LSettings);
     Result := True;
   finally

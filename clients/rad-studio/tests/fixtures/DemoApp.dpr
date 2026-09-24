@@ -19,7 +19,8 @@ uses
   DemoDefines in 'DemoDefines.pas',
   DemoDcu in 'DemoDcu.pas',
   DemoClassCompleteBase in 'DemoClassCompleteBase.pas',
-  DemoClassCompleteForeign in 'DemoClassCompleteForeign.pas';
+  DemoClassCompleteForeign in 'DemoClassCompleteForeign.pas',
+  DemoDiagnostics in 'DemoDiagnostics.pas';
 
 var
   LDerived: TDerived;

@@ -19,7 +19,9 @@ unit PasTreeIdePlugin.Settings;
   before". "Advanced logging" is the one exception and the rule is the same
   one seen from the other side: it turns a diagnostic ON, and its default is
   therefore OFF. Written only by the dialog: nothing else in the package
-  writes to the registry.
+  writes to the registry - except the Go To picker's own sizes
+  (WritePickerValue) and the IDE's Error Insight level, which the error
+  underline choice has to move with it (ApplyErrorInsightChoice).
 
   READ AT THE POINT OF USE, NOT CACHED AT STARTUP. Every switch is read on
   each gesture (an editor tab activating, a key being pressed), which is what
@@ -195,6 +197,39 @@ function AdvancedLoggingEnabled: Boolean;
 /// </summary>
 function ClearLogOnProjectOpen: Boolean;
 
+/// <summary>
+/// Whether the editor's error underlines are OURS (PasTreeIdePlugin.
+/// ErrorPaint, over the server's publishDiagnostics) rather than the IDE's
+/// Error Insight. One choice, not two switches: the two drawn together put
+/// two families of underline on the same code in the same colours, and
+/// nothing on screen says which one is PasTree's. OFF BY DEFAULT since
+/// 0.52.4, and labelled experimental in the dialog (Alex, 2026-09-24): the
+/// Code Insight manager is withdrawn and DelphiLSP owns the insight
+/// features, so the native underlines are the expected ones.
+/// Read per paint run, from the cache.
+/// </summary>
+function PasTreeErrorSquigglesEnabled: Boolean;
+
+/// <summary>
+/// Makes the IDE's own Error Insight level agree with
+/// PasTreeErrorSquigglesEnabled. Ours: the level the IDE has is remembered
+/// under our key and the IDE's is set to None. The IDE's: the remembered
+/// level is put back - only a level WE replaced, so a None the user chose in
+/// Tools > Options stays theirs. Idempotent; called after the dialog saves and
+/// once at package load (a level changed in Tools > Options while ours is
+/// selected is remembered and switched off again at the next start).
+///
+/// THE ONE WRITE INTO THE IDE'S OWN SETTINGS. There is no ToolsAPI for the
+/// level - IOTACodeInsightManagerEnvOptions can only hide the combobox - so it
+/// is the registry value Tools > Options writes: ErrorInsightLevel under
+/// Editor\Source Options\Borland.EditOptions.Pascal, holding a ValueNames
+/// entry ("None", "Errors", "Errors and Warnings", "Errors, Warnings and
+/// Hints", "Everything"; found by diffing the registry around a change in the
+/// dialog, 2026-09-24). The IDE reads it into its options object, so a change
+/// made here may take effect only after a restart.
+/// </summary>
+procedure ApplyErrorInsightChoice;
+
 /// <summary>Registers Tools > PasTree > Settings.</summary>
 procedure InitializeSettings;
 
@@ -239,6 +274,9 @@ type
     HighlightTypes: Boolean;
     TypeColor: TColor;
     TypeFontStyle: TFontStyles;
+    // False = the IDE's Error Insight draws the error underlines, True = we
+    // do (and the IDE's level is set to None) - see ApplyErrorInsightChoice.
+    PasTreeErrorSquiggles: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -290,6 +328,17 @@ const
   cValueHighlightTypes = 'HighlightTypes';
   cValueTypeColor = 'TypeColor';
   cValueTypeFontStyle = 'TypeFontStyle';
+  cValueErrorSquiggles = 'PasTreeErrorSquiggles';
+  // The IDE level ApplyErrorInsightChoice replaced with None, to put back.
+  // cLevelAbsent stands for "the IDE had no value at all", put back by
+  // deleting ours rather than by guessing the IDE's default.
+  cValueSavedErrorInsightLevel = 'SavedErrorInsightLevel';
+  cLevelAbsent = '<absent>';
+  // Relative to IOTAServices.GetBaseRegistryKey, as written by Tools >
+  // Options > Language > Delphi > Error Insight.
+  cIdePascalEditOptionsKey = 'Editor\Source Options\Borland.EditOptions.Pascal';
+  cValueErrorInsightLevel = 'ErrorInsightLevel';
+  cLevelNone = 'None';
   // Teal, BGR - the PasTree demo's default, readable on both IDE themes.
   cDefaultTypeColor = TColor($00808000);
 
@@ -428,6 +477,7 @@ begin
   Result.HighlightTypes := True;
   Result.TypeColor := cDefaultTypeColor;
   Result.TypeFontStyle := [];
+  Result.PasTreeErrorSquiggles := False;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -467,6 +517,8 @@ begin
         ReadFlag(LReg, cValueAdvancedLogging, Result.AdvancedLogging);
       Result.ClearLogOnOpen :=
         ReadFlag(LReg, cValueClearLogOnOpen, Result.ClearLogOnOpen);
+      Result.PasTreeErrorSquiggles :=
+        ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
     finally
       LReg.CloseKey;
     end;
@@ -520,6 +572,8 @@ begin
         LReg.WriteInteger(cValueTypeColor, Integer(ASettings.TypeColor));
         LReg.WriteInteger(cValueTypeFontStyle,
           StyleBits(ASettings.TypeFontStyle));
+        LReg.WriteInteger(cValueErrorSquiggles,
+          Ord(ASettings.PasTreeErrorSquiggles));
       finally
         LReg.CloseKey;
       end;
@@ -531,6 +585,7 @@ begin
   finally
     LReg.Free;
   end;
+  ApplyErrorInsightChoice;
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -655,6 +710,92 @@ function ClearLogOnProjectOpen: Boolean;
 begin
   // Same dependency as AdvancedLoggingEnabled, for the same reason.
   Result := CurrentSettings.EnableLogging and CurrentSettings.ClearLogOnOpen;
+end;
+
+function PasTreeErrorSquigglesEnabled: Boolean;
+begin
+  Result := CurrentSettings.PasTreeErrorSquiggles;
+end;
+
+{ The IDE's level as a string, cLevelAbsent when it has none. The dialog
+  writes a name; an integer (never seen) reads as its ValueNames index. }
+function ReadIdeLevel(AReg: TRegistry): string;
+begin
+  if not AReg.ValueExists(cValueErrorInsightLevel) then
+    Exit(cLevelAbsent);
+  if AReg.GetDataType(cValueErrorInsightLevel) = rdInteger then
+    Result := IntToStr(AReg.ReadInteger(cValueErrorInsightLevel))
+  else
+    Result := AReg.ReadString(cValueErrorInsightLevel);
+end;
+
+function IsNoneLevel(const ALevel: string): Boolean;
+begin
+  // "None=0" in the dialog's ValueNames: either spelling is off.
+  Result := SameText(Trim(ALevel), cLevelNone) or (Trim(ALevel) = '0');
+end;
+
+procedure ApplyErrorInsightChoice;
+var
+  LServices: IOTAServices;
+  LIde, LOurs: TRegistry;
+  LIdeKey, LOursKey, LLevel: string;
+begin
+  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Exit;
+  LIdeKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
+    + cIdePascalEditOptionsKey;
+  LOursKey := SettingsRegistryKey;
+  LIde := TRegistry.Create(KEY_READ or KEY_WRITE);
+  LOurs := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    try
+      LIde.RootKey := HKEY_CURRENT_USER;
+      LOurs.RootKey := HKEY_CURRENT_USER;
+      if not LOurs.OpenKey(LOursKey, True) then
+        Exit;
+      if CurrentSettings.PasTreeErrorSquiggles then
+      begin
+        if not LIde.OpenKey(LIdeKey, True) then
+          Exit;
+        LLevel := ReadIdeLevel(LIde);
+        // Already off: nothing to remember, and a level remembered earlier
+        // must survive rather than be overwritten with None.
+        if IsNoneLevel(LLevel) then
+          Exit;
+        // Remembered BEFORE it is switched off: the other order, interrupted,
+        // loses the user's level for good.
+        LOurs.WriteString(cValueSavedErrorInsightLevel, LLevel);
+        LIde.WriteString(cValueErrorInsightLevel, cLevelNone);
+      end
+      else
+      begin
+        if not LOurs.ValueExists(cValueSavedErrorInsightLevel) then
+          Exit;   // nothing of ours to undo
+        LLevel := LOurs.ReadString(cValueSavedErrorInsightLevel);
+        if LIde.OpenKey(LIdeKey, LLevel <> cLevelAbsent) then
+          // Only over OUR None: a level the user has set since in Tools >
+          // Options is theirs, and wins.
+          if IsNoneLevel(ReadIdeLevel(LIde)) then
+          begin
+            if LLevel = cLevelAbsent then
+              LIde.DeleteValue(cValueErrorInsightLevel)
+            else
+              LIde.WriteString(cValueErrorInsightLevel, LLevel);
+          end;
+        LOurs.DeleteValue(cValueSavedErrorInsightLevel);
+      end;
+    except
+      on E: Exception do
+        // A failure, so it is worth the Build tab: the two underline layers
+        // now disagree with what the dialog says.
+        LogDiagnostic('could not set the IDE''s Error Insight level: '
+          + E.Message);
+    end;
+  finally
+    LOurs.Free;
+    LIde.Free;
+  end;
 end;
 
 function TypeHighlightEnabled: Boolean;

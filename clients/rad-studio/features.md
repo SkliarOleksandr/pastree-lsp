@@ -254,6 +254,13 @@ queries natively and cannot be displaced. They follow the server's
 `publishDiagnostics`, so they appear when the analysis lands and vanish when it
 comes back clean, with no polling.
 
+Experimental, and off by default: the Highlighting tab of the settings chooses
+who draws the error underlines - RAD Studio's own Error Insight (the default)
+or PasTree. Choosing PasTree sets the IDE's Error Insight level to None, so the
+same error is not underlined twice, and remembers the level it replaced;
+choosing RAD Studio again puts that level back, unless it has been changed in
+Tools > Options since. The IDE may need a restart to pick up its own level.
+
 ### Idle document sync
 
 Everything you type is pushed to the server after a short pause in typing, which

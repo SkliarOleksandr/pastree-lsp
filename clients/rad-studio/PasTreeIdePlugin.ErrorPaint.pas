@@ -39,7 +39,8 @@ uses
   ToolsAPI,
   ToolsAPI.Editor,
   PasTreeIdePlugin.LspSession,
-  PasTreeIdePlugin.LspDocuments;
+  PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.Settings;   // PasTreeErrorSquigglesEnabled
 
 type
   TPasErrorPaintNotifier = class(TNTACodeEditorNotifier)
@@ -140,6 +141,10 @@ begin
   // AFTER the IDE painted the run - underlining is an overlay, never a
   // replacement (AllowDefaultPainting stays untouched).
   if ABeforeEvent or (AContext = nil) or (AText = '') then
+    Exit;
+  // The user's choice between these underlines and the IDE's own Error
+  // Insight - from the settings cache, so no registry read per run.
+  if not PasTreeErrorSquigglesEnabled then
     Exit;
   if ASyntaxCode = atFolded then
     Exit;   // a folded box stands for many lines; per-line ranges lie there

@@ -382,7 +382,7 @@ file-trait question above).
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
 | Squiggles, native | **DEAD** (spike NEGATIVE 2026-08-22) | - | the module answers `IOTAModuleErrors` natively and `FindFileTrait` never saw our registration; see the closed experiment above |
-| Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity; repaint via the session's diagnostics-changed listener |
+| Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity; repaint via the session's diagnostics-changed listener. Since 0.52.4 an experimental choice, off by default: selecting it sets the IDE's `ErrorInsightLevel` (`Editor\Source Options\Borland.EditOptions.Pascal`) to `None` and remembers the old level (`ApplyErrorInsightChoice`) |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
 | A diagnostics list pane | Ready | custom messages, or `IOTAToDoManager` (`8330`) | see "Result surfaces" |

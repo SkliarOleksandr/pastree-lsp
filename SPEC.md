@@ -209,7 +209,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four |
 | `textDocument/documentSymbol` | outline, types with members |
 | `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page; a conditional symbol gets a `{$DEFINE X}` card noting the `$DEFINE` it sees, or that the project defines it |
-| `textDocument/publishDiagnostics` | push, open documents |
+| `textDocument/publishDiagnostics` | push, open documents; PasTree's `ReportUnresolvedMembers` is on since 0.52.4, so an unresolved member after a dot is E2003 like a bare name |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |
 | `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below) |

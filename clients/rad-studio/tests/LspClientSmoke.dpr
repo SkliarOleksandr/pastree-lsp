@@ -49,6 +49,9 @@ var
   GOpened: TArray<string>;
   GReopens: Integer;
   GVersion: Integer;   // document version counter, must only ever increase
+  // The last publishDiagnostics params per lower-cased uri, as JSON text -
+  // section 4d's evidence.
+  GDiagnostics: TDictionary<string, string>;
 
 procedure Check(ACondition: Boolean; const AWhat: string);
 begin
@@ -1206,6 +1209,64 @@ begin
       'a leading BOM does not stop identifiers resolving');
   finally
     SendDidOpen(LUnitFile);   // back to the text the later tests expect
+  end;
+end;
+
+{ 4d. A document opened AFTER the analysis is done, with its disk text, gets
+  its diagnostics at once.
+
+  No rebuild is due for such a document - the analysis already read that
+  text - so the end-of-analysis publish, which covers only the documents open
+  at the time, had come and gone without it, and nothing published again
+  until the next edit. The IDE opens its tabs after the initial analysis on a
+  real project, so an error already in the file when the project opened was
+  in the log and never underlined (2026-09-24, AVImark). The fixture's error
+  is a member after a dot, which also pins ReportUnresolvedMembers being on. }
+// Top level, not nested: the PumpUntil closure below cannot capture a nested
+// routine (E2555).
+function FindDiag(out AKey: string): Boolean;
+var
+  LPair: TPair<string, string>;
+begin
+  for LPair in GDiagnostics do
+    if LPair.Key.Contains('demodiagnostics.pas') then
+    begin
+      AKey := LPair.Key;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+procedure TestDiagnosticsOnOpen;
+var
+  LUnitFile, LDiagFile, LKey, LJson: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 4d. diagnostics for a document opened after the analysis ===');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LDiagFile := TPath.Combine(GFixtureDir, 'DemoDiagnostics.pas');
+  // A request that waits for the analysis, so the open below finds it DONE -
+  // the only state the bug lived in.
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'the analysis is done before the open');
+  Check(not FindDiag(LKey), 'nothing published yet for the unopened unit');
+
+  DidOpen(LDiagFile);
+  Check(PumpUntil(
+    function: Boolean
+    var
+      LFound: string;
+    begin
+      Result := FindDiag(LFound);
+    end, cAnswerTimeoutMs), 'publishDiagnostics arrives for it without an edit');
+  if FindDiag(LKey) then
+  begin
+    LJson := GDiagnostics[LKey];
+    Writeln('  -- ' + LJson);
+    Check(LJson.Contains('"E2003"') and LJson.Contains('Valeu'),
+      'and carries the E2003 on the unresolved member');
   end;
 end;
 
@@ -3466,6 +3527,7 @@ begin
       raise Exception.Create('fixtures not found next to the test exe');
 
     GFailures := 0;
+    GDiagnostics := TDictionary<string, string>.Create;
     GClient := TLspClient.Create(GExe, ExtractFilePath(GExe),
       procedure(const AText: string)
       begin
@@ -3475,8 +3537,13 @@ begin
       GClient.OnNotification :=
         procedure(const AMethod: string; AParams: TJSONValue)
         begin
-          // Diagnostics arrive unprompted; just show that they do.
+          // Diagnostics arrive unprompted; show that they do, and keep the
+          // last one per document for section 4d.
           Writeln('  [notify] ' + AMethod);
+          if (AMethod = 'textDocument/publishDiagnostics') and
+             Assigned(AParams) then
+            GDiagnostics.AddOrSetValue(
+              LowerCase(AParams.GetValue<string>('uri', '')), AParams.ToJSON);
         end;
       // The seam the real document layer uses: a restarted server starts with
       // no open documents, so they are re-sent on every handshake.
@@ -3491,6 +3558,7 @@ begin
       TestHierarchy;
       TestFindAll;
       TestBomIsNotContent;
+      TestDiagnosticsOnOpen;
       TestOverlayBeatsDisk;
       TestIncrementalPath;
       TestCompletion;
@@ -3523,6 +3591,7 @@ begin
       Writeln;
       Writeln('stopping client');
       FreeAndNil(GClient);
+      FreeAndNil(GDiagnostics);
       Writeln('stopped');
     end;
 

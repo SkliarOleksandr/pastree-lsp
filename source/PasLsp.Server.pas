@@ -288,6 +288,7 @@ type
     function WaitAnalyzed(const APriorityFile,
       ARequestIdJson: string): Boolean;
     procedure PublishDiagnostics;
+    procedure PublishDiagnosticsFor(const ADoc: TLspDocument);
     procedure PublishEmptyDiagnostics(const APath: string);
     function DocPathOf(AParams: TJSONValue): string;
     function HandleInitialize(const AMsg: TLspIncoming): string;
@@ -942,6 +943,14 @@ begin
   FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
     LRoots, LPriority);
   FSession.SetNamespaces(FNamespaces);
+  // A member after a dot that nothing resolves (`Grid.Canvas2`) is E2003 too.
+  // PasTree leaves it off by default - a false E2003 on a member is worse
+  // than a missing one - and without it the squiggles missed the most common
+  // typo there is (Alex, 2026-09-24, on AVImark). The library's own corpus
+  // runs, AVImark's 3767 units among them, report zero under the switch.
+  // Carried by the project object, so the incremental CreateForModule path
+  // below inherits it.
+  FSession.SetReportUnresolvedMembers(True);
   // Before Start, like every other piece of configuration: the project's
   // directory and its own unit list outrank the search paths (FProjectFiles).
   if FProjectDir <> '' then
@@ -1813,6 +1822,19 @@ end;
 procedure TLspServer.PublishDiagnostics;
 var
   LDoc: TLspDocument;
+begin
+  for LDoc in FDocs.All do
+    PublishDiagnosticsFor(LDoc);
+end;
+
+{ One open document's share of the above. Also called by didOpen for a
+  document opened AFTER the analysis finished with its text unchanged: no
+  rebuild is due for it, so without this call it got no publish at all until
+  the next edit anywhere - the error was in the log (every diagnostic of the
+  closure is) and never on screen (Alex, 2026-09-24, AVImark: the IDE opens
+  its tabs after the initial analysis has already published). }
+procedure TLspServer.PublishDiagnosticsFor(const ADoc: TLspDocument);
+var
   LMid, LIdx, LFileId, LLine, LChar, LEndChar, LEndLine: Integer;
   LModel: TPasSemaModel;
   LDiagFile, LKey: string;
@@ -1820,90 +1842,87 @@ var
   LFirst, LMainIsDoc: Boolean;
   LIdent: TPasNavIdent;
 begin
-  for LDoc in FDocs.All do
-  begin
-    LMid := FNav.ModelIdOf(LDoc.Path);
-    LSB := TStringBuilder.Create;
-    try
-      LFirst := True;
-      if LMid >= 0 then
+  LMid := FNav.ModelIdOf(ADoc.Path);
+  LSB := TStringBuilder.Create;
+  try
+    LFirst := True;
+    if LMid >= 0 then
+    begin
+      LModel := FProject.Model(LMid);
+      LKey := LowerCase(ADoc.Path);
+      // Whether this open doc IS the model's main file - the only space
+      // IdentAt's coordinates live in. False for an open $I include.
+      LMainIsDoc := LowerCase(TPath.GetFullPath(
+        FProject.ModelFile(LMid))) = LKey;
+      for LIdx := 0 to High(LModel.Diags) do
       begin
-        LModel := FProject.Model(LMid);
-        LKey := LowerCase(LDoc.Path);
-        // Whether this open doc IS the model's main file - the only space
-        // IdentAt's coordinates live in. False for an open $I include.
-        LMainIsDoc := LowerCase(TPath.GetFullPath(
-          FProject.ModelFile(LMid))) = LKey;
-        for LIdx := 0 to High(LModel.Diags) do
+        // FileId indexes the MODEL'S own file table ($I includes) - see
+        // the demo's ReportProjectResult for why assuming the main file
+        // misplaces include diagnostics.
+        LFileId := LModel.Diags[LIdx].FileId;
+        if (LFileId >= 0) and
+           (LFileId <= High(LModel.Tree.Source.FileNames)) then
+          LDiagFile := LModel.Tree.Source.FileNames[LFileId]
+        else
+          LDiagFile := FProject.ModelFile(LMid);
+        if LowerCase(TPath.GetFullPath(LDiagFile)) <> LKey then
+          Continue;
+        // Deliberately NOT logged here any more: LogParseRecord already
+        // wrote every diagnostic in the closure, including these, right
+        // above. Logging them a second time only made the open documents'
+        // subset look like the whole picture, which is the misreading that
+        // cost a debugging session.
+        if not LFirst then
+          LSB.Append(',');
+        LFirst := False;
+        PasTreeToLsp(LModel.Diags[LIdx].Line, LModel.Diags[LIdx].Col,
+          LLine, LChar);
+        // The range END: most diagnostics anchor on an identifier
+        // (E2003 and family), and a one-character range draws as a
+        // stub of a squiggle (first live run of the painted route,
+        // 2026-08-22 - the "very small line" was THIS, not the client's
+        // pixel math). IdentAt at the diagnostic's own position hands
+        // back the identifier's full span; anything without one
+        // (a missing ';', a structural error) keeps the one-character
+        // range, which is also what dcc's own caret amounts to.
+        LEndChar := LChar + 1;
+        if LMainIsDoc and
+           FNav.IdentAt(LMid, LModel.Diags[LIdx].Line,
+             LModel.Diags[LIdx].Col, LIdent) and
+           (LIdent.Line = LModel.Diags[LIdx].Line) and
+           (LIdent.ColTo > LIdent.ColFrom) then
         begin
-          // FileId indexes the MODEL'S own file table ($I includes) - see
-          // the demo's ReportProjectResult for why assuming the main file
-          // misplaces include diagnostics.
-          LFileId := LModel.Diags[LIdx].FileId;
-          if (LFileId >= 0) and
-             (LFileId <= High(LModel.Tree.Source.FileNames)) then
-            LDiagFile := LModel.Tree.Source.FileNames[LFileId]
-          else
-            LDiagFile := FProject.ModelFile(LMid);
-          if LowerCase(TPath.GetFullPath(LDiagFile)) <> LKey then
-            Continue;
-          // Deliberately NOT logged here any more: LogParseRecord already
-          // wrote every diagnostic in the closure, including these, right
-          // above. Logging them a second time only made the open documents'
-          // subset look like the whole picture, which is the misreading that
-          // cost a debugging session.
-          if not LFirst then
-            LSB.Append(',');
-          LFirst := False;
-          PasTreeToLsp(LModel.Diags[LIdx].Line, LModel.Diags[LIdx].Col,
-            LLine, LChar);
-          // The range END: most diagnostics anchor on an identifier
-          // (E2003 and family), and a one-character range draws as a
-          // stub of a squiggle (first live run of the painted route,
-          // 2026-08-22 - the "very small line" was THIS, not the client's
-          // pixel math). IdentAt at the diagnostic's own position hands
-          // back the identifier's full span; anything without one
-          // (a missing ';', a structural error) keeps the one-character
-          // range, which is also what dcc's own caret amounts to.
-          LEndChar := LChar + 1;
-          if LMainIsDoc and
-             FNav.IdentAt(LMid, LModel.Diags[LIdx].Line,
-               LModel.Diags[LIdx].Col, LIdent) and
-             (LIdent.Line = LModel.Diags[LIdx].Line) and
-             (LIdent.ColTo > LIdent.ColFrom) then
-          begin
-            PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
-            if LEndChar <= LChar then
-              LEndChar := LChar + 1;
-          end;
-          LSB.Append(Format(
-            '{"range":{"start":{"line":%d,"character":%d},' +
-            '"end":{"line":%d,"character":%d}},' +
-            '"severity":%d,"code":%s,"source":"pastree","message":%s}',
-            [LLine, LChar, LLine, LEndChar,
-             DiagSeverity(LModel.Diags[LIdx].Code),
-             JsonQuote(LModel.Diags[LIdx].Code),
-             JsonQuote(LModel.Diags[LIdx].Msg)]));
+          PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
+          if LEndChar <= LChar then
+            LEndChar := LChar + 1;
         end;
+        LSB.Append(Format(
+          '{"range":{"start":{"line":%d,"character":%d},' +
+          '"end":{"line":%d,"character":%d}},' +
+          '"severity":%d,"code":%s,"source":"pastree","message":%s}',
+          [LLine, LChar, LLine, LEndChar,
+           DiagSeverity(LModel.Diags[LIdx].Code),
+           JsonQuote(LModel.Diags[LIdx].Code),
+           JsonQuote(LModel.Diags[LIdx].Msg)]));
       end;
-      // THE VERSION THESE WERE COMPUTED FROM, not the one the document is on
-      // now. On the stale path (documents changed mid-build; we publish
-      // before restarting, deliberately) those are different, and stamping
-      // the current one tells the client the ranges are exact for text they
-      // were never measured against - which defeats the only thing the field
-      // is for. The project's own buffer stamp is that truth; -1 means this
-      // build carried no overlay for the document, and then the document's
-      // version is the best available answer.
-      var LVer := FProject.BufferVersion(LDoc.Path);
-      if LVer < 0 then
-        LVer := LDoc.Version;
-      Notify(Format(
-        '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",' +
-        '"params":{"uri":%s,"version":%d,"diagnostics":[%s]}}',
-        [JsonQuote(PathToUri(LDoc.Path)), LVer, LSB.ToString]));
-    finally
-      LSB.Free;
     end;
+    // THE VERSION THESE WERE COMPUTED FROM, not the one the document is on
+    // now. On the stale path (documents changed mid-build; we publish
+    // before restarting, deliberately) those are different, and stamping
+    // the current one tells the client the ranges are exact for text they
+    // were never measured against - which defeats the only thing the field
+    // is for. The project's own buffer stamp is that truth; -1 means this
+    // build carried no overlay for the document, and then the document's
+    // version is the best available answer.
+    var LVer := FProject.BufferVersion(ADoc.Path);
+    if LVer < 0 then
+      LVer := ADoc.Version;
+    Notify(Format(
+      '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",' +
+      '"params":{"uri":%s,"version":%d,"diagnostics":[%s]}}',
+      [JsonQuote(PathToUri(ADoc.Path)), LVer, LSB.ToString]));
+  finally
+    LSB.Free;
   end;
 end;
 
@@ -2004,6 +2023,7 @@ var
   LPath, LText, LDisk, LShownNote: string;
   LVersion: Integer;
   LDiffers, LShown: Boolean;
+  LDoc: TLspDocument;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
@@ -2055,8 +2075,17 @@ begin
   if (LDiffers and AffectsAnalysis(LPath)) or
      ((FProject = nil) and (FSession = nil)) then
     ScheduleAnalysis(LPath)
-  else if LDiffers then
-    Log('  outside this closure: kept as an overlay, no rebuild');
+  else
+  begin
+    if LDiffers then
+      Log('  outside this closure: kept as an overlay, no rebuild');
+    // No rebuild is coming for this document, so nothing else will publish
+    // for it: the finished analysis already covers its text - hand over what
+    // it found now. See PublishDiagnosticsFor. With no project yet, the
+    // running session publishes to every open document when it lands.
+    if (FProject <> nil) and FDocs.TryGet(LPath, LDoc) then
+      PublishDiagnosticsFor(LDoc);
+  end;
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);

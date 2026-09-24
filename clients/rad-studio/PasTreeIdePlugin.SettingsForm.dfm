@@ -402,6 +402,37 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 4
         OnClick = TypeStyleChanged
       end
+      object lblErrorSquiggles: TLabel
+        Left = 16
+        Top = 190
+        Width = 128
+        Height = 15
+        Caption = 'Error underlines drawn by'
+        FocusControl = cbxErrorSquiggles
+      end
+      object cbxErrorSquiggles: TComboBox
+        Left = 170
+        Top = 186
+        Width = 270
+        Height = 23
+        Style = csDropDownList
+        TabOrder = 5
+        Items.Strings = (
+          'RAD Studio (Error Insight)'
+          'PasTree (experimental)')
+      end
+      object lblErrorSquigglesHint: TLabel
+        Left = 35
+        Top = 216
+        Width = 405
+        Height = 60
+        Caption =
+          'PasTree draws the analysis'#39's errors and warnings itself and sets' +
+          ' the IDE'#39's Error Insight level to None, so they are not drawn tw' +
+          'ice. Switching back restores the level it replaced. The IDE may ' +
+          'need a restart to pick up its own level.'
+        WordWrap = True
+      end
     end
   end
   object btnOK: TButton
