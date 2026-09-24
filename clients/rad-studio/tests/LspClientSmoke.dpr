@@ -1224,17 +1224,22 @@ end;
   is a member after a dot, which also pins ReportUnresolvedMembers being on. }
 // Top level, not nested: the PumpUntil closure below cannot capture a nested
 // routine (E2555).
-function FindDiag(out AKey: string): Boolean;
+function FindDiagOf(const AFileName: string; out AKey: string): Boolean;
 var
   LPair: TPair<string, string>;
 begin
   for LPair in GDiagnostics do
-    if LPair.Key.Contains('demodiagnostics.pas') then
+    if LPair.Key.Contains(AFileName) then
     begin
       AKey := LPair.Key;
       Exit(True);
     end;
   Result := False;
+end;
+
+function FindDiag(out AKey: string): Boolean;
+begin
+  Result := FindDiagOf('demodiagnostics.pas', AKey);
 end;
 
 procedure TestDiagnosticsOnOpen;
@@ -1267,6 +1272,50 @@ begin
     Writeln('  -- ' + LJson);
     Check(LJson.Contains('"E2003"') and LJson.Contains('Valeu'),
       'and carries the E2003 on the unresolved member');
+  end;
+end;
+
+{ 4e. A missing DOTTED unit is underlined under its last segment.
+
+  The F1027 anchors on the uses name's node, and a dotted name is an nkMember
+  whose first token is the dot - so the range was one character wide, over
+  the '.', and IdentAt found no identifier there to widen it (Alex,
+  2026-09-24, `uses System.Classes2`). dcc's own Error Insight underlines the
+  segment after the last dot, and so must we. }
+function FindMissingUnitDiag(out AKey: string): Boolean;
+begin
+  Result := FindDiagOf('demomissingunit.pas', AKey);
+end;
+
+procedure TestMissingDottedUnitRange;
+var
+  LFile, LKey, LJson: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 4e. a missing dotted unit: the range covers its name ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoMissingUnit.pas');
+  FindPos(LFile, '  System.NoSuchUnit2;', 'NoSuchUnit2', LLine, LChar);
+  DidOpen(LFile);
+  Check(PumpUntil(
+    function: Boolean
+    var
+      LFound: string;
+    begin
+      Result := FindMissingUnitDiag(LFound);
+    end, cAnswerTimeoutMs), 'publishDiagnostics arrives for it');
+  if FindMissingUnitDiag(LKey) then
+  begin
+    LJson := GDiagnostics[LKey];
+    Writeln('  -- ' + LJson);
+    Check(LJson.Contains('"F1027"'), 'and carries the F1027');
+    Check(LJson.Contains(Format(
+      '"start":{"line":%d,"character":%d}', [LLine, LChar])),
+      'which starts at the segment after the dot');
+    Check(LJson.Contains(Format(
+      '"end":{"line":%d,"character":%d}',
+      [LLine, LChar + Length('NoSuchUnit2')])),
+      'and ends with it');
   end;
 end;
 
@@ -3559,6 +3608,7 @@ begin
       TestFindAll;
       TestBomIsNotContent;
       TestDiagnosticsOnOpen;
+      TestMissingDottedUnitRange;
       TestOverlayBeatsDisk;
       TestIncrementalPath;
       TestCompletion;

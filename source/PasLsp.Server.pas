@@ -1841,6 +1841,46 @@ var
   LSB: TStringBuilder;
   LFirst, LMainIsDoc: Boolean;
   LIdent: TPasNavIdent;
+  LNameLine, LNameCol, LNameColTo: Integer;
+
+  { The NAME a diagnostic's node stands for, when IdentAt found none at the
+    diagnostic's position: a dotted name is an nkMember, whose FirstToken -
+    and so the diagnostic's position, which EmitAt takes from it - is the
+    DOT (by design, PasTree.Ast). `uses System.Classes2` with no such unit
+    therefore drew a one-character mark under the '.' (Alex, 2026-09-24).
+    The member's last token is its name, which is also exactly what dcc's own
+    Error Insight underlines there: `Classes2`, not the whole dotted name.
+    Only nkMember and nkIdent - a larger node's last token is not its name. }
+  function NameSpanOf(AModel: TPasSemaModel; ANode, AFileId: Integer;
+    out ALine, ACol, AColTo: Integer): Boolean;
+  var
+    LVisIdx: Integer;
+    LVis: TPasVisibleToken;
+    LTok: TPasToken;
+  begin
+    Result := False;
+    if (ANode < 0) or (ANode > High(AModel.Tree.Nodes)) then
+      Exit;
+    case AModel.Tree.Nodes[ANode].Kind of
+      nkMember: LVisIdx := AModel.Tree.Nodes[ANode].LastToken;
+      nkIdent: LVisIdx := AModel.Tree.Nodes[ANode].FirstToken;
+    else
+      Exit;
+    end;
+    if (LVisIdx < 0) or (LVisIdx > High(AModel.Tree.Source.Visible)) then
+      Exit;
+    LVis := AModel.Tree.Source.Visible[LVisIdx];
+    if LVis.FileId <> AFileId then
+      Exit;
+    LTok := AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex];
+    if LTok.Len <= 0 then
+      Exit;
+    AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(LTok.Start,
+      ALine, ACol);
+    AColTo := ACol + LTok.Len;
+    Result := True;
+  end;
+
 begin
   LMid := FNav.ModelIdOf(ADoc.Path);
   LSB := TStringBuilder.Create;
@@ -1895,6 +1935,15 @@ begin
           PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
           if LEndChar <= LChar then
             LEndChar := LChar + 1;
+        end
+        // No identifier AT the position - the dot of a dotted name. The
+        // node's own name then gives start AND end (see NameSpanOf).
+        else if NameSpanOf(LModel, LModel.Diags[LIdx].DeclNode,
+          LModel.Diags[LIdx].FileId, LNameLine, LNameCol, LNameColTo) and
+          (LNameLine = LModel.Diags[LIdx].Line) then
+        begin
+          PasTreeToLsp(LNameLine, LNameCol, LLine, LChar);
+          PasTreeToLsp(LNameLine, LNameColTo, LEndLine, LEndChar);
         end;
         LSB.Append(Format(
           '{"range":{"start":{"line":%d,"character":%d},' +

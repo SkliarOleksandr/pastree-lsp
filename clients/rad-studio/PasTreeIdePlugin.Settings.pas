@@ -210,6 +210,27 @@ function ClearLogOnProjectOpen: Boolean;
 /// </summary>
 function PasTreeErrorSquigglesEnabled: Boolean;
 
+type
+  /// <summary>
+  /// Tools > Options > Language > Delphi > Error Insight > "Editor rendering
+  /// style", in the order of its ValueNames (Classic=0 .. Dots=3).
+  /// </summary>
+  TErrorMarkStyle = (emsClassic, emsSmoothWave, emsSolidLine, emsDots);
+
+/// <summary>
+/// The IDE's own choice of underline shape, so ours draw the one the user
+/// picked for Error Insight rather than a second setting of our own. Stored as
+/// the string value "ErrorInsight Marks" under Editor\Source Options\
+/// Borland.EditOptions.Pascal ("0".."3"; found in coreide370.bpl's
+/// TPropComboBox ValueNames, 2026-09-24, and present under 22.0 and 23.0
+/// too). No ToolsAPI exposes it. Asked per paint run, so the read is
+/// THROTTLED rather than cached for the session: at most one registry read a
+/// second, which is what lets a change in Tools > Options show on the next
+/// repaint instead of at the next IDE start. Absent or unreadable is Classic,
+/// the IDE's own default.
+/// </summary>
+function IdeErrorMarkStyle: TErrorMarkStyle;
+
 /// <summary>
 /// Makes the IDE's own Error Insight level agree with
 /// PasTreeErrorSquigglesEnabled. Ours: the level the IDE has is remembered
@@ -339,6 +360,9 @@ const
   cIdePascalEditOptionsKey = 'Editor\Source Options\Borland.EditOptions.Pascal';
   cValueErrorInsightLevel = 'ErrorInsightLevel';
   cLevelNone = 'None';
+  cValueErrorInsightMarks = 'ErrorInsight Marks';
+  // See IdeErrorMarkStyle.
+  cMarkStyleRereadMs = 1000;
   // Teal, BGR - the PasTree demo's default, readable on both IDE themes.
   cDefaultTypeColor = TColor($00808000);
 
@@ -350,6 +374,10 @@ var
   // value either.
   GSettings: TPasTreeSettings;
   GLoaded: Boolean = False;
+  // IdeErrorMarkStyle's throttle: the last answer and when it was read.
+  GMarkStyle: TErrorMarkStyle = emsClassic;
+  GMarkStyleReadAt: UInt64 = 0;
+  GMarkStyleRead: Boolean = False;
   // The two menu items we own: the "PasTree" submenu parent and its one
   // child. Held so FinalizeSettings can take them back out of the IDE's menu
   // - freeing the parent frees the child with it.
@@ -715,6 +743,56 @@ end;
 function PasTreeErrorSquigglesEnabled: Boolean;
 begin
   Result := CurrentSettings.PasTreeErrorSquiggles;
+end;
+
+function ReadIdeErrorMarkStyle: TErrorMarkStyle;
+var
+  LServices: IOTAServices;
+  LReg: TRegistry;
+  LIndex: Integer;
+begin
+  Result := emsClassic;
+  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Exit;
+  LReg := TRegistry.Create(KEY_READ);
+  try
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+      if not LReg.OpenKeyReadOnly(
+        IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
+        + cIdePascalEditOptionsKey) then
+        Exit;
+      if not LReg.ValueExists(cValueErrorInsightMarks) then
+        Exit;
+      // The dialog writes the index as a string; an integer is accepted too.
+      if LReg.GetDataType(cValueErrorInsightMarks) = rdInteger then
+        LIndex := LReg.ReadInteger(cValueErrorInsightMarks)
+      else
+        LIndex := StrToIntDef(Trim(LReg.ReadString(cValueErrorInsightMarks)),
+          Ord(emsClassic));
+      if (LIndex >= Ord(Low(TErrorMarkStyle)))
+        and (LIndex <= Ord(High(TErrorMarkStyle))) then
+        Result := TErrorMarkStyle(LIndex);
+    except
+      Result := emsClassic;
+    end;
+  finally
+    LReg.Free;
+  end;
+end;
+
+function IdeErrorMarkStyle: TErrorMarkStyle;
+var
+  LNow: UInt64;
+begin
+  LNow := GetTickCount64;
+  if (not GMarkStyleRead) or (LNow - GMarkStyleReadAt >= cMarkStyleRereadMs) then
+  begin
+    GMarkStyle := ReadIdeErrorMarkStyle;
+    GMarkStyleReadAt := LNow;
+    GMarkStyleRead := True;
+  end;
+  Result := GMarkStyle;
 end;
 
 { The IDE's level as a string, cLevelAbsent when it has none. The dialog
