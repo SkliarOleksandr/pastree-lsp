@@ -721,6 +721,19 @@ Two details that are easy to get wrong and were:
   ("which copy of this unit won?") are rebuild questions; writing it per
   keystroke buries the rebuild that matters.
 
+**Library text is demoted after every full build** (`DemoteText`, since
+0.53.0; PasTree estimates about 920 MB). Kept: the open documents, the main source,
+the .dproj's units and everything under the project directory. The maps and
+symbols stay, so the module path and the next rebuild's donor are unaffected;
+a demoted unit's text comes back on first touch (`EnsureHydrated`, ~1 ms a
+unit). The navigator does that itself; the server does it for an open
+document at `didOpen` and at every project swap, and completion details and
+argument annotation do it for the foreign model they read tokens from - any
+new code that reads another model's `Tree.Source` must too, or it reads a nil
+token layer. Not after accepted module runs: those rehydrate project units,
+which are kept anyway, and demoting again would only make the next completion
+list rehydrate its library units per keystroke.
+
 `moduleRedoLimit` in the initializationOptions writes PasTree's
 `ModuleRedoLimit` - how many affected units an interface edit may pull in
 before rebuilding instead. 0 keeps the library's measured default of 128.

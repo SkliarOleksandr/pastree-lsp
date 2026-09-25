@@ -613,6 +613,10 @@ begin
           if (AProject <> nil) and LModel.ExtRefMap.TryGetValue(LNode, LExt) then
           begin
             LModel := AProject.Model(LExt.UnitId);
+            // The owner's parameter list is read as TEXT - see ModelOf.
+            if (LModel <> nil) and LModel.Demoted and
+               not AProject.EnsureHydrated(LExt.UnitId) then
+              Exit;
             LSym := LExt.Sym;
           end
           else if (LNode <= High(LModel.RefMap)) and
@@ -629,7 +633,11 @@ begin
 end;
 
 { The model a target's symbol lives in: the overlay itself for Mid -1, the
-  project's model otherwise; nil when the project no longer has it. }
+  project's model otherwise; nil when the project no longer has it.
+  Rehydrated when it is demoted: a callee in the library has had its text
+  freed after the full build (TLspServer.DemoteLibraryText), and its
+  parameter names and modifiers are read off its tokens. A stream that cannot
+  be reproduced is nil here too - no annotation rather than a fault. }
 function ModelOf(AOverlay: TPasSemaModel; AProject: TPasSemaProject;
   AMid: Integer): TPasSemaModel;
 begin
@@ -638,6 +646,9 @@ begin
   if AProject = nil then
     Exit(nil);
   Result := AProject.Model(AMid);
+  if (Result <> nil) and Result.Demoted and
+     not AProject.EnsureHydrated(AMid) then
+    Result := nil;
 end;
 
 (* The brace comments IMMEDIATELY before a visible token, over whitespace only,

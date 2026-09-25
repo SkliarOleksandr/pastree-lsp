@@ -204,7 +204,12 @@ const
   /// class that carries attributes (`[TableAttr('T')] TFoo = class`).
   /// Silent without it: Ctrl+Shift+Up/Down does nothing in such a class and
   /// the log says only `nothing to toggle to at that position`.
-  cMinPasTreeVersion = '0.46.1';
+  /// 0.49.1 (2026-09-25): DemoteText (0.47.0) and scopes held as records in
+  /// one array per model (0.49.0, reached through PSemaScope) are compile
+  /// errors without it; what is silent is 0.49.1's trimming - against 0.49.0
+  /// the token, node and line-start arrays keep their grown capacity, and the
+  /// memory the server was measured to give back is simply not given back.
+  cMinPasTreeVersion = '0.49.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

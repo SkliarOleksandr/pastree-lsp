@@ -297,6 +297,8 @@ type
       SILENT in the worst way: rename simply stops refusing RTL/VCL sources
       and rewrites somebody else's files instead. }
     function NewNavigator: TPasNavigator;
+    procedure DemoteLibraryText;
+    procedure HydrateOpenDoc(ANav: TPasNavigator; const APath: string);
     function StateLine: string;
     procedure NoteIdleFault(const AMsg: string);
     procedure FlushIdleFault;
@@ -1203,7 +1205,12 @@ begin
   LWasModule := FModuleMode;
   FModuleMode := False;
   if not LWasModule then
+  begin
     FDiskReadAt := FBuildDiskReadAt;
+    // Before the "analysis done" line, so its memory figure is what the
+    // server holds from here on.
+    DemoteLibraryText;
+  end;
   // The whole-closure diagnostic count (open docs get theirs listed by
   // PublishDiagnostics below): a healthy run on a fully-pathed project is
   // near zero, so a big number here means missing search paths (F1027
@@ -1685,9 +1692,106 @@ begin
 end;
 
 function TLspServer.NewNavigator: TPasNavigator;
+var
+  LDoc: TLspDocument;
 begin
   Result := TPasNavigator.Create(FProject);
   Result.LibraryPaths := FLibraryPaths;
+  // Every project swap passes through here, so this is where an open
+  // document demoted in the project being swapped in gets its text back -
+  // see HydrateOpenDoc.
+  for LDoc in FDocs.All do
+    HydrateOpenDoc(Result, LDoc.Path);
+end;
+
+{ Frees the text layer (sources, tokens, line tables) of every unit that is
+  neither open nor the project's own - the library, which is most of a
+  closure's text and what an edit rarely touches. PasTree's stage A2,
+  estimated there at about 920 MB for this server. The maps and symbols
+  stay, so the module fast path and the next rebuild's parse donor keep
+  working; what needs a demoted unit's
+  text gets it back (EnsureHydrated, ~1 ms a unit) - the navigator does that
+  itself, and the few places here that read a foreign model's tokens
+  directly (completion details, argument annotation) do it by hand.
+
+  After a FULL build only, not after every accepted incremental run, although
+  PasTree allows both: a module run rehydrates the consumers of the edited
+  unit, which are project units and kept anyway, so demoting again there
+  frees next to nothing - while it would throw away every library unit the
+  last completion list rehydrated, and the next Ctrl+Space would pay ~1 ms
+  per such unit again, per keystroke.
+
+  Kept: the open documents, the main source, the .dproj's units and
+  everything under the project directory (a bare .dpr lists no units). }
+procedure TLspServer.DemoteLibraryText;
+var
+  LKeep: TList<string>;
+  LDoc: TLspDocument;
+  LDir, LItem: string;
+  LMid, LBefore, LAfter: Integer;
+  LStart: UInt64;
+
+  function DemotedCount: Integer;
+  var
+    LI: Integer;
+  begin
+    Result := 0;
+    for LI := 0 to FProject.ModelCount - 1 do
+      if (FProject.Model(LI) <> nil) and FProject.Model(LI).Demoted then
+        Inc(Result);
+  end;
+
+begin
+  if FProject = nil then
+    Exit;
+  LStart := GetTickCount64;
+  LBefore := DemotedCount;
+  LKeep := TList<string>.Create;
+  try
+    for LDoc in FDocs.All do
+      LKeep.Add(LDoc.Path);
+    if FMainSource <> '' then
+      LKeep.Add(FMainSource);
+    LKeep.AddRange(FProjectFiles);
+    if FProjectDir <> '' then
+    begin
+      LDir := IncludeTrailingPathDelimiter(TPath.GetFullPath(FProjectDir));
+      for LMid := 0 to FProject.ModelCount - 1 do
+      begin
+        LItem := FProject.ModelFile(LMid);
+        if (LItem <> '') and
+           TPath.GetFullPath(LItem).StartsWith(LDir, True) then
+          LKeep.Add(LItem);
+      end;
+    end;
+    FProject.DemoteText(LKeep.ToArray);
+  finally
+    LKeep.Free;
+  end;
+  LAfter := DemotedCount;
+  Log(Format('library text demoted: %d of %d units (%d newly) in %d ms',
+    [LAfter, FProject.ModelCount, LAfter - LBefore,
+     GetTickCount64 - LStart]));
+end;
+
+{ An open document's model with its text in place. DemoteText keeps the open
+  files, but a file opened AFTER the demotion (a library unit Ctrl+Clicked
+  into) was not open then, and the diagnostics and documentSymbol paths read
+  an open document's tokens without asking - a demoted one would lose its
+  underline positions and its whole outline, silently. Called on didOpen and
+  at every project swap (NewNavigator); a no-op for a model that has its
+  text. Only on the live project: a module session owns it while FProject is
+  nil, and the swap after it catches up. }
+procedure TLspServer.HydrateOpenDoc(ANav: TPasNavigator; const APath: string);
+var
+  LMid: Integer;
+begin
+  if (FProject = nil) or (ANav = nil) then
+    Exit;
+  LMid := ANav.ModelIdOf(APath);
+  if (LMid >= 0) and (FProject.Model(LMid) <> nil) and
+     FProject.Model(LMid).Demoted and not FProject.EnsureHydrated(LMid) then
+    Log('could not rehydrate the open document ' + APath);
 end;
 
 { This process's memory and the system's remaining commit, in MB, for the two
@@ -2154,6 +2258,7 @@ begin
   else
     Log(Format('textDocument/didOpen %s v%d%s',
       [LPath, LVersion, LShownNote]));
+  HydrateOpenDoc(FNav, LPath);
   // Schedule when this buffer is unsaved work the analysis has not seen, OR
   // when nothing has been analyzed yet - the first file opened is what starts
   // the initial build, and without this clause a workspace whose files all
@@ -4943,7 +5048,7 @@ var
   // The items of one scope as comma-joined DocumentSymbol JSON ('' = none).
   function ScopeItems(AScopeIdx, ADepth: Integer): string;
   var
-    LScope: TSemaScope;
+    LScope: PSemaScope;
     LI, LSymIdx, LKind, LLine, LChar, LPasLine, LPasCol: Integer;
     LSym: TSemaSymbol;
     LFile, LChildren, LOne: string;

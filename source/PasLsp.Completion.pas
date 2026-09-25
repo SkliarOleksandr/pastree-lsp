@@ -622,7 +622,17 @@ begin
           if LItems[LIdx].Mid < 0 then
             LItemModel := LModel
           else if AProject <> nil then
-            LItemModel := AProject.Model(LItems[LIdx].Mid)
+          begin
+            LItemModel := AProject.Model(LItems[LIdx].Mid);
+            // Library units have their text demoted after a full build
+            // (TLspServer.DemoteLibraryText), and every helper below reads
+            // text - on a demoted model the token layer is nil. A unit whose
+            // stream cannot be reproduced stays demoted: no detail, not a
+            // fault.
+            if (LItemModel <> nil) and LItemModel.Demoted and
+               not AProject.EnsureHydrated(LItems[LIdx].Mid) then
+              LItemModel := nil;
+          end
           else
             LItemModel := nil;
           if LItemModel <> nil then
