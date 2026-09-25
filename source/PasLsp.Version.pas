@@ -215,7 +215,16 @@ const
   /// var from such a call has no type, and every member behind it answers
   /// `did not resolve to a source declaration` (AVImark, VirtualTreeView's
   /// TVirtualNode.GetData<T>).
-  cMinPasTreeVersion = '0.50.1';
+  /// 0.50.2 (2026-09-25): three fixes pastree-mcp found on AVImark. Find
+  /// Destructions no longer reads the token array of a text-demoted unit -
+  /// an access violation here since 0.53.0 demotes library text after every
+  /// build. `TFoo.Create(...)` inside TFoo's own unit binds TFoo's
+  /// constructor instead of the parameterless one an ancestor declares, and
+  /// an anonymous method argument picks the `reference to` overload over an
+  /// `of object` one. Silent without it apart from the crash: Ctrl+Click on
+  /// such a Create lands in TObject, and Find References on the constructor
+  /// or on the TProc overload comes back empty.
+  cMinPasTreeVersion = '0.50.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
