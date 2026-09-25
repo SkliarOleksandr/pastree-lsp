@@ -209,7 +209,13 @@ const
   /// errors without it; what is silent is 0.49.1's trimming - against 0.49.0
   /// the token, node and line-start arrays keep their grown capacity, and the
   /// memory the server was measured to give back is simply not given back.
-  cMinPasTreeVersion = '0.49.1';
+  /// 0.50.1 (2026-09-25): a generic method called with written type
+  /// arguments is typed - `Node.GetData<T>` with no parentheses, and
+  /// `GetData<T>()` beside a plain `GetData()`. Silent without it: an inline
+  /// var from such a call has no type, and every member behind it answers
+  /// `did not resolve to a source declaration` (AVImark, VirtualTreeView's
+  /// TVirtualNode.GetData<T>).
+  cMinPasTreeVersion = '0.50.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
