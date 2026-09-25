@@ -138,6 +138,37 @@ project group was tried and withdrawn in 0.47.23. The jump is
 history-aware, like every other navigation here. Off in
 the settings, Ctrl+G goes back to whatever your keymap binds it to.
 
+### View Unit (Ctrl+F12) and Use Unit (Alt+F11)
+
+These replace the IDE's own two dialogs, which list only the units the
+`.dproj` names. The window is PasTree's demo View Unit picker: one filter box
+(a substring of the unit name), two lines a row - the name over its
+directory - and an **Implicit Units** box that switches from the project's
+units to every unit the analysis reached. That includes units found through
+the search path, the IDE's Library Path, and `.dcu`-only units, which are
+tagged "compiled only". The project list opens at once, even on a cold server;
+the full list loads when the box is ticked, and the status line says so while
+it does. The box, the window size and Use Unit's section choice are
+remembered.
+
+- **View Unit** opens the chosen unit where it starts. A compiled-only unit
+  opens as its generated `Foo.dcu.pas` tab. Alt+Left goes back. Its **All files
+  in project group** box, like the stock dialog's, adds the own units of the
+  group's other projects, read from the IDE - no server is started for them.
+  Their implicit units therefore stay out of the list.
+- **Use Unit** leaves out what the file already uses, in either section (with
+  or without a unit-scope prefix - `Classes` counts as `System.Classes`), and
+  the file itself. It writes the name into the Interface or Implementation
+  clause. A program has one clause, so there is nothing to choose. The name
+  goes in front of the clause's `;`, which puts it outside any `{$IFDEF}`
+  around the last item. It wraps onto its own line past the Right Margin. A
+  section with no clause gets a new one after its keyword. One Ctrl+Z undoes
+  it. A refusal (already used, a clause that does not parse while you are
+  typing in it) goes to the Build tab with its reason.
+
+Off in the settings, both keys go back to the IDE's dialogs. The stock
+dialogs stay on their menus either way.
+
 ### IDE Insight symbol search (Ctrl+.)
 
 Adds a "PasTree symbols" category to the IDE Insight search box, holding every

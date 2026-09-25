@@ -1,6 +1,8 @@
 # Completion plumbing - server and plugin plan
 
-Status: agreed plan, 2026-08-21. Not started.
+Status: DELIVERED - agreed 2026-08-21, completion and signature help shipped
+2026-08-21/22 once PasTree's completion API landed. Kept as the record of the
+seam and its reasons; open polish is under "Deferred polish" below.
 
 Scope: everything completion needs in THIS repository - the LSP server and the
 RAD Studio plugin - built now, against a seam, so that when PasTree grows its

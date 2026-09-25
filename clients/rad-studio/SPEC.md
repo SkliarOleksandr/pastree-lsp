@@ -158,13 +158,15 @@ is the authoritative source for it. `IOTAProjectPlatforms.CurrentPlatform`
 (`PlatformAPI.pas:893`) is the active-platform source of truth, and
 `IOTAPlatformSDKNotifier` (`2185`) is a legitimate reconfigure trigger.
 
-**Still missing, and it is a real gap.** The IDE's own Library Path and Browsing
-Path per platform are in none of this - not in `DCCStrs`, not in `PlatformAPI`.
-They live in environment options: `IOTAServices.GetEnvironmentOptions`
-(`ToolsAPI.pas:7301`) and `GetBaseRegistryKey` (`7287`), under
-`Library\<Platform>`. Until that is read, a project depending on a third-party
-library installed IDE-wide will have identifiers the server cannot resolve, and
-the symptom is the quiet one: navigation resolves nothing, with no error.
+**The IDE's own Library configuration - read.** The Library Path and Browsing
+Path per platform are in none of the above - not in `DCCStrs`, not in
+`PlatformAPI`. They live under `Library\<Platform>` below
+`IOTAServices.GetBaseRegistryKey` (`7287`), and `GetIDELibraryPaths` in
+`PasTreeIdePlugin.LspSession` reads both values from there and sends them as
+extra `searchPaths` (and as `libraryPaths`, so the server refuses to rewrite
+them). Its header records why both are needed. The symptom of getting this
+wrong is the quiet one: navigation resolves nothing, with no error, and the
+server log fills with F1027 "Unit not found".
 
 ## Feeding the server: change events
 
@@ -370,7 +372,7 @@ file-trait question above).
 |---|---|---|---|
 | Go to declaration | Have | the Code Insight manager, plus a mouse override and the menu takeover for everyone else | With PasTree selected as Insight Provider, Ctrl+Click routes through `AsyncGotoDefinitionEx`. Under any other provider the mouse-notifier override in `PasTreeIdePlugin.GotoDeclaration` claims plain Ctrl+Click. The `cEdMenuCatIdentifier` takeover is back too - a menu item never reaches the package, so nothing else can reach it. Both restored 2026-09-01 under one switch; the click is decided per click, the takeover once at load (one-way door) |
 | Go to declaration into a compiled-only unit | **Have** (0.44.0) | a read-only editor tab named `Foo.dcu.pas`, through a registered `IOTAFileSystem` (`PasTreeIdePlugin.DcuSource`) | The server analyzes a unit with no `.pas` from its `.dcu` (PasTree 0.37.0) and answers Locations into the text it generated; the IDE cannot open a `.dcu`, so the tab is a virtual module whose text comes from one `pastree/dcuSource` request and whose I/O goes through our file system (`IsReadonly` True, plus the buffer's own flag). Named `<dcu path>.pas` for the highlighter; `PathToLspUri` maps it back to the `.dcu`, so every request from the tab reaches the server under the URI it knows. Closed, with a Build line, when the project's server is replaced (platform, configuration, re-saved `.dproj`) - a Win64 build may name a different `.dcu`. A refused `.dcu` puts the reader's reason on the Build tab. Both navigation paths (the override and the Insight manager's `AsyncGotoDefinitionEx`) reach it. Reasons in the README, "Compiled-only units" |
-| Declaration ↔ implementation toggle | Ready | a menu item | server already answers `declaration` and `implementation` |
+| Declaration ↔ implementation toggle | **Have** (2026-08-21) | Ctrl+Shift+Up/Down through the package's keyboard binding | `ToggleKeyProc`; silent on a caret that is not on a routine since 2026-08-29 (live queue item 7) |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
 | Find All submenu (overrides, implementations, descendants, assignments, creations, destructions) | **Have** (0.34.0, completed 0.37.0) | one `Find All` submenu via the ToolsAPI category convention (`Parent.child`), items greyed per caret by a synchronous `pastree/findAllAt` under a 250 ms budget | `PasTreeIdePlugin.FindHierarchy`; Descendants is a nested tree in the Messages panel through the `Pointer` `AddCustomMessage(msg, Parent)` returns, to any depth |
 | Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |
@@ -537,25 +539,16 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
   it is live. Its one useful legacy is conceptual: the `TEditPos` versus
   `TCharPos` distinction described above.
 
-## Suggested order
+## The first suggested order - closed
 
-1. **The file-trait spike.** It is the only unknown, and it decides whether
-   diagnostics and folding cost a day or a fortnight.
-2. **Diagnostics**, by whichever route the spike settles - plus the gutter
-   column and the scrollbar minimap, which are independent of it and are what
-   make a diagnostic findable rather than merely visible.
-3. **`EditorIdle`-driven `didChange`**, without which diagnostics lag behind
-   typing. Bring `IOTAEditLineTracker` with it or the decorations drift.
-4. **The Structure pane outline**, with caret sync and state preservation. The
-   server already answers `documentSymbol`; this is presentation only.
-5. **Result-surface upgrade** for Find References: hierarchy plus owner-drawn
-   rows, which also closes the "highlight the match in the snippet" TODO.
-6. **Keyboard bindings** for what exists by then.
-7. **Workspace symbol** into IDE Insight, once the server answers it.
-8. **Code Insight**, as its own project, once the server can answer completion.
+The original eight-step order (file-trait spike, diagnostics, idle
+`didChange`, Structure outline, result rows, keyboard bindings, IDE Insight
+symbols, Code Insight) is spent: every step was delivered, answered negative
+(the spike) or withdrawn (the outline, see the inventory). What it left open
+is only the decoration around diagnostics - the gutter column, the scrollbar
+minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
 
-## The live queue (2026-08-22, user asks - supersedes "Suggested order" above,
-## whose items 1-8 are all delivered or running)
+## The live queue (2026-08-22, user asks - supersedes the first order)
 
 1. **Error Insight - DELIVERED via the paint path (2026-08-22, first live
    run pending).** The spike answered NEGATIVE the same day (closed
@@ -1366,14 +1359,19 @@ later:
 
 ### Still to build
 
-4. Group-wide `workspace/symbol`: the same fan-out, and cheap, since it is a
-   read with no plan to approve.
+4. Group-wide `workspace/symbol` (IDE Insight, Ctrl+.) - still the active
+   project only. Weigh it against what the Go To picker learned first: its
+   group tab (0.45.3) was withdrawn in 0.47.23 because a group list cost a
+   fan-out to every server, and since 0.51.3 every group-wide command asks
+   only the projects ticked in the scope dialog (`PasTreeIdePlugin.GroupScope`).
+   A group symbol search would have to go through that dialog too.
 5. A project ADDED to or REMOVED from an open group. Removal must dispose its
    session; the notification for it is not yet identified.
-6. Group-wide Rename - see item 3. Waiting on the rename's own rework, not on
-   the group machinery.
 
-## Use Unit over the real closure (queued 2026-09-14, not started)
+Group-wide Rename, item 6 of the original list, is delivered: 0.39.1 applies
+and saves across the group, 0.51.3 put it behind the same scope dialog.
+
+## View Unit and Use Unit over the real closure (built 0.54.0, 2026-09-25)
 
 **The ask.** File > Use Unit (Alt+F11) and Refactor > Find Unit
 (Ctrl+Shift+A, the "Search for units" dialog) offer only the units the
@@ -1407,12 +1405,31 @@ were weighed:
    Rejected: it rewrites the `.dproj`, which is a side effect no navigation
    feature may have.
 
-**Pieces when it starts.** A server method returning the closure with paths
-(the pool routes it to the project owning the current file, as everything
-else); a form; two keyboard bindings; the `uses` insertion, which must handle
-a missing `uses` clause in either section and respect the file's line ending
-and BOM through `PasLsp.SourceText`. Cover the insertion with a harness
-request and test in AVImark, where the implicit set is the large one.
+**Built in 0.54.0 - how it differs from the plan above.**
+
+- **The keys are Ctrl+F12 (View Unit) and Alt+F11 (Use Unit)**, not
+  Ctrl+Shift+A: that key went to Annotate Arguments the same day this was
+  queued, and Alex chose to replace View Unit instead (2026-09-25). Find
+  Unit keeps its menu item.
+- **The window is PasTree's demo View Unit picker**, not a Find All-shaped
+  form (`PasTreeIdePlugin.UnitPickerForm`, on `PasTreeIdePlugin.ListBox`).
+  One form, two modes; its "Implicit Units" box switches the project's units
+  for the whole closure, which is the point of the feature.
+- **Two requests, not one.** `pastree/units` answers the project scope
+  without waiting for the analysis (the dialog opens at once on a cold
+  server) and the closure after it; both mark what the current file
+  already uses, read from its live text. `pastree/useUnit` computes the
+  insertion on the server (`PasLsp.UseUnit`), because the rules - in front
+  of the `;` so it lands outside any `{$IFDEF}`, wrap at the Right Margin,
+  a new clause after the section keyword, the file's own line break - need
+  the tree. The client applies it through one undoable writer behind
+  Annotate's buffer-length gate.
+- **Covered** by `LspClientSmoke` section 5n. **Not yet tested in the IDE**
+  or on AVImark, where the implicit set is the large one - the harnesses
+  cannot say whether 3,700 rows feel instant in a 32-bit IDE.
+- **Open:** multi-select (the stock Use Unit takes several units at once);
+  moving a unit from implementation to interface (refused as "already
+  used" today); hiding the stock menu items.
 
 ## Go To over library units (deferred 2026-09-19, not started)
 
@@ -1460,15 +1477,16 @@ shape.
 
 **Rules that hold under either shape.**
 
-1. UI is a checkbox on the Project and Group tabs beside the kind boxes, not
-   a fourth tab; off by default; remembered in Settings.
+1. UI is a checkbox on the Project tab beside the kind boxes, not a third
+   tab; off by default; remembered in Settings.
 2. Project rows sort above library rows, and library rows draw in the quiet
    colour the `include` rows got in 0.46.7 - typing `TStr` must not bury the
    project's own types under RTL.
-3. Group tab: library rows come from the CURRENT project's server only; the
-   other servers contribute their project rows as now. Nine servers hold nine
-   copies of the RTL analyzed under nine sets of defines, so a merge by (file,
-   name) would be both slow and wrong.
+3. Library rows come from the CURRENT project's server only. (Written when
+   Go To had a group tab; it was withdrawn in 0.47.23, but the rule stands for
+   anything group-wide later.) Nine servers hold nine copies of the RTL
+   analyzed under nine sets of defines, so a merge by (file, name) would be
+   both slow and wrong.
 4. The server's `FOutlineCache` is dropped at every analysis install, i.e.
    after every edit. The library table changes only when the closure does,
    so it needs its own cache keyed by the closure generation, or every

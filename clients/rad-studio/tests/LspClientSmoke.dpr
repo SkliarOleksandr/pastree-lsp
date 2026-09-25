@@ -3187,6 +3187,141 @@ begin
     'and says it refused, with the parser''s own first complaint');
 end;
 
+(* 5n. pastree/units and pastree/useUnit: the lists behind View Unit and Use
+  Unit, and the one insertion Use Unit writes. The fixture's header says
+  what it is shaped to test. *)
+procedure TestUseUnit;
+var
+  LUseFile, LUnitFile, LAppFile: string;
+
+  function AskUnits(const AScope, AFile: string): Boolean;
+  var
+    LParams, LDoc: TJSONObject;
+  begin
+    LParams := TJSONObject.Create;
+    LParams.AddPair('scope', AScope);
+    if AFile <> '' then
+    begin
+      LDoc := TJSONObject.Create;
+      LDoc.AddPair('uri', PathToLspUri(AFile));
+      LParams.AddPair('textDocument', LDoc);
+    end;
+    Result := Ask('pastree/units', LParams);
+  end;
+
+  // The flags of the row named AName in the last answer, -1 when absent.
+  function FlagsOf(const AName: string): Integer;
+  var
+    LRoot: TJSONValue;
+    LUnits: TJSONArray;
+    LRow: TJSONValue;
+  begin
+    Result := -1;
+    LRoot := TJSONObject.ParseJSONValue(GResultJson);
+    try
+      if not (LRoot is TJSONObject) or
+         not TJSONObject(LRoot).TryGetValue<TJSONArray>('units', LUnits) then
+        Exit;
+      for LRow in LUnits do
+        if (LRow is TJSONArray) and (TJSONArray(LRow).Count >= 3) and
+           SameText(TJSONArray(LRow).Items[0].Value, AName) then
+          Exit(StrToIntDef(TJSONArray(LRow).Items[2].Value, 0));
+    finally
+      LRoot.Free;
+    end;
+  end;
+
+  function AskUse(const AFile, AUnit, ASection: string;
+    ARightMargin: Integer = 80): Boolean;
+  var
+    LParams, LDoc, LOpts: TJSONObject;
+  begin
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFile));
+    LParams.AddPair('textDocument', LDoc);
+    LParams.AddPair('unit', AUnit);
+    LParams.AddPair('section', ASection);
+    LOpts := TJSONObject.Create;
+    LOpts.AddPair('tabSize', TJSONNumber.Create(2));
+    LOpts.AddPair('insertSpaces', TJSONBool.Create(True));
+    LOpts.AddPair('rightMargin', TJSONNumber.Create(ARightMargin));
+    LParams.AddPair('options', LOpts);
+    Result := Ask('pastree/useUnit', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5n. units lists the project and the closure, useUnit writes '
+    + 'into a uses clause ===');
+  LUseFile := TPath.Combine(GFixtureDir, 'DemoUseUnit.pas');
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+
+  // The project list, marked for the document it was asked about.
+  Check(AskUnits('project', LUnitFile), 'units (project) answered');
+  Check(GOk and GResultJson.Contains('"kind":"unit"')
+    and GResultJson.Contains('"name":"DemoUnit"'),
+    'and says what the document is');
+  Check(FlagsOf('DemoApp') and 1 <> 0, 'the main source is a project row');
+  Check((FlagsOf('DemoUnit') >= 0) and (FlagsOf('DemoUnit') and 9 = 9),
+    'the document''s own row is a project row marked as itself');
+
+  // The closure: everything the analysis reached, the .dcu-only unit too.
+  Check(AskUnits('closure', LAppFile), 'units (closure) answered');
+  Check((FlagsOf('DemoDcuLib') >= 0) and (FlagsOf('DemoDcuLib') and 2 <> 0),
+    'the closure lists the compiled-only unit, flagged .dcu');
+  Check(FlagsOf('DemoUnit') and 4 <> 0,
+    'and marks what the .dpr already uses');
+
+  // Use Unit: `, Name` in front of the interface clause's `;`.
+  Check(AskUse(LUseFile, 'DemoUnit', 'interface'), 'useUnit answered');
+  Check(GOk and GResultJson.Contains('"newText":", DemoUnit"')
+    and GResultJson.Contains(
+      '"start":{"line":10,"character":26}'),
+    'the name goes right before the interface clause''s semicolon');
+  Check(GOk and GResultJson.Contains('"section":"interface"'),
+    'and the answer says which clause');
+
+  // Past the right margin: the name on a line of its own.
+  Check(AskUse(LUseFile, 'DemoUnit', 'interface', 20),
+    'useUnit answered under a narrow margin');
+  Check(GOk and GResultJson.Contains('"newText":",\r\n  DemoUnit"'),
+    'a line that would pass the margin breaks, indented like the item line');
+
+  // No implementation clause: a new one after the keyword.
+  Check(AskUse(LUseFile, 'DemoUnit', 'implementation'),
+    'useUnit answered for the implementation section');
+  Check(GOk and GResultJson.Contains(
+      '"newText":"\r\n\r\nuses\r\n  DemoUnit;"')
+    and GResultJson.Contains('"start":{"line":15,"character":14}'),
+    'a section with no clause gets one, right after its keyword, CRLF');
+
+  // Refusals that name themselves.
+  Check(AskUse(LUseFile, 'SysUtils', 'implementation'),
+    'useUnit answered for a unit used with its prefix');
+  Check(GOk and GResultJson.Contains('"edits":[]')
+    and GResultJson.Contains('already in the interface uses clause'),
+    'SysUtils is System.SysUtils - already used, said so');
+  Check(AskUse(LUseFile, 'System.Classes', 'interface'),
+    'useUnit answered for a unit used without its prefix');
+  Check(GOk and GResultJson.Contains('"edits":[]')
+    and GResultJson.Contains('already in the interface uses clause'),
+    'System.Classes is Classes - already used, said so');
+  Check(AskUse(LUseFile, 'DemoUseUnit', 'interface'),
+    'useUnit answered for the file itself');
+  Check(GOk and GResultJson.Contains('"edits":[]')
+    and GResultJson.Contains('this file itself'),
+    'a unit cannot use itself');
+
+  // A program: its one clause, whatever section was asked for.
+  Check(AskUse(LAppFile, 'Classes', 'implementation'),
+    'useUnit answered for the program');
+  Check(GOk and GResultJson.Contains('"newText":", Classes"')
+    and GResultJson.Contains('"section":"program"'),
+    'a program''s single clause takes the name');
+end;
+
 { 5e. workspace/symbol: the project-wide index behind Ctrl+. }
 procedure TestWorkspaceSymbol;
 var
@@ -3630,6 +3765,7 @@ begin
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;
       TestAnnotateArgs;
+      TestUseUnit;
       TestWorkspaceSymbol;
       TestOnTypeFormatting;
       TestCancelHygiene;

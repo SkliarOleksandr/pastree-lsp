@@ -75,6 +75,8 @@ type
     lblFindAllHint: TLabel;
     chkGoTo: TCheckBox;
     lblGoToHint: TLabel;
+    chkUnitDialogs: TCheckBox;
+    lblUnitDialogsHint: TLabel;
     chkRename: TCheckBox;
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
@@ -310,6 +312,7 @@ begin
     LForm.cbxClassCompleteOrder.ItemIndex :=
       Ord(LSettings.ClassCompleteDeclOrder);
     LForm.chkGoTo.Checked := LSettings.EnableGoTo;
+    LForm.chkUnitDialogs.Checked := LSettings.EnableUnitDialogs;
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
     LForm.chkClearLogOnOpen.Checked := LSettings.ClearLogOnOpen;
@@ -337,6 +340,7 @@ begin
     LSettings.ClassCompleteDeclOrder :=
       LForm.cbxClassCompleteOrder.ItemIndex = 1;
     LSettings.EnableGoTo := LForm.chkGoTo.Checked;
+    LSettings.EnableUnitDialogs := LForm.chkUnitDialogs.Checked;
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
     LSettings.ClearLogOnOpen := LForm.chkClearLogOnOpen.Checked;

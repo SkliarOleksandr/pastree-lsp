@@ -4,7 +4,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   BorderIcons = [biSystemMenu]
   BorderStyle = bsDialog
   Caption = 'PasTree Settings'
-  ClientHeight = 545
+  ClientHeight = 605
   ClientWidth = 500
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -93,7 +93,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 12
     Top = 106
     Width = 476
-    Height = 380
+    Height = 440
     ActivePage = tsNavigation
     TabOrder = 1
     object tsNavigation: TTabSheet
@@ -166,9 +166,8 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Width = 405
         Height = 45
         Caption =
-          'A picker over the declarations of the current unit, the project' +
-          ' and the whole project group - type a name or a line number. Off' +
-          ' hands Ctrl+G back to the IDE.'
+          'A picker over the declarations of the current unit and the' +
+          ' project - type a name or a line number. Off hands Ctrl+G back to the IDE.'
         WordWrap = True
       end
       object chkGoTo: TCheckBox
@@ -180,6 +179,27 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Checked = True
         State = cbChecked
         TabOrder = 3
+      end
+      object lblUnitDialogsHint: TLabel
+        Left = 35
+        Top = 341
+        Width = 405
+        Height = 45
+        Caption =
+          'Replace the IDE'#39's View Unit and Use Unit dialogs with lists of' +
+          ' every unit the analysis reached - implicit units and libraries' +
+          ' included. Off hands both keys back to the IDE.'
+        WordWrap = True
+      end
+      object chkUnitDialogs: TCheckBox
+        Left = 16
+        Top = 320
+        Width = 430
+        Height = 17
+        Caption = 'View Unit (Ctrl+F12) and Use Unit (Alt+F11)'
+        Checked = True
+        State = cbChecked
+        TabOrder = 4
       end
     end
     object tsEditing: TTabSheet
@@ -437,7 +457,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnOK: TButton
     Left = 312
-    Top = 504
+    Top = 564
     Width = 85
     Height = 27
     Caption = 'OK'
@@ -447,7 +467,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   end
   object btnCancel: TButton
     Left = 403
-    Top = 504
+    Top = 564
     Width = 85
     Height = 27
     Cancel = True

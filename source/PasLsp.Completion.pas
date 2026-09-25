@@ -40,7 +40,8 @@ uses
   PasTree.Sema.Project,
   PasLsp.ClassComplete,
   PasLsp.SyncPrototypes,
-  PasLsp.AnnotateArgs;
+  PasLsp.AnnotateArgs,
+  PasLsp.UseUnit;
 
 type
   TLspCompletionEntry = record
@@ -154,6 +155,15 @@ type
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
       AProjectMid: Integer;
       const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
+    { What the LIVE text is and what it uses (PasLsp.UseUnit) - parse only,
+      so the unit list can leave out what the buffer already names, a
+      keystroke ago included. }
+    function UsesInfoAt(const AFileName, AText: string): TLspUsesInfo;
+    { Use Unit: the one edit that adds AUnitName to the live text's uses
+      (PasLsp.UseUnit has the rules and the refusals). }
+    function UseUnitAt(const AFileName, AText, AUnitName: string;
+      AImplementation: Boolean; const AIndent: string;
+      ARightMargin: Integer): TLspUseUnitAnswer;
   end;
 
 implementation
@@ -946,6 +956,34 @@ begin
   finally
     LModel.Free;
   end;
+end;
+
+function TLspCompletionEngine.UsesInfoAt(const AFileName,
+  AText: string): TLspUsesInfo;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  Result := ReadUsesInfo(LTree);
+end;
+
+function TLspCompletionEngine.UseUnitAt(const AFileName, AText,
+  AUnitName: string; AImplementation: Boolean; const AIndent: string;
+  ARightMargin: Integer): TLspUseUnitAnswer;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  // Parse errors elsewhere in the file do not matter here; one inside the
+  // clause does, and UseUnitEdit refuses it through the clause's own flag.
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  Result := UseUnitEdit(LTree, AText, AUnitName, AImplementation, AIndent,
+    ARightMargin);
 end;
 
 end.

@@ -84,6 +84,7 @@ uses
   PasTreeIdePlugin.EditorWindowHook,
   PasTreeIdePlugin.Rename,
   PasTreeIdePlugin.GoToPicker,
+  PasTreeIdePlugin.UnitPicker,
   PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.CrashLog,
   PasTreeIdePlugin.LspSession;
@@ -856,9 +857,12 @@ begin
   // ToolsAPI has no refactoring surface, so this is a plain command -
   // see PasTreeIdePlugin.Rename.
   InitializeRename;
-  // Ctrl+G: the Go To picker over the module, the project and the group -
-  // see PasTreeIdePlugin.GoToPicker.
+  // Ctrl+G: the Go To picker over the module and the project - see
+  // PasTreeIdePlugin.GoToPicker.
   InitializeGoTo;
+  // Ctrl+F12 and Alt+F11: View Unit and Use Unit over the whole analyzed
+  // closure - see PasTreeIdePlugin.UnitPicker.
+  InitializeUnitPicker;
   // Tools > PasTree > Settings. Last of the registrations because it is the
   // only one that is pure UI - nothing above it reads the settings at
   // startup, they are read at the point of use.
@@ -911,6 +915,7 @@ begin
   FinalizeSyncPrototypes;
   FinalizeAnnotateArgs;
   FinalizeGoTo;
+  FinalizeUnitPicker;
   FinalizeBlockClose;
   // AFTER every feature that registers with it has withdrawn (Ctrl+Click in
   // FinalizeGotoDeclaration, block completion just above): this releases the

@@ -435,6 +435,48 @@ type
     const ARows: TArray<TLspOutlineRow>; const AError: string);
 
   /// <summary>
+  /// One row of the View Unit / Use Unit list (pastree/units): a unit of the
+  /// project, or of the whole analyzed closure. Used and IsSelf are about
+  /// the document the list was asked for, and False without one.
+  /// </summary>
+  TLspUnitRow = record
+    Name: string;
+    FilePath: string;
+    IsProject: Boolean;
+    IsDcu: Boolean;
+    Used: Boolean;
+    IsSelf: Boolean;
+  end;
+
+  /// <summary>
+  /// The pastree/units answer. DocKind is what the document is - 'unit',
+  /// 'program', 'library', 'package' - or '' when none was asked about or
+  /// it did not parse.
+  /// </summary>
+  TLspUnits = record
+    Scope: string;
+    DocKind: string;
+    DocName: string;
+    Rows: TArray<TLspUnitRow>;
+  end;
+
+  TLspUnitsProc = reference to procedure(ASuccess: Boolean;
+    const AUnits: TLspUnits; const AError: string);
+
+  /// <summary>
+  /// The pastree/useUnit answer: at most one insertion, and on a refusal no
+  /// edit and a Provider that says why. Section is where the name went.
+  /// </summary>
+  TLspUseUnit = record
+    Edits: TArray<TLspTextEdit>;
+    Section: string;
+    Provider: string;
+  end;
+
+  TLspUseUnitProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspUseUnit; const AError: string);
+
+  /// <summary>
   /// One node of a document's outline (textDocument/documentSymbol), in IDE
   /// coordinates. Children are the type's members, one level deep - the
   /// same shape the server builds.
@@ -795,6 +837,24 @@ procedure LspOutlineProject(const AFileName: string;
 /// </summary>
 procedure LspOutlineTarget(const ARow: TLspOutlineRow;
   const AOnDone: TLspHitsProc);
+
+/// <summary>
+/// The View Unit / Use Unit list (pastree/units) from the server owning
+/// AFileName: AScope 'project' (the .dproj's units - answered without
+/// waiting for the analysis) or 'closure' (every unit the analysis reached,
+/// libraries and .dcu-only units included). The rows say whether AFileName
+/// already uses them.
+/// </summary>
+procedure LspUnits(const AScope, AFileName: string;
+  const AOnDone: TLspUnitsProc);
+
+/// <summary>
+/// Use Unit's write (pastree/useUnit): the edit that adds AUnitName to
+/// AFileName's interface (or, with AImplementation, implementation) uses
+/// clause, computed over the buffer as it is now. Asked of the owner.
+/// </summary>
+procedure LspUseUnit(const AFileName, AUnitName: string;
+  AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
 
 /// <summary>
 /// The .dproj of the project that would answer for AFileName - the owner,
@@ -1188,6 +1248,13 @@ type
     /// or 'project' (AFileName ignored). See LspOutlineModule.</summary>
     procedure Outline(const AScope, AFileName: string;
       const AOnDone: TLspOutlineProc);
+    /// <summary>pastree/units - AScope 'project' or 'closure'; AFileName
+    /// the document whose uses mark the rows ('' for none).</summary>
+    procedure Units(const AScope, AFileName: string;
+      const AOnDone: TLspUnitsProc);
+    /// <summary>pastree/useUnit - AUnitName into AFileName's uses.</summary>
+    procedure UseUnit(const AFileName, AUnitName: string;
+      AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
     /// <summary>pastree/outlineTarget for a project row this server listed.</summary>
     procedure OutlineTarget(const ARow: TLspOutlineRow;
       const AOnDone: TLspHitsProc);
@@ -2653,6 +2720,26 @@ begin
     AInsertSpaces := not LOptions.BufferOptions.UseTabCharacter;
 end;
 
+{ The IDE's Right Margin - the column Use Unit keeps a uses line within. 80,
+  the IDE's own default, when the options cannot be read. }
+function ReadRightMargin: Integer;
+var
+  LEditorServices: IOTAEditorServices;
+  LView: IOTAEditView;
+  LOptions: IOTAEditOptions;
+begin
+  Result := 80;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
+    Exit;
+  LView := LEditorServices.TopView;
+  if not Assigned(LView) or not Assigned(LView.Buffer) then
+    Exit;
+  LOptions := LView.Buffer.EditOptions;
+  if Assigned(LOptions) and Assigned(LOptions.BufferOptions) and
+     (LOptions.BufferOptions.RightMargin > 0) then
+    Result := LOptions.BufferOptions.RightMargin;
+end;
+
 procedure TLspSession.OnTypeFormatting(const AFileName: string;
   ARow, ACol: Integer; const AOnDone: TLspTextEditsProc);
 var
@@ -3580,6 +3667,150 @@ begin
       end
       else
         AOnDone(True, LRows, '');
+    end);
+end;
+
+function ParseUnits(AResult: TJSONValue): TLspUnits;
+var
+  LDoc: TJSONObject;
+  LRows: TJSONArray;
+  LValue: TJSONValue;
+  LItem: TJSONArray;
+  LRow: TLspUnitRow;
+  LFlags, LCount: Integer;
+begin
+  Result := Default(TLspUnits);
+  if not (AResult is TJSONObject) then
+    Exit;
+  Result.Scope := AResult.GetValue<string>('scope', '');
+  if AResult.TryGetValue<TJSONObject>('document', LDoc) then
+  begin
+    Result.DocKind := LDoc.GetValue<string>('kind', '');
+    Result.DocName := LDoc.GetValue<string>('name', '');
+  end;
+  if not AResult.TryGetValue<TJSONArray>('units', LRows) then
+    Exit;
+  SetLength(Result.Rows, LRows.Count);
+  LCount := 0;
+  for LValue in LRows do
+  begin
+    if not (LValue is TJSONArray) or (TJSONArray(LValue).Count < 3) then
+      Continue;
+    LItem := TJSONArray(LValue);
+    LRow := Default(TLspUnitRow);
+    LRow.Name := LItem.Items[0].Value;
+    LRow.FilePath := LspUriToPath(LItem.Items[1].Value);
+    LFlags := StrToIntDef(LItem.Items[2].Value, 0);
+    LRow.IsProject := LFlags and 1 <> 0;
+    LRow.IsDcu := LFlags and 2 <> 0;
+    LRow.Used := LFlags and 4 <> 0;
+    LRow.IsSelf := LFlags and 8 <> 0;
+    Result.Rows[LCount] := LRow;
+    Inc(LCount);
+  end;
+  SetLength(Result.Rows, LCount);
+end;
+
+procedure TLspSession.Units(const AScope, AFileName: string;
+  const AOnDone: TLspUnitsProc);
+var
+  LParams, LDoc: TJSONObject;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspUnits), 'no LSP server available');
+    Exit;
+  end;
+  // The rows say what the document already uses, read off its LIVE text -
+  // a unit typed into the uses a second ago must already be left out.
+  FDocs.Sync;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('scope', AScope);
+  if AFileName <> '' then
+  begin
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFileName));
+    LParams.AddPair('textDocument', LDoc);
+  end;
+  FClient.Request('pastree/units', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if ASuccess then
+        AOnDone(True, ParseUnits(AResult), '')
+      else
+        AOnDone(False, Default(TLspUnits), AError);
+    end);
+end;
+
+procedure TLspSession.UseUnit(const AFileName, AUnitName: string;
+  AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
+var
+  LParams, LDoc, LOpts: TJSONObject;
+  LTabSize, LMargin: Integer;
+  LInsertSpaces: Boolean;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspUseUnit), 'no LSP server available');
+    Exit;
+  end;
+  // Sync first, class completion's reason: the clause the name goes into is
+  // the one in the buffer now.
+  FDocs.Sync;
+  ReadIndentOptions({out} LTabSize, {out} LInsertSpaces);
+  LMargin := ReadRightMargin;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LOpts := TJSONObject.Create;
+  LOpts.AddPair('tabSize', TJSONNumber.Create(LTabSize));
+  LOpts.AddPair('insertSpaces', TJSONBool.Create(LInsertSpaces));
+  LOpts.AddPair('rightMargin', TJSONNumber.Create(LMargin));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('unit', AUnitName);
+  if AImplementation then
+    LParams.AddPair('section', 'implementation')
+  else
+    LParams.AddPair('section', 'interface');
+  LParams.AddPair('options', LOpts);
+  FClient.Request('pastree/useUnit', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LAnswer: TLspUseUnit;
+      LEdits: TJSONArray;
+      LValue: TJSONValue;
+      LObj: TJSONObject;
+      LEdit: TLspTextEdit;
+      LLine, LChar: Integer;
+    begin
+      if not ASuccess then
+      begin
+        AOnDone(False, Default(TLspUseUnit), AError);
+        Exit;
+      end;
+      LAnswer := Default(TLspUseUnit);
+      if AResult is TJSONObject then
+      begin
+        LAnswer.Section := AResult.GetValue<string>('section', '');
+        LAnswer.Provider := AResult.GetValue<string>('provider', '');
+        if AResult.TryGetValue<TJSONArray>('edits', LEdits) then
+          for LValue in LEdits do
+          begin
+            if not (LValue is TJSONObject) then
+              Continue;
+            LObj := TJSONObject(LValue);
+            LLine := LObj.GetValue<Integer>('range.start.line', -1);
+            LChar := LObj.GetValue<Integer>('range.start.character', -1);
+            LEdit.Text := LObj.GetValue<string>('newText', '');
+            if (LLine < 0) or (LChar < 0) or (LEdit.Text = '') then
+              Continue;
+            LspToIde(LLine, LChar, LEdit.Row, LEdit.Col);
+            LEdit.EndRow := LEdit.Row;
+            LEdit.EndCol := LEdit.Col;
+            LAnswer.Edits := LAnswer.Edits + [LEdit];
+          end;
+      end;
+      AOnDone(True, LAnswer, '');
     end);
 end;
 
@@ -5022,6 +5253,34 @@ begin
     Exit;
   end;
   LSession.Outline('project', AFileName, AOnDone);
+end;
+
+procedure LspUnits(const AScope, AFileName: string;
+  const AOnDone: TLspUnitsProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspUnits), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Units(AScope, AFileName, AOnDone);
+end;
+
+procedure LspUseUnit(const AFileName, AUnitName: string;
+  AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspUseUnit), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.UseUnit(AFileName, AUnitName, AImplementation, AOnDone);
 end;
 
 procedure LspOutlineTarget(const ARow: TLspOutlineRow;

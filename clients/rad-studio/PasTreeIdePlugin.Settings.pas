@@ -137,6 +137,13 @@ function ClassCompleteDeclarationOrder: Boolean;
 function GoToEnabled: Boolean;
 
 /// <summary>
+/// Whether Ctrl+F12 and Alt+F11 are ours - the View Unit and Use Unit dialogs
+/// over the whole analyzed closure (PasTreeIdePlugin.UnitPicker). False hands
+/// both keys back to the IDE, the Go To switch's shape.
+/// </summary>
+function UnitDialogsEnabled: Boolean;
+
+/// <summary>
 /// The Go To picker's own remembered state - window size, the kind boxes -
 /// as named integers under the same registry key as the switches. THE ONE
 /// EXCEPTION to "written only by the dialog": the picker writes these when
@@ -287,6 +294,7 @@ type
     // True = in declaration order. Sent as the request's `bodyOrder`.
     ClassCompleteDeclOrder: Boolean;
     EnableGoTo: Boolean;
+    EnableUnitDialogs: Boolean;
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
     ClearLogOnOpen: Boolean;
@@ -343,6 +351,7 @@ const
   cValueClassComplete = 'EnableClassComplete';
   cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
   cValueGoTo = 'EnableGoTo';
+  cValueUnitDialogs = 'EnableUnitDialogs';
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
   cValueClearLogOnOpen = 'ClearLogOnProjectOpen';
@@ -498,6 +507,7 @@ begin
   Result.EnableClassComplete := True;
   Result.ClassCompleteDeclOrder := False;
   Result.EnableGoTo := True;
+  Result.EnableUnitDialogs := True;
   Result.EnableLogging := True;
   // See AdvancedLoggingEnabled: the one default that is False.
   Result.AdvancedLogging := False;
@@ -539,6 +549,8 @@ begin
       Result.ClassCompleteDeclOrder := ReadFlag(LReg,
         cValueClassCompleteOrder, Result.ClassCompleteDeclOrder);
       Result.EnableGoTo := ReadFlag(LReg, cValueGoTo, Result.EnableGoTo);
+      Result.EnableUnitDialogs :=
+        ReadFlag(LReg, cValueUnitDialogs, Result.EnableUnitDialogs);
       Result.EnableLogging :=
         ReadFlag(LReg, cValueLogging, Result.EnableLogging);
       Result.AdvancedLogging :=
@@ -591,6 +603,7 @@ begin
         LReg.WriteInteger(cValueClassCompleteOrder,
           Ord(ASettings.ClassCompleteDeclOrder));
         LReg.WriteInteger(cValueGoTo, Ord(ASettings.EnableGoTo));
+        LReg.WriteInteger(cValueUnitDialogs, Ord(ASettings.EnableUnitDialogs));
         LReg.WriteInteger(cValueLogging, Ord(ASettings.EnableLogging));
         LReg.WriteInteger(cValueAdvancedLogging,
           Ord(ASettings.AdvancedLogging));
@@ -672,6 +685,11 @@ end;
 function GoToEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableGoTo;
+end;
+
+function UnitDialogsEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableUnitDialogs;
 end;
 
 function ReadPickerValue(const AName: string; ADefault: Integer): Integer;

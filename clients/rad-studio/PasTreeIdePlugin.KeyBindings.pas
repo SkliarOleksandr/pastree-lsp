@@ -2,7 +2,8 @@ unit PasTreeIdePlugin.KeyBindings;
 
 {
   THE ONE keyboard binding of this package - every key the plugin takes
-  (Ctrl+G, Ctrl+Shift+C, Ctrl+Shift+E, Ctrl+Shift+A, Ctrl+Shift+Up/Down)
+  (Ctrl+G, Ctrl+F12, Alt+F11, Ctrl+Shift+C, Ctrl+Shift+E, Ctrl+Shift+A,
+  Ctrl+Shift+Up/Down)
   goes through a single IOTAKeyboardBinding registered once at startup and
   removed once at unload. The features do not register with the IDE at all:
   they hand this unit a key and a procedure (RegisterKey) before the wizard

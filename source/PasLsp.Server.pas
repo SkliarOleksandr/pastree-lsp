@@ -71,6 +71,7 @@ uses
   PasLsp.ClassComplete,
   PasLsp.SyncPrototypes,
   PasLsp.AnnotateArgs,
+  PasLsp.UseUnit,
   PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
@@ -337,6 +338,9 @@ type
       APasLine, APasCol: Integer;
       const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
     function HandleAnnotateArgs(const AMsg: TLspIncoming): string;
+    function LiveTextOf(const APath: string): string;
+    function HandleUnits(const AMsg: TLspIncoming): string;
+    function HandleUseUnit(const AMsg: TLspIncoming): string;
     function HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
@@ -5039,6 +5043,277 @@ begin
      JsonQuote(LAnswer.Routine), JsonQuote(LAnswer.Provider)]));
 end;
 
+{ The text a parse-only request reads: the open document's overlay, else the
+  file on disk (BOM stripped, PasLsp.SourceText's rule), else ''. }
+function TLspServer.LiveTextOf(const APath: string): string;
+var
+  LDoc: TLspDocument;
+begin
+  if FDocs.TryGet(APath, LDoc) then
+    Result := LDoc.Text
+  else if not TryReadTextNoBom(APath, Result) then
+    Result := '';
+end;
+
+(* pastree/units - OURS, not LSP. The list behind the RAD Studio client's
+  View Unit (Ctrl+F12) and Use Unit (Alt+F11) dialogs - PasTree's demo View
+  Unit picker, whose two scopes this keeps:
+
+  - `project`: the main source and the .dproj's units. Answered WITHOUT
+    waiting for the analysis when the .dproj listed units - they are known
+    from initialize, and the dialog should open on a cold server at once. A
+    project with no .dproj (a bare .dpr) has no list, and then waits and
+    takes the models under the project's directory, as pastree/outline does.
+  - `closure`: every unit the analysis reached - the project's, the search
+    path's, the IDE's Library Path's, `.dcu`-only ones included. This is
+    what the stock dialogs cannot offer (they list the .dproj alone), and
+    why these dialogs exist. Waits for the analysis.
+
+  With `textDocument`, that document's LIVE text is parsed (no analysis) and
+  each row says whether the document already uses it and whether it is the
+  document itself, so Use Unit can leave both out. A uses item matches a
+  row by name, directly or behind one of the project's unit-scope prefixes
+  (`Classes` is the row `System.Classes`) - never by bare suffix, which
+  would make `Types` hide `Vcl.Types` as well as `System.Types`.
+
+  The answer - one object, braces left out of this comment:
+    "scope": "closure",
+    "document": {"kind": "unit", "name": "Foo"} or null,
+    "units": [["System.Classes", uri, flags], ...]
+  flags: 1 a project unit, 2 compiled-only (`.dcu`), 4 used by the document,
+  8 the document itself. Rows are in no particular order; the client sorts. *)
+function TLspServer.HandleUnits(const AMsg: TLspIncoming): string;
+var
+  LScope, LDocPath, LPath, LItem, LName: string;
+  LProjectSet, LUsedNames, LInPaths: TDictionary<string, Boolean>;
+  LPaths: TList<string>;
+  LInfo: TLspUsesInfo;
+  LHasDoc: Boolean;
+  LMid, LFlags: Integer;
+  LBuf: TJsonBuf;
+  LStart: UInt64;
+
+  { ONE LOOKUP PER ROW. The first cut compared every row with every uses
+    item under every unit-scope prefix - on AVImark.dpr that is 1554 rows x
+    1556 items x a dozen prefixes, 30 million SameText calls on concatenated
+    strings: 1.7 s for the project list, 6 s for the closure (2026-09-25).
+    The keys are built once instead: every item's name, lower-cased, as
+    written and behind each prefix, and the file name of every `in` path. }
+  procedure BuildUsedKeys;
+  var
+    LU: TLspUsesItem;
+    LN: string;
+  begin
+    for LU in LInfo.Items do
+    begin
+      if LU.InPath <> '' then
+        LInPaths.AddOrSetValue(LowerCase(ExtractFileName(LU.InPath)), True);
+      LUsedNames.AddOrSetValue(LowerCase(LU.Name), True);
+      if Pos('.', LU.Name) = 0 then
+        for LN in FNamespaces do
+          if LN <> '' then
+            LUsedNames.AddOrSetValue(LowerCase(LN + '.' + LU.Name), True);
+    end;
+  end;
+
+  function UsedByDoc(const AUnitName, AFilePath: string): Boolean;
+  begin
+    Result := LUsedNames.ContainsKey(LowerCase(AUnitName)) or
+      ((LInPaths.Count > 0) and
+       LInPaths.ContainsKey(LowerCase(ExtractFileName(AFilePath))));
+  end;
+
+  procedure AddProjectPath(const APath: string);
+  var
+    LFull: string;
+  begin
+    if APath = '' then
+      Exit;
+    LFull := TPath.GetFullPath(APath);
+    if not LProjectSet.ContainsKey(LowerCase(LFull)) then
+    begin
+      LProjectSet.Add(LowerCase(LFull), True);
+      if LScope = 'project' then
+        LPaths.Add(LFull);
+    end;
+  end;
+
+begin
+  LScope := 'project';
+  if AMsg.Params <> nil then
+    LScope := AMsg.Params.GetValue<string>('scope', 'project');
+  if (LScope <> 'project') and (LScope <> 'closure') then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'units: scope must be "project" or "closure"'));
+  LDocPath := DocPathOf(AMsg.Params);
+  LStart := GetTickCount64;
+
+  // The closure needs the analysis; so does a project that listed nothing.
+  if (LScope = 'closure') or (Length(FProjectFiles) = 0) then
+  begin
+    if not WaitAnalyzed(LDocPath, AMsg.IdJson) then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  end;
+
+  LInfo := Default(TLspUsesInfo);
+  LHasDoc := False;
+  if LDocPath <> '' then
+  begin
+    LItem := LiveTextOf(LDocPath);
+    if LItem <> '' then
+    begin
+      if FCompletion = nil then
+        FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+          FDefines);
+      SyncCompletionOverlays;
+      LInfo := FCompletion.UsesInfoAt(LDocPath, LItem);
+      LHasDoc := LInfo.Kind <> '';
+    end;
+  end;
+
+  LProjectSet := TDictionary<string, Boolean>.Create;
+  LUsedNames := TDictionary<string, Boolean>.Create;
+  LInPaths := TDictionary<string, Boolean>.Create;
+  LPaths := TList<string>.Create;
+  try
+    if LHasDoc then
+      BuildUsedKeys;
+    AddProjectPath(FMainSource);
+    for LItem in FProjectFiles do
+      AddProjectPath(LItem);
+    // No .dproj list: the project's units are the models under its directory.
+    if (Length(FProjectFiles) = 0) and (FProjectDir <> '') and
+       (FProject <> nil) then
+      for LMid := 0 to FProject.ModelCount - 1 do
+        if FProject.Model(LMid) <> nil then
+        begin
+          LItem := TPath.GetFullPath(FProject.ModelFile(LMid));
+          if LItem.StartsWith(IncludeTrailingPathDelimiter(FProjectDir),
+               True) then
+            AddProjectPath(LItem);
+        end;
+    if (LScope = 'closure') and (FProject <> nil) then
+      for LMid := 0 to FProject.ModelCount - 1 do
+        if FProject.Model(LMid) <> nil then
+          LPaths.Add(TPath.GetFullPath(FProject.ModelFile(LMid)));
+
+    LBuf.Init(LPaths.Count * 160 + 256);
+    LBuf.Add('{"scope":');
+    LBuf.AddQuoted(LScope);
+    LBuf.Add(',"document":');
+    if LHasDoc then
+    begin
+      LBuf.Add('{"kind":');
+      LBuf.AddQuoted(LInfo.Kind);
+      LBuf.Add(',"name":');
+      LBuf.AddQuoted(LInfo.SelfName);
+      LBuf.AddChar('}');
+    end
+    else
+      LBuf.Add('null');
+    LBuf.Add(',"units":[');
+    for LMid := 0 to LPaths.Count - 1 do
+    begin
+      LPath := LPaths[LMid];
+      LName := ChangeFileExt(ExtractFileName(LPath), '');
+      LFlags := 0;
+      if LProjectSet.ContainsKey(LowerCase(LPath)) then
+        LFlags := LFlags or 1;
+      if TPasSourceManager.IsDcuPath(LPath) then
+        LFlags := LFlags or 2;
+      if LHasDoc then
+      begin
+        if UsedByDoc(LName, LPath) then
+          LFlags := LFlags or 4;
+        if SameText(LPath, LDocPath) or SameText(LName, LInfo.SelfName) then
+          LFlags := LFlags or 8;
+      end;
+      if LMid > 0 then
+        LBuf.AddChar(',');
+      LBuf.AddChar('[');
+      LBuf.AddQuoted(LName);
+      LBuf.AddChar(',');
+      LBuf.AddQuoted(PathToUri(LPath));
+      LBuf.AddChar(',');
+      LBuf.AddInt(LFlags);
+      LBuf.AddChar(']');
+    end;
+    LBuf.Add(']}');
+    Log(Format('pastree/units %s for %s -> %d rows, the document uses %d, '
+      + 'in %d ms', [LScope, ExtractFileName(LDocPath), LPaths.Count,
+       Length(LInfo.Items), GetTickCount64 - LStart]));
+    Result := BuildResponse(AMsg.IdJson, LBuf.ToString);
+  finally
+    LPaths.Free;
+    LInPaths.Free;
+    LUsedNames.Free;
+    LProjectSet.Free;
+  end;
+end;
+
+(* pastree/useUnit - OURS, not LSP. Use Unit's write: `unit` added to the
+  `section` ("interface" | "implementation"; ignored for a program) uses
+  clause of the LIVE text, as ONE zero-length insertion edit (PasLsp.UseUnit
+  has the layout and every refusal). No WaitAnalyzed, for Annotate's reason:
+  the clause may have been edited a second ago and only the buffer knows.
+  `options` is the client's layout - tabSize/insertSpaces for the one indent
+  step a new clause or a wrapped name needs, rightMargin for when `, Name`
+  no longer fits on the `;` line. An empty `edits` is a refusal, and
+  `provider` says why. *)
+function TLspServer.HandleUseUnit(const AMsg: TLspIncoming): string;
+var
+  LPath, LText, LUnit, LIndent, LEdits: string;
+  LAnswer: TLspUseUnitAnswer;
+  LTabSize, LMargin, LLine, LChar: Integer;
+  LImpl: Boolean;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  LUnit := '';
+  if AMsg.Params <> nil then
+    LUnit := AMsg.Params.GetValue<string>('unit', '');
+  if (LPath = '') or (LUnit = '') then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'useUnit: textDocument.uri and unit required'));
+  LImpl := SameText(AMsg.Params.GetValue<string>('section', 'interface'),
+    'implementation');
+  LTabSize := AMsg.Params.GetValue<Integer>('options.tabSize', 2);
+  if (LTabSize < 1) or (LTabSize > 16) then
+    LTabSize := 2;
+  if AMsg.Params.GetValue<Boolean>('options.insertSpaces', True) then
+    LIndent := StringOfChar(' ', LTabSize)
+  else
+    LIndent := #9;
+  LMargin := AMsg.Params.GetValue<Integer>('options.rightMargin', 80);
+  LAnswer := Default(TLspUseUnitAnswer);
+
+  LText := LiveTextOf(LPath);
+  if LText = '' then
+    LAnswer.Provider := 'pastree/useUnit: no text'
+  else
+  begin
+    if FCompletion = nil then
+      FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+        FDefines);
+    SyncCompletionOverlays;
+    LAnswer := FCompletion.UseUnitAt(LPath, LText, LUnit, LImpl, LIndent,
+      LMargin);
+  end;
+  LEdits := '';
+  if LAnswer.Text <> '' then
+  begin
+    PasTreeToLsp(LAnswer.Line, LAnswer.Col, LLine, LChar);
+    LEdits := Format('{"range":{"start":{"line":%d,"character":%d},'
+      + '"end":{"line":%d,"character":%d}},"newText":%s}',
+      [LLine, LChar, LLine, LChar, JsonQuote(LAnswer.Text)]);
+  end;
+  Log(Format('useUnit: %s + %s (%s) -> %s',
+    [ExtractFileName(LPath), LUnit, IfThen(LImpl, 'implementation',
+     'interface'), LAnswer.Provider]));
+  Result := BuildResponse(AMsg.IdJson, Format(
+    '{"edits":[%s],"section":%s,"provider":%s}',
+    [LEdits, JsonQuote(LAnswer.Section), JsonQuote(LAnswer.Provider)]));
+end;
+
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
 var
   LPath, LItems, LParts: string;
@@ -6197,6 +6472,10 @@ begin
         Exit(HandleSyncPrototypes(LMsg));
       if LMsg.Method = 'pastree/annotateArgs' then
         Exit(HandleAnnotateArgs(LMsg));
+      if LMsg.Method = 'pastree/units' then
+        Exit(HandleUnits(LMsg));
+      if LMsg.Method = 'pastree/useUnit' then
+        Exit(HandleUseUnit(LMsg));
       if LMsg.Method = 'textDocument/onTypeFormatting' then
         Exit(HandleOnTypeFormatting(LMsg));
       if LMsg.Method = 'textDocument/typeDefinition' then
