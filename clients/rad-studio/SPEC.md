@@ -1427,9 +1427,16 @@ were weighed:
 - **Covered** by `LspClientSmoke` section 5n. **Not yet tested in the IDE**
   or on AVImark, where the implicit set is the large one - the harnesses
   cannot say whether 3,700 rows feel instant in a 32-bit IDE.
+- **The menu and toolbar (0.54.1).** View > Units..., its toolbar button
+  and File > Use Unit... run IDE actions from `INTAServices.ActionList`,
+  `ViewUnitCommand` and `FileUseUnitCommand` (same names in 22.0, 23.0 and
+  37.0). Their `OnExecute` is repointed at load and put back at unload. This
+  is not the Sync Prototypes trap above: those actions live for the whole
+  session, unlike the editor local menu that is rebuilt on every open. The
+  header of `PasTreeIdePlugin.UnitPicker` has the details.
 - **Open:** multi-select (the stock Use Unit takes several units at once);
   moving a unit from implementation to interface (refused as "already
-  used" today); hiding the stock menu items.
+  used" today).
 
 ## Go To over library units (deferred 2026-09-19, not started)
 

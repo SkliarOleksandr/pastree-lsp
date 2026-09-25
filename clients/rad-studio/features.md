@@ -166,8 +166,11 @@ remembered.
   it. A refusal (already used, a clause that does not parse while you are
   typing in it) goes to the Build tab with its reason.
 
-Off in the settings, both keys go back to the IDE's dialogs. The stock
-dialogs stay on their menus either way.
+View > Units..., its toolbar button and File > Use Unit... open the same
+windows since 0.54.1 (their IDE actions, `ViewUnitCommand` and
+`FileUseUnitCommand`, are repointed while the package is loaded). With no
+editor open they still open the stock dialogs. Off in the settings, the keys,
+the menu and the toolbar all go back to the IDE's dialogs.
 
 ### IDE Insight symbol search (Ctrl+.)
 

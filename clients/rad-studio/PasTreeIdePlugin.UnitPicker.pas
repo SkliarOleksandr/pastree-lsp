@@ -55,6 +55,9 @@ uses
   System.IOUtils,
   Winapi.Windows,
   Vcl.Menus,
+  System.Actions,
+  Vcl.ActnList,
+  Vcl.ExtCtrls,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings,
@@ -231,6 +234,9 @@ begin
     AddProjectRows(LGroup.Projects[LProj], Result);
 end;
 
+{ Below, with the menu hooks it reports on. }
+procedure ReportHooksOnce; forward;
+
 procedure ExecuteUnitPicker(const AView: IOTAEditView; AMode: TUnitPickerMode);
 var
   LFile, LProjectFile, LProjectName: string;
@@ -242,6 +248,7 @@ var
 begin
   if not Assigned(AView) or not Assigned(AView.Buffer) or GBusy then
     Exit;
+  ReportHooksOnce;
   // View Unit only - Use Unit writes into THIS project's file, and a unit
   // of another project is not one it compiles.
   LGroupSource := nil;
@@ -306,18 +313,223 @@ begin
     ExecuteUnitPicker(LView, upmView);
 end;
 
+{ THE MENU AND TOOLBAR (Alex, 2026-09-25: View > Units... and its toolbar
+  button still opened the stock dialog). The keys are ours through the
+  binding; a menu item or a toolbar button never reaches a key binding. What
+  they run is a TAction of the IDE's main action list -
+  INTAServices.ActionList - named ViewUnitCommand (coreide) and
+  FileUseUnitCommand (delphicoreide), the same names in 22.0, 23.0 and 37.0
+  (read out of the packages). Menu item and button share the action, so one
+  OnExecute repointed takes both.
+
+  NOT the editor local menu's trap. The failed Sync Prototypes takeover
+  (clients/rad-studio/SPEC.md) held a TMenuItem of the EDITOR's local menu,
+  which the IDE rebuilds on every open - a use-after-free. These actions are
+  the IDE's own, created once with its main form and alive for the session;
+  nothing is held but the action and the handler it had.
+
+  REVERSIBLE, unlike the Find Declaration takeover: the IDE's handler is kept
+  and put back at unload - but only if the action still carries ours. If
+  something loaded after us repointed it in turn and kept ours as ITS
+  "previous", putting the IDE's back would cut that chain; the line then
+  says so, and our handler, gated by GAlive, falls through to nothing.
+
+  THE SWITCH is the keys' switch: off, the hook hands every execution to the
+  IDE's handler. So is "no editor open": our dialog is about the file under
+  the caret, and without one the stock dialog is the only sensible answer.
+
+  FOUND LATE IF NEED BE. FileUseUnitCommand belongs to the Delphi
+  personality, which may register after a designtime package loads; an
+  action not there at startup is looked for again on a timer, a few times. }
+type
+  TActionHook = class
+  public
+    Action: TContainedAction;
+    Original: TNotifyEvent;
+    Mode: TUnitPickerMode;
+    procedure Execute(ASender: TObject);
+  end;
+
+  THookRetry = class
+    procedure Tick(ASender: TObject);
+  end;
+
+const
+  cHookedActions: array[TUnitPickerMode] of string =
+    ('ViewUnitCommand', 'FileUseUnitCommand');
+  cHookRetryMs = 2000;
+  cHookRetries = 5;
+
+var
+  GHooks: array[TUnitPickerMode] of TActionHook;
+  GHookTimer: TTimer = nil;
+  GHookRetry: THookRetry = nil;
+  GHookTries: Integer = 0;
+  // What the hooks did, for the log - written once a server is up to take
+  // it (Advanced Logging), since at package load there is none.
+  GHookReport: string = '';
+  GHookReported: Boolean = False;
+
+procedure NoteHook(const ALine: string);
+begin
+  if GHookReport <> '' then
+    GHookReport := GHookReport + '; ';
+  GHookReport := GHookReport + ALine;
+  GHookReported := False;
+end;
+
+procedure ReportHooksOnce;
+begin
+  if GHookReported or (GHookReport = '') or not AdvancedLoggingEnabled then
+    Exit;
+  if LspLogToServer('unitpicker menu hooks: ' + GHookReport) then
+    GHookReported := True;
+end;
+
+procedure TActionHook.Execute(ASender: TObject);
+var
+  LEditorServices: IOTAEditorServices;
+  LView: IOTAEditView;
+begin
+  LView := nil;
+  if GAlive and UnitDialogsEnabled and
+     Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
+    LView := LEditorServices.TopView;
+  if not Assigned(LView) or not Assigned(LView.Buffer) then
+  begin
+    if Assigned(Original) then
+      Original(ASender);
+    Exit;
+  end;
+  ExecuteUnitPicker(LView, Mode);
+end;
+
+function FindIdeAction(const AName: string): TContainedAction;
+var
+  LServices: INTAServices;
+  LList: TCustomActionList;
+  LIdx: Integer;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, INTAServices, LServices) then
+    Exit;
+  LList := LServices.ActionList;
+  if not Assigned(LList) then
+    Exit;
+  for LIdx := 0 to LList.ActionCount - 1 do
+    if SameText(LList.Actions[LIdx].Name, AName) then
+      Exit(LList.Actions[LIdx]);
+end;
+
+{ Hooks whatever is not hooked yet; True when both are. }
+function HookIdeActions: Boolean;
+var
+  LMode: TUnitPickerMode;
+  LAction: TContainedAction;
+  LHook: TActionHook;
+begin
+  Result := True;
+  for LMode := Low(TUnitPickerMode) to High(TUnitPickerMode) do
+  begin
+    if Assigned(GHooks[LMode]) then
+      Continue;
+    LAction := FindIdeAction(cHookedActions[LMode]);
+    if not Assigned(LAction) then
+    begin
+      Result := False;
+      Continue;
+    end;
+    LHook := TActionHook.Create;
+    LHook.Action := LAction;
+    LHook.Original := LAction.OnExecute;
+    LHook.Mode := LMode;
+    LAction.OnExecute := LHook.Execute;
+    GHooks[LMode] := LHook;
+    if Assigned(LHook.Original) then
+      NoteHook(cHookedActions[LMode] + ' hooked')
+    else
+      NoteHook(cHookedActions[LMode] + ' hooked (it had no OnExecute - the '
+        + 'IDE may run it another way)');
+  end;
+end;
+
+procedure StopHookTimer;
+begin
+  FreeAndNil(GHookTimer);
+  FreeAndNil(GHookRetry);
+end;
+
+procedure THookRetry.Tick(ASender: TObject);
+var
+  LMode: TUnitPickerMode;
+begin
+  Inc(GHookTries);
+  if HookIdeActions or (GHookTries >= cHookRetries) then
+  begin
+    for LMode := Low(TUnitPickerMode) to High(TUnitPickerMode) do
+      if not Assigned(GHooks[LMode]) then
+        NoteHook(cHookedActions[LMode] + ' not found - the menu keeps the '
+          + 'stock dialog');
+    // Freed on the next turn, not inside its own event.
+    GHookTimer.Enabled := False;
+    TThread.ForceQueue(nil, StopHookTimer);
+  end;
+end;
+
+procedure UnhookIdeActions;
+var
+  LMode: TUnitPickerMode;
+  LHook: TActionHook;
+  LOurs: TNotifyEvent;
+begin
+  StopHookTimer;
+  for LMode := Low(TUnitPickerMode) to High(TUnitPickerMode) do
+  begin
+    LHook := GHooks[LMode];
+    if not Assigned(LHook) then
+      Continue;
+    GHooks[LMode] := nil;
+    LOurs := LHook.Execute;
+    if (TMethod(LHook.Action.OnExecute).Code = TMethod(LOurs).Code) and
+       (TMethod(LHook.Action.OnExecute).Data = TMethod(LOurs).Data) then
+    begin
+      LHook.Action.OnExecute := LHook.Original;
+      LHook.Free;
+    end
+    else
+    begin
+      // Someone repointed it after us and may call ours as their previous:
+      // leave the chain alone. The object stays allocated (it is tiny) so a
+      // late call finds valid memory while the package is still mapped.
+      LspLogToServer('unitpicker: ' + cHookedActions[LMode] + ' was '
+        + 'repointed after us - left as it is');
+    end;
+  end;
+end;
+
 procedure InitializeUnitPicker;
 begin
   GAlive := True;
   // Registered, not bound: the wizard binds everything at once.
   RegisterKey(ShortCut(VK_F12, [ssCtrl]), UnitKeyProc);
   RegisterKey(ShortCut(VK_F11, [ssAlt]), UnitKeyProc);
+  GHookReport := '';
+  GHookTries := 0;
+  if not HookIdeActions then
+  begin
+    GHookRetry := THookRetry.Create;
+    GHookTimer := TTimer.Create(nil);
+    GHookTimer.Interval := cHookRetryMs;
+    GHookTimer.OnTimer := GHookRetry.Tick;
+    GHookTimer.Enabled := True;
+  end;
 end;
 
 procedure FinalizeUnitPicker;
 begin
   GAlive := False;
   GBusy := False;
+  UnhookIdeActions;
 end;
 
 end.

@@ -97,7 +97,6 @@ type
     pnlButtons: TPanel;
     chkImplicits: TCheckBox;
     chkGroup: TCheckBox;
-    lblSection: TLabel;
     rbInterface: TRadioButton;
     rbImplementation: TRadioButton;
     btnOK: TButton;
@@ -364,7 +363,6 @@ begin
     Caption := 'View Unit';
     // The stock View Unit's own box, where Use Unit has its section choice.
     chkGroup.Visible := Assigned(AGroupSource);
-    lblSection.Visible := False;
     rbInterface.Visible := False;
     rbImplementation.Visible := False;
   end;
@@ -499,7 +497,6 @@ begin
     FDocError := 'a package has requires/contains, not a uses clause';
   end;
   LSectioned := FDocKind = 'unit';
-  lblSection.Visible := LSectioned;
   rbInterface.Visible := LSectioned;
   rbImplementation.Visible := LSectioned;
   Rebuild;
