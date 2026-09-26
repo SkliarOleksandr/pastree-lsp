@@ -77,6 +77,12 @@ type
       // IOTAEditorContent.Content call can be skipped.
       ReadStamp: Int64;
       DiskStamp: TDateTime;
+      // The third stamp, for the edits no event reports: the buffer's AGE
+      // then (BufferAgeOf), and whether an unmoved age can be trusted - see
+      // AgeSettledAt. 0 = the buffer would not say, and the two stamps above
+      // decide alone, as before this one existed.
+      BufferAge: TDateTime;
+      AgeSettled: Boolean;
     end;
   private
     FClient: TLspClient;
@@ -91,6 +97,7 @@ type
       history in PasTreeIdePlugin.LspSession.EnsureSession. The hook stays
       for a client that does know. }
     FOwnsPath: TFunc<string, Boolean>;
+    FOnReplaced: TProc<string, string>;
     function CollectOpenDocuments: TArray<TSentDocument>;
     procedure SendDidOpen(const APath, AText: string; AVersion: Integer;
       AShown: Boolean);
@@ -138,6 +145,23 @@ type
     /// the caller then reports it as changed on disk instead.
     /// </summary>
     function SyncFromDisk(const APath: string): Boolean;
+
+    /// <summary>
+    /// Whether the server was given APath at all - the question
+    /// LspSyncFirstSight asks before paying for a Sync.
+    /// </summary>
+    function Holds(const APath: string): Boolean;
+
+    /// <summary>
+    /// Called by a Sync that closed exactly one document and opened exactly
+    /// one - the shape of a Save As, where the IDE renames the module in
+    /// place: (old path, new path). The new name is outside the analysis
+    /// until the rebuild its program's new uses clause starts, seconds on a
+    /// big project, and this is where the session lends it the old name's
+    /// colouring meanwhile.
+    /// </summary>
+    property OnReplaced: TProc<string, string> read FOnReplaced
+      write FOnReplaced;
 
     /// <summary>
     /// Re-opens every tracked document from scratch. Hook this to
@@ -300,6 +324,73 @@ function DiskStampOf(const APath: string): TDateTime;
 begin
   if not FileAge(APath, Result) then
     Result := 0;
+end;
+
+{ The buffer's AGE: IOTAEditBuffer.CurrentDate, "the datetime of the last
+  actual modification of the file" as ToolsAPI documents it for
+  IOTAEditorContent.GetContentAge - the file's time on disk until the buffer
+  is edited, the edit's time after. It moves for EVERY modification, the ones
+  the IDE makes on its own included, and those are what the other two stamps
+  cannot see: creating a unit, or saving one under a new name, rewrites the
+  program's uses clause in a buffer with no view - no EditorViewModified is
+  raised - and nothing reaches the disk until the project is saved. The
+  server kept the old uses clause, and the renamed unit stayed outside the
+  analysis until the next IDE session (2026-09-25, a data module saved under
+  a new name). Two date reads, never the content; 0 when the module will not
+  say. }
+function BufferAgeOf(const AModule: IOTAModule): TDateTime;
+var
+  LBuffer: IOTAEditBuffer;
+begin
+  Result := 0;
+  try
+    if Supports(AModule.GetModuleFileEditor(0), IOTAEditBuffer, LBuffer) then
+      Result := LBuffer.GetCurrentDate;
+  except
+    Result := 0;
+  end;
+end;
+
+function BufferAgeOfPath(const APath: string): TDateTime;
+var
+  LModuleServices: IOTAModuleServices;
+  LModule: IOTAModule;
+begin
+  Result := 0;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+    Exit;
+  LModule := LModuleServices.FindModule(APath);
+  if Assigned(LModule) then
+    Result := BufferAgeOf(LModule);
+end;
+
+const
+  // CurrentDate moves in the 2-second steps of a DOS file time (every value
+  // the timing log has shown is an even second), so an edit landing in the
+  // step a read was taken in leaves it where it was. Two seconds cover any
+  // rounding; the third is slack.
+  cAgeStepSec = 3;
+
+{ Whether a text read at AReadAt may trust an age that has not moved since:
+  only a read taken a whole step after the age, so that any later edit lands
+  in a later step. A buffer edited moments before its read is read again at
+  the next sync instead - in practice the buffer being typed in, which is
+  read again anyway. }
+function AgeSettledAt(AAge, AReadAt: TDateTime): Boolean;
+begin
+  Result := (AAge <> 0) and (AReadAt - AAge >= cAgeStepSec / SecsPerDay);
+end;
+
+{ The age's half of "may the text we hold be reused": unmoved since a settled
+  read. An age the buffer would not give, then or now, decides nothing - the
+  modification count and the disk stamp then decide alone, as they did before
+  there was an age. }
+function AgeAllowsReuse(AKnownAge: TDateTime; AKnownSettled: Boolean;
+  ANowAge: TDateTime): Boolean;
+begin
+  if (AKnownAge = 0) or (ANowAge = 0) then
+    Exit(True);
+  Result := (AKnownAge = ANowAge) and AKnownSettled;
 end;
 
 procedure IdeToLsp(ARow, ACol: Integer; out ALine, ACharacter: Integer);
@@ -580,22 +671,29 @@ begin
           LKey := LowerCase(LDoc.Path);
           LDoc.ReadStamp := ModCountOf(LKey);
           LDoc.DiskStamp := DiskStampOf(LDoc.Path);
+          LDoc.BufferAge := BufferAgeOf(LModule);
           // REUSE THE TEXT WE HOLD when nothing says it moved: the editor has
-          // not reported a modification since it was read, and the file on
-          // disk is what it was. Both stamps equal is the whole test; the
-          // 15 ms IOTAEditorContent.Content call (see the header) is paid only
-          // for a buffer that is new to us or has actually changed. With no
-          // tracking every buffer is read, as before tracking existed.
+          // not reported a modification since it was read, the file on disk
+          // is what it was, and neither is the buffer's age - which is what
+          // catches an edit the IDE made itself (BufferAgeOf). The three
+          // stamps are the whole test; the 15 ms IOTAEditorContent.Content
+          // call (see the header) is paid only for a buffer that is new to us
+          // or has actually changed. With no tracking every buffer is read,
+          // as before tracking existed.
           if GTracking and FSent.TryGetValue(LKey, LKnown) and
              (LKnown.ReadStamp = LDoc.ReadStamp) and
-             (LKnown.DiskStamp = LDoc.DiskStamp) then
+             (LKnown.DiskStamp = LDoc.DiskStamp) and
+             AgeAllowsReuse(LKnown.BufferAge, LKnown.AgeSettled,
+               LDoc.BufferAge) then
           begin
             LDoc.Text := LKnown.Text;
+            LDoc.AgeSettled := LKnown.AgeSettled;
             Inc(LReused);
           end
           else
           begin
             LDoc.Text := ReadBufferText(LModule, LCost.Read);
+            LDoc.AgeSettled := AgeSettledAt(LDoc.BufferAge, Now);
             LCost.Chars := Length(LDoc.Text);
           end;
           LT := TimingNowMs;
@@ -764,6 +862,7 @@ var
   LReady: Boolean;
   LIdx, LChars, LOpened, LChanged, LClosed: Integer;
   LStart, LCollected, LSendStart: Double;
+  LOpenedPath, LClosedPath: string;   // for OnReplaced
 begin
   LStart := TimingNowMs;
   LReady := FClient.IsReady;
@@ -798,6 +897,7 @@ begin
           LogSent('didOpen', LDoc.Path, LDoc.Version, Length(LDoc.Text),
             LSendStart);
           Inc(LOpened);
+          LOpenedPath := LDoc.Path;
         end;
         FSent.Add(LKey, LDoc);       // FSent owns it from here
         Continue;
@@ -813,6 +913,8 @@ begin
       // every sync after it.
       LKnown.ReadStamp := LDoc.ReadStamp;
       LKnown.DiskStamp := LDoc.DiskStamp;
+      LKnown.BufferAge := LDoc.BufferAge;
+      LKnown.AgeSettled := LDoc.AgeSettled;
       if LKnown.Text <> LDoc.Text then
       begin
         Inc(LKnown.Version);
@@ -843,6 +945,7 @@ begin
       begin
         SendDidClose(FSent[LKey].Path);
         Inc(LClosed);
+        LClosedPath := FSent[LKey].Path;
       end;
       FSent.Remove(LKey);
     end;
@@ -852,6 +955,8 @@ begin
       LOpen[LIdx].Free;
     LSeen.Free;
   end;
+  if (LOpened = 1) and (LClosed = 1) and Assigned(FOnReplaced) then
+    FOnReplaced(LClosedPath, LOpenedPath);
   // The summary AFTER the per-send lines, so the reader sees what the total
   // is made of. "read" is CollectOpenDocuments - every open module of this
   // server's project pulled out of the editor and UTF-8 decoded - and is paid
@@ -874,7 +979,7 @@ var
   LCost: TReadCost;
   LStart, LRead, LSendStart: Double;
   LReadStamp: Int64;
-  LDiskStamp: TDateTime;
+  LDiskStamp, LAge: TDateTime;
 begin
   Result := False;
   if not FSent.TryGetValue(LowerCase(APath), LKnown) then
@@ -890,6 +995,7 @@ begin
   // time, rather than lost.
   LReadStamp := ModCountOf(LowerCase(APath));
   LDiskStamp := DiskStampOf(APath);
+  LAge := BufferAgeOf(LModule);
   try
     LText := ReadBufferText(LModule, LCost);
   except
@@ -900,6 +1006,8 @@ begin
   end;
   LKnown.ReadStamp := LReadStamp;
   LKnown.DiskStamp := LDiskStamp;
+  LKnown.BufferAge := LAge;
+  LKnown.AgeSettled := AgeSettledAt(LAge, Now);
   LRead := TimingNowMs;
   Result := True;
   if LKnown.Text = LText then
@@ -936,6 +1044,14 @@ begin
   // count it matches - a keystroke after it is newer and re-read.
   LKnown.ReadStamp := ModCountOf(LowerCase(APath));
   LKnown.DiskStamp := DiskStampOf(APath);
+  // The age too - the buffer's date, never its content - and settled by
+  // definition: the text is the file's, the buffer is unmodified (the
+  // caller's test, CheckBufferReloaded), and the next edit moves the count.
+  // Left unsettled, a reload of a file written a moment ago would be read
+  // back out of the buffer by the next Sync, which is the read this method
+  // exists to avoid.
+  LKnown.BufferAge := BufferAgeOfPath(APath);
+  LKnown.AgeSettled := True;
   if not TryReadTextNoBom(APath, LText) then
   begin
     // Unreadable: stale stamps, so the next Sync reads the buffer instead.
@@ -959,6 +1075,11 @@ begin
   end;
   TimingLogFmt('sync-from-disk %s: total %s',
     [ExtractFileName(APath), TimingSince(LStart)]);
+end;
+
+function TLspDocumentSync.Holds(const APath: string): Boolean;
+begin
+  Result := FSent.ContainsKey(LowerCase(APath));
 end;
 
 procedure TLspDocumentSync.ResendAll;

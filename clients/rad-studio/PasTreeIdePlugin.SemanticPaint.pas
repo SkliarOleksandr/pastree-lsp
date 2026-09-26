@@ -33,10 +33,14 @@ unit PasTreeIdePlugin.SemanticPaint;
   again - so the colouring tracks the analysis with no polling. A file with
   no tokens yet asks once from its first paint, which is how a newly opened
   module gets its colours; the request never starts a server. Between an
-  edit and the re-analysis the tokens are the LAST answer's - aligned above
-  the edit, drifting behind it for a few hundred ms. Kept rather than
-  cleared, because clearing flickers every type name on each keystroke
-  (the PasTree demo's finding, docs/editor-features.md 1.5).
+  edit and the re-analysis the tokens are the LAST answer's. Kept rather
+  than cleared, because clearing flickers every type name on each keystroke
+  (the PasTree demo's finding, docs/editor-features.md 1.5) - but not
+  painted at their old columns: each line is matched to the text the answer
+  describes, and every token is carried to where its identifier now stands,
+  or left out until the answer (PasTreeIdePlugin.TokenShift). Painted where
+  they were, a character typed in front of a type name slid the name right
+  for half a second and left its colour behind (2026-09-25).
 
   MAIN THREAD throughout: paint events are, and the session marshals its
   answers there (the client unit's own contract).
@@ -62,7 +66,8 @@ uses
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.IdleSync,
-  PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.TokenShift;
 
 type
   TPasSemanticPaintNotifier = class(TNTACodeEditorNotifier)
@@ -94,6 +99,16 @@ var
   GNotifier: INTACodeEditorEvents;
   GNotifierIndex: Integer = -1;
   GDiagListener: Integer = 0;   // LspAddDiagnosticsChangedListener handle
+  // ONE PAINT PASS's state for PasTreeIdePlugin.TokenShift: the editor it
+  // is for, the row offset of the last line matched, and the one line
+  // matched last - a line arrives as several runs in a row, and its text
+  // does not change within a pass. Reset by BeginPaint.
+  GPassEditor: TWinControl;
+  GPassHint: Integer;
+  GLineRow: Integer;
+  GLineBase: Pointer;   // the base lines' array it was matched against
+  GLineText: string;
+  GLineShift: TLineShift;
 
 function IsTypeToken(const AToken: TLspSemanticToken): Boolean;
 begin
@@ -152,10 +167,53 @@ procedure TPasSemanticPaintNotifier.HandleBeginPaint(
 var
   LServices: INTACodeEditorServices;
 begin
+  // A new pass: TokenShift's state starts over (see GPassEditor).
+  GPassEditor := AEditor;
+  GPassHint := 0;
+  GLineRow := 0;
   if (AEditor = nil) or
      not Supports(BorlandIDEServices, INTACodeEditorServices, LServices) then
     Exit;
   CheckBufferReloaded(LServices.GetViewForEditor(AEditor));
+end;
+
+{ Where row ARow's tokens are, and ARow's text now - one TokenShift match per
+  line per pass (see GPassEditor). No base lines means nothing to match
+  against: the tokens apply where they are, as before there was a base. }
+function LineShiftFor(const AContext: INTACodeEditorPaintContext;
+  ARow: Integer; const ABase: TArray<string>; out AText: string): TLineShift;
+var
+  LLine: INTACodeEditorLineState;
+begin
+  if AContext.EditControl <> GPassEditor then
+  begin
+    // Painted without a BeginPaint of its own that we saw: its own pass.
+    GPassEditor := AContext.EditControl;
+    GPassHint := 0;
+    GLineRow := 0;
+  end;
+  if (ARow = GLineRow) and (Pointer(ABase) = GLineBase) then
+  begin
+    AText := GLineText;
+    Exit(GLineShift);
+  end;
+  AText := '';
+  Result := Default(TLineShift);
+  Result.BaseRow := ARow;
+  Result.Same := True;
+  if ABase <> nil then
+  begin
+    LLine := AContext.LineState;
+    if Assigned(LLine) then
+    begin
+      AText := LLine.Text;
+      Result := ShiftForLine(ABase, ARow, AText, GPassHint);
+    end;
+  end;
+  GLineRow := ARow;
+  GLineBase := Pointer(ABase);
+  GLineText := AText;
+  GLineShift := Result;
 end;
 
 procedure TPasSemanticPaintNotifier.HandlePaintText(const ARect: TRect;
@@ -165,7 +223,10 @@ procedure TPasSemanticPaintNotifier.HandlePaintText(const ARect: TRect;
   const AContext: INTACodeEditorPaintContext);
 var
   LTokens: TArray<TLspSemanticToken>;
-  LIdx, LRow, LFrom, LTo, LRunEnd: Integer;
+  LBase: TArray<string>;
+  LShift: TLineShift;
+  LLineText: string;
+  LIdx, LRow, LFrom, LTo, LRunEnd, LTokFrom, LTokTo: Integer;
   LCanvas: TCanvas;
   LPiece: TRect;
   LOldColor, LColor: TColor;
@@ -186,14 +247,21 @@ begin
     Exit;
   if not IsPascalSourceFile(AContext.FileName) then
     Exit;
-  if not LspTryGetSemanticTokens(AContext.FileName, LTokens) then
+  if not LspTryGetSemanticTokens(AContext.FileName, LTokens, LBase) then
   begin
     // Nothing answered yet for this file - ask once (a no-op while the
     // request is in flight or no server is up); the answer repaints.
     LspRefreshSemanticTokens(AContext.FileName);
     Exit;
   end;
+  if LTokens = nil then
+    Exit;
   LRow := AContext.LogicalLineNum;
+  // The answer describes the text it was asked about; this line may have
+  // moved or changed since (PasTreeIdePlugin.TokenShift).
+  LShift := LineShiftFor(AContext, LRow, LBase, LLineText);
+  if LShift.BaseRow = 0 then
+    Exit;
   LRunEnd := AColNum + Length(AText);
   LCanvas := AContext.Canvas;
   LOldColor := LCanvas.Font.Color;
@@ -202,14 +270,16 @@ begin
   // The user's style ADDED to the run's own (the editor may already paint
   // identifiers bold): a style is a mark, not a replacement.
   LStyle := LOldStyle + TypeHighlightStyle;
-  LIdx := FirstTokenOfRow(LTokens, LRow);
-  while (LIdx < Length(LTokens)) and (LTokens[LIdx].Row = LRow) do
+  LIdx := FirstTokenOfRow(LTokens, LShift.BaseRow);
+  while (LIdx < Length(LTokens)) and (LTokens[LIdx].Row = LShift.BaseRow) do
   begin
-    if IsTypeToken(LTokens[LIdx]) then
+    if IsTypeToken(LTokens[LIdx]) and
+       ShiftToken(LShift, LLineText, LTokens[LIdx].ColFrom,
+         LTokens[LIdx].ColTo, LTokFrom, LTokTo) then
     begin
       // Intersect the token's columns with this run's [AColNum, LRunEnd).
-      LFrom := Max(LTokens[LIdx].ColFrom, AColNum);
-      LTo := Min(LTokens[LIdx].ColTo, LRunEnd);
+      LFrom := Max(LTokFrom, AColNum);
+      LTo := Min(LTokTo, LRunEnd);
       if LTo > LFrom then
       begin
         // Columns -> pixels PROPORTIONALLY within the run's own rect (the

@@ -1373,6 +1373,124 @@ begin
   SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
 end;
 
+{ 5r. A UNIT CREATED IN THE IDE AND NEVER SAVED - a buffer with no file.
+
+  Creating it writes `X in 'X.pas'` into the program at once and nothing to
+  disk, so the server gets the program's new text and the unit's didOpen,
+  and has no file to find. Until PasTree 0.52.2 every resolver gate asked the
+  disk: the unit stayed outside the closure, so there was no colouring and no
+  navigation in it until the first save (2026-09-25). Both arrival orders:
+  the unit first (the one the IDE's Sync produces), and the program first -
+  analyzed while the unit was still missing, which only the didOpen's own
+  rebuild can repair. }
+procedure TestUnsavedUnit;
+const
+  cUnitText =
+    'unit DemoUnsaved;'#13#10#13#10 +
+    'interface'#13#10#13#10 +
+    'type'#13#10 +
+    '  TUnsavedThing = class'#13#10 +
+    '  end;'#13#10#13#10 +
+    'function UnsavedGreeting: string;'#13#10#13#10 +
+    'implementation'#13#10#13#10 +
+    'function UnsavedGreeting: string;'#13#10 +
+    'var'#13#10 +
+    '  LThing: TUnsavedThing;'#13#10 +
+    'begin'#13#10 +
+    '  LThing := nil;'#13#10 +
+    '  Result := ''unsaved'';'#13#10 +
+    'end;'#13#10#13#10 +
+    'end.'#13#10;
+var
+  LAppFile, LNewFile, LAppText, LBefore: string;
+  LLine, LChar: Integer;
+
+  procedure SendDidClose(const AFile: string);
+  var
+    LParams, LDoc: TJSONObject;
+  begin
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFile));
+    LParams := TJSONObject.Create;
+    LParams.AddPair('textDocument', LDoc);
+    GClient.Notify('textDocument/didClose', LParams);
+  end;
+
+  function TokensParams(const AFile: string): TJSONObject;
+  var
+    LDoc: TJSONObject;
+  begin
+    Result := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(AFile));
+    Result.AddPair('textDocument', LDoc);
+  end;
+
+  procedure CheckAnalyzed(const AOrder: string);
+  begin
+    FindPosInText(LAppText, 'Writeln(UnsavedGreeting)', 'UnsavedGreeting',
+      LLine, LChar);
+    Check(Ask('textDocument/definition',
+      PositionParams(LAppFile, LLine, LChar)),
+      AOrder + ': definition answered');
+    Check(GOk and GResultJson.Contains('DemoUnsaved.pas'),
+      AOrder + ': the call resolves into the unit that has no file');
+    Check(Ask('textDocument/semanticTokens/full', TokensParams(LNewFile)),
+      AOrder + ': semanticTokens answered for it');
+    Check(GOk and GResultJson.Contains('"data":[') and
+      not GResultJson.Contains('"data":[]'),
+      AOrder + ': and it has tokens - it is inside the analysis');
+  end;
+
+  procedure Restore;
+  begin
+    SendDidChange(LAppFile, TFile.ReadAllText(LAppFile));
+    SendDidClose(LNewFile);
+    // Settle before the next order or section: any request waits for the
+    // analysis the restore scheduled.
+    FindPos(LAppFile, 'Writeln(Greet(''world', 'Greet', LLine, LChar);
+    Ask('textDocument/definition', PositionParams(LAppFile, LLine, LChar));
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5r. a unit created in the IDE and never saved ===');
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+  LNewFile := TPath.Combine(GFixtureDir, 'DemoUnsaved.pas');
+  if TFile.Exists(LNewFile) then
+    raise Exception.Create(LNewFile + ' exists on disk - this section needs a '
+      + 'unit that does not; remove the stray file');
+  // The program as the IDE rewrites it: the new unit in its uses clause, and
+  // a call into it.
+  LAppText := string.Join(#13#10, InsertAfterLine(InsertAfterLine(
+    SplitLines(TFile.ReadAllText(LAppFile)), 'DemoUnit in ''DemoUnit.pas'',',
+      ['  DemoUnsaved in ''DemoUnsaved.pas'',']),
+    'Writeln(Shout(', ['  Writeln(UnsavedGreeting);']));
+  Check(LAppText.Contains('DemoUnsaved in '), 'fixture patch applied');
+
+  // The program first, analyzed without the unit; then the unit arrives.
+  // FIRST of the two orders: once the unit has been in a build, the module
+  // path keeps its model after the program drops it again, and the unit no
+  // longer reads as outside the closure.
+  SendDidChange(LAppFile, LAppText);
+  FindPosInText(LAppText, 'Writeln(Greet(''world', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LAppFile, LLine, LChar)),
+    'program first: analyzed while the unit was missing');
+  LBefore := ReadServerLog;
+  SendDidOpenText(LNewFile, cUnitText);
+  CheckAnalyzed('program first');
+  Check(Copy(ReadServerLog, Length(LBefore) + 1, MaxInt).Contains(
+    'not on disk yet (a new unit) - rebuild scheduled'),
+    'program first: the didOpen scheduled the rebuild that took it in');
+  Restore;
+
+  // The unit first, then the program - one Sync's order.
+  SendDidOpenText(LNewFile, cUnitText);
+  SendDidChange(LAppFile, LAppText);
+  CheckAnalyzed('unit first');
+  Restore;
+end;
+
 { 5c. THE INCREMENTAL FAST PATH ACTUALLY FIRES.
 
   A fast path that quietly stops firing is indistinguishable from a slow
@@ -3572,6 +3690,45 @@ end;
   outstanding must fail exactly once rather than leave a feature waiting for an
   answer that can never come. The in-flight case is the interesting one - it is
   what "the user switched project mid-Ctrl+Click" looks like. }
+{ 6b. THE HEADER COMES BACK WHEN THE IDE EMPTIES THE LOG.
+
+  The package empties the log when a project opens (ClearLogOnProjectOpen),
+  and a server already running for it had written its header before that -
+  version, hardware, host, configuration. A log sent in from someone else's
+  machine then began "project configured" and named nothing (2026-09-25).
+  Emptied here the way the package empties it - the same CreateFile, both
+  shares, TRUNCATE_EXISTING - and then a request makes the server write. }
+procedure TestLogHeaderAfterClear;
+var
+  LFile: THandle;
+  LLines: TArray<string>;
+  LAppFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 6b. the log header comes back when the IDE empties the log ===');
+  LFile := CreateFile(PChar(ServerLogFile), GENERIC_WRITE,
+    FILE_SHARE_READ or FILE_SHARE_WRITE, nil, TRUNCATE_EXISTING,
+    FILE_ATTRIBUTE_NORMAL, 0);
+  Check(LFile <> INVALID_HANDLE_VALUE,
+    'the log was emptied under the running server');
+  if LFile <> INVALID_HANDLE_VALUE then
+    CloseHandle(LFile);
+  LAppFile := TPath.Combine(GFixtureDir, 'DemoApp.dpr');
+  FindPos(LAppFile, 'Writeln(Greet(''world', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LAppFile, LLine, LChar)),
+    'a request made the server write again');
+  LLines := SplitLines(ReadServerLog);
+  Check((Length(LLines) > 3) and
+    LLines[0].Contains('log emptied under a running server'),
+    'the first line says the log was emptied under this server');
+  Check((Length(LLines) > 3) and LLines[1].Contains('pastree-lsp-server ') and
+    LLines[2].Contains('hardware: '),
+    'and the version and hardware lines follow it');
+  Check(string.Join(#10, LLines).Contains('configured: '),
+    'with the configuration line among them');
+end;
+
 procedure TestRestartOnConfigChange(const AExe: string);
 var
   LOldPid, LNewPid: DWORD;
@@ -3766,9 +3923,12 @@ begin
       TestSyncPrototypes;
       TestAnnotateArgs;
       TestUseUnit;
+      TestUnsavedUnit;
       TestWorkspaceSymbol;
       TestOnTypeFormatting;
       TestCancelHygiene;
+      // Empties the server log: after every section that reads it back.
+      TestLogHeaderAfterClear;
       // These three each kill or replace the server, so they go last.
       TestLazyRestart;
       TestRestartOnConfigChange(GExe);

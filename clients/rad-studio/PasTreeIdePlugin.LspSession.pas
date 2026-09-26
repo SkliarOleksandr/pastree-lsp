@@ -753,12 +753,18 @@ procedure LspRemoveDiagnosticsChangedListener(AHandle: Integer);
 
 /// <summary>
 /// The last semantic tokens the server answered for APath, in IDE
-/// coordinates. False when nothing has been answered yet (the request may
-/// be in flight). Read per syntax run during a repaint, so it never starts
-/// a session - routed like LspTryGetDiagnostics.
+/// coordinates, and ABaseLines - the text they describe, one string per
+/// line: what this client had sent the server when it asked (nil when it
+/// had sent nothing, and the server answered about the file on disk). The
+/// editor has moved on from it by whatever was typed since; the painter
+/// carries each token over (PasTreeIdePlugin.TokenShift). False when nothing
+/// has been answered yet (the request may be in flight). Read per syntax run
+/// during a repaint, so it never starts a session - routed like
+/// LspTryGetDiagnostics.
 /// </summary>
 function LspTryGetSemanticTokens(const APath: string;
-  out ATokens: TArray<TLspSemanticToken>): Boolean;
+  out ATokens: TArray<TLspSemanticToken>;
+  out ABaseLines: TArray<string>): Boolean;
 
 /// <summary>
 /// Asks the owning RUNNING server for APath's semantic tokens; the answer
@@ -804,6 +810,17 @@ procedure LspIdleSync(const APaths: TArray<string>);
 /// file lies ignores. Passive like LspIdleSync - starts no server.
 /// </summary>
 procedure LspReloadedFromDisk(const APaths: TArray<string>);
+
+/// <summary>
+/// Files a view has shown for the FIRST time. Every ready session that does
+/// not hold one of them yet runs its full Sync, once: a module the IDE has
+/// just CREATED - a new unit, a Save As under another name - is a document no
+/// server has, and creating it rewrote the program's uses clause without any
+/// editor event. The Sync opens the one and re-reads the other (see the
+/// buffer age in TLspDocumentSync), so the new unit is analyzed before anyone
+/// types in it. Passive like LspIdleSync - starts no server.
+/// </summary>
+procedure LspSyncFirstSight(const APaths: TArray<string>);
 
 /// <summary>
 /// Asks for every project-level symbol matching AQuery ('' = all, capped and
@@ -1081,7 +1098,8 @@ uses
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.DcuNames,
   PasTreeIdePlugin.Timing,
-  PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.TokenShift;
 
 const
   // Persistent, so it can be left open in a tail across server restarts.
@@ -1171,6 +1189,9 @@ type
     // answer, decoded; and the paths with such a request in flight.
     FSemanticTokens: TDictionary<string, TArray<TLspSemanticToken>>;
     FSemanticPending: TDictionary<string, Int64>;
+    // Path -> the text that answer describes, split into lines (see
+    // LspTryGetSemanticTokens); absent when nothing had been sent.
+    FSemanticBase: TDictionary<string, TArray<string>>;
     FDestroying: Boolean;
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
@@ -1264,10 +1285,13 @@ type
     function TryGetDiagnostics(const APath: string;
       out ADiags: TArray<TLspDiagnostic>): Boolean;
     function TryGetSemanticTokens(const APath: string;
-      out ATokens: TArray<TLspSemanticToken>): Boolean;
+      out ATokens: TArray<TLspSemanticToken>;
+      out ABaseLines: TArray<string>): Boolean;
     procedure RefreshSemanticTokens(const APath: string);
+    procedure LendSemanticTokens(const AOld, ANew: string);
     procedure IdleSync(const APath: string);
     procedure ReloadedFromDisk(const APath: string);
+    procedure SyncFirstSight(const APaths: TArray<string>);
   end;
 
   { THE SESSIONS OF AN OPEN PROJECT GROUP - one per project, one server
@@ -1765,6 +1789,7 @@ begin
   FreeAndNil(FDiagnostics);
   FreeAndNil(FSemanticTokens);
   FreeAndNil(FSemanticPending);
+  FreeAndNil(FSemanticBase);
   inherited;
 end;
 
@@ -1829,11 +1854,18 @@ begin
 end;
 
 function TLspSession.TryGetSemanticTokens(const APath: string;
-  out ATokens: TArray<TLspSemanticToken>): Boolean;
+  out ATokens: TArray<TLspSemanticToken>;
+  out ABaseLines: TArray<string>): Boolean;
+var
+  LKey: string;
 begin
   ATokens := nil;
+  ABaseLines := nil;
+  LKey := LowerCase(APath);
   Result := (FSemanticTokens <> nil) and
-    FSemanticTokens.TryGetValue(LowerCase(APath), ATokens);
+    FSemanticTokens.TryGetValue(LKey, ATokens);
+  if Result and (FSemanticBase <> nil) then
+    FSemanticBase.TryGetValue(LKey, ABaseLines);
 end;
 
 { textDocument/semanticTokens/full for one file. The answer's `data` is the
@@ -1848,6 +1880,8 @@ var
   LKey: string;
   LParams, LDoc: TJSONObject;
   LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+  LBaseText: string;  // captured too: what the answer will describe
+  LHaveBase: Boolean;
 begin
   if FDestroying or not Assigned(FClient) or (FClient.State <> lcsReady) then
     Exit;
@@ -1856,6 +1890,12 @@ begin
     FSemanticPending := TDictionary<string, Int64>.Create;
   if FSemanticPending.ContainsKey(LKey) then
     Exit;
+  // THE TEXT THE ANSWER WILL DESCRIBE, taken NOW: every didChange this
+  // client sent went out before this request on the same pipe, and the
+  // server waits out the analysis of all of it before it answers
+  // (WaitAnalyzed). The painter carries the tokens from this text to the one
+  // on screen - see PasTreeIdePlugin.TokenShift.
+  LHaveBase := Assigned(FDocs) and FDocs.TryGetSentText(APath, LBaseText);
 
   LDoc := TJSONObject.Create;
   LDoc.AddPair('uri', PathToLspUri(APath));
@@ -1883,15 +1923,33 @@ begin
         Exit;
       if Assigned(FSemanticPending) then
         FSemanticPending.Remove(LKey);
-      if not ASuccess or (AResult = nil) or
+      if not ASuccess then
+        Exit;   // cancelled or failed: the previous tokens stay
+      // A null answer is the server saying "nothing for this file" - it lies
+      // outside the analyzed closure. Cached as an EMPTY answer rather than
+      // skipped: skipped, the file stayed uncached and every paint of every
+      // run asked again - 332 requests in five minutes for one new unit, one
+      // per 31 ms at times (2026-09-25 log). The next analysis publishes
+      // diagnostics for every open document, and that asks again
+      // (SemanticPaint's OnDiagnosticsChanged).
+      if (AResult = nil) or
          not AResult.TryGetValue<TJSONArray>('data', LData) then
+        LData := nil;
+      // But "nothing" never unpaints what an earlier answer painted: a file
+      // leaving the closure keeps its last colours, like any stale answer,
+      // and a Save As keeps the ones LendSemanticTokens gave it while the
+      // rebuild that takes the new name in is still running.
+      if (LData = nil) and (FSemanticTokens <> nil) and
+         FSemanticTokens.TryGetValue(LKey, LTokens) and (LTokens <> nil) then
         Exit;
-      SetLength(LTokens, LData.Count div 5);
+      LTokens := nil;
       LCount := 0;
+      if LData <> nil then
+        SetLength(LTokens, LData.Count div 5);
       LLine := 0;
       LChar := 0;
       LIdx := 0;
-      while LIdx + 4 < LData.Count do
+      while (LData <> nil) and (LIdx + 4 < LData.Count) do
       begin
         if IntAt(LIdx) <> 0 then
           LChar := 0;
@@ -1909,10 +1967,49 @@ begin
       if FSemanticTokens = nil then
         FSemanticTokens := TDictionary<string, TArray<TLspSemanticToken>>.Create;
       FSemanticTokens.AddOrSetValue(LKey, LTokens);
+      if FSemanticBase = nil then
+        FSemanticBase := TDictionary<string, TArray<string>>.Create;
+      if LHaveBase and (LCount > 0) then
+        FSemanticBase.AddOrSetValue(LKey, SplitBaseLines(LBaseText))
+      else
+        FSemanticBase.Remove(LKey);
       if Assigned(GSemanticTokensListener) then
         GSemanticTokensListener(APath);
     end);
   FSemanticPending.AddOrSetValue(LKey, LIssuedId);
+end;
+
+{ SAVE AS - see TLspDocumentSync.OnReplaced. The old name's tokens and the
+  text they describe go to the new name unless it has a real answer of its
+  own: the new name is outside the analysis until the rebuild its program's
+  uses clause starts (3.9 s on a 3768-unit project, 2026-09-25), and its
+  colouring vanished for that long. The painter carries them onto the text
+  like any stale answer (PasTreeIdePlugin.TokenShift), so a pairing that is
+  not a Save As at all paints nothing but identifiers that stand where they
+  stood; the first answer for the new name replaces them. }
+procedure TLspSession.LendSemanticTokens(const AOld, ANew: string);
+var
+  LOldKey, LNewKey: string;
+  LTokens, LHeld: TArray<TLspSemanticToken>;
+  LBase: TArray<string>;
+begin
+  if FDestroying or (FSemanticTokens = nil) then
+    Exit;
+  LOldKey := LowerCase(AOld);
+  LNewKey := LowerCase(ANew);
+  if not FSemanticTokens.TryGetValue(LOldKey, LTokens) or (LTokens = nil) then
+    Exit;
+  if FSemanticTokens.TryGetValue(LNewKey, LHeld) and (LHeld <> nil) then
+    Exit;
+  FSemanticTokens.AddOrSetValue(LNewKey, LTokens);
+  if FSemanticBase = nil then
+    FSemanticBase := TDictionary<string, TArray<string>>.Create;
+  if FSemanticBase.TryGetValue(LOldKey, LBase) then
+    FSemanticBase.AddOrSetValue(LNewKey, LBase)
+  else
+    FSemanticBase.Remove(LNewKey);
+  if Assigned(GSemanticTokensListener) then
+    GSemanticTokensListener(ANew);
 end;
 
 { WHICH RAD STUDIO IS RUNNING THIS, to the update - "13.0" and "13.1" are one
@@ -2119,6 +2216,11 @@ begin
       never scheduled anything. What the broadcast costs is therefore the
       JSON and the pipe per server, not a rebuild per server. }
     FDocs := TLspDocumentSync.Create(FClient);
+    FDocs.OnReplaced :=
+      procedure(AOld, ANew: string)
+      begin
+        LendSemanticTokens(AOld, ANew);
+      end;
     // A restarted server has no documents; re-open them before anything that
     // was queued behind the handshake gets answered from stale disk text.
     FClient.OnReady :=
@@ -5107,18 +5209,20 @@ begin
 end;
 
 function LspTryGetSemanticTokens(const APath: string;
-  out ATokens: TArray<TLspSemanticToken>): Boolean;
+  out ATokens: TArray<TLspSemanticToken>;
+  out ABaseLines: TArray<string>): Boolean;
 var
   LSession: TLspSession;
 begin
   ATokens := nil;
+  ABaseLines := nil;
   if not Assigned(GPool) then
     Exit(False);
   // Routed without creating a session, exactly as LspTryGetDiagnostics:
   // this runs per syntax run during a repaint.
   LSession := GPool.SessionForFile(APath, False);
   Result := Assigned(LSession) and
-    LSession.TryGetSemanticTokens(APath, ATokens);
+    LSession.TryGetSemanticTokens(APath, ATokens, ABaseLines);
 end;
 
 procedure LspRefreshSemanticTokens(const APath: string);
@@ -5197,6 +5301,34 @@ begin
   for LSession in GPool.ReadySessions do
     for LPath in APaths do
       LSession.ReloadedFromDisk(LPath);
+end;
+
+procedure TLspSession.SyncFirstSight(const APaths: TArray<string>);
+var
+  LPath: string;
+begin
+  // As passive as IdleSync.
+  if (FClient = nil) or not FClient.IsReady or (FDocs = nil) or
+     FDestroying then
+    Exit;
+  // One Sync covers them all: it opens every module this server lacks.
+  for LPath in APaths do
+    if not FDocs.Holds(LPath) then
+    begin
+      FDocs.Sync;
+      Exit;
+    end;
+end;
+
+procedure LspSyncFirstSight(const APaths: TArray<string>);
+var
+  LSession: TLspSession;
+begin
+  // Every ready session, for the reason LspIdleSync gives.
+  if not Assigned(GPool) or (Length(APaths) = 0) then
+    Exit;
+  for LSession in GPool.ReadySessions do
+    LSession.SyncFirstSight(APaths);
 end;
 
 procedure LspIdleSync(const APaths: TArray<string>);

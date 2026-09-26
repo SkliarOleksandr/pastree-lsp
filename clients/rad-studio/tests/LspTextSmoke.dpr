@@ -25,7 +25,8 @@ uses
   System.SysUtils,
   PasLsp.Protocol,
   PasLsp.XmlDoc,
-  PasTreeIdePlugin.DirectiveText;
+  PasTreeIdePlugin.DirectiveText,
+  PasTreeIdePlugin.TokenShift;
 
 var
   GFailures: Integer;
@@ -229,6 +230,98 @@ begin
   CheckHit('{$ELSEIF Defined(B)}', 18, 'B', '{$ELSEIF Defined(X)}');
   CheckHit('{$IF FOO > 1}', 6, '', '{$IF} a bare constant is not one');
 end;
+{ PasTreeIdePlugin.TokenShift: the last tokens answer carried onto the text
+  on screen. The base is what the answer describes; each case is a line as
+  the editor holds it now, and where the TList token (row 5, [12, 17)) is
+  painted - or that it is not, when the edit touched it. }
+procedure TestTokenShift;
+const
+  cField = '    FData: TList;';
+var
+  LBase: TArray<string>;
+  LHint: Integer;
+
+  // Where the TList token lands on ACurrent, painted as row ARow; -1 when
+  // it is left out.
+  function Lands(ARow: Integer; const ACurrent: string;
+    var AHint: Integer): Integer;
+  var
+    LShift: TLineShift;
+    LFrom, LTo: Integer;
+  begin
+    Result := -1;
+    LShift := ShiftForLine(LBase, ARow, ACurrent, AHint);
+    if (LShift.BaseRow = 5) and
+       ShiftToken(LShift, ACurrent, 12, 17, LFrom, LTo) and
+       (LTo - LFrom = 5) then
+      Result := LFrom;
+  end;
+
+  procedure CheckLands(ARow: Integer; const ACurrent: string; AWant: Integer;
+    const AName: string);
+  var
+    LOwnHint: Integer;
+  begin
+    LOwnHint := 0;
+    Check(Lands(ARow, ACurrent, LOwnHint) = AWant, AName);
+  end;
+
+var
+  LShift: TLineShift;
+  LFrom, LTo: Integer;
+begin
+  Writeln('--- TokenShift');
+  LBase := SplitBaseLines('unit U;'#13#10'interface'#13#10'type'#13#10 +
+    '  TFoo = class'#13#10 + cField + #13#10'  end;'#13#10#13#10 +
+    'implementation'#13#10'end.');
+  Check((Length(LBase) = 9) and (LBase[4] = cField) and (LBase[6] = ''),
+    'SplitBaseLines: CRLF lines, the CR dropped, the blank line kept');
+
+  CheckLands(5, cField, 12, 'an unchanged line paints where it was');
+  CheckLands(5, '    FXData: TList;', 13,
+    'a character typed in front moves the type name right');
+  CheckLands(5, '    FData:  TList;', 13, 'so does a space');
+  CheckLands(5, '    Data: TList;', 11, 'a deletion in front moves it left');
+  CheckLands(5, '    FData: TList; // note', 12,
+    'typing after it leaves it where it was');
+  CheckLands(5, '    FData: XTList;', -1,
+    'a letter typed against its start makes another name: left out');
+  CheckLands(5, '    FData: TListX;', -1,
+    'a letter typed against its end: left out');
+  CheckLands(5, '    FData: TLiist;', -1, 'an edit inside it: left out');
+  CheckLands(5, '    Total := Count + 1;', -1,
+    'a line with nothing in common paints no token of its base line');
+
+  // A line inserted above: the field is now row 6, and the pass's offset
+  // carries the rows below it.
+  LHint := 0;
+  Check(Lands(6, cField, LHint) = 12,
+    'a line moved down by an insertion above is found by its text');
+  Check(LHint = -1, 'and the pass remembers the offset');
+  LShift := ShiftForLine(LBase, 7, '  end;', LHint);
+  Check(LShift.Same and (LShift.BaseRow = 6),
+    'the next line is tried at that offset first');
+  LHint := -1;
+  Check(Lands(6, '    FXData: TList;', LHint) = 13,
+    'an edited line below an insertion maps through the pass''s offset');
+
+  LHint := 3;
+  LShift := ShiftForLine(LBase, 7, '   ', LHint);
+  Check((LShift.BaseRow = 0) and (LHint = 3),
+    'a blank line paints nothing and does not move the offset');
+  LHint := 0;
+  LShift := ShiftForLine(LBase, 40, 'begin', LHint);
+  Check(LShift.BaseRow = 0, 'a row past the base text paints nothing');
+
+  // The suffix never reaches into the prefix.
+  LHint := 0;
+  LShift := ShiftForLine(['aa'], 1, 'aaa', LHint);
+  Check((LShift.Prefix = 2) and (LShift.Suffix = 0) and (LShift.Delta = 1),
+    'aa -> aaa is one insertion after the common prefix');
+  Check(not ShiftToken(LShift, 'aaa', 1, 3, LFrom, LTo),
+    'and a token the insertion extends is left out');
+end;
+
 begin
   GFailures := 0;
   TestUri;
@@ -236,6 +329,7 @@ begin
   TestXmlDocProse;
   TestPositions;
   TestDirectiveSymbol;
+  TestTokenShift;
 
   Writeln;
   if GFailures = 0 then

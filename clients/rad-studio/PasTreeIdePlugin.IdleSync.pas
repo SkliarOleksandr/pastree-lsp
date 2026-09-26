@@ -48,6 +48,28 @@ unit PasTreeIdePlugin.IdleSync;
   touching the buffer at all. No idle tick runs while the IDE is modal
   either (IdeIsModal): typed-in buffers wait for the dialog to close.
 
+  A MOVED CurrentDate IS NOT A RELOAD EITHER - only an unmodified buffer's
+  is. CurrentDate is the buffer's AGE, "the datetime of the last actual
+  modification" (ToolsAPI's own words, on IOTAEditorContent.GetContentAge),
+  in the 2-second steps of a DOS file time: it moves on every edit that
+  lands in a new step, not only on a reload. 0.52.6 took any move for a
+  reload, so while someone typed, the file's OLD text went to the server
+  every couple of seconds - the log alternated between the typed buffer and
+  the 989 characters on disk (2026-09-25, a data module being written), the
+  colouring painted the file's type names over the typed text, and
+  Ctrl+Shift+Up/Down answered about text that was not on screen, until the
+  next save made the two equal. A reload leaves the buffer holding exactly
+  the file, i.e. NOT modified, and that is the test now; a save passes it too
+  and costs the one "sync-from-disk: unchanged" read it always did.
+
+  FIRST SIGHT. The first paint of a file the IDE has just CREATED - a new
+  unit, a Save As under another name - queues one full Sync for every server
+  that does not hold it yet (LspSyncFirstSight). Creating one also rewrites
+  the program's uses clause, which fires no EditorViewModified at all; the
+  Sync sends both, so the new unit is analyzed before anyone types in it or
+  asks about it. Once per file per IDE session - GBufferDates is the record -
+  so a file no Sync ever takes cannot turn into a Sync per paint.
+
   Same teardown rules as every notifier in this package: unregister and
   stop the timer BEFORE the session dies, or a tick dispatches into
   unloaded code.
@@ -63,10 +85,11 @@ procedure FinalizeIdleSync;
 
 /// <summary>
 /// Queues AView's file for the idle didChange when its buffer's CurrentDate
-/// moved since the last call for that file - the IDE reloaded it from disk,
-/// which EditorViewModified never reports. Cheap enough for every repaint:
-/// two date reads and a dictionary lookup. The first sight of a file only
-/// remembers its dates.
+/// moved since the last call for that file AND the buffer is not modified -
+/// the IDE reloaded it from disk, which EditorViewModified never reports (an
+/// edit moves CurrentDate too, see the header). Cheap enough for every
+/// repaint: two date reads, a flag and a dictionary lookup. The first sight
+/// of a file remembers its dates and queues the first-sight Sync.
 /// </summary>
 procedure CheckBufferReloaded(const AView: IOTAEditView);
 
@@ -156,6 +179,9 @@ var
   // instead of after its own 300 ms typing debounce, and the answer
   // repaints - old colours for ~0.1 s instead of ~0.65 s.
   GReloaded: TArray<string>;
+  // Files painted for the first time since the last tick - see FIRST SIGHT
+  // in the header.
+  GFirstSight: TArray<string>;
 
 { One modification of APath's buffer, from whichever side reported it:
   counted for the request-path Sync, remembered for the tick, and the
@@ -189,8 +215,9 @@ end;
 procedure CheckBufferReloaded(const AView: IOTAEditView);
 var
   LBuffer: IOTAEditBuffer;
-  LPath, LKey: string;
+  LPath, LKey, LVerdict: string;
   LNow, LWas: TBufferDates;
+  LModified, LReloaded: Boolean;
 begin
   if (GTimer = nil) or (GBufferDates = nil) or not Assigned(AView) then
     Exit;
@@ -203,26 +230,42 @@ begin
       Exit;
     LNow.Initial := LBuffer.GetInitialDate;
     LNow.Current := LBuffer.GetCurrentDate;
+    LModified := LBuffer.IsModified;
   except
     Exit;   // a buffer we cannot ask about is left to the request path
   end;
   LKey := LowerCase(LPath);
-  if GBufferDates.TryGetValue(LKey, LWas) and
-     ((LWas.Initial <> LNow.Initial) or (LWas.Current <> LNow.Current)) then
+  if not GBufferDates.TryGetValue(LKey, LWas) then
   begin
-    // Both dates logged: which one moved when is what the header's
-    // account of a reload rests on.
-    TimingLogFmt('buffer dates moved: %s (initial %s -> %s, current %s -> %s)%s',
+    // FIRST SIGHT - see the header. The tick, not here: a Sync reads
+    // buffers, and this runs inside a paint.
+    GFirstSight := GFirstSight + [LPath];
+    GTimer.Enabled := False;
+    GTimer.Enabled := True;
+  end
+  else if (LWas.Initial <> LNow.Initial) or (LWas.Current <> LNow.Current) then
+  begin
+    // InitialDate alone is the IDE noticing, with the old text still in
+    // the buffer: nothing to send yet. CurrentDate on a MODIFIED buffer is
+    // an edit's, and the edit reported itself (see the header).
+    LReloaded := (LWas.Current <> LNow.Current) and not LModified;
+    if LReloaded then
+      LVerdict := ' - reloaded, queued'
+    else if LWas.Current <> LNow.Current then
+      LVerdict := ' - edited, not a reload'
+    else
+      LVerdict := ' - noticed only';
+    // Both dates and the flag logged: which one moved when, on which side
+    // of a modification, is what the header's account of a reload rests on.
+    TimingLogFmt('buffer dates moved: %s (initial %s -> %s, current %s -> %s, ' +
+      '%s)%s',
       [ExtractFileName(LPath),
        FormatDateTime('hh:nn:ss.zzz', LWas.Initial),
        FormatDateTime('hh:nn:ss.zzz', LNow.Initial),
        FormatDateTime('hh:nn:ss.zzz', LWas.Current),
        FormatDateTime('hh:nn:ss.zzz', LNow.Current),
-       IfThen(LWas.Current <> LNow.Current, ' - reloaded, queued',
-         ' - noticed only')]);
-    // InitialDate alone is the IDE noticing, with the old text still in
-    // the buffer: nothing to send yet (see the header).
-    if LWas.Current <> LNow.Current then
+       IfThen(LModified, 'modified', 'unmodified'), LVerdict]);
+    if LReloaded then
     begin
       if IndexText(LPath, GReloaded) < 0 then
         GReloaded := GReloaded + [LPath];
@@ -251,7 +294,7 @@ var
   LStart: Double;
   LEdits: Integer;
   LFile: string;
-  LPaths, LReloaded: TArray<string>;
+  LPaths, LReloaded, LFirstSight: TArray<string>;
   LPath: string;
 begin
   // Not while a dialog is up: the timer stays armed and the pending set
@@ -265,6 +308,8 @@ begin
   LFile := GLastEdited;
   LPaths := GModified;
   LReloaded := GReloaded;
+  LFirstSight := GFirstSight;
+  GFirstSight := nil;
   // A buffer typed into and then reloaded holds the file now: it goes the
   // reload's way only, never through a buffer read.
   for LPath in LReloaded do
@@ -277,6 +322,9 @@ begin
   LStart := TimingNowMs;
   LspIdleSync(LPaths);
   LspReloadedFromDisk(LReloaded);
+  // After the idle sync: its fallback may already have opened them, and
+  // then this finds nothing to do.
+  LspSyncFirstSight(LFirstSight);
   // Behind the didChange on the same pipe, so the server answers about the
   // new text - see GReloaded.
   for LPath in LReloaded do
@@ -286,8 +334,8 @@ begin
   // against: if this number is small and the cursor still shows, the time
   // is not in this package's sync at all.
   TimingLogFmt('idle tick: %d edit(s) in %d file(s), last %s, %d reloaded, ' +
-    'total %s', [LEdits, Length(LPaths), ExtractFileName(LFile),
-    Length(LReloaded), TimingSince(LStart)]);
+    '%d first seen, total %s', [LEdits, Length(LPaths), ExtractFileName(LFile),
+    Length(LReloaded), Length(LFirstSight), TimingSince(LStart)]);
 end;
 
 { TIdleSyncNotifier }
@@ -377,6 +425,7 @@ begin
   FreeAndNil(GTimer);
   FreeAndNil(GDispatch);
   FreeAndNil(GBufferDates);
+  GFirstSight := nil;
 end;
 
 end.

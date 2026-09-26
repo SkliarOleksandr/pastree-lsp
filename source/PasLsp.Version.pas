@@ -224,7 +224,13 @@ const
   /// `of object` one. Silent without it apart from the crash: Ctrl+Click on
   /// such a Create lands in TObject, and Find References on the constructor
   /// or on the TProc overload comes back empty.
-  cMinPasTreeVersion = '0.50.2';
+  /// 0.52.2 (2026-09-26): a unit that exists only as an editor buffer - one
+  /// created in the IDE and never saved - resolves through the program's
+  /// `in 'path'`. Silent without it: the unit stays outside the closure, so
+  /// there is no colouring and no navigation in it until it is saved, and the
+  /// program shows F1027 for a unit the editor has open. (0.52.0 and 0.52.1
+  /// do not have it: they were committed beside it, not on top of it.)
+  cMinPasTreeVersion = '0.52.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

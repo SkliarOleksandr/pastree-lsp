@@ -28,6 +28,30 @@ in the initializationOptions (`pastree.logUnits` in VS Code) or
 thing that answers "which of several copies on the search path won?". Off by
 default because it is hundreds of lines per rebuild.
 
+## Colours on the wrong spans, or "nothing to toggle" while typing
+
+Half a type name coloured, a method name painted as a type, Ctrl+Shift+Up/Down
+answering `nothing to toggle to at that position` on a name plainly on screen -
+and all of it gone after a save. The server is analyzing a text the editor
+does not hold. Grep the log for `textDocument/didChange <that file>` and read
+the character counts: a sequence that keeps coming back to ONE number between
+the typed sizes (1085, 989, 1100, 989, 1096, 989) is the file's text on disk
+being sent in place of the buffer. That was 0.52.6-0.54.2: the reload detector
+took every move of `IOTAEditBuffer.CurrentDate` for a reload, and CurrentDate
+is the buffer's AGE - it moves on edits too (2026-09-25). The header of
+`PasTreeIdePlugin.IdleSync` has the whole account; with Advanced Logging on,
+each `buffer dates moved:` line says whether the buffer was modified and what
+was decided.
+
+`file not in the analyzed closure` for a unit that IS in the project is the
+same question about the program file: its uses clause on the server does not
+list the unit. A unit created in the IDE, or saved under a new name, rewrites
+the `.dpr` in a buffer with no view, which raises no editor event - look for a
+`didChange` of the `.dpr` after the unit's `didOpen`. None means the program's
+edit never left the IDE (the buffer age in `TLspDocumentSync` is what sends it
+since 0.54.3). A unit never saved at all also needs PasTree 0.52.2, which
+resolves an `in 'path'` to an editor buffer.
+
 ## "Back does nothing after Ctrl+Click" - but only sometimes
 
 The IDE's Backward/Forward stack (`IOTAHistoryServices`) is opaque from the

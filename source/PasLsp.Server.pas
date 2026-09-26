@@ -129,6 +129,17 @@ type
     FLogDetail: Boolean;
     FLogPath: string;
     FLogStarted: Boolean;
+    // THE HEADER, KEPT FOR A LOG EMPTIED UNDER US. The IDE package empties the
+    // log when a project is opened (ClearLogOnProjectOpen), and a server that
+    // had already started for it had written its version, hardware, host and
+    // configuration lines by then: the file began "project configured", and a
+    // log sent in from someone else's machine said nothing about which build
+    // or which machine (2026-09-25). AppendLog writes these again when the
+    // file turns out SHORTER than it last left it - other writers only
+    // append, so that is truncation - and FLogSize is what it last left.
+    FHeaderLines: TArray<string>;
+    FLogSize: Int64;
+    FStartedAt: TDateTime;
     FDocs: TLspDocumentStore;
     FOutgoing: TList<string>;   // notifications queued during Handle
     // Configuration (fixed at initialize)
@@ -264,6 +275,9 @@ type
     FLastReportTick: UInt64;
     procedure AppendLog(const AText: string);
     procedure Log(const AMsg: string);
+    { Log, and remembered as one of the header lines AppendLog repeats in a
+      log that was emptied (FHeaderLines). }
+    procedure LogHeader(const AMsg: string);
     procedure LogBlock(const ALines: TArray<string>);
     procedure LogParseRecord;
     procedure Notify(const AJson: string);
@@ -485,6 +499,7 @@ begin
   FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
   FLogDetail := True;
   FLogPath := GetEnvironmentVariable('PASTREE_LSP_LOG');
+  FStartedAt := Now;
 end;
 
 destructor TLspServer.Destroy;
@@ -540,6 +555,8 @@ var
   LBytes: TBytes;
   LWritten: DWORD;
   LTry: Integer;
+  LText, LStamp, LLine: string;
+  LWas, LSize: Int64;
 begin
   // No `LFile := INVALID_HANDLE_VALUE` before the loop: cRetries is a
   // positive constant, so the body always assigns it and the compiler says
@@ -547,9 +564,11 @@ begin
   // into W1036 rather than reading a stale handle.
   for LTry := 1 to cRetries do
   begin
-    LFile := CreateFile(PChar(FLogPath), FILE_APPEND_DATA,
-      FILE_SHARE_READ or FILE_SHARE_WRITE, nil, OPEN_ALWAYS,
-      FILE_ATTRIBUTE_NORMAL, 0);
+    // FILE_READ_ATTRIBUTES beside the append right: GetFileSizeEx below
+    // needs it, and it takes no part in sharing.
+    LFile := CreateFile(PChar(FLogPath), FILE_APPEND_DATA or
+      FILE_READ_ATTRIBUTES, FILE_SHARE_READ or FILE_SHARE_WRITE, nil,
+      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if LFile <> INVALID_HANDLE_VALUE then
       Break;
     if GetLastError <> ERROR_SHARING_VIOLATION then
@@ -565,12 +584,37 @@ begin
   if LFile = INVALID_HANDLE_VALUE then
     Exit;   // busy for 100 ms; drop the line, keep the log
   try
-    LBytes := TEncoding.UTF8.GetBytes(AText);
+    LText := AText;
+    // EMPTIED UNDER US - see FHeaderLines. The size this server last left
+    // is read BEFORE the file's own: every other writer only appends, so a
+    // file found shorter than that was truncated (or replaced), never merely
+    // written to by someone else.
+    LWas := FLogSize;
+    if FLogStarted and (Length(FHeaderLines) > 0) and
+       GetFileSizeEx(LFile, LSize) and (LSize < LWas) then
+    begin
+      LStamp := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now) + ' ';
+      LText := LStamp + Format('log emptied under a running server (up ' +
+        'since %s) - its header again:',
+        [FormatDateTime('yyyy-mm-dd hh:nn:ss', FStartedAt)]) + sLineBreak;
+      for LLine in FHeaderLines do
+        LText := LText + LStamp + LLine + sLineBreak;
+      LText := LText + AText;
+    end;
+    LBytes := TEncoding.UTF8.GetBytes(LText);
     if Length(LBytes) > 0 then
       WriteFile(LFile, LBytes[0], Length(LBytes), LWritten, nil);
+    if GetFileSizeEx(LFile, LSize) then
+      FLogSize := LSize;
   finally
     CloseHandle(LFile);
   end;
+end;
+
+procedure TLspServer.LogHeader(const AMsg: string);
+begin
+  Log(AMsg);
+  FHeaderLines := FHeaderLines + [AMsg];
 end;
 
 procedure TLspServer.Log(const AMsg: string);
@@ -714,15 +758,17 @@ begin
   // opening line does not say which build produced it is worth much less than
   // one that does - especially across a rebuild, where "did my fix even get
   // into the exe the IDE is running" is the first question worth asking.
-  Log(PasLspVersionBanner);
+  // All three, and the configured and watching lines below, are the HEADER
+  // (LogHeader): written again if the IDE empties the log under this server.
+  LogHeader(PasLspVersionBanner);
   // SECOND line, next to the version: CPU, cores, RAM - a report from someone
   // else's machine needs this before "is it slow" is even askable.
-  Log(PasLspHardwareBanner);
+  LogHeader(PasLspHardwareBanner);
   // THIRD line, next to the build that produced the log: the pair "which exe"
   // and "which IDE ran it" is what a report from someone else's machine has to
   // answer before anything else is worth reading.
   if LHost <> '' then
-    Log('host: ' + LHost);
+    LogHeader('host: ' + LHost);
 
   if not ((LPlatformStr = '') or
     TryParsePlatformName(LPlatformStr, FPlatform)) then
@@ -827,7 +873,7 @@ begin
       Tell(2, 'PasTree: the libraryPaths setting is not a list of strings'
         + ' - ignored, so rename will not refuse library sources', True);
   end;
-  Log(Format('configured: platform=%s main=%s paths=%d defines=%d'
+  LogHeader(Format('configured: platform=%s main=%s paths=%d defines=%d'
     + ' libraryPaths=%d projectFiles=%d projectDir=%s',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
      Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
@@ -1682,7 +1728,7 @@ begin
     Log(Format('cannot watch client pid %d (error %d) - watchdog disabled',
       [APid, GetLastError]))
   else
-    Log(Format('watching client pid %d', [APid]));
+    LogHeader(Format('watching client pid %d', [APid]));
 end;
 
 function TLspServer.ClientGone: Boolean;
@@ -2280,6 +2326,23 @@ begin
     Log('  changed on disk since the analysis read it - rebuild scheduled');
     FDiskMoved := True;
     ScheduleAnalysis(LPath);
+  end
+  else if LDiffers and (FProject <> nil) and not FileExists(LPath) then
+  begin
+    // A UNIT WITH NO FILE YET: created in the IDE and never saved, so it is
+    // outside the closure however the program names it - PasTree resolves an
+    // `in 'path'` to an editor buffer (0.52.2), but only in a build that has
+    // the buffer. The program's new uses clause usually arrives beside this
+    // didOpen and its own rebuild takes the unit in; if it came first and was
+    // analyzed without it (the unit read as missing), nothing else would
+    // schedule the rebuild. Forced like a disk change: no overlay of the
+    // closure moved, and the "inputs did not change" gate would drop it.
+    Log('  not on disk yet (a new unit) - rebuild scheduled in case the ' +
+      'project names it');
+    FDiskMoved := True;
+    // No priority file: a priority is loaded whether or not anything uses
+    // it, and a unit the project does not name must stay outside.
+    ScheduleAnalysis('');
   end
   else
   begin
