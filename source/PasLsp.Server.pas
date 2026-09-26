@@ -229,12 +229,24 @@ type
     // backstop that keeps a scheduled rebuild from running when the inputs
     // came back to what is already analyzed (an edit typed and undone).
     FBuiltSignature: string;
-    FStartedSignature: string;
-    // The same two signatures split into their per-document parts: what tells
-    // a ONE-FILE edit (the incremental fast path) from any other change to
-    // the inputs - a document opened, closed, saved, or two edited at once.
+    // The same signature split into its per-document parts: what tells a
+    // ONE-FILE edit (the incremental fast path) from any other change to the
+    // inputs - a document opened, closed, saved, or two edited at once.
     FBuiltParts: TArray<string>;
+    // EVERY differing document's part when the running analysis started,
+    // closure or not (OverlayParts(True)). The built parts are cut from it
+    // AFTER the run, against the closure the run produced - see
+    // CommitBuiltParts for the unit that was outside when it started.
     FStartedParts: TArray<string>;
+    // Documents with no file on disk, opened while outside the closure - a
+    // unit just created in the IDE - waiting for a program that names them
+    // (TakeInNamer). Case-insensitive. Armed by didOpen only, consumed when a
+    // module run starts to take one in, cleared when a full rebuild starts:
+    // a unit still outside after either is not one a retry can bring in.
+    FTakeIn: TStringList;
+    // FProject.ModelCount when the running module session started: the models
+    // past it are the units that run took in (LogTakenIn).
+    FModuleBaseCount: Integer;
     // INCREMENTAL REANALYSIS (PasTree's stage B). When the only thing that
     // changed is the text of one already-analyzed unit, the in-flight session
     // is a TPasAsyncSession.CreateForModule one over FModuleFile instead of a
@@ -284,10 +296,14 @@ type
     procedure StartClientWatchdog(APid: Integer);
     function FileMatches(const APath, AText, ADiskText: string): Boolean;
     function OverlaySignature: string;
-    function OverlayParts: TArray<string>;
+    function OverlayParts(AAll: Boolean = False): TArray<string>;
+    procedure CommitBuiltParts;
     function AffectsAnalysis(const APath: string): Boolean;
     function DiskNewerThanAnalysis(const APath: string): Boolean;
-    function SingleChangedDoc(out APath: string): Boolean;
+    function ChangedDocs(out APath: string): Integer;
+    function NamerOf(const ADocPath: string): string;
+    function TakeInNamer(out ANamer: string): Boolean;
+    procedure LogTakenIn;
     function TryStartModuleAnalysis: Boolean;
     procedure StartProgress(const ATitle: string);
     procedure ReportProgress;
@@ -494,6 +510,10 @@ begin
   FCancels := ACancels;
   FDocs := TLspDocumentStore.Create;
   FOutgoing := TList<string>.Create;
+  FTakeIn := TStringList.Create;
+  FTakeIn.CaseSensitive := False;
+  FTakeIn.Sorted := True;
+  FTakeIn.Duplicates := dupIgnore;
   FPlatform := pfWin64;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
   FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
@@ -513,6 +533,7 @@ begin
   InvalidateAnalysis;
   FOutgoing.Free;
   FDocs.Free;
+  FTakeIn.Free;
   FLineTokenCache.Free;
   inherited;
 end;
@@ -953,8 +974,8 @@ begin
         begin
           // The run committed: the project now IS the inputs that session
           // started from, so that is what the next comparison must use.
-          FBuiltSignature := FStartedSignature;
-          FBuiltParts := FStartedParts;
+          CommitBuiltParts;
+          LogTakenIn;
         end
         else
           // Refused. FinalizeAnalysisIfDone would have set this; the fast
@@ -1045,10 +1066,13 @@ begin
     FSession.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
   FDirty := False;   // this session covers everything up to now
   FDiskMoved := False;   // and reads every file itself
+  // Every buffer goes in above, so a unit waiting to be taken in is taken in
+  // here if anything names it; one still outside afterwards is not named, or
+  // not resolvable, and its next didOpen arms it again.
+  FTakeIn.Clear;
   FPendingDue := 0;  // whatever was scheduled is covered by this start
   FPendingPriority := '';
-  FStartedParts := OverlayParts;
-  FStartedSignature := string.Join(',', FStartedParts);
+  FStartedParts := OverlayParts(True);
   FBuildStart := GetTickCount64;
   FBuildDiskReadAt := Now;   // before the worker reads anything
   StartProgress('PasTree: analyzing');
@@ -1075,6 +1099,8 @@ end;
 // Fires a scheduled analysis NOW (deadline ignored) - requests call this so
 // they never sit out the debounce window.
 procedure TLspServer.FlushPending;
+var
+  LNamer: string;
 begin
   if FPendingDue = 0 then
     Exit;
@@ -1082,7 +1108,7 @@ begin
   // built from - an edit typed and undone, or a file opened and closed.
   //
   // ONLY WITH NOTHING IN FLIGHT. FBuiltSignature describes the last COMPLETED
-  // analysis; a session running right now was started from FStartedSignature,
+  // analysis; a session running right now was started from FStartedParts,
   // which the undo has just made obsolete. Dropping the plan then leaves the
   // rebuild nobody will do: the in-flight result lands, FDirty is False, and
   // the reverted document is skipped by the stamp loop in
@@ -1091,8 +1117,11 @@ begin
   // that is computed from text the editor no longer holds, until the next
   // real edit. Type a character, start a build, Ctrl+Z: that is the whole
   // repro, and it is silent.
+  //
+  // Nor with a unit waiting to be taken in: its buffer is outside the closure
+  // and therefore outside the signature, so the signature cannot see it.
   if (FProject <> nil) and (FSession = nil) and not FDiskMoved and
-     (OverlaySignature = FBuiltSignature) then
+     (OverlaySignature = FBuiltSignature) and not TakeInNamer(LNamer) then
   begin
     Log('scheduled rebuild dropped: the analyzed inputs did not change');
     FPendingDue := 0;
@@ -1206,7 +1235,7 @@ procedure TLspServer.FinalizeAnalysisIfDone;
 var
   LDoc: TLspDocument;
   LStale, LWasModule: Boolean;
-  LError: string;
+  LError, LNamer: string;
 begin
   if (FSession = nil) or not FSession.IsDone then
     Exit;
@@ -1250,8 +1279,7 @@ begin
   if FProject = nil then
     Exit;
   FNav := NewNavigator;
-  FBuiltSignature := FStartedSignature;
-  FBuiltParts := FStartedParts;
+  CommitBuiltParts;
   LWasModule := FModuleMode;
   FModuleMode := False;
   if not LWasModule then
@@ -1284,9 +1312,13 @@ begin
   // fail to load?") are rebuild questions. Writing it per keystroke would
   // walk every model of a 3676-unit project and bury the rebuild that
   // matters under a hundred repetitions of itself. The stages field above
-  // carries what IS new - module=<radius>, or module=refused:<reason>.
+  // carries what IS new - module=<radius>, or module=refused:<reason> - and
+  // a unit the run took in is recorded on its own (LogTakenIn), since that
+  // one DID change the closure.
   if not LWasModule then
-    LogParseRecord;
+    LogParseRecord
+  else
+    LogTakenIn;
 
   LStale := FDirty;
   if not LStale then
@@ -1315,7 +1347,11 @@ begin
     // second FULL rebuild for an edit that no longer exists - the same trap
     // FlushPending's drop guards against, reached from the other side now
     // that an in-flight full build is left to finish instead of restarted.
-    if (OverlaySignature = FBuiltSignature) and not FDiskMoved then
+    // A unit waiting to be taken in is outside the signature, so the
+    // signature cannot say it is done: a new unit opened while a build ran
+    // that started before its buffer existed (see TakeInNamer).
+    if (OverlaySignature = FBuiltSignature) and not FDiskMoved and
+       not TakeInNamer(LNamer) then
     begin
       Log('documents changed mid-build and changed back - result is current');
       FDirty := False;
@@ -1437,14 +1473,20 @@ begin
   Result := (LReadAt > 0) and FileAge(APath, LAge) and (LAge > LReadAt);
 end;
 
-function TLspServer.OverlayParts: TArray<string>;
+// The path of one `path|len|hash` part (see OverlayParts), lower-cased there.
+function PartPath(const APart: string): string;
+begin
+  Result := Copy(APart, 1, Pos('|', APart) - 1);
+end;
+
+function TLspServer.OverlayParts(AAll: Boolean): TArray<string>;
 var
   LDoc: TLspDocument;
   LParts: TStringList;
 begin
   LParts := TStringList.Create;
   try
-    // ORDINAL, and it has to be: SingleChangedDoc merges this list against
+    // ORDINAL, and it has to be: ChangedDocs merges this list against
     // the previous build's with `<` on the strings, which is codepoint order.
     // TStringList's default comparer is AnsiCompareText - a locale word sort
     // that weighs punctuation differently - so with the two disagreeing (say
@@ -1456,7 +1498,7 @@ begin
     LParts.CaseSensitive := True;
     LParts.Sorted := True;   // dictionary order is not stable; this is
     for LDoc in FDocs.All do
-      if LDoc.Differs and AffectsAnalysis(LDoc.Path) then
+      if LDoc.Differs and (AAll or AffectsAnalysis(LDoc.Path)) then
         LParts.Add(Format('%s|%d|%.8x', [LowerCase(LDoc.Path),
           Length(LDoc.Text), THashFNV1a32.GetHashValue(LDoc.Text)]));
     Result := LParts.ToStringArray;
@@ -1470,21 +1512,34 @@ begin
   Result := string.Join(',', OverlayParts);
 end;
 
-{ Did EXACTLY ONE document's text change since the last completed analysis?
+{ What the finished analysis was built from, cut against the closure IT
+  produced: the parts of every document that differed when the run started
+  (FStartedParts) and that the new project holds.
 
-  The parts are sorted and one per differing document, `path|len|hash`, so the
-  two lists line up position by position and the answer is a single walk: same
-  length, and exactly one position where the parts differ while their PATHS
-  match. Anything else - a document opened, closed, saved back to its file, or
-  two edited between builds - is not a one-file edit and gets the full
-  rebuild. Deliberately strict: the fast path is only sound for a change the
-  guards in AnalyzeModuleOnly actually inspected, and they inspect one unit. }
-function PartPath(const APart: string): string;
+  Cut AFTER the run, not at its start, and the difference is a unit that joins
+  the closure in the run - the IDE's File > New > Unit. At the start its
+  buffer was outside the closure and outside the parts; afterwards it is
+  inside, so the NEXT signature lists it. Parts taken at the start never did,
+  so the unit read as a freshly changed document forever after: the first edit
+  anywhere else was two changed documents and a full rebuild, and "typed and
+  undone" could never match again. OverlayParts cuts the current documents
+  with the same closure, so the two stay comparable. }
+procedure TLspServer.CommitBuiltParts;
+var
+  LPart: string;
+  LKept: TArray<string>;
 begin
-  Result := Copy(APart, 1, Pos('|', APart) - 1);
+  LKept := nil;
+  for LPart in FStartedParts do
+    if AffectsAnalysis(PartPath(LPart)) then
+      LKept := LKept + [LPart];
+  FBuiltParts := LKept;
+  FBuiltSignature := string.Join(',', FBuiltParts);
 end;
 
-{ Did EXACTLY ONE document's text change since the last completed analysis?
+{ How many documents' text changed since the last completed analysis - 0, 1,
+  or 2 for "more than one" - and, for exactly one, which (APath, the
+  signature's lower-cased spelling).
 
   A MERGE OF TWO SORTED SETS, not a position-by-position compare, and the
   difference is the whole point. Each list holds one entry per document whose
@@ -1512,8 +1567,12 @@ end;
 
   A save where the buffer already held the file's text produces a
   disappearance with nothing behind it: no rebuild is needed at all, and this
-  still spends one module run on it. Cheap, and simpler than proving it. }
-function TLspServer.SingleChangedDoc(out APath: string): Boolean;
+  still spends one module run on it. Cheap, and simpler than proving it.
+
+  ZERO is an answer of its own since 0.55.0: nothing the closure holds
+  changed, yet a unit waiting outside it may be due for a take-in (see
+  TakeInNamer), which is a module run too. }
+function TLspServer.ChangedDocs(out APath: string): Integer;
 var
   LNow: TArray<string>;
   LI, LJ, LFound: Integer;
@@ -1522,7 +1581,7 @@ begin
   APath := '';
   LNow := OverlayParts;
   if FProject = nil then
-    Exit(False);
+    Exit(2);
   LI := 0;
   LJ := 0;
   LFound := 0;
@@ -1561,11 +1620,136 @@ begin
       Inc(LJ);
     end;
     if LFound > 1 then
-      Exit(False);
+    begin
+      APath := '';
+      Exit(2);
+    end;
   end;
-  Result := LFound = 1;
-  if not Result then
+  Result := LFound;
+  if Result <> 1 then
     APath := '';
+end;
+
+{ The program that NAMES ADocPath and has not got it: a model of the closure
+  whose `uses` entry says `X in '<ADocPath>'` and resolved to nothing - the
+  program was analyzed before the unit's buffer existed. '' when there is
+  none. The in-path is read the way the source manager's first probe reads
+  it: rooted as it stands, otherwise beside the naming file. Every model's
+  uses list is walked (a few tens of thousands of entries on a large project,
+  a string test each); only a document waiting for a take-in pays for it. }
+function TLspServer.NamerOf(const ADocPath: string): string;
+var
+  LMid, LU: Integer;
+  LModel: TPasSemaModel;
+  LPath: string;
+begin
+  Result := '';
+  if FProject = nil then
+    Exit;
+  for LMid := 0 to FProject.ModelCount - 1 do
+  begin
+    LModel := FProject.Model(LMid);
+    if LModel = nil then
+      Continue;
+    for LU := 0 to High(LModel.UsesList) do
+    begin
+      if (LModel.UsesList[LU].InPath = '') or
+         (LModel.UsesList[LU].UnitId >= 0) then
+        Continue;
+      LPath := LModel.UsesList[LU].InPath;
+      try
+        if not TPath.IsPathRooted(LPath) then
+          LPath := TPath.Combine(
+            TPath.GetDirectoryName(FProject.ModelFile(LMid)), LPath);
+        LPath := TPath.GetFullPath(LPath);
+      except
+        Continue;   // an in-string no file name can hold names no document
+      end;
+      if SameText(LPath, TPath.GetFullPath(ADocPath)) then
+        Exit(FProject.ModelFile(LMid));
+    end;
+  end;
+end;
+
+{ IS A TAKE-IN DUE: a document waiting in FTakeIn that a program of the
+  closure names without having it (NamerOf), and that program's path in
+  ANamer.
+
+  The IDE's New Unit writes the unit into the program's uses clause and opens
+  the unit's editor, and WHICH ORDER reaches the server depends on the
+  program's editor. With no view, the uses edit raises no editor event and
+  rides the unit's first-sight sync: both arrive together, the program's own
+  edit carries the unit in (the module path takes in a new import since
+  PasTree 0.53.0) and nothing waits here. With the program open in a tab - the
+  usual session - the edit fires EditorViewModified and goes out on the next
+  idle tick, the unit's didOpen with the first-sight sync over a second later
+  (1.6 s in the first AVImark run, 2026-09-26): the program is analyzed with
+  the unit a missing import (F1027), then the unit's buffer arrives. Nothing
+  about the closure's documents changes at that point, so no signature shows
+  it; this does.
+
+  Also prunes: a document no longer open, now inside the closure, or now on
+  disk (saved - the rebuild the disk change schedules sees it) waits no
+  more. }
+function TLspServer.TakeInNamer(out ANamer: string): Boolean;
+var
+  LIdx: Integer;
+  LDoc: TLspDocument;
+begin
+  ANamer := '';
+  Result := False;
+  if (FProject = nil) or (FTakeIn.Count = 0) then
+    Exit;
+  for LIdx := FTakeIn.Count - 1 downto 0 do
+    if not FDocs.TryGet(FTakeIn[LIdx], LDoc) or
+       (FProject.ModelIdOf(FTakeIn[LIdx]) >= 0) or
+       FileExists(FTakeIn[LIdx]) then
+      FTakeIn.Delete(LIdx);
+  for LIdx := 0 to FTakeIn.Count - 1 do
+  begin
+    ANamer := NamerOf(FTakeIn[LIdx]);
+    if ANamer <> '' then
+      Exit(True);
+  end;
+end;
+
+{ The units an accepted module run TOOK IN (PasTree 0.53.0) - the models past
+  the count the run started from - with their files and diagnostics, the part
+  of LogParseRecord that is new: a rebuild would have listed them there, and
+  the per-keystroke runs that change nothing about the closure stay silent. }
+procedure TLspServer.LogTakenIn;
+var
+  LLines: TArray<string>;
+  LMi, LDi, LFileId: Integer;
+  LModel: TPasSemaModel;
+  LFile: string;
+begin
+  if (FProject = nil) or (FProject.ModelCount <= FModuleBaseCount) then
+    Exit;
+  LLines := [Format('taken in by the incremental run: %d units',
+    [FProject.ModelCount - FModuleBaseCount])];
+  for LMi := FModuleBaseCount to FProject.ModelCount - 1 do
+  begin
+    LModel := FProject.Model(LMi);
+    LLines := LLines + [Format('  unit %s <- %s%s',
+      [LModel.UnitNameLower, FProject.ModelFile(LMi),
+       IfThen(Length(LModel.Diags) = 0, '',
+         Format(' (%d diagnostics)', [Length(LModel.Diags)]))])];
+    for LDi := 0 to High(LModel.Diags) do
+    begin
+      LFileId := LModel.Diags[LDi].FileId;
+      if (LFileId >= 0) and (LFileId <= High(LModel.Tree.Source.FileNames)) then
+        LFile := LModel.Tree.Source.FileNames[LFileId]
+      else
+        LFile := FProject.ModelFile(LMi);
+      LLines := LLines + [Format('    %s %s: %s',
+        [PosTag(LFile, LModel.Diags[LDi].Line, LModel.Diags[LDi].Col),
+         LModel.Diags[LDi].Code, LModel.Diags[LDi].Msg])];
+    end;
+  end;
+  LogBlock(LLines);
+  // Once per run: the count moves on with the closure.
+  FModuleBaseCount := FProject.ModelCount;
 end;
 
 { The keystroke path: re-analyze ONE unit in place instead of rebuilding the
@@ -1578,8 +1762,8 @@ end;
   ModuleAccepted to tell which, and rebuilds for real on a refusal. }
 function TLspServer.TryStartModuleAnalysis: Boolean;
 var
-  LPath: string;
-  LId: Integer;
+  LPath, LNamer, LTakeInNote: string;
+  LId, LChanged, LIdx: Integer;
   LDoc: TLspDocument;
 begin
   Result := False;
@@ -1588,7 +1772,39 @@ begin
     FNoModuleOnce := False;
     Exit;
   end;
-  if (FProject = nil) or not SingleChangedDoc(LPath) then
+  if FProject = nil then
+    Exit;
+  // A FILE MOVED ON DISK needs the rebuild it was scheduled for: the module
+  // path re-reads one unit and trusts every other file to be what the closure
+  // read. Only the signature used to keep this off the fast path - a disk
+  // change moves no overlay - so a disk change arriving beside an edit took
+  // the module run, and FDiskMoved stayed set with nothing left to rebuild.
+  if FDiskMoved then
+    Exit;
+  LChanged := ChangedDocs(LPath);
+  LTakeInNote := '';
+  if TakeInNamer(LNamer) then
+  begin
+    // A unit waiting to be taken in (see TakeInNamer): its program is re-run,
+    // which takes the unit in - unless something else changed as well, when
+    // the rebuild covers both.
+    if (LChanged = 1) and
+       (FProject.ModelIdOf(LPath) <> FProject.ModelIdOf(LNamer)) then
+      Exit;
+    if LChanged > 1 then
+      Exit;
+    LPath := LNamer;
+    // Consumed here: whether the run takes them in or not, retrying would
+    // only repeat it (see FTakeIn).
+    for LIdx := FTakeIn.Count - 1 downto 0 do
+      if SameText(NamerOf(FTakeIn[LIdx]), LNamer) then
+      begin
+        LTakeInNote := LTakeInNote + ' ' + TPath.GetFileName(FTakeIn[LIdx]);
+        FTakeIn.Delete(LIdx);
+      end;
+    LTakeInNote := ' to take in' + LTakeInNote;
+  end
+  else if LChanged <> 1 then
     Exit;
   // It has to be a unit this project already analyzed - a file the closure
   // never reached has no model to swap.
@@ -1604,8 +1820,8 @@ begin
   // after the first incremental run). ModelFile is the path the closure
   // loaded, so the swap keeps the model's identity exactly as it was.
   LPath := FProject.ModelFile(LId);
-  FStartedParts := OverlayParts;
-  FStartedSignature := string.Join(',', FStartedParts);
+  FStartedParts := OverlayParts(True);
+  FModuleBaseCount := FProject.ModelCount;
   FModuleFile := LPath;
   FModuleMode := True;
   // Set on the project rather than kept by the session, and set here rather
@@ -1626,7 +1842,8 @@ begin
   FPendingDue := 0;
   FPendingPriority := '';
   FBuildStart := GetTickCount64;
-  Log(Format('analysis started: incremental, one module (%s)', [LPath]));
+  Log(Format('analysis started: incremental, one module (%s)%s',
+    [LPath, LTakeInNote]));
   FSession.Start;
   Result := True;
 end;
@@ -2260,9 +2477,9 @@ end;
 
 procedure TLspServer.HandleDidOpen(AParams: TJSONValue);
 var
-  LPath, LText, LDisk, LShownNote: string;
+  LPath, LText, LDisk, LShownNote, LNamer: string;
   LVersion: Integer;
-  LDiffers, LShown: Boolean;
+  LDiffers, LShown, LNoFile: Boolean;
   LDoc: TLspDocument;
 begin
   LPath := DocPathOf(AParams);
@@ -2309,40 +2526,59 @@ begin
     Log(Format('textDocument/didOpen %s v%d%s',
       [LPath, LVersion, LShownNote]));
   HydrateOpenDoc(FNav, LPath);
+  // A UNIT WITH NO FILE YET - created in the IDE and never saved - outside the
+  // closure, or with no closure to ask: armed for a take-in whatever happens
+  // below, so that a program naming it is re-run as soon as there is a
+  // project to run it on (see TakeInNamer).
+  LNoFile := LDiffers and not FileExists(LPath) and
+    ((FProject = nil) or (FProject.ModelIdOf(LPath) < 0));
+  if LNoFile then
+    FTakeIn.Add(LPath);
   // Schedule when this buffer is unsaved work the analysis has not seen, OR
   // when nothing has been analyzed yet - the first file opened is what starts
   // the initial build, and without this clause a workspace whose files all
   // match their disk contents would sit unanalyzed until the first request.
   if (LDiffers and AffectsAnalysis(LPath)) or
      ((FProject = nil) and (FSession = nil)) then
-    ScheduleAnalysis(LPath)
+  begin
+    // No priority file for a unit with no file: a priority is loaded whether
+    // or not anything uses it, and a unit nothing names must stay outside.
+    if LNoFile then
+      ScheduleAnalysis('')
+    else
+      ScheduleAnalysis(LPath);
+  end
   else if not LDiffers and DiskNewerThanAnalysis(LPath) and
      AffectsAnalysis(LPath) then
   begin
     // Same as the disk, but not as the disk the analysis READ: the file was
     // rewritten after it (see FDiskReadAt). A full rebuild, not the module
-    // fast path - no overlay changed, so SingleChangedDoc sees nothing - and
-    // the parse donor keeps it to this one unit's parse.
+    // fast path - TryStartModuleAnalysis declines while FDiskMoved is set -
+    // and the parse donor keeps it to this one unit's parse.
     Log('  changed on disk since the analysis read it - rebuild scheduled');
     FDiskMoved := True;
     ScheduleAnalysis(LPath);
   end
-  else if LDiffers and (FProject <> nil) and not FileExists(LPath) then
+  else if LNoFile then
   begin
-    // A UNIT WITH NO FILE YET: created in the IDE and never saved, so it is
-    // outside the closure however the program names it - PasTree resolves an
-    // `in 'path'` to an editor buffer (0.52.2), but only in a build that has
-    // the buffer. The program's new uses clause usually arrives beside this
-    // didOpen and its own rebuild takes the unit in; if it came first and was
-    // analyzed without it (the unit read as missing), nothing else would
-    // schedule the rebuild. Forced like a disk change: no overlay of the
-    // closure moved, and the "inputs did not change" gate would drop it.
-    Log('  not on disk yet (a new unit) - rebuild scheduled in case the ' +
-      'project names it');
-    FDiskMoved := True;
-    // No priority file: a priority is loaded whether or not anything uses
-    // it, and a unit the project does not name must stay outside.
-    ScheduleAnalysis('');
+    // THE IDE'S NEW UNIT. PasTree resolves an `in 'path'` to an editor buffer
+    // (0.52.2) and the module path takes a new import in (0.53.0). When the
+    // program's uses edit arrives beside this didOpen (a program with no
+    // editor view), its incremental run brings the unit in and there is
+    // nothing to do here. When it arrived FIRST (the program open in a tab:
+    // its edit rides the idle tick, this didOpen the first-sight sync - see
+    // TakeInNamer), the program was analyzed with the unit missing and is
+    // re-run now, incrementally, to take it in. Until 0.55.0 this forced a
+    // FULL rebuild either way, 4-5 s on a large project.
+    if TakeInNamer(LNamer) then
+    begin
+      Log(Format('  not on disk yet (a new unit), and %s names it - ' +
+        'reanalyzed to take it in', [ExtractFileName(LNamer)]));
+      ScheduleAnalysis('');
+    end
+    else
+      Log('  not on disk yet (a new unit), and nothing names it yet - kept ' +
+        'as an overlay until a program does');
   end
   else
   begin
@@ -2435,6 +2671,7 @@ var
   LPath: string;
   LDoc: TLspDocument;
   LDiffered: Boolean;
+  LIdx: Integer;
 begin
   LPath := DocPathOf(AParams);
   if LPath = '' then
@@ -2442,6 +2679,8 @@ begin
   LDiffered := FDocs.TryGet(LPath, LDoc) and LDoc.Differs and
     AffectsAnalysis(LPath);
   FDocs.Close(LPath);
+  if FTakeIn.Find(LPath, LIdx) then
+    FTakeIn.Delete(LIdx);
   PublishEmptyDiagnostics(LPath);
   Log('textDocument/didClose ' + LPath);
   // The disk file is the truth again - a rebuild is due only if the overlay

@@ -230,7 +230,14 @@ const
   /// there is no colouring and no navigation in it until it is saved, and the
   /// program shows F1027 for a unit the editor has open. (0.52.0 and 0.52.1
   /// do not have it: they were committed beside it, not on top of it.)
-  cMinPasTreeVersion = '0.52.2';
+  /// 0.53.0 (2026-09-26): the module path TAKES IN a new import - the unit
+  /// the IDE's File > New > Unit (or Save As) writes into the program's uses
+  /// clause is loaded and analyzed beside the program instead of refusing
+  /// with new-dependency. The server leans on it: the didOpen of a unit with
+  /// no file no longer forces a rebuild, the program's incremental run brings
+  /// the unit in. Silent without it: every new unit costs a full rebuild
+  /// again (4-5 s on AVImark), with every answer still right.
+  cMinPasTreeVersion = '0.53.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

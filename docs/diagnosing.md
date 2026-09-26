@@ -83,8 +83,15 @@ for `analysis started:`:
   `too-many-consumers(N>L)` is tunable with the `moduleRedoLimit`
   initializationOption; the rest are library decisions.
 - `full rebuild` on a single-file edit - the server never offered the fast
-  path. That decision is `SingleChangedDoc`, and the cause is always the same
-  shape: something made the inputs look like more than one changed document.
+  path. That decision is `ChangedDocs`, and the cause is always the same
+  shape: something made the inputs look like more than one changed document -
+  or a file moved on disk (`changed on disk ... rebuild scheduled`, `watched:`),
+  which the module path must not paper over.
+- A NEW UNIT (File > New > Unit, Save As) is an incremental run of its
+  program since 0.55.0: `analysis done (incremental)` with
+  `newunits=N(<names>)` in its stages, then `taken in by the incremental run`
+  listing the files. `incremental refused ... new-dependency-<why>` names the
+  case PasTree left to a rebuild (see its docs/incremental-analysis.md).
 
 The rest of this section is about a slow REBUILD, a different question.
 

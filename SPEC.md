@@ -701,7 +701,43 @@ per-document parts, and the two lists are merged by path. One differing path
 | path disappears | a save, or a close without saving |
 
 Two or more differing paths rebuild. PasTree's entry point takes one path and
-its guards inspected one unit, so this is not a place to be clever.
+its guards inspected one unit, so this is not a place to be clever. Neither is
+a FILE MOVED ON DISK (a reload noticed at didOpen, a watched create or
+delete): the module path trusts every other file to be what the closure read,
+so while such a rebuild is pending the fast path is not offered at all.
+
+**A new unit is an incremental run of its program** (0.55.0, PasTree 0.53.0).
+File > New > Unit writes `UnitN in 'UnitN.pas'` into the program and opens the
+unit's editor, and a module run of the program takes the unit in - PasTree
+loads it (an editor buffer with no file), and every unit it pulls in, beside
+the program. Nothing else is redone: nothing else can depend on the new unit
+yet. Until then the didOpen of a unit with no file forced a full rebuild -
+4-5 s on a large project. Two server-side pieces make it hold:
+
+- **The program first.** The unit's didOpen comes with the client's
+  first-sight sync; the program's didChange comes with it only when the
+  program has no editor view. Open in a tab - the usual session - the program's
+  edit fires EditorViewModified and goes out on the idle tick, over a second
+  EARLIER (1.6 s in the first AVImark run, 2026-09-26), so the program is
+  analyzed with the unit a missing import (F1027) before the unit's buffer
+  exists. When it arrives no document of the closure changes, so the signature
+  shows nothing; the unit waits in `FTakeIn` (armed by its didOpen) until
+  `TakeInNamer` finds the program that names it without having it, and the
+  program is re-run (`analysis started: incremental, one module (<dpr>) to
+  take in <unit>`) - 62 + 63 ms on AVImark, against the ~5 s rebuild it
+  replaces. Consumed when that run starts and cleared by every full rebuild,
+  so a unit that cannot be taken in is never retried in a loop.
+- **The built parts are cut AFTER the run**, against the closure it produced
+  (`CommitBuiltParts`): the parts of every document that differed when the run
+  started, kept if the new project holds the file. Cut at the start, as they
+  were, a unit that joined in the run was missing from them, read as a second
+  changed document forever after, and the first edit anywhere else rebuilt
+  the closure.
+
+An accepted run that took units in says so twice: `newunits=<n>(<names>)` in
+its stages, and a `taken in by the incremental run` block with each new
+unit's file and diagnostics - the one part of the parse record (below) that a
+module run changes.
 
 Then: `TPasAsyncSession.CreateForModule` takes ownership of the project, the
 document buffers go in exactly as for a full session, and the project comes
@@ -750,7 +786,9 @@ then `analysis done (incremental)`, and on a refusal `incremental refused for
 <file> (module=refused:<reason>) - full rebuild` with PasTree's own reason.
 `LspClientSmoke` section 5c is the gate: it reads the server's log back and
 requires the module path for the first edit to a file, an edit on top of an
-edit, and a revert.
+edit, and a revert. Section 5r does the same for a unit that exists only as a
+buffer, in both arrival orders, and for an edit elsewhere right after the
+unit joined.
 
 ## What the log contains
 

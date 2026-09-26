@@ -1380,9 +1380,14 @@ end;
   and has no file to find. Until PasTree 0.52.2 every resolver gate asked the
   disk: the unit stayed outside the closure, so there was no colouring and no
   navigation in it until the first save (2026-09-25). Both arrival orders:
-  the unit first (the one the IDE's Sync produces), and the program first -
-  analyzed while the unit was still missing, which only the didOpen's own
-  rebuild can repair. }
+  the program first - what the IDE sends when the program is open in a tab
+  (its edit rides the idle tick, the unit's didOpen the first-sight sync a
+  second later; the first AVImark run, 2026-09-26) - analyzed while the unit
+  was still missing, which the didOpen repairs by re-running the program that
+  names it; and the unit first, one sync carrying both (a program with no
+  editor view). Either way the unit joins through an INCREMENTAL run of the
+  program since 0.55.0 (PasTree 0.53.0 takes a new import in): until then each
+  order cost a closure rebuild. }
 procedure TestUnsavedUnit;
 const
   cUnitText =
@@ -1402,7 +1407,8 @@ const
     'end;'#13#10#13#10 +
     'end.'#13#10;
 var
-  LAppFile, LNewFile, LAppText, LBefore: string;
+  LAppFile, LNewFile, LAppText, LBefore, LAfter: string;
+  LUnitFile, LUnitText, LEdited: string;
   LLine, LChar: Integer;
 
   procedure SendDidClose(const AFile: string);
@@ -1468,7 +1474,8 @@ begin
     'Writeln(Shout(', ['  Writeln(UnsavedGreeting);']));
   Check(LAppText.Contains('DemoUnsaved in '), 'fixture patch applied');
 
-  // The program first, analyzed without the unit; then the unit arrives.
+  // The program first, analyzed without the unit; then the unit arrives - the
+  // IDE's order when the program is open in a tab (see the header).
   // FIRST of the two orders: once the unit has been in a build, the module
   // path keeps its model after the program drops it again, and the unit no
   // longer reads as outside the closure.
@@ -1479,15 +1486,53 @@ begin
   LBefore := ReadServerLog;
   SendDidOpenText(LNewFile, cUnitText);
   CheckAnalyzed('program first');
-  Check(Copy(ReadServerLog, Length(LBefore) + 1, MaxInt).Contains(
-    'not on disk yet (a new unit) - rebuild scheduled'),
-    'program first: the didOpen scheduled the rebuild that took it in');
+  LAfter := Copy(ReadServerLog, Length(LBefore) + 1, MaxInt);
+  Check(LAfter.Contains('names it - reanalyzed to take it in'),
+    'program first: the didOpen found the program that names the unit');
+  // Since 0.55.0 (PasTree 0.53.0) a new unit is an incremental run of its
+  // program, where it used to cost a full rebuild - 4-5 s on a large project.
+  Check(LAfter.Contains('analysis started: incremental, one module') and
+    LAfter.Contains('newunits=1(demounsaved)'),
+    'program first: the program''s incremental run took the unit in');
+  Check(not LAfter.Contains('analysis started: full rebuild'),
+    'program first: and no closure rebuild was started for it');
+  // The unit is inside the closure now, and its buffer is part of what the
+  // analysis was built from: an edit ANYWHERE ELSE is a one-file change. A
+  // built signature cut when the run STARTED - before the unit joined - left
+  // the unit out, so it read as a second changed document and this edit
+  // rebuilt the closure (and the restore below left the unit behind as an
+  // orphan the next section tripped over).
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  LUnitText := TFile.ReadAllText(LUnitFile);
+  LEdited := StringReplace(LUnitText, 'Result := ''Hello, ''',
+    '// after a new unit'#13#10'  Result := ''Hello, ''', []);
+  Check(LEdited <> LUnitText, 'fixture patch applied (a comment in a body)');
+  LBefore := ReadServerLog;
+  SendDidChange(LUnitFile, LEdited);
+  FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LUnitFile, LLine, LChar)),
+    'program first: an edit elsewhere is analyzed');
+  LAfter := Copy(ReadServerLog, Length(LBefore) + 1, MaxInt);
+  Check(LAfter.Contains('analysis started: incremental, one module') and
+    not LAfter.Contains('analysis started: full rebuild'),
+    'program first: and it is a one-module run, not a closure rebuild');
+  SendDidChange(LUnitFile, LUnitText);
   Restore;
 
-  // The unit first, then the program - one Sync's order.
+  // The unit first, then the program - one sync carrying both, the IDE's
+  // order when the program has no editor view: its uses edit raises no event
+  // and rides the unit's first-sight sync.
+  LBefore := ReadServerLog;
   SendDidOpenText(LNewFile, cUnitText);
   SendDidChange(LAppFile, LAppText);
   CheckAnalyzed('unit first');
+  LAfter := Copy(ReadServerLog, Length(LBefore) + 1, MaxInt);
+  Check(LAfter.Contains('nothing names it yet - kept as an overlay'),
+    'unit first: the didOpen alone schedules nothing');
+  Check(LAfter.Contains('analysis started: incremental, one module') and
+    LAfter.Contains('newunits=1(demounsaved)') and
+    not LAfter.Contains('analysis started: full rebuild'),
+    'unit first: the program''s edit took the unit in incrementally');
   Restore;
 end;
 
