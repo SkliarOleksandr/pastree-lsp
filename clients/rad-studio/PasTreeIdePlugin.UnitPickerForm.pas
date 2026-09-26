@@ -132,7 +132,7 @@ type
     FShown: TArray<TLspUnitRow>;   // what the list shows
     FChosen: Boolean;
     FChosenRow: TLspUnitRow;
-    FQuiet: TColor;
+    FNameColor, FPathColor, FQuiet: TColor;  // RowColors
     FLoadingState: Boolean;
     procedure CreateList;
     procedure lbUnitsClick(Sender: TObject);
@@ -155,7 +155,7 @@ type
     constructor CreateWith(AOwner: TComponent; AMode: TUnitPickerMode;
       const AProjectRows: TArray<TLspUnitRow>; const AProjectName: string;
       const AFetch: TUnitPickerFetch; const AGroupSource: TUnitPickerGroupRows;
-      AQuiet: TColor); reintroduce;
+      ANameColor, APathColor, AQuiet: TColor); reintroduce;
     destructor Destroy; override;
   end;
 
@@ -200,6 +200,7 @@ uses
   System.IOUtils,
   System.Generics.Defaults,
   ToolsAPI,
+  ToolsAPI.UI,
   PasTreeIdePlugin.Settings;
 
 const
@@ -295,6 +296,27 @@ begin
     Result := LTheming.StyleServices.GetSystemColor(AColor);
 end;
 
+{ The row colours are the IDE's own View Unit's (RAD Studio 13, the IDE
+  Insight popup - coreide's TPopupSearchForm), read off its screenshots on
+  2026-09-26 and traced to their sources: the name is the theme's
+  clWindowText (#000000 light, #FFFFFF dark), the directory the palette's
+  theme-aware blue, ThemeAwareColors[itcBlue] (#0E4A84 light, #8CB6DF dark -
+  the tables of designide's TIDEThemePalette). Asked of the IDE rather than
+  written down, so another theme gets the IDE's answer for it. Until 0.55.1
+  the name took the list's font colour - a SYSTEM clWindowText, black on
+  the dark theme's #2D2F32 - and the directory clGrayText, which stays for
+  the 'compiled only' tag. }
+procedure RowColors(out AName, APath, AQuiet: TColor);
+var
+  LUI: INTAIDEUIServices;
+begin
+  AName := Themed(clWindowText);
+  AQuiet := Themed(clGrayText);
+  APath := AQuiet;
+  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+    APath := LUI.ThemeAwareColors[itcBlue];
+end;
+
 function ShowUnitPicker(AMode: TUnitPickerMode;
   const AProjectRows: TArray<TLspUnitRow>;
   const AProjectName: string; const AFetch: TUnitPickerFetch;
@@ -304,6 +326,7 @@ var
   LForm: TPasTreeUnitPickerForm;
   LTheming: IOTAIDEThemingServices;
   LThemed: Boolean;
+  LName, LPath, LQuiet: TColor;
 begin
   ARow := Default(TLspUnitRow);
   AImplementation := False;
@@ -311,8 +334,9 @@ begin
     and LTheming.IDEThemingEnabled;
   if LThemed then
     LTheming.RegisterFormClass(TPasTreeUnitPickerForm);
+  RowColors(LName, LPath, LQuiet);
   LForm := TPasTreeUnitPickerForm.CreateWith(Application.MainForm, AMode,
-    AProjectRows, AProjectName, AFetch, AGroupSource, Themed(clGrayText));
+    AProjectRows, AProjectName, AFetch, AGroupSource, LName, LPath, LQuiet);
   try
     if LThemed then
       LTheming.ApplyTheme(LForm);
@@ -337,7 +361,8 @@ end;
 constructor TPasTreeUnitPickerForm.CreateWith(AOwner: TComponent;
   AMode: TUnitPickerMode; const AProjectRows: TArray<TLspUnitRow>;
   const AProjectName: string; const AFetch: TUnitPickerFetch;
-  const AGroupSource: TUnitPickerGroupRows; AQuiet: TColor);
+  const AGroupSource: TUnitPickerGroupRows;
+  ANameColor, APathColor, AQuiet: TColor);
 begin
   inherited Create(AOwner);   // loads the .dfm, and with it the design PPI
   FMode := AMode;
@@ -346,6 +371,8 @@ begin
   FProjectName := AProjectName;
   FFetch := AFetch;
   FGroupSource := AGroupSource;
+  FNameColor := ANameColor;
+  FPathColor := APathColor;
   FQuiet := AQuiet;
   CreateList;
   // Two text lines plus breathing room, from the font in effect after
@@ -718,6 +745,10 @@ begin
   LTextColor := ACanvas.Font.Color;
   LLineHeight := Abs(Font.Height) + 4;
   LTop := ARect.Top + 3;
+  // The canvas arrives in the list's font colour, a system clWindowText -
+  // black on the dark theme - so the name takes the theme's (RowColors).
+  if not ASelected then
+    ACanvas.Font.Color := FNameColor;
   ACanvas.TextOut(ARect.Left + 6, LTop, FShown[AIndex].Name);
   // A unit the server has only as a .dcu opens as a generated tab, not a
   // source file - worth saying before the click.
@@ -730,10 +761,10 @@ begin
     ACanvas.Font.Color := LTextColor;
   end;
   Inc(LTop, LLineHeight);
-  // The directory in a quieter colour - but NOT on the selected row, where
+  // The directory in the IDE's blue - but NOT on the selected row, where
   // the highlight's own text colour is the only one guaranteed readable.
   if not ASelected then
-    ACanvas.Font.Color := FQuiet;
+    ACanvas.Font.Color := FPathColor;
   ACanvas.TextOut(ARect.Left + 6, LTop,
     ExcludeTrailingPathDelimiter(ExtractFilePath(FShown[AIndex].FilePath)));
   ACanvas.Font.Color := LTextColor;
