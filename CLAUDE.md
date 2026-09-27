@@ -18,12 +18,16 @@ Green builds do not cover the half of this product that lives inside RAD
 Studio. On 2026-09-02 three defects passed a full build and were found by Alex
 opening a project and clicking - and each had already been committed as fixed.
 
-## English, plain hyphens, `local/` for working papers
+## English in the repository, Russian to Alex, plain hyphens, `local/` for working papers
 
 **Everything written into this repository is in English** - specs, READMEs,
-commit messages, comments, log lines. Conversation is in whatever language
-suits; artifacts are not, because they outlive it and the next reader may be a
-stranger or a future session.
+commit messages, comments, log lines - because it outlives the conversation
+and the next reader may be a stranger or a future session.
+
+**Everything written to Alex is in Russian** - the report of what was done,
+summaries, questions, explanations - in full, not a shortened retelling. It
+is the language he works in: a report in English is one he has to ask for
+again. Quoted tool output, code and identifiers stay as they are.
 
 **Only the plain hyphen `-`. Never an em dash (U+2014) or en dash (U+2013)**,
 anywhere. They are non-ASCII, and `dcc32` on a legacy code page, `cmd.exe` and
