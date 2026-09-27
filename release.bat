@@ -2,7 +2,9 @@
 rem Pack a release archive: one zip a user unpacks and runs, containing the
 rem sources of BOTH halves and nothing built.
 rem
-rem Usage:  release.bat [version] [--yes]   (RAD Studio version, as elsewhere)
+rem Usage:  release.bat [version] [win32] [win64] [--yes]
+rem         (which RAD Studio and which of its IDEs to build and test with, as
+rem         elsewhere - see scripts\ide.bat)
 rem
 rem WHY SOURCES AND NOT A BUILT SERVER. Shipping pastree-server.exe would mean
 rem shipping an unsigned binary: GitHub neither virus-scans release assets nor
@@ -75,9 +77,11 @@ rem report a successful install of nothing.
 >>"%LSTAGE%\README.txt" echo PATH is not needed - everything is in this archive.
 >>"%LSTAGE%\README.txt" echo.
 >>"%LSTAGE%\README.txt" echo To install: close RAD Studio, then run install.bat in this directory.
->>"%LSTAGE%\README.txt" echo It builds both halves from source and registers the IDE package. RAD
->>"%LSTAGE%\README.txt" echo Studio must be closed: it holds the package file while running, and it
->>"%LSTAGE%\README.txt" echo rewrites its own package list when it exits.
+>>"%LSTAGE%\README.txt" echo It builds both halves from source and registers the IDE package - with
+>>"%LSTAGE%\README.txt" echo the 64-bit IDE as well, where RAD Studio 13 has one installed (pass
+>>"%LSTAGE%\README.txt" echo win32 or win64 to install.bat for only one of them). RAD Studio must be
+>>"%LSTAGE%\README.txt" echo closed: it holds the package file while running, and it rewrites its
+>>"%LSTAGE%\README.txt" echo own package list when it exits.
 >>"%LSTAGE%\README.txt" echo.
 >>"%LSTAGE%\README.txt" echo To remove it again: run pastree-lsp\uninstall.bat.
 >>"%LSTAGE%\README.txt" echo.

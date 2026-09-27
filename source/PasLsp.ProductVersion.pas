@@ -15,8 +15,9 @@
 
   ZERO DEPENDENCIES, AND THAT IS A HARD REQUIREMENT, NOT A STYLE PREFERENCE.
   This unit is linked into BOTH pastree-server.exe (Win64, links PasTree) and
-  the RAD Studio designtime package (Win32, links rtl/vcl/designide and nothing
-  else - PasTree is Win64-only and CANNOT go in there; that constraint is the
+  the RAD Studio designtime package (Win32 for every 32-bit IDE, Win64 as well
+  for a 64-bit one; either links rtl/vcl/designide and nothing else - PasTree
+  is Win64-only and CANNOT go into the Win32 build; that constraint is the
   entire reason the analysis moved out of process). Anything this unit `uses`
   must therefore be available in a plain Win32 designtime BPL.
 
@@ -58,7 +59,7 @@ const
   /// this unit's 0.22.9, about forty commits behind, silently. Bump it in the
   /// same edit as this line.
   /// </summary>
-  PasTreeLspVersion = '0.55.1';
+  PasTreeLspVersion = '0.56.0';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than

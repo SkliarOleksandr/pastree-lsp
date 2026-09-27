@@ -6,8 +6,8 @@ unit PasTreeIdePlugin.LspSession;
   (declaration, references). This is what replaced the in-process
   BuildNavigator - same role, opposite shape. That unit
   (PasTreeIdePlugin.Analysis) no longer exists in this package: linking PasTree
-  into a Win32 designtime BPL is the thing the whole out-of-process design was
-  built to stop.
+  into this designtime BPL - Win32 in every 32-bit IDE - is the thing the whole
+  out-of-process design was built to stop.
 
   THE SHAPE CHANGE IS THE WHOLE POINT, AND CALLERS FEEL IT. BuildNavigator
   returned an answer; these take a callback. Nothing here blocks the IDE's main
@@ -1527,6 +1527,18 @@ end;
 /// loaded into.
 /// </summary>
 function GetIDELibraryPaths(const APlatform, AFallbackPlatform: string): TArray<string>;
+const
+  // THE 64-BIT IDE KEEPS ITS OWN SET of overrides, beside the 32-bit IDE's
+  // under the same base key and not merged with it: on the machine this was
+  // written on (RAD Studio 13.2, 2026-09-27) the override every third-party
+  // library path goes through existed only in the 32-bit IDE's set. So the
+  // package reads the set its host IDE resolves paths with - the paths it
+  // hands the server should be the ones that IDE's compiler would find.
+  {$IFDEF CPUX64}
+  cEnvVarsKey = 'Environment Variables x64';
+  {$ELSE}
+  cEnvVarsKey = 'Environment Variables';
+  {$ENDIF}
 var
   LServices: IOTAServices;
   LSeen: TDictionary<string, Byte>;
@@ -1541,7 +1553,8 @@ var
   ///   1. $(Platform) - not a variable at all, it is the platform the paths are
   ///      being read for.
   ///   2. The IDE's own "Environment Variables" overrides (Tools > Options >
-  ///      Environment Variables). These are the ones a real installation
+  ///      Environment Variables) - the 64-bit IDE's own set in the 64-bit
+  ///      package, see cEnvVarsKey. These are the ones a real installation
   ///      actually depends on - this machine resolves every third-party library
   ///      through a $(avi3rdlib) override - and they are IDE settings, not
   ///      process environment variables, so nothing outside the IDE's own
@@ -1644,7 +1657,7 @@ begin
       // see ExpandMacros for why ExpandRootMacro alone is not enough.
       LMacros.NameValueSeparator := '=';
       LKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
-        + 'Environment Variables';
+        + cEnvVarsKey;
       if LReg.OpenKeyReadOnly(LKey) then
       begin
         LNames := TStringList.Create;
@@ -2023,10 +2036,22 @@ end;
   establishing what was different about the host. The answer belongs in the
   log the user already sends, not in a round of questions.
 
+  AND WHICH OF ITS TWO IDEs. RAD Studio 13 has a 32-bit and a 64-bit bds.exe
+  (bin\ and bin64\) with the SAME file version - both 37.0.60952.8797 on 13.2
+  - so the version cannot tell them apart, and which one it was decides whose
+  .map an offset belongs to. This code's own bitness is the host's: a
+  package loads only into the IDE of its own bitness.
+
   Every failure here returns what it has rather than raising. This decorates
   a log line - a session must not fail to start because a version resource
   could not be read. }
 function HostDescription: string;
+const
+  {$IFDEF CPUX64}
+  cIdeBits = '64-bit IDE';
+  {$ELSE}
+  cIdeBits = '32-bit IDE';
+  {$ENDIF}
 var
   LExe: string;
   LSize, LHandle: DWORD;
@@ -2035,7 +2060,7 @@ var
   LLen: UINT;
 begin
   LExe := ParamStr(0);
-  Result := ExtractFileName(LExe);
+  Result := ExtractFileName(LExe) + ', ' + cIdeBits;
   LSize := GetFileVersionInfoSize(PChar(LExe), LHandle);
   if LSize = 0 then
     Exit;
@@ -2046,10 +2071,11 @@ begin
     Exit;
   if (LInfo = nil) or (LLen < SizeOf(TVSFixedFileInfo)) then
     Exit;
-  Result := Format('%s %d.%d.%d.%d',
-    [Result,
+  Result := Format('%s %d.%d.%d.%d, %s',
+    [ExtractFileName(LExe),
      HiWord(LInfo.dwFileVersionMS), LoWord(LInfo.dwFileVersionMS),
-     HiWord(LInfo.dwFileVersionLS), LoWord(LInfo.dwFileVersionLS)]);
+     HiWord(LInfo.dwFileVersionLS), LoWord(LInfo.dwFileVersionLS),
+     cIdeBits]);
 end;
 
 function TLspSession.IsReady: Boolean;
@@ -2165,12 +2191,13 @@ begin
           [cLspServerEnvVar, ServerExeOverride]))
       else
         // Both searched directories are named, because the answer differs by
-        // which one the reader expected: a normal build puts the exe in the
-        // parent (the BPL is one level down, under its RAD Studio version),
-        // and naming only the BPL's own directory would send someone to copy a
-        // file into a place nothing writes.
+        // which one the reader expected: a normal build puts the exe two
+        // levels up (the BPL sits in out\<version>\<win32|win64>\, the exe in
+        // out\), and naming only the BPL's own directory would send someone
+        // to copy a file into a place nothing writes.
         LogDiagnostic(Format('%s not found next to the package''s BPL (%s) '
-          + 'nor in the directory above it - build it there, or point %s at it.',
+          + 'nor two directories above it, where the build puts it - build '
+          + 'it there, or point %s at it.',
           [cLspServerExeName, PackageDir, cLspServerEnvVar]));
       Exit;
     end;

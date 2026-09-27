@@ -15,8 +15,9 @@ unit PasLsp.SourceText;
   SHARED WITH THE RAD STUDIO PACKAGE, and therefore under the same rule as
   PasLsp.ProductVersion: this unit uses the RTL and NOTHING from this project,
   and it must never gain a dependency - above all not on PasTree, which is
-  Win64-only while the package is a Win32 designtime BPL. That is the entire
-  reason the analysis runs out of process. tests/VersionSmoke links this unit
+  Win64-only while every IDE version gets the package as a Win32 designtime
+  BPL (a 64-bit IDE gets a Win64 one besides). That is the entire reason the
+  analysis runs out of process. tests/VersionSmoke links this unit
   into a Win32 program for exactly that reason: if a `uses` line creeps in
   here, that harness stops compiling, which is the alarm.
 

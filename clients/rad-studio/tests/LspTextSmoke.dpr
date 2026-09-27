@@ -12,9 +12,10 @@ program LspTextSmoke;
   log line and nothing to reproduce from, so it belongs here where a wrong
   string is a failed check.
 
-  Win32 like every harness in this directory, and that costs nothing: these two
-  units link the RTL and nothing else. (PasLsp.XmlDoc is compiled into the
-  Win64 server; the code under test is the same code either way.)
+  Win32 like every harness in this directory (and Win64 as well whenever the
+  64-bit IDE's package is built), and that costs nothing: these two units link
+  the RTL and nothing else. (PasLsp.XmlDoc is compiled into the Win64 server;
+  the code under test is the same code either way.)
 
   Usage: LspTextSmoke.exe   (no arguments; exits non-zero on failure)
 }

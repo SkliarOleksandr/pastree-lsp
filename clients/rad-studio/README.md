@@ -16,9 +16,12 @@ into its own repository (2026-08-16), then into the server's repository as
 because the server and this package are one deliverable with one version - see
 the root README.
 
-**THE PACKAGE LINKS NO PASTREE, AND MUST NOT START.** It is a 32-bit designtime
-BPL; PasTree is Win64-only, and that mismatch is the entire reason the analysis
-runs out of process at all. So:
+**THE PACKAGE LINKS NO PASTREE, AND MUST NOT START.** Every IDE version gets it
+as a 32-bit designtime BPL; PasTree is Win64-only, and that mismatch is the
+entire reason the analysis runs out of process at all. The Win64 build for a
+64-bit IDE (see "The 64-bit IDE" below) is the same source under the same rule,
+although PasTree would compile into it - "Why the in-process path had to go"
+has the reasons that outlive the bitness. So:
 
 ```
 requires rtl, vcl, designide;
@@ -37,9 +40,11 @@ This used to be guaranteed by geography - PasTree was in another repository
 entirely. Now it is in the same tree, one directory up, and "just link this one
 unit" is an easy and plausible mistake that would quietly undo the whole
 out-of-process design. `tests/VersionSmoke` is the tripwire for the most likely
-version of it: it is a Win32 program over both shared units, so it stops
-compiling the moment either one grows a PasTree dependency. A third shared unit
-is a decision to weigh, not a convenience - each one is a route in.
+version of it: its Win32 build - made on every build, whatever IDEs are
+targeted - is a program over both shared units, so it stops compiling the
+moment either one grows a PasTree dependency. (Its Win64 build, made beside the
+64-bit IDE's package, would link PasTree without complaint.) A third shared
+unit is a decision to weigh, not a convenience - each one is a route in.
 
 The analysis itself lives in `pastree-server.exe`; **both features run through
 it**. See "Architecture" below.
@@ -609,6 +614,9 @@ not an oversight - and these are the reasons it could not stay:
 
 - A designtime package is forced to run **Win32** (the IDE itself is a
   32-bit process) - there is no way to make this package itself Win64.
+  *True when written. RAD Studio 12.3 added a 64-bit IDE, and since 0.56.0 the
+  package is built for it as well - which removes this reason for that one
+  build and neither of the other two, so it stays out of process too.*
 - The real target project this plugin is ultimately for is large enough to
   need **Win64 and several GB** to analyze (the same
   codebase OOMs when analyzed as Win32). That analysis was never going to fit
@@ -616,6 +624,9 @@ not an oversight - and these are the reasons it could not stay:
 - Synchronous analysis on the UI thread froze the IDE for as long as it took.
   The measurement above puts that at ~2.7s for this small package; at the real
   target's scale it is not a pause, it is a hang.
+
+And one the 64-bit IDE makes no difference to: in process, an analyzer crash
+is an IDE crash. Out of process it is a server restart and a line in the log.
 
 ### What is left
 
@@ -650,23 +661,26 @@ No path is hardcoded. `FindServerExe` looks in three places, in order:
    run some other build, and a typo would cost an afternoon.
 2. `pastree-server.exe` next to the package's own BPL, so a matched pair can be
    deployed together.
-3. `pastree-server.exe` one directory up from the BPL, which is where a normal
-   build leaves it - the BPL sits one level down, in a directory named for the
-   RAD Studio version that compiled it.
+3. `pastree-server.exe` two directories up from the BPL, which is where a
+   normal build leaves it - the BPL sits in `out\<RAD Studio version>\win32\`
+   or `...\win64\`. Exactly two, not a walk up: the level between,
+   `out\<version>\`, held the BPL before 0.56.0, and old builds left server
+   copies there that a walk would take first (`LspClientSmoke` section 0 pins
+   this).
 
 **Neither normally has to be arranged, because the build puts the BPL in
-`out\<RAD Studio version>\` and `pastree-server.exe` in `out\` directly above
-it.** Case 2 is therefore satisfied by where the build writes its output: one
-build produces both files, and the pair the IDE loads cannot come from two
-different builds. `install.bat` registers the BPL's full path with the IDE; a
-designtime package is loaded by path, so it need not live in the IDE's own
-`Bpl` directory.
+`out\<RAD Studio version>\<win32|win64>\` and `pastree-server.exe` in `out\`,
+two levels above it.** Case 3 is therefore satisfied by where the build writes
+its output: one build produces both files, and the pair the IDE loads cannot
+come from two different builds. `install.bat` registers the BPL's full path
+with the IDE; a designtime package is loaded by path, so it need not live in
+the IDE's own `Bpl` directory.
 
-The per-version subdirectory is what lets several RAD Studio versions have the
-plugin installed at the same time: a designtime BPL loads only in the compiler
-that produced it, so each needs its own file, while the server - a separate
-Win64 process - is shared. That is why case 2 searches the BPL's directory
-*and* its parent.
+The per-version, per-IDE subdirectory is what lets several RAD Studio versions
+- and both IDEs of one - have the plugin installed at the same time: a
+designtime BPL loads only in the compiler and the bitness that produced it, so
+each needs its own file, while the server - a separate Win64 process - is
+shared. That is why the search covers the BPL's own directory *and* `out\`.
 
 This was not always so. Without `DCC_BplOutput` the BPL landed in the IDE
 default, e.g. `C:\Users\Public\Documents\Embarcadero\Studio\37.0\Bpl\`, which
@@ -687,32 +701,42 @@ naming which case it is, since the two need different fixes:
 
 ```
 [pastree-lsp] PASTREE_LSP_SERVER points at "C:\...\out\pastree-server.exe", which does not exist.
-[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\out\37.0\) nor in the directory above it - build it there, or point PASTREE_LSP_SERVER at it.
+[pastree-lsp] pastree-server.exe not found next to the package's BPL (C:\...\out\37.0\win32\) nor two directories above it, where the build puts it - build it there, or point PASTREE_LSP_SERVER at it.
 ```
 
 ## Where the build puts things
 
 ```
 out\
-  pastree-server.exe        one Win64 process, shared by every IDE version
-  <RAD Studio version>\     PasTreeIdePlugin.bpl, .dcp - one set per version
+  pastree-server.exe        one Win64 process, shared by every IDE
+  <RAD Studio version>\
+    win32\                  PasTreeIdePlugin.bpl, .dcp, .map - the 32-bit IDE's
+    win64\                  the same for the 64-bit IDE, where the version has one
+  ide\<platform>\           a build started inside the IDE - never registered
   dcu\<version>\win32|win64
+  dcu\ide\<platform>\
 ```
 
 **Split by IDE version because neither a `.bpl` nor a `.dcu` is portable
 between compilers.** A designtime package loads only in the version that built
 it, so several installed RAD Studios each need their own; shared `.dcu` output
 produces "unit was compiled with a different version of ..." in a build that
-changed nothing. The server is the exception - a separate Win64 process - so
-one build of it serves all of them, and the package looks for it beside its own
-BPL *and* one level up.
+changed nothing. **And by IDE within a version**, because RAD Studio 13 has two
+and the 64-bit one loads only a Win64 BPL of the same name. A subdirectory for
+each, rather than Win32 left where it was in `out\<version>\`, keeps every BPL
+exactly two levels below `out\`. The server is the exception - a separate
+Win64 process - so one build of it serves all of them, and the package looks
+for it beside its own BPL *and* two levels up.
 
 **`build.bat` passes those three output paths to msbuild**; the values in the
 `.dproj` are a fallback for a build started inside the IDE, which lands in
-`out\` and is deliberately not what `install.bat` registers. The project file
-cannot work the version out for itself: msbuild exposes no property naming the
-RAD Studio that is running it (`$(ProductVersion)` expands to nothing, and the
-build then fails on a path ending in a bare separator).
+`out\ide\<platform>\` and is deliberately not what `install.bat` registers -
+the IDE's own Install command does register it, and `install.bat` removes that
+registration. The project file cannot work the version out for itself: msbuild
+exposes no property naming the RAD Studio that is running it
+(`$(ProductVersion)` expands to nothing, and the build then fails on a path
+ending in a bare separator); `$(Platform)` it does know, and it keeps the two
+IDEs' builds apart there too.
 
 **This explanation lives here rather than in the `.dproj` because RAD Studio
 strips XML comments from that file every time it saves it** - it ate this one
@@ -720,10 +744,48 @@ once already, along with the note on `DCC_DcuOutput` that had been there far
 longer. Anything about the project file that has to survive belongs in this
 README; leave a pointer in the `.dproj`, not the reasoning.
 
+## The 64-bit IDE
+
+Delphi 12.3 added a 64-bit IDE as an optional feature, and RAD Studio 13 has it
+too: `bin64\bds.exe` beside `bin\bds.exe`, one installation, one registry key.
+Since 0.56.0 the package is built for it and registered with it by default.
+What that took, as checked on 2026-09-27 against 13.2 and 12.3 on one machine:
+
+- **Its packages are Win64** - not Win64x, which is C++Builder's modern
+  platform - and it reads them from `Known Packages x64` (experts: `Experts
+  x64`), never from the 32-bit IDE's list. `install.bat` writes the one each
+  IDE reads.
+- **Detected by the `App x64` value and the file it names.** The x64 keys are
+  no evidence: 12.3 had created `Known Packages x64` and its siblings on a
+  machine where the 64-bit IDE was never installed.
+- **Its floor is 37.0** (`LMINMAJOR64` in `scripts\ide.bat`). 23.0 compiles
+  for Win64 unchanged, but 12.3's 64-bit IDE is an "initial release" - no
+  Delphi refactorings, no Live Templates, among others - and the package has
+  not been run in it. Lower the floor once it has.
+- **ToolsAPI is the same** (Embarcadero's word, and the package compiles for
+  it unchanged), and so is nearly everything the package reads from the
+  registry: its own `PasTree` settings, `Editor\Options\Known Editor
+  Enhancements` and `Library\*` have no x64 twins. Settings made in one IDE
+  apply in the other, and `uninstall.bat` prunes the key mapping records only
+  once neither IDE has the package any more.
+- **Except the macro overrides.** The 64-bit IDE keeps its own `Environment
+  Variables x64` (Tools > Options > Environment Variables, in that IDE), not
+  merged with the 32-bit IDE's, and `GetIDELibraryPaths` reads the set of the
+  IDE it runs in. On the machine this was written on, the one override every
+  third-party library path goes through existed only in the 32-bit set - the
+  64-bit IDE needs it defined before either it or the plugin resolves them.
+- **Both `bds.exe` carry the same version**, so the host line in the server
+  log names the IDE (`bds.exe 37.0.60952.8797, 64-bit IDE`), and a crash log
+  block names the BPL by full path - the two builds have different maps.
+- **A build needs both IDEs of the version closed**, whichever it is for -
+  `scripts\ide-closed.bat` has the reasons.
+
 ## Building and testing
 
 **`build.bat` at the repository root builds everything** - server, this
-package, all five harnesses - and runs the harnesses. That is the intended way,
+package for each IDE of the version, all five harnesses (Win32, and Win64 as
+well whenever the Win64 package is built) - and runs the harnesses. That is the
+intended way,
 and not merely a convenience: the package and the server share one version and
 check each other for equality at the handshake, which only means anything if a
 normal build produces both halves from the same commit. RAD Studio must be
@@ -737,12 +799,14 @@ its own `.bpl`, and the IDE rewrites its package list on exit, which would
 discard a registration made while it ran. `uninstall.bat` removes the entry and
 leaves `out\` alone.
 
-Which RAD Studio both target is decided in one place, `scripts\ide.bat`, and
-decided once per run: a designtime BPL loads only in the version that compiled
-it, so "which Delphi builds it" and "which Delphi registers it" cannot be
-allowed to be different answers. It takes an explicit version (`build.bat
-37.0`), asks only when several suitable installations exist, and `--yes` takes
-the newest.
+Which RAD Studio both target, and which of its IDEs, is decided in one place,
+`scripts\ide.bat`, and decided once per run: a designtime BPL loads only in the
+version and the bitness that compiled it, so "which Delphi builds it" and
+"which Delphi registers it" cannot be allowed to be different answers. It takes
+an explicit version (`build.bat 37.0`) and `win32` or `win64` to narrow the
+IDEs (`PASTREE_IDE_PLATFORMS` for the same, per shell), asks only when several
+suitable installations exist, and `--yes` takes the newest. It never asks about
+the bitness: every IDE the version has is the default.
 
 The individual commands, for when only one piece needs rebuilding - from a shell
 with `rsvars.bat` sourced (`LspProjectSmoke` needs `%BDS%` to find the
@@ -750,18 +814,22 @@ RTL/VCL/ToolsAPI sources):
 
 ```
 msbuild clients\rad-studio\PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win32
+msbuild clients\rad-studio\PasTreeIdePlugin.dproj /t:Build /p:Config=Debug /p:Platform=Win64
 dcc32 -B clients\rad-studio\tests\LspTransportSmoke.dpr -U"clients\rad-studio;source" -Eclients\rad-studio\tests\out -Nclients\rad-studio\tests\out
+dcc64 -B clients\rad-studio\tests\LspTransportSmoke.dpr -U"clients\rad-studio;source" -Eclients\rad-studio\tests\out64 -Nclients\rad-studio\tests\out64
 ```
 
 `-U` names two directories: this one for the IDE-free LSP units, and `source`
-for the shared `PasLsp.ProductVersion` and `PasLsp.SourceText`.
+for the shared `PasLsp.ProductVersion` and `PasLsp.SourceText`. Both msbuild
+lines take `/p:DCC_BplOutput=...` and friends to land anywhere but the
+`out\ide\` fallback - see "Where the build puts things".
 
 Each harness takes the server path as its first argument and otherwise falls
 back to `out\pastree-server.exe` resolved relative to its own exe; each prints a
 per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. Build them into
-`tests\out\` - `LspClientSmoke` finds its fixtures at `..\fixtures` and
-`LspProjectSmoke` finds this package's `.dproj` at `..\..`, both relative to the
-test exe.
+`tests\out\` (the Win64 set into `tests\out64\`, a sibling) - `LspClientSmoke`
+finds its fixtures at `..\fixtures` and `LspProjectSmoke` finds this package's
+`.dproj` at `..\..`, both relative to the test exe.
 
 ## Versions
 

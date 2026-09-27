@@ -73,10 +73,10 @@ git ls-files --eol | awk -F'\t' '$1 ~ /w[/]lf/ && $1 ~ /eol=crlf/ { print $2 }'
 ## One product, two halves, one version
 
 The server (`pastree-server.exe`, Win64) and the package (`clients/rad-studio`,
-Win32 designtime BPL) are one deliverable sharing `PasTreeLspVersion` in
-`source/PasLsp.ProductVersion.pas`. The package checks at the handshake that
-the server reports the *same* version; a difference means one binary was not
-rebuilt.
+a designtime BPL per IDE - Win32, plus Win64 for a 64-bit IDE) are one
+deliverable sharing `PasTreeLspVersion` in `source/PasLsp.ProductVersion.pas`.
+The package checks at the handshake that the server reports the *same*
+version; a difference means one binary was not rebuilt.
 
 **Bump the PATCH in every commit**, mechanically - MINOR for a substantial
 change - and `clients/vscode/package.json` in the same edit, since nothing
@@ -94,18 +94,30 @@ would be silent rather than a compile error.
 build.bat
 ```
 
-Builds the server, the package and all five harnesses, then runs them. **It
-must end with `all built, all harnesses passed`; anything else is a real
-failure.** Use it rather than building halves separately - the version check
-only means something if one build produces both.
+Builds the server, the package for each IDE of the chosen version, and the five
+harnesses - Win32, plus Win64 whenever the Win64 package is built - then runs
+them. **It must end with `all built, all harnesses passed`; anything else is a
+real failure.** Use it rather than building halves separately - the version
+check only means something if one build produces both.
 
 `install.bat` is that plus the IDE registration, `uninstall.bat` its inverse,
 `release.bat` packs the user-facing archive (both working trees must be clean;
 it exports from the last commit). All four take the same optional arguments -
-a RAD Studio version and `--yes` - resolved in `scripts\ide.bat`, which is the
-only place that decides which IDE is meant. Keep it that way: a BPL loads only
-in the Delphi that compiled it, so a second opinion about the version produces
-a package the IDE silently declines to load.
+a RAD Studio version, `win32`/`win64` to narrow its IDEs, and `--yes` -
+resolved in `scripts\ide.bat`, which is the only place that decides which IDE
+is meant. Keep it that way: a BPL loads only in the Delphi and the bitness
+that compiled it, so a second opinion about either produces a package the IDE
+silently declines to load.
+
+**A version with a 64-bit IDE is two targets.** RAD Studio 13 has both
+`bin\bds.exe` and `bin64\bds.exe`; the 64-bit one loads only Win64 packages,
+from `Known Packages x64`, and keeps its own `Environment Variables x64`. With
+no `win32`/`win64` argument everything is built for and registered with both,
+because being in both costs nothing and missing from one is the plugin
+silently absent. It is detected by the `App x64` value *and* the file - the
+x64 keys prove nothing, Delphi 12.3 writes them without the 64-bit IDE. Its
+floor is 37.0 (`LMINMAJOR64` in `scripts\ide.bat`) although 23.0 compiles:
+12.3's 64-bit IDE is an "initial release" nobody has run the package in.
 
 - **RAD Studio must be closed.** A running IDE holds the `.bpl`, its LSP
   session holds `pastree-server.exe`; either gives a confusing "could not
@@ -126,11 +138,15 @@ a package the IDE silently declines to load.
   changed nothing. A new compilation needs `-N0` (or `DCC_DcuOutput`) pointing
   there. A stray `.dcu` beside a `.pas` means something was built outside the
   scripts.
-- **The BPL goes to `out\<RAD Studio version>\`, the server exe to `out\`.**
-  A designtime package loads only in the compiler that built it, so each
-  installed IDE needs its own; the server is a separate Win64 process and one
-  serves all of them, which is why the package looks for it beside its own BPL
-  *and* one level up (`FindServerExe`).
+- **The BPL goes to `out\<RAD Studio version>\win32\` (and `...\win64\`), the
+  server exe to `out\`.** A designtime package loads only in the compiler and
+  bitness that built it, so each installed IDE needs its own; the server is a
+  separate Win64 process and one serves all of them, which is why the package
+  looks for it beside its own BPL *and* two levels up (`FindServerExe`) -
+  exactly two: `out\<version>\` held the BPL before 0.56.0, and old builds left
+  server copies there that a walk up would find first. `install.bat` moves an
+  old registration and clears that layout; `build.bat` warns while an IDE is
+  still registered to it.
 - The IDE builds this server differently from `build.bat` - see
   `docs/diagnosing.md` if it works one way and not the other.
 - **RAD Studio strips XML comments from a `.dproj` every time it saves it**,
@@ -144,11 +160,15 @@ a package the IDE silently declines to load.
 
 `clients/rad-studio` links `rtl, vcl, designide` and exactly two units from
 outside its directory - `PasLsp.ProductVersion` and `PasLsp.SourceText`, both
-dependency-free by construction. **It must never link PasTree**: it is a
-32-bit designtime package and PasTree is Win64-only, which is the whole reason
-the analysis runs out of process. `tests/VersionSmoke` is the tripwire - a
-Win32 program over both shared units, so it stops compiling if either gains a
-dependency. A third shared unit is a real decision, not a convenience.
+dependency-free by construction. **It must never link PasTree - not even the
+Win64 build for the 64-bit IDE, where it would compile.** The Win32 build every
+IDE version gets cannot (PasTree is Win64-only, the original reason the
+analysis runs out of process); both builds are one source; and analysis inside
+the IDE is what the design removed - a UI frozen for every rebuild, and an
+analyzer crash that takes the IDE with it. `tests/VersionSmoke` is the
+tripwire - its Win32 build, over both shared units, stops compiling if either
+gains a dependency (its Win64 build would not notice). A third shared unit is
+a real decision, not a convenience.
 
 ## Two traps in code that look like other bugs
 

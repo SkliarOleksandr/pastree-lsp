@@ -24,7 +24,10 @@ program VersionSmoke;
   or reaching for a PasTree source loader from PasLsp.SourceText, which is
   exactly the temptation a unit about reading source files invites. It is not
   harmless: PasTree is Win64-only, which is why the analysis moved out of
-  process at all. This program failing to build IS that alarm.
+  process at all. This program failing to build IS that alarm - its WIN32
+  build, which build.bat makes whatever IDEs it targets. The Win64 build made
+  beside the 64-bit IDE's package would link PasTree without complaint, so it
+  proves nothing here.
 
   Usage: VersionSmoke.exe   (no arguments; exits non-zero on failure)
 }

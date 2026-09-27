@@ -45,7 +45,7 @@ unit PasTreeIdePlugin.Rename;
 
   THE NEW NAME IS VALIDATED IN TWO PLACES, AND THAT IS DELIBERATE. Only the
   ANALYSIS knows that `begin` is a reserved word (IsValidRenameName lives in
-  PasTree, which this Win32 designtime package must never link - see
+  PasTree, which this designtime package must never link - see
   clients/rad-studio/README.md), so the real verdict always comes from the
   server. What happens here is the cheap half: obvious non-identifiers are
   refused without a round trip, so a typo does not cost a request. Never

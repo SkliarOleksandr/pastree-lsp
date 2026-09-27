@@ -51,6 +51,12 @@ unit PasTreeIdePlugin.CrashLog;
   offset is enough to find the site once. A block with no frame of ours is an
   answer too - it says the fault was not in this plugin.
 
+  WHICH .map is the one beside the BPL the block's header names by full path:
+  out\<version>\win32\ or out\<version>\win64\. The frames say only
+  "PasTreeIdePlugin.bpl", which the 32-bit and the 64-bit IDE's packages both
+  are, and an offset read against the other one's map names a plausible,
+  wrong line.
+
   COST WHEN NOTHING IS WRONG: one comparison per exception raised in the
   process. The IDE raises (and handles) plenty, but only ACCESS VIOLATIONS get
   past the first check.
@@ -130,6 +136,10 @@ var
   GLock: TCriticalSection = nil;
   GEntries: Integer = 0;
   GPath: string = '';
+  // "<version> at <full path of this BPL>", for each block's header - worked
+  // out once at registration rather than inside the handler, which runs on
+  // whatever thread faulted and should call as little as it can.
+  GPackage: string = '';
   // Re-entrancy: an AV raised by this handler's own code (or by the file
   // write) must not recurse into it.
   GInside: Boolean = False;
@@ -245,7 +255,7 @@ begin
          DescribeAddress(LRec.ExceptionAddress),
          IfThen(LRec.ExceptionInformation[0] = 0, 'read', 'write'),
          Pointer(LRec.ExceptionInformation[1]), GetCurrentThreadId,
-         PasTreeLspVersion]);
+         GPackage]);
       for LIdx := 0 to LCount - 1 do
         LText := LText + #13#10 + '    ' + DescribeAddress(LFrames[LIdx]);
       AppendBlock(LText);
@@ -266,6 +276,7 @@ begin
   // abandon the first one's.
   if GLock = nil then
     GLock := TCriticalSection.Create;
+  GPackage := PasTreeLspVersion + ' at ' + ThisBinaryPath;
   // Until a project is open there is no per-project log yet, and an AV during
   // package load is exactly the kind this must not miss.
   GPath := TPath.Combine(TPath.GetTempPath, cCrashLogName);

@@ -392,6 +392,66 @@ begin
   Result := GClient.Start(LOptions);
 end;
 
+{ 0. Where the package looks for its server - FindServerExe, over a scratch
+  copy of the build layout rather than the real out\, so it runs the same on
+  every machine and needs no server at all. The case that matters is the
+  stale copy: until 0.56.0 the BPL lived in out\<version>\ and old builds
+  left server copies there, one level above today's out\<version>\<platform>\
+  - a search that walked up would take that one before the fresh
+  out\pastree-server.exe, and every fix would "not work". }
+procedure TestFindServerExe;
+var
+  LRoot, LOut, LBplDir, LFresh, LStale, LBeside, LFound, LSavedEnv: string;
+begin
+  Writeln;
+  Writeln('=== 0. FindServerExe over the out\<version>\<platform>\ layout ===');
+  LRoot := TPath.Combine(TPath.GetTempPath,
+    'pastree-findserver-' + IntToStr(GetCurrentProcessId));
+  LOut := TPath.Combine(LRoot, 'out');
+  LBplDir := TPath.Combine(LOut, '37.0\win64');
+  LFresh := TPath.Combine(LOut, cLspServerExeName);
+  LStale := TPath.Combine(LOut, '37.0\' + cLspServerExeName);
+  LBeside := TPath.Combine(LBplDir, cLspServerExeName);
+  // The development override wins over every directory checked here - and it
+  // is set on the machine this was written on - so it is cleared for the
+  // duration and put back after.
+  LSavedEnv := GetEnvironmentVariable(cLspServerEnvVar);
+  SetEnvironmentVariable(cLspServerEnvVar, nil);
+  try
+    TDirectory.CreateDirectory(LBplDir);
+    TFile.WriteAllText(LFresh, '');
+    TFile.WriteAllText(LStale, '');
+    LFound := FindServerExe(LBplDir);
+    Check(SameText(LFound, LFresh),
+      'found two levels up, past the stale copy in out\<version>\');
+    if not SameText(LFound, LFresh) then
+      Writeln('    got: ' + LFound);
+
+    TFile.WriteAllText(LBeside, '');
+    Check(SameText(FindServerExe(LBplDir), LBeside),
+      'a server beside the BPL wins - a deployed pair');
+
+    TFile.Delete(LBeside);
+    TFile.Delete(LFresh);
+    Check(FindServerExe(LBplDir) = '',
+      'the stale copy one level up is never taken - nothing is found instead');
+
+    SetEnvironmentVariable(cLspServerEnvVar, PChar(LStale));
+    Check(SameText(FindServerExe(LBplDir), LStale),
+      'PASTREE_LSP_SERVER still wins over the directories');
+    SetEnvironmentVariable(cLspServerEnvVar,
+      PChar(TPath.Combine(LRoot, 'missing.exe')));
+    Check(FindServerExe(LBplDir) = '',
+      'and a set-but-wrong one does not fall back to them');
+  finally
+    if LSavedEnv <> '' then
+      SetEnvironmentVariable(cLspServerEnvVar, PChar(LSavedEnv))
+    else
+      SetEnvironmentVariable(cLspServerEnvVar, nil);
+    TDirectory.Delete(LRoot, True);
+  end;
+end;
+
 { 1. The handshake, plus a request issued while it is still in flight. }
 procedure TestQueuedBeforeReady(const AExe: string);
 var
@@ -3935,6 +3995,7 @@ begin
       // no open documents, so they are re-sent on every handshake.
       GClient.OnReady := ReopenAll;
 
+      TestFindServerExe;
       TestQueuedBeforeReady(GExe);
       TestNavigation;
       TestDefines;

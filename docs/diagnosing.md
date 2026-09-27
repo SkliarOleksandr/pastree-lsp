@@ -257,6 +257,13 @@ Two masks to know about, both fixed but both instructive:
   a permanent fault repeats per idle tick. One line plus a repeat count means
   a fault that never cleared; look at what the state says was in flight.
 
+**An access violation inside the IDE** is recorded in `pastree-ide-crash.log`
+beside the LSP log (the header of `PasTreeIdePlugin.CrashLog` has the format).
+Resolve a `PasTreeIdePlugin.bpl + offset` frame the same way, against the
+`.map` beside the BPL the block's header names - `out\<version>\win32\` or
+`out\<version>\win64\`. The two IDEs' packages are separate builds, and an
+offset read against the other one's map names a plausible line that never ran.
+
 ## `LspClientSmoke` fails two checks about a Cyrillic literal
 
 Those two checks were EXPECTED to fail until 2026-08-20 - the ANSI-vs-UTF-8

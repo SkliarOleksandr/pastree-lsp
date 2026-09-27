@@ -53,8 +53,8 @@ unit PasTreeIdePlugin.ResultRows;
   (brace-dollar, painted as atPreproc), symbols. It cannot know that its
   line sits inside a multi-line block comment or an asm block - such a
   line degrades to normally-classified text, never to an error. The real
-  tokenizer is Win64-only (PasTree, which this Win32 package must never
-  link); the keyword list here is a cosmetic copy, not a second semantic
+  tokenizer is Win64-only (PasTree, which this package must never link);
+  the keyword list here is a cosmetic copy, not a second semantic
   authority - a missed or extra keyword paints a word in the wrong color
   and nothing else. Directives (private, virtual, name, index...) are
   deliberately NOT in the list: they are only keywords in context, and

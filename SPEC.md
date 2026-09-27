@@ -85,7 +85,8 @@ source/PasLsp.SourceText.pas      BOM and buffer-vs-file rules, shared likewise
 clients/rad-studio/               the RAD Studio designtime package + its tests
 clients/vscode/                   the VS Code extension (also a .vsix)
 build.bat                         builds everything and runs the harnesses
-out/                              build output; out/dcu/{win32,win64} is throwaway
+out/                              build output: the server, the package per IDE in
+                                  out/<version>/{win32,win64}/; out/dcu/ is throwaway
 SPEC.md                           this document
 clients/rad-studio/SPEC.md        the ToolsAPI-side specification
 clients/vscode/SPEC.md            the VS Code extension's own specification
@@ -102,9 +103,12 @@ already here, so the layout is unchanged in kind: a server and its clients.
 
 **One invariant to protect.** The RAD Studio package must keep linking nothing
 but `rtl, vcl, designide` and the two dependency-free shared units,
-`PasLsp.ProductVersion` and `PasLsp.SourceText`. It is a 32-bit designtime BPL;
-PasTree is Win64-only, and that constraint is the whole reason the analysis runs
-out of process. Now that the package sits in the same repository as
+`PasLsp.ProductVersion` and `PasLsp.SourceText`. Every IDE version gets it as a
+32-bit designtime BPL; PasTree is Win64-only, and that constraint is the whole
+reason the analysis runs out of process. The Win64 build for a 64-bit IDE is
+the same source and obeys the same rule, though PasTree would compile into it -
+see "Why out-of-process at all". Now that the package sits in the same
+repository as
 PasTree-dependent code, adding "just one" PasTree unit to it is an easy mistake
 to make and would undo the move. `VersionSmoke` fails to build if either shared
 unit ever grows a dependency, which is the alarm for the most likely version of
@@ -118,6 +122,11 @@ that mistake.
 - **Isolation.** An analyzer crash or the suspected `TPasSourceManager`
   Prefetch race must not take the IDE down.
 - **Reuse.** The same exe is the future editor-agnostic LSP server for free.
+
+The 64-bit IDE (RAD Studio 12.3 and later, built for since 0.56.0) removes the
+first reason for its own package and neither of the others, which is why that
+package runs the analysis out of process too: a crash is still a crash, and
+the server is still the one implementation every client shares.
 
 ## Architecture
 

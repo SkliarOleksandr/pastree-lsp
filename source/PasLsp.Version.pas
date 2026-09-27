@@ -6,8 +6,9 @@ unit PasLsp.Version;
   numbers.
 
   SPLIT FROM PasLsp.ProductVersion FOR A HARD REASON, not tidiness. The product
-  version has to be readable by the RAD Studio package, which is a Win32
-  designtime BPL and cannot link PasTree (Win64-only). So the version string
+  version has to be readable by the RAD Studio package, whose Win32 build -
+  the one every IDE version gets - cannot link PasTree (Win64-only). So the
+  version string
   itself lives in a unit with no dependencies, and everything that needs
   PasTree.Version stays here - compiled only into pastree-server.exe. See the
   header of PasLsp.ProductVersion.

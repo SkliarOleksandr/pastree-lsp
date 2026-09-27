@@ -30,8 +30,9 @@ unit PasTreeIdePlugin.DcuSource;
   regenerates from the file - no rebuild.
 
   THE TEXT COMES FROM THE SERVER (pastree/dcuSource), never from a reader of
-  our own: this package must not link PasTree (it is Win32, PasTree is
-  Win64-only, and that split is the reason the analysis is a process), and
+  our own: this package must not link PasTree (its Win32 build cannot -
+  PasTree is Win64-only, and that split is the reason the analysis is a
+  process - and the 64-bit IDE's build is the same source), and
   the line the answer named is a line of the text the SERVER printed. One
   request per tab; a tab already open is only revealed again.
 

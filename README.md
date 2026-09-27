@@ -13,7 +13,8 @@ feature it adds to the IDE, one paragraph each.
 ## Installing it
 
 Unpack the release archive and run `install.bat` in it, with RAD Studio
-closed. It builds both halves from source and registers the IDE package;
+closed. It builds both halves from source and registers the IDE package - with
+RAD Studio 13's 64-bit IDE as well, where it is installed;
 `pastree-lsp\uninstall.bat` takes it back out.
 
 The archive holds two directories side by side - `pastree-lsp` and
@@ -49,8 +50,8 @@ the archive.
   package and test harnesses in the same pass - one script produces both
   halves of the product, which is what makes the version-equality check
   between them meaningful). RAD Studio must be closed while it runs.
-- No separate install step for the server: it lands in `out\`, next to the
-  IDE package built alongside it.
+- No separate install step for the server: it lands in `out\`, above the
+  IDE packages built alongside it.
 
 **Status / docs**
 
@@ -79,16 +80,22 @@ costs, and the incremental-reanalysis mechanism are in
   only when more than one suitable installation is present; `install.bat 37.0`
   or `install.bat --yes` answers in advance. `uninstall.bat` unregisters it
   again without deleting anything built.
+- **Both IDEs of RAD Studio 13.** Where the 64-bit IDE (`bin64\bds.exe`) is
+  installed, the package is built for Win64 too and registered with it as
+  well; `install.bat 37.0 win32` or `... win64` limits it to one. Delphi
+  12.3's 64-bit IDE is not offered yet - the package compiles for it but has
+  not been run in it.
 - Nothing is copied anywhere and no environment variable is needed. The BPL is
-  built into `out\<RAD Studio version>\` and `pastree-server.exe` into `out\`
-  above it, and the plugin looks for its server in both places - so the matched
-  pair is where the build put it rather than something a deployment step has to
-  arrange. `PASTREE_LSP_SERVER` still overrides that, for running a server from
+  built into `out\<RAD Studio version>\win32\` (and `...\win64\`) and
+  `pastree-server.exe` into `out\`, two levels above it, and the plugin looks
+  for its server in both places - so the matched pair is where the build put
+  it rather than something a deployment step has to arrange.
+  `PASTREE_LSP_SERVER` still overrides that, for running a server from
   somewhere else.
-- **Several RAD Studio versions can have it installed at once.** Each gets its
-  own BPL directory, since a designtime package loads only in the compiler that
-  built it; they share the one server, which is a separate Win64 process. Run
-  `install.bat` once per version.
+- **Several RAD Studio versions can have it installed at once.** Each IDE gets
+  its own BPL directory, since a designtime package loads only in the compiler
+  and bitness that built it; they all share the one server, which is a
+  separate Win64 process. Run `install.bat` once per version.
 - Restart RAD Studio after every rebuild of the package - hot reload
   (Uninstall/Install) is unreliable here; see
   [docs/diagnosing.md](docs/diagnosing.md).

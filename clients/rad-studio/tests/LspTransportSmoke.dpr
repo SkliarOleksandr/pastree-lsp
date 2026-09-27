@@ -7,8 +7,10 @@ program LspTransportSmoke;
   the riskiest part of the plugin's LSP client (the Win32 pipe and process
   plumbing) testable without an IDE restart cycle.
 
-  Deliberately built Win32, like the designtime package it is for, driving a
-  Win64 server - the exact cross-bitness pairing the real plugin uses.
+  Built like the designtime packages it is for: Win32 always, driving the
+  Win64 server - the cross-bitness pairing of the 32-bit IDE - and Win64 too
+  whenever build.bat builds the 64-bit IDE's package, since process and
+  handle plumbing is where pointer size breaks one flavour and not the other.
 
   Three scenarios, each asserting a property the plugin depends on:
 

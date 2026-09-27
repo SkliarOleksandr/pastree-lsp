@@ -195,7 +195,9 @@ var
 begin
   Result := Default(TLspInitOptions);
   Result.ProjectFile := TPath.Combine(GRepoDir, 'PasTreeIdePlugin.dproj');
-  Result.Platform := 'Win32';   // a designtime package is always Win32
+  // The 32-bit IDE's package, the one every supported version builds; the
+  // 64-bit IDE's is the same sources for Win64.
+  Result.Platform := 'Win32';
   Result.Config := 'Debug';
   LSource := IncludeTrailingPathDelimiter(AIdeRoot) + 'source\';
   Result.SearchPaths := [LSource + 'rtl', LSource + 'vcl',

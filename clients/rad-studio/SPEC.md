@@ -57,10 +57,12 @@ Every entry below is one of:
 These four facts decide what is implementable here, and they are the reason
 several otherwise-obvious features are more expensive than they look.
 
-**A designtime package is Win32 and in-process with the IDE.** Everything this
-plugin does happens inside the IDE's own address space and, for anything
-touching ToolsAPI, on its main thread. That is what forced the analysis out of
-process to begin with, and it still forbids doing real work in a handler.
+**A designtime package is in-process with the IDE, and Win32 in every 32-bit
+one.** Everything this plugin does happens inside the IDE's own address space
+and, for anything touching ToolsAPI, on its main thread. That is what forced
+the analysis out of process to begin with, and it still forbids doing real
+work in a handler - in the 64-bit IDE's Win64 build too (README, "The 64-bit
+IDE"), where only the address-space half of the argument goes away.
 
 **Nothing may block the main thread waiting for the server.** Every answer
 arrives in a callback on a later main-thread turn. So the first question to ask
@@ -927,8 +929,8 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    wrong fourteen.
 
    **Two validators, deliberately.** The keyword verdict is the analysis's
-   (`IsValidRenameName`, in PasTree - which this Win32 package must never
-   link), so every real refusal comes from the server and is shown verbatim.
+   (`IsValidRenameName`, in PasTree - which this package must never link),
+   so every real refusal comes from the server and is shown verbatim.
    The plugin only rejects obvious non-identifiers, to save a round trip on a
    typo. A copy of the keyword list here would be a second answer able to
    disagree with the first.

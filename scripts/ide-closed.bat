@@ -12,12 +12,20 @@ rem when it exits, so a registry change made while it runs is discarded on
 rem close - an install that reported success and did nothing, which is worse
 rem than one that failed.
 rem
-rem WHY ONLY THIS VERSION. Both reasons are per-version: the BPL lives in
-rem out\<version>\ and the registration is under that version's own key, so a
-rem running Delphi 12 holds out\23.0\ and rewrites 23.0's list while having no
-rem opinion about 37.0. An earlier version of this check refused on any bds.exe
-rem at all - written before the per-version split - which made installing for
-rem one IDE impossible while another was merely open.
+rem WHY ONLY THIS VERSION. Both reasons are per-version: the BPLs live in
+rem out\<version>\ and the registrations are under that version's own key, so
+rem a running Delphi 12 holds out\23.0\ and rewrites 23.0's list while having
+rem no opinion about 37.0. An earlier version of this check refused on any
+rem bds.exe at all - written before the per-version split - which made
+rem installing for one IDE impossible while another was merely open.
+rem
+rem BUT BOTH IDEs OF THE VERSION, whichever of them is being built for. The
+rem 64-bit IDE (bin64\bds.exe) sits under the same %BDSROOT% as the 32-bit one,
+rem so the path match below takes either - on purpose: each holds its own
+rem out\<version>\<platform>\ BPL, either one with a PasTree session holds the
+rem shared out\pastree-server.exe that every build replaces first, and whether
+rem one IDE rewrites the other's package key on exit has never been checked.
+rem Narrowing this to one bitness would trade a guard for a guess.
 rem
 rem WHY POWERSHELL, AND WHY IN ITS OWN FILE. tasklist gives no executable path,
 rem and the path is the only thing that says which version a bds.exe is. The
@@ -49,7 +57,8 @@ exit /b 0
 :running
 
 echo.
-echo RAD Studio %BDSVER% is running. Close it and run this again.
+echo RAD Studio %BDSVER% is running - its 32-bit or its 64-bit IDE. Close it and
+echo run this again.
 echo.
 echo   %BDSROOT%
 echo.

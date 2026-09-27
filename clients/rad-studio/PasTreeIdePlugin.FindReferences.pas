@@ -6,7 +6,7 @@ unit PasTreeIdePlugin.FindReferences;
 
   Runs OUT OF PROCESS since the LSP move: ExecuteFindReferences asks
   pastree-server.exe (Win64) via PasTreeIdePlugin.LspSession instead of
-  building a TPasNavigator inside this Win32 designtime package. The
+  building a TPasNavigator inside this designtime package. The
   three-identity resolve (symbol / unit / builtin) lives in the server now -
   one implementation shared with every other LSP client.
 
