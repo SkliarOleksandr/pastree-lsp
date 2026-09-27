@@ -3221,12 +3221,19 @@ end;
   declines the latter two by design. FindReferences never includes the
   declaration site, so context.includeDeclaration is honored by prepending
   the separate DeclHit/UnitDeclHit answer (builtins have no declaration to
-  include). }
+  include).
+
+  context.includeImplementationHeaders is OURS, not the protocol's (a client
+  that does not know it never sends it, and gets the standard answer): the
+  implementation headers that spell a symbol's name without using it - a
+  type's name in every `procedure TFoo.Bar;`, a routine's own implementation
+  header. Off by default because on a form's class it is one row per event
+  handler; rename always takes them (PlanRename), whatever this says. }
 function TLspServer.HandleReferences(const AMsg: TLspIncoming): string;
 var
   LPath, LName: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
-  LInclDecl: Boolean;
+  LInclDecl, LImplHeaders: Boolean;
   LHits: TArray<TPasRefHit>;
   LDecl: TPasRefHit;
   LSB: TStringBuilder;
@@ -3242,6 +3249,8 @@ begin
       'references: textDocument.uri and position required'));
   LInclDecl := AMsg.Params.GetValue<Boolean>('context.includeDeclaration',
     False);
+  LImplHeaders := AMsg.Params.GetValue<Boolean>(
+    'context.includeImplementationHeaders', False);
 
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
@@ -3269,7 +3278,9 @@ begin
   else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
   begin
     LKind := 'symbol';
-    LHits := FNav.FindReferences(LTMid, LSym);
+    if LImplHeaders then
+      LKind := 'symbol, implementation headers';
+    LHits := FNav.FindReferences(LTMid, LSym, LImplHeaders);
     if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
       LHits := [LDecl] + LHits;
   end

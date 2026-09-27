@@ -2297,8 +2297,9 @@ end;
   user, never as a silent empty edit set. }
 procedure TestRename;
 var
-  LUnitFile, LAppFile: string;
-  LLine, LChar: Integer;
+  LUnitFile, LAppFile, LFindAllFile, LHdrPos: string;
+  LLine, LChar, LHdrLine, LHdrChar: Integer;
+  LParams, LCtx: TJSONObject;
 
   // PositionParams plus the one member rename adds.
   function RenameParams(const AFile: string; ALine, AChar: Integer;
@@ -2357,6 +2358,37 @@ begin
     'and the preview snippets already read as the new name');
   Check(GOk and GResultJson.Contains('"kind":"symbol"'),
     'and it says which of the two plans this was');
+
+  { A CLASS: its name in every `constructor TAnimal.Create;` header is in the
+    plan. None of those is a use - the resolver binds no qualifier segment -
+    and until PasTree's ImplQualifierNodes the plan left all four spelling the
+    old name: a rename that no longer compiled. Find References lists them
+    only when asked (context.includeImplementationHeaders, ours). }
+  LFindAllFile := TPath.Combine(GFixtureDir, 'DemoFindAll.pas');
+  FindPos(LFindAllFile, 'TAnimal = class', 'TAnimal', LLine, LChar);
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LFindAllFile, LLine, LChar, 'TBeast')),
+    'renamePlan on a class answered');
+  Check(GOk and GResultJson.Contains('constructor TBeast.Create;') and
+    GResultJson.Contains('destructor TBeast.Destroy;') and
+    GResultJson.Contains('procedure TBeast.Free;') and
+    GResultJson.Contains('procedure TBeast.SetName(const AValue: string);'),
+    'and it renames the class in every method implementation header');
+  FindPos(LFindAllFile, 'constructor TAnimal.', 'TAnimal', LHdrLine, LHdrChar);
+  LHdrPos := Format('"line":%d,"character":%d', [LHdrLine, LHdrChar]);
+  Check(Ask('textDocument/references',
+    PositionParams(LFindAllFile, LLine, LChar)),
+    'references on the class answered');
+  Check(GOk and not GResultJson.Contains(LHdrPos),
+    'without the implementation headers by default, as before');
+  LParams := PositionParams(LFindAllFile, LLine, LChar);
+  LCtx := TJSONObject.Create;
+  LCtx.AddPair('includeImplementationHeaders', TJSONBool.Create(True));
+  LParams.AddPair('context', LCtx);
+  Check(Ask('textDocument/references', LParams),
+    'references with includeImplementationHeaders answered');
+  Check(GOk and GResultJson.Contains(LHdrPos),
+    'and those list the constructor''s implementation header');
 
   { The UNIT half. The same request on a `uses` item - which now plans rather
     than refuses. The file obligation is the part worth pinning: a unit rename

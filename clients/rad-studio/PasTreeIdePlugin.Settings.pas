@@ -16,12 +16,13 @@ unit PasTreeIdePlugin.Settings;
   DEFAULT IS ON, FOR EVERY SWITCH THAT TURNS SOMETHING OFF. Those switches
   disable something this plugin already does, so a missing value - a fresh
   installation, a user who never opened the dialog - must read as "behave as
-  before". "Advanced logging" is the one exception and the rule is the same
-  one seen from the other side: it turns a diagnostic ON, and its default is
-  therefore OFF. Written only by the dialog: nothing else in the package
-  writes to the registry - except the Go To picker's own sizes
-  (WritePickerValue) and the IDE's Error Insight level, which the error
-  underline choice has to move with it (ApplyErrorInsightChoice).
+  before". "Advanced logging" and Find References' implementation headers are
+  the exceptions, and the rule is the same one seen from the other side: each
+  turns something ON, so its default is OFF. Written only by the dialog:
+  nothing else in the package writes to the registry - except the Go To
+  picker's own sizes (WritePickerValue) and the IDE's Error Insight level,
+  which the error underline choice has to move with it
+  (ApplyErrorInsightChoice).
 
   READ AT THE POINT OF USE, NOT CACHED AT STARTUP. Every switch is read on
   each gesture (an editor tab activating, a key being pressed), which is what
@@ -109,6 +110,19 @@ function RenameEnabled: Boolean;
 /// of the two off gets the family on, which is the safe direction.
 /// </summary>
 function FindAllEnabled: Boolean;
+
+/// <summary>
+/// Whether Find References also lists the implementation headers that spell
+/// the name without using it: for a type, the `TFoo` of every `procedure
+/// TFoo.Bar;`; for a method, its own implementation header. Sent as the
+/// request's `context.includeImplementationHeaders`.
+///
+/// OFF BY DEFAULT, the other side of the rule in this unit's header: it adds
+/// rows rather than taking a feature away, and on a form's class it adds one
+/// per event handler, burying the uses the search was for. Rename does not
+/// read it - it always rewrites those headers, or the code would not compile.
+/// </summary>
+function FindReferencesImplHeaders: Boolean;
 
 /// <summary>
 /// Whether Ctrl+Shift+C is ours - class completion AND the prototype sync
@@ -287,6 +301,9 @@ type
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
     EnableFindAll: Boolean;
+    // Find References with the `TFoo.Bar` implementation headers - see
+    // FindReferencesImplHeaders. Default False.
+    FindRefsImplHeaders: Boolean;
     EnableBlockCompletion: Boolean;
     EnableClassComplete: Boolean;
     // Where Ctrl+Shift+C puts a new body among its type's existing ones:
@@ -347,6 +364,7 @@ const
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
   cValueFindAll = 'EnableFindAll';
+  cValueFindRefsImplHeaders = 'FindReferencesImplHeaders';
   cValueBlockCompletion = 'EnableBlockCompletion';
   cValueClassComplete = 'EnableClassComplete';
   cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
@@ -503,6 +521,7 @@ begin
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
   Result.EnableFindAll := True;
+  Result.FindRefsImplHeaders := False;
   Result.EnableBlockCompletion := True;
   Result.EnableClassComplete := True;
   Result.ClassCompleteDeclOrder := False;
@@ -542,6 +561,8 @@ begin
         ReadFlag(LReg, cValueRename, Result.EnableRename);
       Result.EnableFindAll :=
         ReadFlag(LReg, cValueFindAll, Result.EnableFindAll);
+      Result.FindRefsImplHeaders := ReadFlag(LReg, cValueFindRefsImplHeaders,
+        Result.FindRefsImplHeaders);
       Result.EnableBlockCompletion :=
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
       Result.EnableClassComplete :=
@@ -596,6 +617,8 @@ begin
           Ord(ASettings.OverrideDeclImplToggle));
         LReg.WriteInteger(cValueRename, Ord(ASettings.EnableRename));
         LReg.WriteInteger(cValueFindAll, Ord(ASettings.EnableFindAll));
+        LReg.WriteInteger(cValueFindRefsImplHeaders,
+          Ord(ASettings.FindRefsImplHeaders));
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
         LReg.WriteInteger(cValueClassComplete,
@@ -665,6 +688,11 @@ end;
 function FindAllEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableFindAll;
+end;
+
+function FindReferencesImplHeaders: Boolean;
+begin
+  Result := CurrentSettings.FindRefsImplHeaders;
 end;
 
 function BlockCompletionEnabled: Boolean;

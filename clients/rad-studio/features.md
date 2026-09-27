@@ -72,6 +72,13 @@ Every use of the symbol under the caret, grouped by file: one header row per
 file with a hit count, then the hits. The snippet text comes from the same
 snapshot the server analyzed, so unsaved buffers still line up.
 
+A method's implementation header is not a use, so by default a class's name in
+`procedure TFoo.Bar;` is not listed - on a form's class that would be a row per
+event handler. **References include method implementations (TFoo.Bar)**, under
+the Find All switch in the settings, lists them too: every header a type's name
+qualifies, and a method's own implementation header. The report's title says
+so while it is on.
+
 #### Overrides
 
 With the caret on a class method, its whole VMT chain: the declaration that
@@ -197,7 +204,10 @@ a rename that touched fourteen places is otherwise indistinguishable from one
 that touched the wrong fourteen. Above the rows, one button: **Revert** puts
 every site back and saves again. The new name is asked for through the server's
 `prepareRename`, not read off the caret, so a dotted unit name is offered whole
-rather than one segment of it.
+rather than one segment of it. Renaming a type renames it in every method
+implementation header it qualifies (`procedure TFoo.Bar;`), and renaming a
+routine renames both of its headers, whatever Find References is set to list -
+leaving either behind would not compile.
 
 Renaming a *unit* is deliberately refused with a message pointing at the Project
 Manager. The server produces a correct plan for it, but the IDE performs a

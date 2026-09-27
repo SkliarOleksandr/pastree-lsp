@@ -215,7 +215,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/definition` | symbol / unit / builtin, plus a CONDITIONAL SYMBOL (0.40.0, PasTree 0.27.0): the name in `$IFDEF`/`$IFNDEF`/`$DEFINE`/`$UNDEF`/`Defined()` goes to the nearest preceding active `$DEFINE` in the same unit; a project or platform define lands on the main module's header (PasTree 0.27.2 - the project is its home, as System.pas is a builtin's) |
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
 | `pastree/declarationAt` | OURS, not LSP: the same three-identity resolve as `textDocument/definition`, but WITHOUT that request's redirect to a routine's implementation - the actual declaration site, full stop. Exists because Find References labels a row "declaration" (`ReportHits` in the RAD Studio client) and that row must be the declaration, not one hop further to the body (found 2026-09-15: it was asking `textDocument/definition` for it, which put the row's target on the wrong half of the routine) |
-| `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four |
+| `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four. `context.includeImplementationHeaders` is OURS: it adds the implementation headers that spell a symbol's name without using it - a type's name in every `procedure TFoo.Bar;`, a routine's own implementation header (PasTree `FindReferences(..., AImplHeaders)`). Off unless sent, so a standard client gets the standard answer |
 | `textDocument/documentSymbol` | outline, types with members |
 | `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page; a conditional symbol gets a `{$DEFINE X}` card noting the `$DEFINE` it sees, or that the project defines it |
 | `textDocument/publishDiagnostics` | push, open documents; PasTree's `ReportUnresolvedMembers` is on since 0.52.4, so an unresolved member after a dot is E2003 like a bare name |
@@ -402,9 +402,14 @@ binding, should still answer through the same `ClassCompleteFor` machinery
 rather than a second copy of the matching rules.
 
 **Rename is the reference search, turned into edits - and its refusals are
-half the feature.** `PlanRename` is `DeclHit` + `FindReferences`, so a rename
-can never reach further than the references panel already showed, and never
-onto a same-spelled unrelated symbol. `PlanUnitRename` is the same idea over
+half the feature.** `PlanRename` is `DeclHit` + `FindReferences` with the
+implementation headers, so a rename never lands on a same-spelled unrelated
+symbol. The headers are the one reach beyond the default references list, and
+a language rule rather than a search: `procedure TFoo.Bar;` repeats the type's
+name and the routine's own, neither is a use, and a rename that skipped them
+left code that did not compile (the type half until PasTree's
+`ImplQualifierNodes`; the parameter twin in the peer header, `PeerDeclSym`, is
+the same rule). `PlanUnitRename` is the same idea over
 the unit identity: the module's own header name plus every `uses` item that
 resolved to it, with each site getting the spelling it had (the full dotted
 name where it was written in full, the bare leaf where a namespace prefix

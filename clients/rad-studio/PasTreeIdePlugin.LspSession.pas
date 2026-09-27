@@ -603,10 +603,14 @@ procedure LspReferences(const AFileName: string; ARow, ACol: Integer;
 /// group in the registry, unticked by default. AProjectsInGroup still counts
 /// the WHOLE group, so the title's "across 2 of 9 projects" says honestly
 /// how partial the answer is.
+///
+/// AImplHeaders asks for the implementation headers that spell the name too -
+/// `TFoo` in every `procedure TFoo.Bar;` (context.includeImplementationHeaders,
+/// see PasTreeIdePlugin.Settings.FindReferencesImplHeaders).
 /// </summary>
 procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
-  AIncludeDeclaration: Boolean; const AProjectFiles: TArray<string>;
-  const AOnDone: TLspGroupHitsProc);
+  AIncludeDeclaration, AImplHeaders: Boolean;
+  const AProjectFiles: TArray<string>; const AOnDone: TLspGroupHitsProc);
 
 /// <summary>
 /// One Find All request (AMethod is the server's name - pastree/findOverrides,
@@ -1198,7 +1202,7 @@ type
     function EnsureSession: Boolean;
     procedure StoreDiagnostics(AParams: TJSONValue);
     procedure Ask(const AMethod: string; const AFileName: string;
-      ARow, ACol: Integer; AIncludeDeclaration: Boolean;
+      ARow, ACol: Integer; AIncludeDeclaration, AImplHeaders: Boolean;
       var APendingId: Int64; const AOnDone: TLspHitsProc);
     function Project: IOTAProject;
   public
@@ -1224,7 +1228,7 @@ type
     procedure DeclarationAt(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHitsProc);
     procedure References(const AFileName: string; ARow, ACol: Integer;
-      AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
+      AIncludeDeclaration, AImplHeaders: Boolean; const AOnDone: TLspHitsProc);
     procedure Toggle(const AFileName: string; ARow, ACol: Integer;
       AToImpl: Boolean; const AOnDone: TLspHitsProc);
     procedure TypeDefinition(const AFileName: string; ARow, ACol: Integer;
@@ -2409,8 +2413,8 @@ begin
 end;
 
 procedure TLspSession.Ask(const AMethod: string; const AFileName: string;
-  ARow, ACol: Integer; AIncludeDeclaration: Boolean; var APendingId: Int64;
-  const AOnDone: TLspHitsProc);
+  ARow, ACol: Integer; AIncludeDeclaration, AImplHeaders: Boolean;
+  var APendingId: Int64; const AOnDone: TLspHitsProc);
 var
   LParams, LDoc, LPos, LCtx: TJSONObject;
   LLine, LChar: Integer;
@@ -2445,10 +2449,13 @@ begin
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
   LParams.AddPair('position', LPos);
-  if AIncludeDeclaration then
+  if AIncludeDeclaration or AImplHeaders then
   begin
     LCtx := TJSONObject.Create;
-    LCtx.AddPair('includeDeclaration', TJSONBool.Create(True));
+    LCtx.AddPair('includeDeclaration', TJSONBool.Create(AIncludeDeclaration));
+    // Ours, not the protocol's - see the server's HandleReferences.
+    if AImplHeaders then
+      LCtx.AddPair('includeImplementationHeaders', TJSONBool.Create(True));
     LParams.AddPair('context', LCtx);
   end;
 
@@ -4119,22 +4126,22 @@ end;
 procedure TLspSession.Definition(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
-  Ask('textDocument/definition', AFileName, ARow, ACol, False,
+  Ask('textDocument/definition', AFileName, ARow, ACol, False, False,
     FPendingDefinition, AOnDone);
 end;
 
 procedure TLspSession.DeclarationAt(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHitsProc);
 begin
-  Ask('pastree/declarationAt', AFileName, ARow, ACol, False,
+  Ask('pastree/declarationAt', AFileName, ARow, ACol, False, False,
     FPendingDeclarationAt, AOnDone);
 end;
 
 procedure TLspSession.References(const AFileName: string; ARow, ACol: Integer;
-  AIncludeDeclaration: Boolean; const AOnDone: TLspHitsProc);
+  AIncludeDeclaration, AImplHeaders: Boolean; const AOnDone: TLspHitsProc);
 begin
   Ask('textDocument/references', AFileName, ARow, ACol, AIncludeDeclaration,
-    FPendingReferences, AOnDone);
+    AImplHeaders, FPendingReferences, AOnDone);
 end;
 
 procedure TLspSession.Toggle(const AFileName: string; ARow, ACol: Integer;
@@ -4147,13 +4154,14 @@ const
   cMethod: array[Boolean] of string =
     ('textDocument/declaration', 'textDocument/implementation');
 begin
-  Ask(cMethod[AToImpl], AFileName, ARow, ACol, False, FPendingToggle, AOnDone);
+  Ask(cMethod[AToImpl], AFileName, ARow, ACol, False, False, FPendingToggle,
+    AOnDone);
 end;
 
 procedure TLspSession.TypeDefinition(const AFileName: string;
   ARow, ACol: Integer; const AOnDone: TLspHitsProc);
 begin
-  Ask('textDocument/typeDefinition', AFileName, ARow, ACol, False,
+  Ask('textDocument/typeDefinition', AFileName, ARow, ACol, False, False,
     FPendingTypeDefinition, AOnDone);
 end;
 
@@ -4625,7 +4633,8 @@ begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  LSession.References(AFileName, ARow, ACol, AIncludeDeclaration, AOnDone);
+  LSession.References(AFileName, ARow, ACol, AIncludeDeclaration, False,
+    AOnDone);
 end;
 
 procedure LspFindDefines(const AFileName: string;
@@ -4697,8 +4706,8 @@ begin
 end;
 
 procedure LspReferencesInGroup(const AFileName: string; ARow, ACol: Integer;
-  AIncludeDeclaration: Boolean; const AProjectFiles: TArray<string>;
-  const AOnDone: TLspGroupHitsProc);
+  AIncludeDeclaration, AImplHeaders: Boolean;
+  const AProjectFiles: TArray<string>; const AOnDone: TLspGroupHitsProc);
 var
   LOwner: TLspSession;
   LTargets: TArray<TLspSession>;
@@ -4736,6 +4745,7 @@ begin
 
   for LSession in LTargets do
     LSession.References(AFileName, ARow, ACol, AIncludeDeclaration,
+      AImplHeaders,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
         const AError: string)
       begin

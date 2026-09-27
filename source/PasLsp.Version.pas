@@ -238,7 +238,13 @@ const
   /// no file no longer forces a rebuild, the program's incremental run brings
   /// the unit in. Silent without it: every new unit costs a full rebuild
   /// again (4-5 s on AVImark), with every answer still right.
-  cMinPasTreeVersion = '0.53.0';
+  /// 0.56.0 (2026-09-27): PlanRename takes a type's name in every
+  /// implementation header it qualifies (`procedure TFoo.Bar;`), and
+  /// FindReferences' AImplHeaders serves context.includeImplementationHeaders.
+  /// The parameter is a compile error without it; what is silent is the
+  /// rename - against an older library it renames the class and leaves every
+  /// method implementation spelling the old name, E2003 on each.
+  cMinPasTreeVersion = '0.56.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

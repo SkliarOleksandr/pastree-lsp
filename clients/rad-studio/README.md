@@ -188,6 +188,17 @@ left alone and simply no longer read. Server side these are `pastree/find*` and
 `LspClientSmoke` 2b and 2c over `fixtures\DemoHierarchy.pas` and
 `fixtures\DemoFindAll.pas`.
 
+**"References include method implementations (TFoo.Bar)"**, indented under
+that switch and greyed with it (References is reachable only through the
+submenu), sends `context.includeImplementationHeaders` with Find References:
+a type's name in every `procedure TFoo.Bar;` header, a method's own
+implementation header. OFF by default, against the settings unit's "default is
+on" rule and for its own stated reason - it adds rows rather than removing a
+feature, and on a form's class it adds one per event handler. The report's
+title carries "with method implementations" while it is on, because the
+setting outlives the memory of turning it on. Rename never reads it: PasTree's
+`PlanRename` always takes those headers.
+
 **"Find Declaration" is the one native item we replace** (again, since
 2026-09-01): our own action takes over the `Identifier` category, in the
 same first menu position. A menu item cannot be intercepted the way a click

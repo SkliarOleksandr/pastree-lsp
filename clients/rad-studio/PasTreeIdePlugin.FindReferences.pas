@@ -76,7 +76,8 @@ uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
-  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope;
+  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
+  PasTreeIdePlugin.Settings;
 
 const
   cMessageGroupName = 'Find References';
@@ -257,10 +258,10 @@ end;
 /// the AddToolMessage Parent/LineRef mechanism used before.
 /// </summary>
 procedure ReportHits(const AIdentifier: string;
-  AProjectsSearched, AProjectsInGroup: Integer; AHasDecl: Boolean;
+  AProjectsSearched, AProjectsInGroup: Integer; AImplHeaders, AHasDecl: Boolean;
   const ADeclHit: TLspHit; const AHits: TArray<TLspHit>);
 var
-  LScope: string;
+  LScope, LImplHeaders: string;
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
   LFileCounts: TDictionary<string, Integer>;
@@ -344,10 +345,16 @@ begin
   if AProjectsInGroup > 1 then
     LScope := Format(' across %d of %d projects',
       [AProjectsSearched, AProjectsInGroup]);
+  // Said in the title because the setting outlives the memory of turning it
+  // on: a form's class then lists a row per event handler, and a report that
+  // did not say why would read as a changed search.
+  LImplHeaders := '';
+  if AImplHeaders then
+    LImplHeaders := ' with method implementations';
   LTitleCount := IntToStr(Length(AHits));
   LMessageServices.AddCustomMessagePtr(
-    NewTitleRow(LTitleHead + LTitleCount + ' reference(s)' + LScope,
-      Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
+    NewTitleRow(LTitleHead + LTitleCount + ' reference(s)' + LImplHeaders +
+      LScope, Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
@@ -437,6 +444,7 @@ var
   LCursorFile: string;
   LRow, LCol: Integer;
   LProjects: TArray<string>;
+  LImplHeaders: Boolean;
 begin
   try
     if not Assigned(AView) then
@@ -445,6 +453,8 @@ begin
     LCursorFile := AView.Buffer.FileName;
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
+    // Read once, here: the request and the report's title must agree.
+    LImplHeaders := FindReferencesImplHeaders;
 
     // WHICH PROJECTS, before anything is shown or asked: in a group of two
     // or more the scope dialog lists them, the owner ticked and greyed, the
@@ -473,7 +483,8 @@ begin
     // sees only its own. LspReferencesInGroup asks the owner and every
     // project ticked above and merges the answers, dropping the duplicates
     // a shared unit produces.
-    LspReferencesInGroup(LCursorFile, LRow, LCol, False, LProjects,
+    LspReferencesInGroup(LCursorFile, LRow, LCol, False, LImplHeaders,
+      LProjects,
       procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
         AProjectsSearched, AProjectsInGroup: Integer; const AError: string)
       var
@@ -526,10 +537,10 @@ begin
               begin
                 if ADeclOk and (Length(ADeclHits) > 0) then
                   ReportHits(LName, AProjectsSearched, AProjectsInGroup,
-                    True, ADeclHits[0], LRefs)
+                    LImplHeaders, True, ADeclHits[0], LRefs)
                 else
                   ReportHits(LName, AProjectsSearched, AProjectsInGroup,
-                    False, Default(TLspHit), LRefs);
+                    LImplHeaders, False, Default(TLspHit), LRefs);
               end);
           end);
       end);

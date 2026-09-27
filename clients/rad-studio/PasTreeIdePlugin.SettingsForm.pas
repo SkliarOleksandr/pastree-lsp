@@ -73,6 +73,7 @@ type
     lblDeclImplToggleHint: TLabel;
     chkFindAll: TCheckBox;
     lblFindAllHint: TLabel;
+    chkFindRefsImplHeaders: TCheckBox;
     chkGoTo: TCheckBox;
     lblGoToHint: TLabel;
     chkUnitDialogs: TCheckBox;
@@ -108,6 +109,7 @@ type
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
     procedure chkLoggingClick(Sender: TObject);
     procedure chkClassCompleteClick(Sender: TObject);
+    procedure chkFindAllClick(Sender: TObject);
     procedure chkHighlightTypesClick(Sender: TObject);
     procedure TypeStyleChanged(Sender: TObject);
     procedure pbxPreviewPaint(Sender: TObject);
@@ -179,6 +181,13 @@ procedure TPasTreeSettingsForm.chkClassCompleteClick(Sender: TObject);
 begin
   lblClassCompleteOrder.Enabled := chkClassComplete.Checked;
   cbxClassCompleteOrder.Enabled := chkClassComplete.Checked;
+end;
+
+{ Find References lives in the Find All submenu and nowhere else, so its
+  option is greyed with it - for chkLoggingClick's reason, value kept. }
+procedure TPasTreeSettingsForm.chkFindAllClick(Sender: TObject);
+begin
+  chkFindRefsImplHeaders.Enabled := chkFindAll.Checked;
 end;
 
 procedure TPasTreeSettingsForm.chkHighlightTypesClick(Sender: TObject);
@@ -306,6 +315,7 @@ begin
     LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;
     LForm.chkDeclImplToggle.Checked := LSettings.OverrideDeclImplToggle;
     LForm.chkFindAll.Checked := LSettings.EnableFindAll;
+    LForm.chkFindRefsImplHeaders.Checked := LSettings.FindRefsImplHeaders;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
@@ -326,6 +336,7 @@ begin
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
     LForm.chkClassCompleteClick(nil);
+    LForm.chkFindAllClick(nil);
     LForm.chkHighlightTypesClick(nil);
 
     if LForm.ShowModal <> mrOk then
@@ -334,6 +345,7 @@ begin
     LSettings.CtrlClickNavigation := LForm.chkCtrlClick.Checked;
     LSettings.OverrideDeclImplToggle := LForm.chkDeclImplToggle.Checked;
     LSettings.EnableFindAll := LForm.chkFindAll.Checked;
+    LSettings.FindRefsImplHeaders := LForm.chkFindRefsImplHeaders.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;
