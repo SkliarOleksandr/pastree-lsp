@@ -79,6 +79,13 @@ the Find All switch in the settings, lists them too: every header a type's name
 qualifies, and a method's own implementation header. The report's title says
 so while it is on.
 
+Form files are searched too: a component's `object Button1: TButton`, a
+handler's `OnClick = Button1Click`, a reference such as `FocusControl = Edit1`
+or `DataSource = DataModule1.Table1`, a class in an object header - each a row
+in its `.dfm`/`.fmx`, bound by the rules the RTL itself streams a form with,
+so a same-spelled name elsewhere in the file is not a row. An event handler
+with no form row is one no form links.
+
 #### Overrides
 
 With the caret on a class method, its whole VMT chain: the declaration that
@@ -208,6 +215,18 @@ rather than one segment of it. Renaming a type renames it in every method
 implementation header it qualifies (`procedure TFoo.Bar;`), and renaming a
 routine renames both of its headers, whatever Find References is set to list -
 leaving either behind would not compile.
+
+Form files are renamed with the code - leaving one behind would compile and
+then fail when the form is created. Renaming a component also renames its
+event handlers named after it (`Button1Click` becomes `OKButtonClick`, calls
+and form links included) and a caption that still reads its name, as the
+Object Inspector does. A form that is open in the IDE - or loaded behind one,
+as ancestors, frames and data modules are - is renamed through its form
+designer, which is checked and saved; a few shapes are refused while their
+form is loaded (a class, a component inside an inline frame, a handler
+another loaded form links), and File > Close All then lets the rename
+through. A published property or an enumeration value that a form file sets
+is refused for now, and so is a binary `.dfm`.
 
 Renaming a *unit* is deliberately refused with a message pointing at the Project
 Manager. The server produces a correct plan for it, but the IDE performs a

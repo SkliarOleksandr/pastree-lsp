@@ -928,6 +928,39 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    touched fourteen places is indistinguishable from one that touched the
    wrong fourteen.
 
+   **Form files, and a LOADED form through its designer (0.57.0).** The plan
+   reaches .dfm/.fmx files (server SPEC, "Form files"). A form file whose
+   form is NOT loaded is the disk kind like any closed file. A LOADED one -
+   and a form is loaded far more often than it is on screen: opening a form
+   loads its ancestors, its inline frames and every data module its form
+   file references - belongs to the form designer, which holds it as live
+   components and writes them out over the file on every save, so no text
+   edit survives there. Its form edits are left to the designer, "the IDE
+   first, then we complete" (Alex, 2026-09-27; five spike runs, the facts in
+   the plugin README): a component's Name is set in the designer of the form
+   whose class declares it (`IOTAComponent.SetPropByName('Name')`), a
+   handler goes through `IDesigner.RenameMethod` there, and the plan writes
+   the rest. The designer is checked, not trusted: the handlers it will
+   rename with a component are PREDICTED from the live component and must be
+   the plan's carried ones, every line it changed must be the plan's (its old
+   text with the sites it renamed), it must then hold the new names - else
+   the same request the other way undoes its change and nothing is written.
+   Every loaded form the plan names is then marked modified and saved, the
+   owner first: the designer updates descendants and cross-module references
+   LIVE but leaves them unmodified, and unsaved their files would keep the
+   old names. The saved files are read back, and a site that does not read
+   the new name is reported in the results tab. REFUSED while loaded: a
+   class, a site inside an inline frame's block, a handler another loaded
+   form links (RenameMethod reaches no other form), a carried handler that
+   belongs to another loaded form. Revert asks the same question again, of
+   the forms as they are then, and runs the same path backward.
+
+   **No interface to the IDE's objects outlives one rename or one Revert.**
+   The Revert state is the plan alone; the touched files' `IOTAModule` and
+   `IOTASourceEditor` used to ride along with it (0.39-0.56), unused, until
+   a tab the user closed found our reference on its editor: "Instance of
+   Class TEditSource has dangling reference count of 1" (2026-09-27).
+
    **Two validators, deliberately.** The keyword verdict is the analysis's
    (`IsValidRenameName`, in PasTree - which this package must never link),
    so every real refusal comes from the server and is shown verbatim.

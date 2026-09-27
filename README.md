@@ -69,7 +69,8 @@ costs, and the incremental-reanalysis mechanism are in
   Descendants (as a tree), Assignments, Creations, Destructions - all
   project-group-wide and greyed per caret, Go to Declaration/Ctrl+Click, the
   decl-impl toggle,
-  rename, class completion (Ctrl+Shift+C: missing bodies and property
+  rename (form files included - through the form designer when the form is
+  loaded), class completion (Ctrl+Shift+C: missing bodies and property
   accessors), prototype sync, and block completion - each with its own
   on/off switch in Tools > PasTree > Settings.
 

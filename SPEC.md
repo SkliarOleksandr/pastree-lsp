@@ -215,7 +215,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/definition` | symbol / unit / builtin, plus a CONDITIONAL SYMBOL (0.40.0, PasTree 0.27.0): the name in `$IFDEF`/`$IFNDEF`/`$DEFINE`/`$UNDEF`/`Defined()` goes to the nearest preceding active `$DEFINE` in the same unit; a project or platform define lands on the main module's header (PasTree 0.27.2 - the project is its home, as System.pas is a builtin's) |
 | `textDocument/declaration`, `textDocument/implementation` | the decl-impl toggle |
 | `pastree/declarationAt` | OURS, not LSP: the same three-identity resolve as `textDocument/definition`, but WITHOUT that request's redirect to a routine's implementation - the actual declaration site, full stop. Exists because Find References labels a row "declaration" (`ReportHits` in the RAD Studio client) and that row must be the declaration, not one hop further to the body (found 2026-09-15: it was asking `textDocument/definition` for it, which put the row's target on the wrong half of the routine) |
-| `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four. `context.includeImplementationHeaders` is OURS: it adds the implementation headers that spell a symbol's name without using it - a type's name in every `procedure TFoo.Bar;`, a routine's own implementation header (PasTree `FindReferences(..., AImplHeaders)`). Off unless sent, so a standard client gets the standard answer |
+| `textDocument/references` | symbol / unit / builtin / conditional-symbol identities - for a define, every mention including the `$DEFINE` sites (no separate declaration); `documentHighlight`, `findAllAt` and the rename refusal follow the same four. `context.includeImplementationHeaders` is OURS: it adds the implementation headers that spell a symbol's name without using it - a type's name in every `procedure TFoo.Bar;`, a routine's own implementation header (PasTree `FindReferences(..., AImplHeaders)`). Off unless sent, so a standard client gets the standard answer. FORM FILES are always searched (0.57.0): their rows carry `formKind`/`formObject`/`formVia`/`formProp` besides the Location - see "Form files" below |
 | `textDocument/documentSymbol` | outline, types with members |
 | `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page; a conditional symbol gets a `{$DEFINE X}` card noting the `$DEFINE` it sees, or that the project defines it |
 | `textDocument/publishDiagnostics` | push, open documents; PasTree's `ReportUnresolvedMembers` is on since 0.52.4, so an unresolved member after a dot is E2003 like a bare name |
@@ -235,7 +235,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `pastree/classComplete` | OURS, not LSP: the bodies a buffer's declarations are missing (Ctrl+Shift+C). Optional `position` (the scope, see below) and `bodyOrder` - `alphabetical` (default) or `declaration`, where a new body goes among its type's existing ones |
 | `pastree/syncPrototypes` | OURS, not LSP: the routine at a position, its signature mirrored onto its other half (the first half of Ctrl+Shift+C in the RAD Studio client). At most one edit, and unlike classComplete's it REPLACES - the range has a real end ([PasLsp.SyncPrototypes](source/PasLsp.SyncPrototypes.pas)) |
 | `pastree/annotateArgs` | OURS, not LSP: the parameter names of the call at a position, as zero-length insertions of `{Name:} ` in front of each argument, `{var} `/`{out} ` in front of that for a by-reference parameter (never `{const}`). The caret INSIDE the argument list means the one argument it is in (`scope` `one`); ON the routine's name means every argument (`all`); `""` is no call. Optional params override the caret: `mode` `all` / `anonymous` (only arguments that do not name themselves - not a plain identifier or member chain) / `current` (refused with the caret on the name); `byRef` (default true) for the `{var}`/`{out}` marks; `multiline` (default false) puts every argument on its own line under the call - then each edit REPLACES the whitespace in front of the argument (a real range end, like syncPrototypes) with the line break, the indent and the annotation, and an argument already on its own line is left there. The overload is the resolver's own choice when it made one (PasTree 0.29.0 `TPasCallInfo.BoundExact`), else the single family member fitting the argument count, else a refusal by count - a wrong name reads as documentation. Idempotent (an argument already carrying a `{...:}` or `{var}`/`{out}` comment gets nothing more); intrinsics are named from the engine's signature table (`Inc(var X[; N])` - optional groups taken as the argument count allows, a variadic `Args`/`...` tail left nameless); procedural values and named arguments are refused or skipped by name in `provider` ([PasLsp.AnnotateArgs](source/PasLsp.AnnotateArgs.pas)). No WaitAnalyzed, for classComplete's reason. Also rides `pastree/findAllAt` as `annotate` so a menu can caption itself |
-| `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line |
+| `pastree/renamePlan` | OURS, not LSP: the same plan with `oldText`, a per-site `newText`, and a post-rename preview per line; a form-file edit also carries `formKind`/`formObject`/`formVia`/`formProp`, and the plan `formRole` and `carried` (the handlers a component's rename carries along) - see "Form files" below |
 | `pastree/findOverrides` | OURS, not LSP: the VMT chain of the CLASS method at the position - the declaration that introduced its slot plus every `override`, `reintroduce` and `message` handler below it, across the closure (PasTree `MethodAt`/`FindOverrides`; its docs/editor-features.md section 4 owns what is and is not a row). Answers `{name, rows[]}`, each row a Location plus `filePath`, `line`/`col` (1-based), `kind` (`root`/`override`/`message`/`reintroduce`/`redeclared`), `typeName`, `snippet`/`hiFrom`/`hiTo`; `null` when the position is neither a class method nor a class property - a different answer from a one-row chain, which is "nothing overrides this". A class PROPERTY is the same request over a different chain: a bare `property Items;` republishing an inherited property is the SAME property, so the rows are its declarations, `redeclared` below the one that writes the type, while a redeclaration WITH a type hides it and is no row (PasTree 0.21.0 and up owns that rule). Custom rather than `textDocument/implementation` because that name is already the decl-impl toggle here |
 | `pastree/findImplementations` | OURS, not LSP: the twin for an INTERFACE - two entry points, one method, as PasTree's demo has it. On an interface METHOD: the method of every class listing the interface, an implementor that inherits the method reported on the ancestor's declaration with `viaTypeName` naming the listing class (PasTree `InterfaceMethodAt`/`FindImplementations`, section 5 there, gaps included: method resolution clauses, `implements` delegation, type aliases). On the interface's own NAME: one row per class listing it (`InterfaceAt`/`FindInterfaceImplementors`, section 5.1). ONE hop, to the classes that spell this interface's name: a class listing a DESCENDANT interface is not a row (PasTree 0.25.0; up to 0.24.x it was, and on a base interface the answer had no shape a list could show) - the interfaces below one are findDescendants' axis, the child's implementors this request on the child. Same row shape; `kind` is `root`/`implementor`/`inherited`; `null` when the position is neither. A separate method for a separate identity: a class method has no implementors and an interface method no override chain, and one request for both would have to guess |
 | `pastree/findDescendants` | OURS, not LSP: every class below the CLASS (or interface below the INTERFACE) at the position, transitively, across the closure (PasTree `TypeAt`/`FindDescendants`, section 6). Same row shape plus `parentTypeName` and `depth` (heritage links from the root, 0 on the root) - the tree flattened in breadth-first order, so a client nesting each row under the depth-1 row its parent names gets the tree without a second walk; `kind` is `root`/`descendant`. One axis only: an interface's rows are the interfaces extending it, never the classes implementing it. `null` when the position is not a class, `object` or interface type name; a type nothing descends from answers its own single root row. Always the whole tree - no depth parameter (0.37.7-0.37.9 briefly took `includeIndirect`, and the direct answer was a flat list in a panel built to show a tree) |
@@ -409,7 +409,8 @@ a language rule rather than a search: `procedure TFoo.Bar;` repeats the type's
 name and the routine's own, neither is a use, and a rename that skipped them
 left code that did not compile (the type half until PasTree's
 `ImplQualifierNodes`; the parameter twin in the peer header, `PeerDeclSym`, is
-the same rule). `PlanUnitRename` is the same idea over
+the same rule). FORM FILES are the other reach, and have a section of their
+own below. `PlanUnitRename` is the same idea over
 the unit identity: the module's own header name plus every `uses` item that
 resolved to it, with each site getting the spelling it had (the full dotted
 name where it was written in full, the bare leaf where a namespace prefix
@@ -449,6 +450,59 @@ and the rename looks like a failure after having entirely succeeded.
 `staleInPaths` now reports only what could NOT be fixed, and a position for
 that literal still belongs in PasTree - then this becomes one more of its own
 edits.
+
+**Form files (.dfm/.fmx) are part of references and rename (0.57.0, PasTree
+0.59.0).** A form file names Pascal symbols - a component's `object X: TC`, a
+handler's `OnClick = X`, a component reference `FocusControl = X` or
+`DataModule1.Table1`, a class in an object header - and the RTL binds them at
+run time BY NAME only (TReader: FieldAddress, MethodAddress, GetFieldClass).
+A rename that skipped one compiles cleanly and fails when the form is
+created: a handler the reader cannot find is EReadError, a component whose
+field was renamed stays nil without a word. So:
+
+- *reading* is the RTL's own lexer: `PasTree.Dfm` walks `System.Classes.
+  TParser` exactly as ObjectTextToBinary does and records positions instead
+  of writing binary. No round trip - regenerating the file would be a
+  whole-file diff for any form file that is not byte-canonical. A binary form
+  file is converted in memory, listed, and refused for a rename;
+- *binding* is TReader's rules, not a guess (`PasTree.Sema.Dfm`): a component
+  is a published field of the lookup root's class - the form, or inside
+  `inline F: TFrame1` the frame; a handler is a published method of the ROOT
+  class, inline or not; a dotted reference's head is a component of the
+  lookup root or another module's root Name;
+- *references* lists the form-file rows BY DEFAULT - they are uses in every
+  sense that matters, and a handler with no form row looks unused. Each row
+  carries `formKind` (component / class / handler / componentRef),
+  `formObject` (the component it is on), `formVia` (own / inline / module -
+  see below) and `formProp` (the property it is the value of);
+- *rename* plans the form sites with the rest and refuses what it cannot do
+  whole: a form file that may name the symbol but cannot be read or bound, a
+  binary one, a published PROPERTY or an enum value a form file spells (bound
+  through a property's type, which is not resolved yet - a partial rename
+  would be exactly the silent break), a non-ASCII name for a form file
+  without a UTF-8 BOM, a name a streaming form already has;
+- *a component's rename carries along* what the form designer does to it
+  when its Name changes, so that a rename made here and one made in the IDE
+  agree: every handler NAMED AFTER it on its own events (Button1Click on
+  Button1's OnClick - the name plus the event's without "On") is renamed
+  with it, declaration, implementation, calls and form links, and a
+  `Caption`/`Text` that reads exactly its old name follows it (TControl.
+  SetName's csSetCaption rule; an action's only without an `Action` link,
+  as TContainedAction.SetName; a TLabeledEdit's `EditLabel.Caption`). A
+  handler whose own rename would be refused keeps its name - it is bound by
+  name wherever it is linked, so not renaming it never breaks anything.
+  `pastree/renamePlan` lists those as `carried` (`oldName`, `newName`,
+  `role`) and each edit writes its own `newText`;
+- `formRole` on renamePlan says where the symbol lives in the form files:
+  `kind` (component / handler / class), `ownerClass`, and `formFile`, the
+  form whose ROOT is that class - the one whose designer owns the symbol.
+  That and `formVia` are for a host whose forms a live designer may hold: the
+  designer must make the rename itself there, and it propagates a rename
+  differently along each path. The RAD Studio client does exactly that - see
+  `clients/rad-studio/SPEC.md`.
+
+`textDocument/documentHighlight` does not read form files: it runs on every
+caret rest, so `FindReferences(..., AFormFiles)` stays off there.
 
 **Why `pastree/renamePlan` exists next to `textDocument/rename`.** They plan
 the same edits; the custom one keeps what a `WorkspaceEdit` throws away -

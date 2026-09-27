@@ -17,7 +17,17 @@ unit PasTreeIdePlugin.Rename;
   here re-reads a buffer to build them.
 
   SYMBOLS ONLY - a routine, a type, a field, a variable, a parameter. Text
-  edits and nothing else.
+  edits and nothing else - except in a FORM FILE whose form is loaded.
+
+  A LOADED FORM IS THE DESIGNER'S (since 0.57.0). Its form file is held as
+  live components and written out of them on every save, so no text edit
+  survives there; the form designer itself makes the rename - a component's
+  Name, a handler's RenameMethod - and the plan does the rest, after checking
+  that the designer did exactly the plan's part (TDesignerAction has the
+  rules and the measurements behind them). A component's rename carries its
+  handlers named after it along (Button1Click -> OKButtonClick) and a caption
+  that read its name - as the designer does, so the two paths agree. What
+  the designer cannot do whole is refused before anything is touched.
 
   A UNIT IS DECLINED, and not for want of a plan: the server produces a
   correct one (the header, every `uses` item, the `in '...'` path, and the
@@ -149,10 +159,13 @@ procedure CloseRenameResults;
 implementation
 
 uses
-  System.SysUtils, System.StrUtils, System.Classes,
-  System.Generics.Collections,
+  System.SysUtils, System.StrUtils, System.Classes, System.Character,
+  System.Generics.Collections, System.TypInfo,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
   System.IOUtils,
+  // DesignIntf: IDesigner, for a loaded form's handlers (RenameMethod,
+  // MethodExists) - see TDesignerAction.
+  DesignIntf,
   // PasLsp.SourceText: reading a closed file and writing it back in its own
   // encoding, for the files the IDE does not have open - see CollectFiles.
   PasLsp.SourceText,
@@ -181,17 +194,68 @@ type
     Nothing of the disk kind touches the disk before Save.
 
     The disk kind has been in and out of this record twice; CollectFiles has
-    the reasons it is back. }
+    the reasons it is back.
+
+    A THIRD KIND, LiveForm: a form file (.dfm/.fmx) whose form is LOADED.
+    The form designer holds it as live components, not as text, so its edits
+    are the designer's (see TDesignerAction) - the applier leaves them alone -
+    and it reaches the disk when its module (Module) is saved. }
   TRenameFile = record
     Path: string;
     Module: IOTAModule;
     Editor: IOTASourceEditor;
     OnDisk: Boolean;
+    LiveForm: Boolean;
     Text: string;
     Encoding: TPasSourceEncoding;
   end;
 
   TRenameFiles = TDictionary<string, TRenameFile>;
+
+  { Where a site stands in the text a pass reads: still reading what the pass
+    replaces (Pending), already reading what it writes (Done - the designer
+    did it, or a Ctrl+Z did the revert's work), or in a live form, where the
+    designer owns it (Live). Row/Col are where it actually is, which is not
+    always the plan's: see VerifySites. }
+  TSiteState = (ssPending, ssDone, ssLive);
+
+  TSiteSpot = record
+    Row, Col: Integer;
+    State: TSiteState;
+  end;
+
+  TSiteSpots = TArray<TSiteSpot>;
+
+  { WHAT THE FORM DESIGNER DOES for a rename whose form is loaded - "the IDE
+    first, then we complete" (Alex, 2026-09-27; the facts from four spike
+    runs are in local/DFM-PLAN.md). A loaded form cannot take a text edit:
+    the designer writes its live components out over the file on every save.
+    So the designer is asked to make the rename itself, and the plan does the
+    rest - every site the designer did not reach (calls and references in
+    code, the form files of forms that are not loaded) - after checking that
+    the designer did exactly what was expected.
+
+    dakComponent: the component's Name is set in its form's designer. The
+    IDE then renames the field and every handler named after the component
+    (the plan's carried renames, predicted and checked), a caption that read
+    the name, and - LIVE, in every other loaded form - the descendants'
+    `inherited` headers, their links to those handlers, and the references
+    from other modules (`DataModule1.Action1`).
+    dakHandler: IDesigner.RenameMethod in the form of the class that declares
+    it - both headers and that form's own links, and nothing in any other
+    form (not even a loaded descendant's link), which is why such a rename is
+    refused when another loaded form links the handler.
+
+    FormFile is the form whose designer acts; Handlers the carried renames
+    that designer makes along with a component's. }
+  TDesignerActionKind = (dakNone, dakComponent, dakHandler);
+
+  TDesignerAction = record
+    Kind: TDesignerActionKind;
+    FormFile: string;
+    OldName, NewName: string;
+    Handlers: TArray<TLspCarriedRename>;
+  end;
 
   { Which way a plan is being applied. Forward is the rename: each site reads
     OldText and gets NewText. Backward is Cancel: each site reads NewText -
@@ -200,16 +264,23 @@ type
     rename it undoes. }
   TApplyDirection = (adForward, adBackward);
 
-  { The rename that Revert would undo: its plan and its files, as applied
-    and saved. Revert exists for the user who presses Ctrl+Z in the one file
-    they had open and finds the other fifty-one still renamed (2026-09-11):
-    it is the button that finishes what the Ctrl+Z started. Cleared by
-    Revert, by the next rename, by a project close, and at unload. }
+  { The rename that Revert would undo: its PLAN, and nothing of the IDE's.
+    Revert exists for the user who presses Ctrl+Z in the one file they had
+    open and finds the other fifty-one still renamed (2026-09-11): it is the
+    button that finishes what the Ctrl+Z started. Cleared by Revert, by the
+    next rename, by a project close, and at unload.
+
+    NO MODULE OR EDITOR IS HELD HERE, and that is a rule with a date. The
+    files a rename touched used to be kept for Revert, with their IOTAModule
+    and IOTASourceEditor - which Revert never used (it gathers the files
+    again, as they stand then), and which outlived the user closing a tab:
+    the IDE destroys that tab's editor with our reference still on it,
+    "Instance of Class TEditSource has dangling reference count of 1"
+    (Alex, 2026-09-27, closing forms after a rename). Every interface to
+    the IDE's objects lives for one rename or one Revert, never between. }
   TAppliedRename = class
     Plan: TLspRenamePlan;
-    Files: TRenameFiles;
-    constructor Create(const APlan: TLspRenamePlan; AFiles: TRenameFiles);
-    destructor Destroy; override;
+    constructor Create(const APlan: TLspRenamePlan);
   end;
 
 var
@@ -314,18 +385,10 @@ end;
 
 { TAppliedRename }
 
-constructor TAppliedRename.Create(const APlan: TLspRenamePlan;
-  AFiles: TRenameFiles);
+constructor TAppliedRename.Create(const APlan: TLspRenamePlan);
 begin
   inherited Create;
   Plan := APlan;
-  Files := AFiles;
-end;
-
-destructor TAppliedRename.Destroy;
-begin
-  Files.Free;
-  inherited;
 end;
 
 procedure RevertApplied; forward;
@@ -341,7 +404,8 @@ procedure RevertApplied; forward;
   And, above the rows, the Revert toolbar (PasTreeIdePlugin.RenameToolbar):
   the one way back. }
 procedure ReportRename(const APlan: TLspRenamePlan;
-  ADiskCount, AFileCount, AFailed: Integer);
+  ADiskCount, AFileCount, AFailed: Integer;
+  const AUnconfirmed: TArray<string>);
 var
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
@@ -349,8 +413,9 @@ var
   LFileHeaders: TDictionary<string, Pointer>;
   LParentRef: Pointer;
   LEdit: TLspRenameEdit;
-  LKey, LTitleHead, LTitleCount: string;
+  LKey, LTitleHead, LTitleCount, LLine: string;
   LExisting, LFileCount: Integer;
+  LCarried: TLspCarriedRename;
 begin
   if not Supports(BorlandIDEServices, IOTAMessageServices,
     LMessageServices) then
@@ -382,6 +447,18 @@ begin
       [AFileCount, AFileCount - ADiskCount, ADiskCount,
        IfThen(AFailed > 0, Format('; %d could not be saved, see the Build tab',
          [AFailed]), '')]), LGroup);
+  // What the rename carried along - the handlers named after a component
+  // (see TLspCarriedRename): rows below show them, this says why they are
+  // there.
+  for LCarried in APlan.Carried do
+    LMessageServices.AddTitleMessage(Format('Carried along: the handler %s ' +
+      '-> %s, named after the component.', [LCarried.OldName,
+      LCarried.NewName]), LGroup);
+  // Form-file sites the designer was trusted with and the file does not show
+  // (ConfirmLiveForms) - the one thing that must not go unsaid.
+  for LLine in AUnconfirmed do
+    LMessageServices.AddTitleMessage('Form file ' + LLine + ' - check it.',
+      LGroup);
 
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
@@ -495,6 +572,24 @@ begin
   Result := nil;
 end;
 
+// A FORM FILE - see CollectFiles for why its edits are a kind of their own.
+function IsFormFile(const APath: string): Boolean;
+begin
+  Result := SameText(ExtractFileExt(APath), '.dfm') or
+    SameText(ExtractFileExt(APath), '.fmx');
+end;
+
+{ The loaded module that owns form file AFormPath, or nil. A form file is
+  never a module of its own - its unit's module holds it - so both names are
+  asked: FindModule may answer for the form file's name, and the module list
+  certainly knows the unit's. }
+function FormOwnerModule(const AFormPath: string): IOTAModule;
+begin
+  Result := ModuleOf(AFormPath);
+  if not Assigned(Result) then
+    Result := ModuleOf(ChangeFileExt(AFormPath, '.pas'));
+end;
+
 { Every file the plan touches, told apart into the two kinds - see
   TRenameFile. ADiskCount comes back with how many are of the disk kind,
   which is what the results tab tells the user about afterwards.
@@ -508,6 +603,16 @@ end;
   have is not given to the IDE at all: its text is read here, edited here,
   and written back here at Save, in the encoding it came in.
 
+  A FORM FILE (.dfm/.fmx) is the disk kind or the LiveForm kind. Its unit's
+  module, when loaded, holds it in the FORM DESIGNER - as live components,
+  not as text - and writes it out of them on every save, so an edit on disk
+  would be undone by the next save, and the module's only source buffer is
+  the .pas, never the form file. A form is loaded far more often than it is
+  on screen: opening a form loads its ancestors and every data module its
+  form file references. Such a file is marked LiveForm here and left to the
+  designer (TDesignerAction); whether the designer CAN do this rename is
+  ResolveDesignerAction's question, and a refusal comes from there.
+
   False (with AError set) for any file that is neither open nor readable,
   and that refuses the WHOLE rename rather than skipping a site - the same
   all-or-nothing rule every other check here follows. }
@@ -517,6 +622,7 @@ var
   LEdit: TLspRenameEdit;
   LFile: TRenameFile;
   LKey: string;
+  LOwner: IOTAModule;
 begin
   Result := False;
   AError := '';
@@ -528,6 +634,35 @@ begin
       Continue;
     LFile := Default(TRenameFile);
     LFile.Path := LEdit.FilePath;
+    if IsFormFile(LEdit.FilePath) then
+    begin
+      LOwner := FormOwnerModule(LEdit.FilePath);
+      if Assigned(LOwner) then
+      begin
+        TraceFmt('  %s: its form is loaded in the IDE (module %s) - the ' +
+          'designer''s', [ExtractFileName(LEdit.FilePath), LOwner.FileName]);
+        LFile.LiveForm := True;
+        LFile.Module := LOwner;
+        AFiles.Add(LKey, LFile);
+        Continue;
+      end;
+      LFile.OnDisk := True;
+      if not TryReadSourceForEdit(LEdit.FilePath, {out} LFile.Text,
+        {out} LFile.Encoding) then
+      begin
+        TraceFmt('  %s: form file not readable - refusing',
+          [ExtractFileName(LEdit.FilePath)]);
+        AError := Format('%s could not be read.'#13#10#13#10'Nothing was ' +
+          'renamed.', [LEdit.FilePath]);
+        Exit;
+      end;
+      Inc(ADiskCount);
+      TraceFmt('  %s: form file, its form not loaded - held for the disk ' +
+        '(encoding=%d)', [ExtractFileName(LEdit.FilePath),
+        Ord(LFile.Encoding)]);
+      AFiles.Add(LKey, LFile);
+      Continue;
+    end;
     LFile.Module := ModuleOf(LEdit.FilePath);
     if Assigned(LFile.Module) then
     begin
@@ -677,44 +812,37 @@ begin
     Result := AEdit.OldText;
 end;
 
-{ A site's actual row, or 0 if it cannot be found.
-
-  The plan's row first. If the expected text is not there, ONE fallback, for
-  the backward pass only: the plan carries each line as it reads AFTER the
-  rename (Snippet), so a site whose line moved - the user added or removed
-  lines above it in a file they had open - is found again if exactly one
-  line in the buffer still reads that way. Exactly one: two identical lines
-  is a guess, and a revert does not guess. The forward pass has no such
-  fallback: its plan is fresh from the analysis, and a mismatch there means
-  the analysis and the buffer disagree, which is a reason to stop. }
-function LocateSite(const AText: UTF8String; const APlan: TLspRenamePlan;
-  AIdx: Integer; ADirection: TApplyDirection; out ACol: Integer): Integer;
+{ Whether ALine reads AText at character column ACol - as a whole name: the
+  character after it may not continue an identifier, or `Button1` would be
+  found at the start of `Button10`, and a rename between two such names
+  could not tell a done site from a pending one. }
+function ReadsAt(const ALine: string; ACol: Integer; const AText: string): Boolean;
 var
-  LEdit: TLspRenameEdit;
-  LLine, LWanted: string;
-  LRow, LFound, LCount: Integer;
+  LAfter: Integer;
 begin
-  LEdit := APlan.Edits[AIdx];
-  ACol := SiteCol(APlan, AIdx, ADirection);
-  LLine := LineText(AText, LEdit.Row);
-  if SameText(Copy(LLine, ACol, Length(SiteExpected(LEdit, ADirection))),
-    SiteExpected(LEdit, ADirection)) then
-    Exit(LEdit.Row);
-  Result := 0;
-  if ADirection = adForward then
+  Result := (AText <> '') and (ACol >= 1) and
+    SameText(Copy(ALine, ACol, Length(AText)), AText);
+  if not Result then
     Exit;
-  // ALREADY REVERTED - the site reads the OLD name where the rename found
-  // it: Ctrl+Z in a file the user had open, or a hand edit. Not a mismatch;
-  // there is nothing left to do at this site, and the revert must not stop
-  // for it (the Ctrl+Z case - see TAppliedRename).
-  if SameText(Copy(LLine, SiteCol(APlan, AIdx, adForward),
-    Length(LEdit.OldText)), LEdit.OldText) then
-    Exit(cAlreadyDone);
-  LWanted := TrimRight(LEdit.Snippet);
+  LAfter := ACol + Length(AText);
+  Result := (LAfter > Length(ALine)) or
+    not (ALine[LAfter].IsLetterOrDigit or (ALine[LAfter] = '_'));
+end;
+
+{ The one row of AText that reads ASnippet (trailing blanks ignored), or 0
+  when none does or several do - two identical lines is a guess, and a
+  revert does not guess. }
+function UniqueRowReading(const AText: UTF8String; const ASnippet: string;
+  out ACount: Integer): Integer;
+var
+  LLine, LWanted: string;
+  LRow: Integer;
+begin
+  Result := 0;
+  ACount := 0;
+  LWanted := TrimRight(ASnippet);
   if LWanted = '' then
     Exit;
-  LFound := 0;
-  LCount := 0;
   LRow := 1;
   while True do
   begin
@@ -723,20 +851,13 @@ begin
       Break;
     if TrimRight(LLine) = LWanted then
     begin
-      Inc(LCount);
-      LFound := LRow;
+      Inc(ACount);
+      Result := LRow;
     end;
     Inc(LRow);
   end;
-  if LCount = 1 then
-  begin
-    TraceFmt('  %s: line %d moved to %d - found by its text',
-      [ExtractFileName(LEdit.FilePath), LEdit.Row, LFound]);
-    Result := LFound;
-  end
-  else
-    TraceFmt('  %s: line %d not where it was and its text matches %d line(s)',
-      [ExtractFileName(LEdit.FilePath), LEdit.Row, LCount]);
+  if ACount <> 1 then
+    Result := 0;
 end;
 
 { The text of every file in AFiles as UTF-8 bytes, read once per pass: the
@@ -754,7 +875,9 @@ var
 begin
   Result := TBufferTexts.Create;
   for LPair in AFiles do
-    if LPair.Value.OnDisk then
+    if LPair.Value.LiveForm then
+      Continue   // the designer's - it has no text here (TRenameFile)
+    else if LPair.Value.OnDisk then
       Result.Add(LPair.Key, UTF8Encode(LPair.Value.Text))
     else
       Result.Add(LPair.Key, ReadModuleBufferUtf8(LPair.Value.Module));
@@ -770,22 +893,57 @@ end;
   parameter is a separate symbol and could, in already-broken code, be
   spelled differently from the one that was clicked.
 
-  ARows comes back with each site's actual row (see LocateSite), so pass two
-  writes where pass one looked. }
-function VerifySites(const APlan: TLspRenamePlan; ATexts: TBufferTexts;
-  ADirection: TApplyDirection; out ARows: TArray<Integer>;
-  out AError: string): Boolean;
+  A SITE IS PENDING OR DONE, and ATolerant says whether Done is allowed at
+  all. Pending reads what the pass replaces (the old name going forward, the
+  new one coming back); Done already reads what the pass writes - after the
+  form designer made its part of the rename (forward), or after a Ctrl+Z in
+  a file the user had open (backward, always tolerated: Revert is how the
+  other files follow). The strict forward pass, before anything happened,
+  allows no Done at all.
+
+  WHERE A SITE IS depends on its neighbours: the plan's column is in the text
+  as it read BEFORE the rename, and every site to its left on the same line
+  that now reads its new text has moved it by the difference between the two
+  names. So each line's sites are walked left to right (the plan is sorted
+  so) with that difference carried along. One fallback, for the backward
+  pass only: a site whose LINE moved - the user added or removed lines above
+  it in a file they had open - is found again if exactly one line reads the
+  plan's post-rename text (Snippet). The forward pass has none: its plan is
+  fresh from the analysis, and a mismatch means the analysis and the buffer
+  disagree, which is a reason to stop.
+
+  ASpots comes back with each site's actual row, column and state, so pass
+  two writes where pass one looked. A site in a LiveForm file is ssLive and
+  not looked at - the designer owns it. }
+function VerifySites(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
+  ATexts: TBufferTexts; ADirection: TApplyDirection; ATolerant: Boolean;
+  out ASpots: TSiteSpots; out AError: string): Boolean;
 var
-  LIdx, LCol: Integer;
+  LIdx, LShift, LCount: Integer;
   LText: UTF8String;
   LEdit: TLspRenameEdit;
+  LFile: TRenameFile;
+  LLine, LExpected, LTarget: string;
+  LReadsExpected, LReadsTarget: Boolean;
 begin
   Result := False;
   AError := '';
-  SetLength(ARows, Length(APlan.Edits));
+  SetLength(ASpots, Length(APlan.Edits));
+  LShift := 0;
   for LIdx := 0 to High(APlan.Edits) do
   begin
     LEdit := APlan.Edits[LIdx];
+    if (LIdx = 0) or (APlan.Edits[LIdx - 1].Row <> LEdit.Row) or
+       not SameText(APlan.Edits[LIdx - 1].FilePath, LEdit.FilePath) then
+      LShift := 0;
+    ASpots[LIdx].Row := LEdit.Row;
+    ASpots[LIdx].Col := LEdit.Col;
+    if AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) and
+       LFile.LiveForm then
+    begin
+      ASpots[LIdx].State := ssLive;
+      Continue;
+    end;
     if not ATexts.TryGetValue(LowerCase(LEdit.FilePath), LText) then
       Exit;   // CollectFiles succeeded, so this cannot happen
     if LText = '' then
@@ -794,23 +952,50 @@ begin
         [ExtractFileName(LEdit.FilePath)]);
       Exit;
     end;
-    ARows[LIdx] := LocateSite(LText, APlan, LIdx, ADirection, {out} LCol);
-    if ARows[LIdx] = 0 then
+    LExpected := SiteExpected(LEdit, ADirection);
+    LTarget := SiteReplacement(LEdit, ADirection);
+    LLine := LineText(LText, LEdit.Row);
+    ASpots[LIdx].Col := LEdit.Col + LShift;
+    LReadsExpected := ReadsAt(LLine, ASpots[LIdx].Col, LExpected);
+    LReadsTarget := ReadsAt(LLine, ASpots[LIdx].Col, LTarget);
+    if LReadsExpected then
+      ASpots[LIdx].State := ssPending
+    else if LReadsTarget and (ATolerant or (ADirection = adBackward)) then
+      ASpots[LIdx].State := ssDone
+    else if ADirection = adBackward then
     begin
-      if ADirection = adForward then
-        AError := Format('%s line %d no longer reads "%s" - the buffer has ' +
-          'changed since the last analysis.'#13#10#13#10 +
-          'Nothing was renamed. Try again in a moment.',
-          [ExtractFileName(LEdit.FilePath), LEdit.Row, LEdit.OldText])
-      else
+      // The line moved: found again by its post-rename text, where every
+      // site on it reads the new name.
+      ASpots[LIdx].Row := UniqueRowReading(LText, LEdit.Snippet, LCount);
+      if ASpots[LIdx].Row = 0 then
+      begin
+        TraceFmt('  %s: line %d not where it was and its text matches %d ' +
+          'line(s)', [ExtractFileName(LEdit.FilePath), LEdit.Row, LCount]);
         AError := Format('%s line %d no longer reads "%s" - the file has ' +
           'been edited since the rename.'#13#10#13#10 +
           'Nothing was reverted. Undo the edit there (or put "%s" back by ' +
           'hand) and press Revert again.',
           [ExtractFileName(LEdit.FilePath), LEdit.Row, LEdit.NewText,
            LEdit.NewText]);
+        Exit;
+      end;
+      TraceFmt('  %s: line %d moved to %d - found by its text',
+        [ExtractFileName(LEdit.FilePath), LEdit.Row, ASpots[LIdx].Row]);
+      ASpots[LIdx].Col := SiteCol(APlan, LIdx, adBackward);
+      ASpots[LIdx].State := ssPending;
+    end
+    else
+    begin
+      AError := Format('%s line %d no longer reads "%s" - the buffer has ' +
+        'changed since the last analysis.'#13#10#13#10 +
+        'Nothing was renamed. Try again in a moment.',
+        [ExtractFileName(LEdit.FilePath), LEdit.Row, LEdit.OldText]);
       Exit;
     end;
+    // What this site reads NOW moves the ones after it on the line.
+    if ((ADirection = adForward) and (ASpots[LIdx].State = ssDone)) or
+       ((ADirection = adBackward) and (ASpots[LIdx].State = ssPending)) then
+      Inc(LShift, Length(LEdit.NewText) - Length(LEdit.OldText));
   end;
   Result := True;
 end;
@@ -821,8 +1006,8 @@ end;
   had already changed (see ApplyClassComplete, which learned that the
   expensive way). Within the file the edits go ASCENDING; the plan is sorted
   so, and a backward pass keeps that order because it shifts columns rather
-  than reordering. A site already reading its target (cAlreadyDone) is left
-  alone; a file where every site is, is not touched at all.
+  than reordering. A site that is not Pending (see VerifySites) is left
+  alone; a file where no site is, is not touched at all.
 
   An OPEN file goes through one IOTASourceEditor.CreateUndoableWriter, so the
   file's pass is one Ctrl+Z in its tab. A DISK file is spliced in memory and
@@ -830,31 +1015,31 @@ end;
   from here. }
 procedure WriteFile(AFiles: TRenameFiles; const AKey: string;
   const AText: UTF8String; const APlan: TLspRenamePlan;
-  const ARows: TArray<Integer>; AFrom, ATo: Integer;
+  const ASpots: TSiteSpots; AFrom, ATo: Integer;
   ADirection: TApplyDirection);
 var
   LFile: TRenameFile;
-  LIdx, LCol, LFrom: Integer;
+  LIdx, LFrom: Integer;
   LAny: Boolean;
   LWriter: IOTAEditWriter;
   LOffsets: TArray<Integer>;
   LExpected: string;
   LOut: UTF8String;
 begin
-  if not AFiles.TryGetValue(AKey, LFile) then
+  if not AFiles.TryGetValue(AKey, LFile) or LFile.LiveForm then
     Exit;
   SetLength(LOffsets, ATo - AFrom + 1);
   LAny := False;
   for LIdx := AFrom to ATo do
   begin
-    if ARows[LIdx] = cAlreadyDone then
+    if ASpots[LIdx].State <> ssPending then
     begin
       LOffsets[LIdx - AFrom] := cAlreadyDone;
       Continue;
     end;
     LAny := True;
-    LCol := SiteCol(APlan, LIdx, ADirection);
-    LOffsets[LIdx - AFrom] := SiteByteOffset(AText, ARows[LIdx], LCol);
+    LOffsets[LIdx - AFrom] := SiteByteOffset(AText, ASpots[LIdx].Row,
+      ASpots[LIdx].Col);
     if LOffsets[LIdx - AFrom] < 0 then
       Exit;   // pass one just found this line; a miss here is a logic error
   end;
@@ -911,25 +1096,673 @@ begin
     LFile.Editor.GetEditView(0).Paint;
 end;
 
-{ Verify EVERYTHING, then write - the two passes the unit header describes,
-  in either direction, over files CollectFiles has already gathered. }
-function ApplyDirection(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
-  ADirection: TApplyDirection; out AError: string): Boolean;
+{ ---- The form designer -------------------------------------------------------
+
+  Everything a rename asks of a LOADED form's designer - see TDesignerAction
+  for the shape and local/DFM-PLAN.md for the four spike runs the facts come
+  from. The rule of this section: nothing is asked of the designer that
+  cannot be checked afterwards, and what is checked is exactly what the plan
+  expects - a designer that did more, or less, is undone before anything
+  else is written. }
+
+function FormEditorOf(const AModule: IOTAModule): IOTAFormEditor;
 var
-  LTexts: TBufferTexts;
-  LRows: TArray<Integer>;
-  LText: UTF8String;
-  LKey: string;
-  LIdx, LRun: Integer;
+  LIdx: Integer;
+begin
+  Result := nil;
+  if not Assigned(AModule) then
+    Exit;
+  for LIdx := 0 to AModule.GetModuleFileCount - 1 do
+    if Supports(AModule.GetModuleFileEditor(LIdx), IOTAFormEditor, Result) then
+      Exit;
+  Result := nil;
+end;
+
+function DesignerOf(const AModule: IOTAModule): IDesigner;
+var
+  LNta: INTAFormEditor;
+begin
+  Result := nil;
+  if Supports(FormEditorOf(AModule), INTAFormEditor, LNta) then
+    Result := LNta.FormDesigner;
+end;
+
+function Opposite(ADirection: TApplyDirection): TApplyDirection;
+begin
+  if ADirection = adForward then
+    Result := adBackward
+  else
+    Result := adForward;
+end;
+
+{ The name the designer holds now and the one it is to hold, by direction:
+  forward it holds OldName, and Revert runs the other way. }
+procedure ActionNames(const AOld, ANew: string; ADirection: TApplyDirection;
+  out AFrom, ATo: string);
+begin
+  if ADirection = adForward then
+  begin
+    AFrom := AOld;
+    ATo := ANew;
+  end
+  else
+  begin
+    AFrom := ANew;
+    ATo := AOld;
+  end;
+end;
+
+// One line for the trace: what the designer is about to be asked.
+function DescribeAction(const AAction: TDesignerAction;
+  ADirection: TApplyDirection): string;
+var
+  LFrom, LTo: string;
+begin
+  ActionNames(AAction.OldName, AAction.NewName, ADirection, LFrom, LTo);
+  case AAction.Kind of
+    dakComponent:
+      Result := Format('%s: component %s -> %s through its Name (%d handler(s) ' +
+        'named after it)', [ExtractFileName(AAction.FormFile), LFrom, LTo,
+        Length(AAction.Handlers)]);
+    dakHandler:
+      Result := Format('%s: IDesigner.RenameMethod(%s, %s)',
+        [ExtractFileName(AAction.FormFile), LFrom, LTo]);
+  else
+    Result := 'none';
+  end;
+end;
+
+{ WHETHER THE DESIGNER CAN DO THIS RENAME, and which designer. dakNone (and
+  True) when no form of the plan is loaded - the plain path. Otherwise the
+  rename must be one the spike runs showed the designer doing whole, or it is
+  refused before anything is touched (False, AError for the user):
+
+  - a component: the form of the class that declares it must be loaded (its
+    designer sets the Name), and no loaded form may reach it from inside an
+    inline frame (a frame's host was never measured following a rename);
+    every carried handler linked in a loaded form must be that same form's
+    own method - the one designer renames only its own;
+  - a handler: the form of the class that declares it must be loaded, and it
+    must be the only loaded form that links the handler, outside an inline
+    frame - RenameMethod reaches no other form, not even a loaded descendant;
+  - anything else a loaded form names (a class) is refused as before. }
+function ResolveDesignerAction(const APlan: TLspRenamePlan;
+  AFiles: TRenameFiles; out AAction: TDesignerAction;
+  out AError: string): Boolean;
+const
+  cCloseHint = #13#10#13#10'Close it and rename again. A form that uses it ' +
+    'keeps it loaded too, so File > Close All is the sure way.'#13#10#13#10 +
+    'Nothing was renamed.';
+var
+  LPair: TPair<string, TRenameFile>;
+  LLive: string;
+  LEdit: TLspRenameEdit;
+  LFile: TRenameFile;
+  LCarried: TLspCarriedRename;
+  LLinkedLive: Boolean;
 begin
   Result := False;
+  AAction := Default(TDesignerAction);
+  AError := '';
+  LLive := '';
+  for LPair in AFiles do
+    if LPair.Value.LiveForm then
+    begin
+      LLive := LPair.Value.Path;
+      Break;
+    end;
+  if LLive = '' then
+    Exit(True);
+  AAction.OldName := APlan.OldName;
+  AAction.NewName := APlan.NewName;
+  AAction.FormFile := APlan.FormRole.FormFile;
+  if SameText(APlan.FormRole.Kind, 'component') then
+    AAction.Kind := dakComponent
+  else if SameText(APlan.FormRole.Kind, 'handler') then
+    AAction.Kind := dakHandler
+  else
+  begin
+    AError := Format('The form of %s is loaded in the IDE, and its form file ' +
+      'is part of this rename - renaming %s there through the form designer ' +
+      'is not supported yet, and the designer would write the old name back ' +
+      'the next time it saves.%s', [ExtractFileName(LLive), APlan.OldName,
+      cCloseHint]);
+    Exit;
+  end;
+  if (AAction.FormFile = '') or
+     not Assigned(FormOwnerModule(AAction.FormFile)) then
+  begin
+    AError := Format('The form of %s is loaded in the IDE and names %s, but ' +
+      'the form of the class that declares it (%s) is not - the designer ' +
+      'that would rename it is not there.%s', [ExtractFileName(LLive),
+      APlan.OldName, APlan.FormRole.OwnerClass, cCloseHint]);
+    Exit;
+  end;
+  for LEdit in APlan.Edits do
+  begin
+    if not AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) or
+       not LFile.LiveForm then
+      Continue;
+    if SameText(LEdit.FormVia, 'inline') then
+    begin
+      AError := Format('%s line %d reaches %s inside an inline frame, and ' +
+        'that form is loaded - a frame''s host is not renamed through the ' +
+        'designer yet.%s', [ExtractFileName(LEdit.FilePath), LEdit.Row,
+        LEdit.OldText, cCloseHint]);
+      Exit;
+    end;
+    if (AAction.Kind = dakHandler) and
+       not SameFile(LEdit.FilePath, AAction.FormFile) then
+    begin
+      AError := Format('%s is loaded and links the handler %s (line %d) - ' +
+        'the designer renames a handler only in the form that declares it ' +
+        '(%s), so this one would keep the old name.%s',
+        [ExtractFileName(LEdit.FilePath), APlan.OldName, LEdit.Row,
+         ExtractFileName(AAction.FormFile), cCloseHint]);
+      Exit;
+    end;
+  end;
+  for LCarried in APlan.Carried do
+  begin
+    if SameFile(LCarried.Role.FormFile, AAction.FormFile) then
+    begin
+      AAction.Handlers := AAction.Handlers + [LCarried];
+      Continue;
+    end;
+    LLinkedLive := (LCarried.Role.FormFile <> '') and
+      Assigned(FormOwnerModule(LCarried.Role.FormFile));
+    for LEdit in APlan.Edits do
+      if SameText(LEdit.FormKind, 'handler') and
+         SameText(LEdit.OldText, LCarried.OldName) and
+         AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) and
+         LFile.LiveForm then
+        LLinkedLive := True;
+    if LLinkedLive then
+    begin
+      AError := Format('Renaming %s also renames %s, the handler named after ' +
+        'it, which belongs to %s - and a form that links it is loaded. The ' +
+        'designer of %s renames only its own handlers.%s', [APlan.OldName,
+        LCarried.OldName, LCarried.Role.OwnerClass,
+        ExtractFileName(AAction.FormFile), cCloseHint]);
+      Exit;
+    end;
+  end;
+  Result := True;
+end;
+
+{ The handlers the IDE renames when component AComp's Name goes from AFrom to
+  ATo, predicted from the LIVE component the way the designer decides it
+  (measured, 2026-09-27): each event of the component whose handler is named
+  AFrom + the event's name without "On" becomes ATo + that suffix. Pairs as
+  'old=new', the new name in the case the designer will write it. }
+function PredictHandlerRenames(const AComp: IOTAComponent;
+  const ADesigner: IDesigner; const AFrom, ATo: string): TArray<string>;
+var
+  LNta: INTAComponent;
+  LObj: TComponent;
+  LProps: PPropList;
+  LCount, LIdx: Integer;
+  LMethod: TMethod;
+  LName, LSuffix, LPair: string;
+begin
+  Result := nil;
+  if not Supports(AComp, INTAComponent, LNta) or
+     not Assigned(LNta.GetComponent) then
+    Exit;
+  LObj := LNta.GetComponent;
+  LCount := GetPropList(LObj.ClassInfo, [tkMethod], nil);
+  if LCount <= 0 then
+    Exit;
+  GetMem(LProps, LCount * SizeOf(PPropInfo));
+  try
+    GetPropList(LObj.ClassInfo, [tkMethod], LProps);
+    for LIdx := 0 to LCount - 1 do
+    begin
+      LMethod := GetMethodProp(LObj, LProps^[LIdx]);
+      if LMethod.Code = nil then
+        Continue;
+      LName := ADesigner.GetMethodName(LMethod);
+      LSuffix := string(LProps^[LIdx]^.Name);
+      if (Length(LSuffix) >= 2) and SameText(Copy(LSuffix, 1, 2), 'On') then
+        Delete(LSuffix, 1, 2);
+      if (LName = '') or not SameText(LName, AFrom + LSuffix) then
+        Continue;
+      LPair := LowerCase(LName) + '=' + ATo + LSuffix;
+      if IndexStr(LPair, Result) < 0 then
+        Result := Result + [LPair];
+    end;
+  finally
+    FreeMem(LProps);
+  end;
+end;
+
+// The carried renames the designer is to make, as PredictHandlerRenames
+// spells them, by direction.
+function ExpectedHandlerRenames(const AAction: TDesignerAction;
+  ADirection: TApplyDirection): TArray<string>;
+var
+  LCarried: TLspCarriedRename;
+  LFrom, LTo: string;
+begin
+  Result := nil;
+  for LCarried in AAction.Handlers do
+  begin
+    ActionNames(LCarried.OldName, LCarried.NewName, ADirection, LFrom, LTo);
+    Result := Result + [LowerCase(LFrom) + '=' + LTo];
+  end;
+end;
+
+// Case-insensitively, as Pascal names are: the designer writing a handler
+// back as `GoButtonClick` where it once read `GoButtonclick` is the same one.
+function SameStringSets(const A, B: TArray<string>): Boolean;
+var
+  LItem: string;
+begin
+  Result := Length(A) = Length(B);
+  if Result then
+    for LItem in A do
+      if IndexText(LItem, B) < 0 then
+        Exit(False);
+end;
+
+{ BEFORE the designer is asked anything: it must hold the name to rename and
+  not the one to rename to, and - for a component - the handlers it will
+  rename along must be exactly the plan's carried ones. The plan was made
+  from the form file on disk and the designer holds the form as it is now;
+  a difference means the form has unsaved changes, or the designer decides
+  differently from how the plan was told it does, and either way the result
+  would not be the plan's. }
+function CheckDesignerReady(const AAction: TDesignerAction;
+  ADirection: TApplyDirection; out AError: string): Boolean;
+var
+  LModule: IOTAModule;
+  LFE: IOTAFormEditor;
+  LDesigner: IDesigner;
+  LComp: IOTAComponent;
+  LFrom, LTo, LForm: string;
+  LPredicted, LExpected: TArray<string>;
+  LPair: string;
+  LParts: TArray<string>;
+begin
+  Result := False;
+  AError := '';
+  ActionNames(AAction.OldName, AAction.NewName, ADirection, LFrom, LTo);
+  LForm := ExtractFileName(AAction.FormFile);
+  LModule := FormOwnerModule(AAction.FormFile);
+  LFE := FormEditorOf(LModule);
+  LDesigner := DesignerOf(LModule);
+  if not Assigned(LFE) or not Assigned(LDesigner) then
+  begin
+    AError := Format('The form designer of %s is not available.%s', [LForm,
+      #13#10#13#10'Nothing was renamed.']);
+    Exit;
+  end;
+  case AAction.Kind of
+    dakComponent:
+      begin
+        LComp := LFE.FindComponent(LFrom);
+        if not Assigned(LComp) then
+        begin
+          AError := Format('The form designer of %s has no component named ' +
+            '%s - the form in the designer differs from the file. Save the ' +
+            'form and rename again.'#13#10#13#10'Nothing was renamed.',
+            [LForm, LFrom]);
+          Exit;
+        end;
+        if Assigned(LFE.FindComponent(LTo)) then
+        begin
+          AError := Format('The form designer of %s already has a component ' +
+            'named %s.'#13#10#13#10'Nothing was renamed.', [LForm, LTo]);
+          Exit;
+        end;
+        LPredicted := PredictHandlerRenames(LComp, LDesigner, LFrom, LTo);
+        LExpected := ExpectedHandlerRenames(AAction, ADirection);
+        TraceFmt('  designer will rename the handler(s) [%s]; the plan ' +
+          'carries [%s]', [string.Join(', ', LPredicted),
+          string.Join(', ', LExpected)]);
+        if not SameStringSets(LPredicted, LExpected) then
+        begin
+          AError := Format('The form designer of %s would rename the ' +
+            'handlers named after %s differently from the plan (designer: ' +
+            '%s; plan: %s) - the form in the designer differs from the file. ' +
+            'Save the form and rename again.'#13#10#13#10'Nothing was renamed.',
+            [LForm, LFrom, IfThen(Length(LPredicted) = 0, 'none',
+             string.Join(', ', LPredicted)), IfThen(Length(LExpected) = 0,
+             'none', string.Join(', ', LExpected))]);
+          Exit;
+        end;
+        for LPair in LExpected do
+        begin
+          LParts := LPair.Split(['=']);
+          if LDesigner.MethodExists(LParts[1]) then
+          begin
+            AError := Format('%s already has a method named %s - the ' +
+              'handler %s cannot take that name.'#13#10#13#10'Nothing was ' +
+              'renamed.', [LForm, LParts[1], LParts[0]]);
+            Exit;
+          end;
+        end;
+      end;
+    dakHandler:
+      begin
+        if not LDesigner.MethodExists(LFrom) then
+        begin
+          AError := Format('The form designer of %s has no method named %s - ' +
+            'the form in the designer differs from the file. Save the form ' +
+            'and rename again.'#13#10#13#10'Nothing was renamed.', [LForm,
+            LFrom]);
+          Exit;
+        end;
+        if LDesigner.MethodExists(LTo) then
+        begin
+          AError := Format('%s already has a method named %s.'#13#10#13#10 +
+            'Nothing was renamed.', [LForm, LTo]);
+          Exit;
+        end;
+      end;
+  end;
+  Result := True;
+end;
+
+{ The designer, asked. Guarded: the designer raises on a name it will not
+  take (EComponentError, EModuleError - a form Name may not equal a unit's). }
+function RunDesignerAction(const AAction: TDesignerAction;
+  ADirection: TApplyDirection; out AError: string): Boolean;
+var
+  LModule: IOTAModule;
+  LComp: IOTAComponent;
+  LDesigner: IDesigner;
+  LFrom, LTo, LName: string;
+begin
+  Result := False;
+  AError := '';
+  ActionNames(AAction.OldName, AAction.NewName, ADirection, LFrom, LTo);
+  LModule := FormOwnerModule(AAction.FormFile);
+  try
+    case AAction.Kind of
+      dakComponent:
+        begin
+          LComp := FormEditorOf(LModule).FindComponent(LFrom);
+          LName := LTo;
+          Result := Assigned(LComp) and LComp.SetPropByName('Name', LName);
+          if not Result then
+            AError := Format('The form designer of %s did not take the name ' +
+              '%s.', [ExtractFileName(AAction.FormFile), LTo]);
+        end;
+      dakHandler:
+        begin
+          LDesigner := DesignerOf(LModule);
+          Result := Assigned(LDesigner);
+          if Result then
+            LDesigner.RenameMethod(LFrom, LTo);
+        end;
+    end;
+  except
+    on E: Exception do
+    begin
+      AError := Format('The form designer of %s refused: %s (%s)',
+        [ExtractFileName(AAction.FormFile), E.Message, E.ClassName]);
+      Result := False;
+    end;
+  end;
+  // The IDE applies what the designer did to the source buffer by the time
+  // this returns; the spike runs read it after one message pump, and so does
+  // this.
+  Application.ProcessMessages;
+end;
+
+{ AFTER the designer: it holds the new name and not the old one - the
+  component, and each handler it was to rename with it. }
+function CheckDesignerResult(const AAction: TDesignerAction;
+  ADirection: TApplyDirection; out AError: string): Boolean;
+var
+  LModule: IOTAModule;
+  LFE: IOTAFormEditor;
+  LDesigner: IDesigner;
+  LFrom, LTo, LPair: string;
+  LParts: TArray<string>;
+begin
+  Result := False;
+  AError := '';
+  ActionNames(AAction.OldName, AAction.NewName, ADirection, LFrom, LTo);
+  LModule := FormOwnerModule(AAction.FormFile);
+  LFE := FormEditorOf(LModule);
+  LDesigner := DesignerOf(LModule);
+  if not Assigned(LFE) or not Assigned(LDesigner) then
+  begin
+    AError := 'The form designer went away during the rename.';
+    Exit;
+  end;
+  case AAction.Kind of
+    dakComponent:
+      begin
+        if not Assigned(LFE.FindComponent(LTo)) or
+           Assigned(LFE.FindComponent(LFrom)) then
+        begin
+          AError := Format('After the rename the form designer does not hold ' +
+            'the component as %s.', [LTo]);
+          Exit;
+        end;
+        for LPair in ExpectedHandlerRenames(AAction, ADirection) do
+        begin
+          LParts := LPair.Split(['=']);
+          if not LDesigner.MethodExists(LParts[1]) or
+             LDesigner.MethodExists(LParts[0]) then
+          begin
+            AError := Format('After the rename the form designer did not ' +
+              'rename the handler %s to %s.', [LParts[0], LParts[1]]);
+            Exit;
+          end;
+        end;
+      end;
+    dakHandler:
+      if not LDesigner.MethodExists(LTo) or LDesigner.MethodExists(LFrom) then
+      begin
+        AError := Format('After the rename the form designer does not hold ' +
+          'the method as %s.', [LTo]);
+        Exit;
+      end;
+  end;
+  Result := True;
+end;
+
+function SplitLines(const AText: UTF8String): TArray<string>;
+begin
+  Result := UTF8ToString(AText).Replace(#13#10, #10).Split([#10]);
+end;
+
+{ EVERY LINE THE DESIGNER CHANGED MUST BE ONE THE PLAN EXPLAINS: a changed
+  line must read exactly its old text with the plan's sites that went from
+  Pending to Done (APre -> APost) replaced - nothing else on it, and no line
+  added or removed. A designer that renamed one handler more than the plan
+  carries, or reformatted a declaration, fails here, and is undone. }
+function ExplainChanges(const APlan: TLspRenamePlan; ABefore,
+  AAfter: TBufferTexts; const APre, APost: TSiteSpots;
+  ADirection: TApplyDirection; out AError: string): Boolean;
+var
+  LPair: TPair<string, UTF8String>;
+  LBeforeText: UTF8String;
+  LOld, LNew: TArray<string>;
+  LRow, LIdx, LDelta: Integer;
+  LLine, LFrom, LTo: string;
+begin
+  Result := False;
+  AError := '';
+  for LPair in AAfter do
+  begin
+    if not ABefore.TryGetValue(LPair.Key, LBeforeText) or
+       (LBeforeText = LPair.Value) then
+      Continue;
+    LOld := SplitLines(LBeforeText);
+    LNew := SplitLines(LPair.Value);
+    if Length(LOld) <> Length(LNew) then
+    begin
+      AError := Format('The form designer added or removed lines in %s ' +
+        '(%d -> %d), which the plan does not do.', [ExtractFileName(LPair.Key),
+        Length(LOld), Length(LNew)]);
+      Exit;
+    end;
+    for LRow := 1 to Length(LOld) do
+    begin
+      if LOld[LRow - 1] = LNew[LRow - 1] then
+        Continue;
+      LLine := LOld[LRow - 1];
+      LDelta := 0;
+      for LIdx := 0 to High(APlan.Edits) do
+      begin
+        if (APre[LIdx].Row <> LRow) or (APre[LIdx].State <> ssPending) or
+           (APost[LIdx].State <> ssDone) or
+           not SameText(LowerCase(APlan.Edits[LIdx].FilePath), LPair.Key) then
+          Continue;
+        if ADirection = adForward then
+        begin
+          LFrom := APlan.Edits[LIdx].OldText;
+          LTo := APlan.Edits[LIdx].NewText;
+        end
+        else
+        begin
+          LFrom := APlan.Edits[LIdx].NewText;
+          LTo := APlan.Edits[LIdx].OldText;
+        end;
+        LLine := Copy(LLine, 1, APre[LIdx].Col - 1 + LDelta) + LTo +
+          Copy(LLine, APre[LIdx].Col + LDelta + Length(LFrom), MaxInt);
+        Inc(LDelta, Length(LTo) - Length(LFrom));
+      end;
+      if not SameText(LLine, LNew[LRow - 1]) then
+      begin
+        AError := Format('The form designer changed %s line %d in a way the ' +
+          'plan does not explain:'#13#10'  was: %s'#13#10'  now: %s',
+          [ExtractFileName(LPair.Key), LRow, Trim(LOld[LRow - 1]),
+           Trim(LNew[LRow - 1])]);
+        Exit;
+      end;
+    end;
+  end;
+  Result := True;
+end;
+
+{ The designer's change undone, after a check refused it - the same request
+  the other way round, which the designer answers with the exact inverse
+  (the spike runs renamed every component and handler back and forth this
+  way). AError is extended with what the user needs to know: whether every
+  buffer reads again what it read before. }
+procedure UndoDesigner(const AAction: TDesignerAction;
+  ADirection: TApplyDirection; AFiles: TRenameFiles; ABefore: TBufferTexts;
+  var AError: string);
+var
+  LUndoError: string;
+  LNow: TBufferTexts;
+  LPair: TPair<string, UTF8String>;
+  LNowText: UTF8String;
+  LDiffers: string;
+begin
+  Trace('  undoing the designer''s change: ' +
+    DescribeAction(AAction, Opposite(ADirection)));
+  if not RunDesignerAction(AAction, Opposite(ADirection), LUndoError) then
+    Trace('  undo FAILED: ' + LUndoError);
+  LNow := ReadBuffers(AFiles);
+  try
+    LDiffers := '';
+    for LPair in ABefore do
+      if LNow.TryGetValue(LPair.Key, LNowText) and (LNowText <> LPair.Value) then
+        LDiffers := LDiffers + ' ' + ExtractFileName(LPair.Key);
+  finally
+    LNow.Free;
+  end;
+  if LDiffers = '' then
+    AError := AError + #13#10#13#10'The form designer''s change was undone. ' +
+      'Nothing was renamed.'
+  else
+  begin
+    Trace('  after the undo these still differ:' + LDiffers);
+    AError := AError + #13#10#13#10'The form designer''s change could NOT be ' +
+      'undone completely - these files differ from before:' + LDiffers +
+      '. Check them (Ctrl+Z there) before saving.';
+  end;
+end;
+
+// Every open buffer the designer changed, told to the document sync - see
+// WriteFile on why a buffer with no view needs saying.
+procedure NoteChangedBuffers(AFiles: TRenameFiles; ABefore,
+  AAfter: TBufferTexts);
+var
+  LPair: TPair<string, UTF8String>;
+  LBeforeText: UTF8String;
+  LFile: TRenameFile;
+begin
+  for LPair in AAfter do
+    if ABefore.TryGetValue(LPair.Key, LBeforeText) and
+       (LBeforeText <> LPair.Value) and AFiles.TryGetValue(LPair.Key, LFile) and
+       not LFile.OnDisk then
+      NoteBufferModified(LFile.Path);
+end;
+
+{ Verify EVERYTHING, then write - the two passes the unit header describes,
+  in either direction, over files CollectFiles has already gathered.
+
+  With a DESIGNER ACTION the designer goes between the two: verified first
+  (every site still reads what it should), then asked (CheckDesignerReady,
+  RunDesignerAction), then checked - every site reads its old or its new
+  text, every line it changed is one the plan explains, it holds the new
+  names - and only then is the rest written, the sites it already did left
+  alone (Done). A check that fails undoes the designer's change and writes
+  nothing. }
+function ApplyDirection(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
+  ADirection: TApplyDirection; const AAction: TDesignerAction;
+  out AError: string): Boolean;
+var
+  LTexts, LAfter: TBufferTexts;
+  LSpots, LPost: TSiteSpots;
+  LText: UTF8String;
+  LKey: string;
+  LIdx, LRun, LDone: Integer;
+begin
+  Result := False;
+  LAfter := nil;
   LTexts := ReadBuffers(AFiles);
   try
     Trace('verifying every site against the text that will be rewritten');
-    if not VerifySites(APlan, LTexts, ADirection, {out} LRows, {out} AError) then
+    if not VerifySites(APlan, AFiles, LTexts, ADirection, False, {out} LSpots,
+      {out} AError) then
     begin
       Trace('verify FAILED: ' + AError);
       Exit;
+    end;
+    if AAction.Kind <> dakNone then
+    begin
+      Trace('designer: ' + DescribeAction(AAction, ADirection));
+      if not CheckDesignerReady(AAction, ADirection, {out} AError) then
+      begin
+        Trace('designer not ready: ' + AError);
+        Exit;
+      end;
+      if not RunDesignerAction(AAction, ADirection, {out} AError) then
+      begin
+        Trace('designer FAILED: ' + AError);
+        UndoDesigner(AAction, ADirection, AFiles, LTexts, AError);
+        Exit;
+      end;
+      LAfter := ReadBuffers(AFiles);
+      if not VerifySites(APlan, AFiles, LAfter, ADirection, True, {out} LPost,
+           {out} AError) or
+         not ExplainChanges(APlan, LTexts, LAfter, LSpots, LPost, ADirection,
+           {out} AError) or
+         not CheckDesignerResult(AAction, ADirection, {out} AError) then
+      begin
+        Trace('designer result REJECTED: ' + AError);
+        UndoDesigner(AAction, ADirection, AFiles, LTexts, AError);
+        Exit;
+      end;
+      LDone := 0;
+      for LIdx := 0 to High(LPost) do
+        if LPost[LIdx].State = ssDone then
+          Inc(LDone);
+      TraceFmt('designer done: %d site(s) already renamed by it', [LDone]);
+      NoteChangedBuffers(AFiles, LTexts, LAfter);
+      LTexts.Free;
+      LTexts := LAfter;
+      LAfter := nil;
+      LSpots := LPost;
     end;
     Trace('verified; writing');
     LIdx := 0;
@@ -944,38 +1777,40 @@ begin
       LKey := LowerCase(APlan.Edits[LIdx].FilePath);
       if LTexts.TryGetValue(LKey, LText) then
       begin
-        WriteFile(AFiles, LKey, LText, APlan, LRows, LIdx, LRun, ADirection);
+        WriteFile(AFiles, LKey, LText, APlan, LSpots, LIdx, LRun, ADirection);
         TraceFmt('  %s: %d edit(s) applied',
           [ExtractFileName(APlan.Edits[LIdx].FilePath), LRun - LIdx + 1]);
-      end;
+      end
+      else if LSpots[LIdx].State = ssLive then
+        TraceFmt('  %s: %d edit(s) left to the form designer',
+          [ExtractFileName(APlan.Edits[LIdx].FilePath), LRun - LIdx + 1]);
       LIdx := LRun + 1;
     end;
     Result := True;
   finally
+    LAfter.Free;
     LTexts.Free;
   end;
 end;
 
-{ Gather every touched file, then the forward pass. On success AFiles is
-  handed to the caller (for Save and Cancel); on refusal it is freed here and
-  the user has been told why. }
+{ Gather every touched file, decide what the form designer has to do, then
+  the forward pass. On success AFiles is handed to the caller (for Save and
+  Revert) with AAction saying what the designer did; on refusal it is freed
+  here and the user has been told why. }
 function ApplyPlan(const APlan: TLspRenamePlan; out ADiskCount: Integer;
-  out AFiles: TRenameFiles): Boolean;
+  out AFiles: TRenameFiles; out AAction: TDesignerAction): Boolean;
 var
   LError: string;
 begin
   Result := False;
   ADiskCount := 0;
+  AAction := Default(TDesignerAction);
   AFiles := TRenameFiles.Create;
   try
     TraceFmt('applying %d edit(s) - gathering files', [Length(APlan.Edits)]);
-    if not CollectFiles(APlan, AFiles, {out} ADiskCount, {out} LError) then
-    begin
-      CloseWaitDialog;
-      TellUser(LError, mtError);
-      Exit;
-    end;
-    if not ApplyDirection(APlan, AFiles, adForward, {out} LError) then
+    if not CollectFiles(APlan, AFiles, {out} ADiskCount, {out} LError) or
+       not ResolveDesignerAction(APlan, AFiles, {out} AAction, {out} LError) or
+       not ApplyDirection(APlan, AFiles, adForward, AAction, {out} LError) then
     begin
       CloseWaitDialog;
       TellUser(LError, mtError);
@@ -1001,36 +1836,147 @@ end;
   already had, so nothing is closed and its .dfm is the IDE's own affair), a
   disk one through TryWriteSource in the encoding it came in. The disk paths
   come back for the server, which has no other way of hearing about them.
-  ASaved and AFailed count; a failure is logged with the file. }
-procedure SaveFiles(AFiles: TRenameFiles; out ASaved, AFailed: Integer;
-  out ADiskPaths: TArray<string>);
+  ASaved and AFailed count; a failure is logged with the file.
+
+  A LIVE FORM is saved through its module too - after its form editor is
+  marked modified. The designer updates a loaded descendant, or a form that
+  references a renamed component of another module, LIVE, and leaves it
+  unmodified (spike run 3): unsaved, its form file would keep the old names.
+  Marked and saved, it writes the new ones (run 4, verified on disk).
+  AFirstForm's module goes first - the form whose designer made the rename,
+  which a descendant is written against. A module shared by two entries
+  (the unit and its form file) is saved once. }
+procedure SaveFiles(AFiles: TRenameFiles; const AFirstForm: string;
+  out ASaved, AFailed: Integer; out ADiskPaths: TArray<string>);
 var
   LPair: TPair<string, TRenameFile>;
+  LFile: TRenameFile;
   LOk: Boolean;
-begin
-  ASaved := 0;
-  AFailed := 0;
-  ADiskPaths := nil;
-  for LPair in AFiles do
+  LSaved: TStringList;
+  LFE: IOTAFormEditor;
+
+  function SaveModule(const AModule: IOTAModule): Boolean;
   begin
-    UpdateWaitDialogWork(ExtractFileName(LPair.Value.Path));
-    if LPair.Value.OnDisk then
-    begin
-      LOk := TryWriteSource(LPair.Value.Path, LPair.Value.Text,
-        LPair.Value.Encoding);
-      if LOk then
-        ADiskPaths := ADiskPaths + [LPair.Value.Path];
-    end
-    else
-      LOk := Assigned(LPair.Value.Module) and
-        LPair.Value.Module.Save(False, True);
-    if LOk then
+    if not Assigned(AModule) then
+      Exit(False);
+    if LSaved.IndexOf(AModule.FileName) >= 0 then
+      Exit(True);
+    LSaved.Add(AModule.FileName);
+    Result := AModule.Save(False, True);
+  end;
+
+  procedure Count(const APath: string; AOk: Boolean);
+  begin
+    if AOk then
       Inc(ASaved)
     else
     begin
       Inc(AFailed);
-      TraceFmt('  %s: could not be saved', [ExtractFileName(LPair.Value.Path)]);
+      TraceFmt('  %s: could not be saved', [ExtractFileName(APath)]);
     end;
+  end;
+
+begin
+  ASaved := 0;
+  AFailed := 0;
+  ADiskPaths := nil;
+  LSaved := TStringList.Create;
+  try
+    LSaved.CaseSensitive := False;
+    for LPair in AFiles do
+      if LPair.Value.LiveForm then
+      begin
+        LFE := FormEditorOf(LPair.Value.Module);
+        if Assigned(LFE) then
+          LFE.MarkModified;
+      end;
+    if (AFirstForm <> '') and
+       AFiles.TryGetValue(LowerCase(AFirstForm), LFile) and LFile.LiveForm then
+    begin
+      UpdateWaitDialogWork(ExtractFileName(LFile.Path));
+      Count(LFile.Path, SaveModule(LFile.Module));
+    end;
+    for LPair in AFiles do
+    begin
+      if (AFirstForm <> '') and SameText(LPair.Key, LowerCase(AFirstForm)) and
+         LPair.Value.LiveForm then
+        Continue;   // saved first, above
+      UpdateWaitDialogWork(ExtractFileName(LPair.Value.Path));
+      if LPair.Value.OnDisk then
+      begin
+        LOk := TryWriteSource(LPair.Value.Path, LPair.Value.Text,
+          LPair.Value.Encoding);
+        if LOk then
+          ADiskPaths := ADiskPaths + [LPair.Value.Path];
+      end
+      else
+        LOk := SaveModule(LPair.Value.Module);
+      Count(LPair.Value.Path, LOk);
+    end;
+  finally
+    LSaved.Free;
+  end;
+end;
+
+{ AFTER THE SAVE, each live form's file read back from disk: every one of its
+  sites must now read the pass's text there. The designer wrote those files
+  out of its live components, and whether it propagated each rename is the
+  one thing no check before the save can see. What does not read so comes
+  back as a line for the results tab, and the trace - a site the designer
+  did not follow is a form that will not load (a handler it cannot find) or
+  a caption left behind.
+
+  A form file the designer rewrote in a layout other than the one analyzed
+  (one saved by hand, or by an older IDE) can move its lines, and then this
+  reports sites that are in fact fine - it says "could not confirm", never
+  "wrong". }
+function ConfirmLiveForms(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
+  ADirection: TApplyDirection): TArray<string>;
+var
+  LIdx, LShift: Integer;
+  LEdit: TLspRenameEdit;
+  LFile: TRenameFile;
+  LTexts: TDictionary<string, UTF8String>;
+  LText: UTF8String;
+  LRead: string;
+  LEncoding: TPasSourceEncoding;
+  LKey, LWant: string;
+begin
+  Result := nil;
+  LTexts := TDictionary<string, UTF8String>.Create;
+  try
+    LShift := 0;
+    for LIdx := 0 to High(APlan.Edits) do
+    begin
+      LEdit := APlan.Edits[LIdx];
+      if (LIdx = 0) or (APlan.Edits[LIdx - 1].Row <> LEdit.Row) or
+         not SameText(APlan.Edits[LIdx - 1].FilePath, LEdit.FilePath) then
+        LShift := 0;
+      LKey := LowerCase(LEdit.FilePath);
+      if not AFiles.TryGetValue(LKey, LFile) or not LFile.LiveForm then
+        Continue;
+      if not LTexts.TryGetValue(LKey, LText) then
+      begin
+        if TryReadSourceForEdit(LEdit.FilePath, LRead, LEncoding) then
+          LText := UTF8Encode(LRead)
+        else
+          LText := '';
+        LTexts.Add(LKey, LText);
+      end;
+      LWant := SiteReplacement(LEdit, ADirection);
+      if not ReadsAt(LineText(LText, LEdit.Row), LEdit.Col + LShift, LWant) then
+      begin
+        Result := Result + [Format('%s line %d: not confirmed to read "%s"',
+          [ExtractFileName(LEdit.FilePath), LEdit.Row, LWant])];
+        TraceFmt('  %s line %d: after the save it does not read "%s" at ' +
+          'column %d: [%s]', [ExtractFileName(LEdit.FilePath), LEdit.Row,
+          LWant, LEdit.Col + LShift, LineText(LText, LEdit.Row)]);
+      end;
+      if ADirection = adForward then
+        Inc(LShift, Length(LEdit.NewText) - Length(LEdit.OldText));
+    end;
+  finally
+    LTexts.Free;
   end;
 end;
 
@@ -1045,51 +1991,67 @@ end;
 procedure RevertApplied;
 var
   LFiles: TRenameFiles;
-  LError, LOldName: string;
+  LError, LOldName, LLine: string;
   LReverted, LFileCount, LDiskCount, LSaved, LFailed: Integer;
-  LDiskPaths: TArray<string>;
+  LDiskPaths, LUnconfirmed: TArray<string>;
+  LAction: TDesignerAction;
 begin
   if not GAlive or not Assigned(GApplied) then
     Exit;
+  LFiles := nil;
   try
-    Trace('Revert pressed');
-    ShowWaitDialog('Reverting the rename...');
-    LFiles := TRenameFiles.Create;
-    if not CollectFiles(GApplied.Plan, LFiles, {out} LDiskCount,
-      {out} LError) then
-    begin
-      LFiles.Free;
+    try
+      Trace('Revert pressed');
+      ShowWaitDialog('Reverting the rename...');
+      LFiles := TRenameFiles.Create;
+      // The designer question is asked again, of the forms as they are NOW:
+      // a form opened since the rename is the designer's now, one closed
+      // since is a file on disk.
+      if not CollectFiles(GApplied.Plan, LFiles, {out} LDiskCount,
+           {out} LError) or
+         not ResolveDesignerAction(GApplied.Plan, LFiles, {out} LAction,
+           {out} LError) then
+      begin
+        CloseWaitDialog;
+        TellUser(LError, mtError);
+        Exit;
+      end;
+      if not ApplyDirection(GApplied.Plan, LFiles, adBackward, LAction,
+        {out} LError) then
+      begin
+        // Refused: the rename stands, Revert stays live, and the user has
+        // been told which line to look at.
+        CloseWaitDialog;
+        TellUser(LError, mtError);
+        Exit;
+      end;
+      LReverted := Length(GApplied.Plan.Edits);
+      LOldName := GApplied.Plan.OldName;
+      LFileCount := LFiles.Count;
+      SaveFiles(LFiles, LAction.FormFile, {out} LSaved, {out} LFailed,
+        {out} LDiskPaths);
+      LUnconfirmed := ConfirmLiveForms(GApplied.Plan, LFiles, adBackward);
       CloseWaitDialog;
-      TellUser(LError, mtError);
-      Exit;
+      TraceFmt('reverted %d site(s) in %d file(s); saved %d, %d failed, %d ' +
+        'form-file site(s) not confirmed', [LReverted, LFileCount, LSaved,
+        LFailed, Length(LUnconfirmed)]);
+      ReportOutcome(Format('Reverted - %d site(s) in %d file(s) read "%s" ' +
+        'again, saved%s.', [LReverted, LFileCount, LOldName,
+        IfThen(LFailed > 0, Format(' (%d could not be saved)', [LFailed]),
+        '')]));
+      for LLine in LUnconfirmed do
+        ReportOutcome('  ' + LLine);
+      DropApplied;
+      LspSyncDocuments;
+      LspFilesChangedOnDisk(LDiskPaths);
+    except
+      on E: Exception do
+        LogDiagnostic(Format('Rename Revert: unhandled %s: %s',
+          [E.ClassName, E.Message]));
     end;
-    GApplied.Files.Free;
-    GApplied.Files := LFiles;
-    if not ApplyDirection(GApplied.Plan, LFiles, adBackward, {out} LError) then
-    begin
-      // Refused: the rename stands, Revert stays live, and the user has been
-      // told which line to look at.
-      CloseWaitDialog;
-      TellUser(LError, mtError);
-      Exit;
-    end;
-    LReverted := Length(GApplied.Plan.Edits);
-    LOldName := GApplied.Plan.OldName;
-    LFileCount := LFiles.Count;
-    SaveFiles(LFiles, {out} LSaved, {out} LFailed, {out} LDiskPaths);
-    CloseWaitDialog;
-    TraceFmt('reverted %d site(s) in %d file(s); saved %d, %d failed',
-      [LReverted, LFileCount, LSaved, LFailed]);
-    ReportOutcome(Format('Reverted - %d site(s) in %d file(s) read "%s" ' +
-      'again, saved%s.', [LReverted, LFileCount, LOldName,
-      IfThen(LFailed > 0, Format(' (%d could not be saved)', [LFailed]), '')]));
-    DropApplied;
-    LspSyncDocuments;
-    LspFilesChangedOnDisk(LDiskPaths);
-  except
-    on E: Exception do
-      LogDiagnostic(Format('Rename Revert: unhandled %s: %s',
-        [E.ClassName, E.Message]));
+  finally
+    // Every module and editor reference goes here - see TAppliedRename.
+    LFiles.Free;
   end;
 end;
 
@@ -1142,8 +2104,9 @@ begin
       const AError: string)
     var
       LFiles: TRenameFiles;
-      LDiskCount, LSaved, LFailed: Integer;
-      LDiskPaths: TArray<string>;
+      LDiskCount, LSaved, LFailed, LFileCount: Integer;
+      LDiskPaths, LUnconfirmed: TArray<string>;
+      LAction: TDesignerAction;
     begin
       // The wait dialog STAYS UP through the apply and the save below - it
       // was shown before the request went out and the file names run on
@@ -1202,28 +2165,44 @@ begin
           TellUser('Nothing to rename.', mtInformation);
           Exit;
         end;
-        TraceFmt('plan: old=%s new=%s edits=%d',
-          [APlan.OldName, APlan.NewName, Length(APlan.Edits)]);
+        TraceFmt('plan: old=%s new=%s edits=%d, form role %s of %s (%s), ' +
+          '%d carried', [APlan.OldName, APlan.NewName, Length(APlan.Edits),
+          IfThen(APlan.FormRole.Kind = '', 'none', APlan.FormRole.Kind),
+          APlan.FormRole.OwnerClass, ExtractFileName(APlan.FormRole.FormFile),
+          Length(APlan.Carried)]);
         // APPLIED AND SAVED, HERE AND NOW - open files through their
-        // buffers (an undo step in each tab), closed ones straight to disk -
-        // and the tab then shows what was done, with Revert above it. A
-        // separate Save step was tried and dropped (user, 2026-09-12): one
-        // click that only confirmed what the tab already showed.
-        if not ApplyPlan(APlan, {out} LDiskCount, {out} LFiles) then
+        // buffers (an undo step in each tab), closed ones straight to disk,
+        // loaded forms through their designer - and the tab then shows what
+        // was done, with Revert above it. A separate Save step was tried and
+        // dropped (user, 2026-09-12): one click that only confirmed what the
+        // tab already showed.
+        if not ApplyPlan(APlan, {out} LDiskCount, {out} LFiles,
+          {out} LAction) then
         begin
           Trace('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
         end;
-        SaveFiles(LFiles, {out} LSaved, {out} LFailed, {out} LDiskPaths);
+        try
+          SaveFiles(LFiles, LAction.FormFile, {out} LSaved, {out} LFailed,
+            {out} LDiskPaths);
+          LUnconfirmed := ConfirmLiveForms(APlan, LFiles, adForward);
+          LFileCount := LFiles.Count;
+        finally
+          // Every module and editor reference goes here, not with GApplied:
+          // a tab the user closes later must not find ours on its editor
+          // (see TAppliedRename).
+          FreeAndNil(LFiles);
+        end;
         CloseWaitDialog;
         DropApplied;
-        GApplied := TAppliedRename.Create(APlan, LFiles);
-        TraceFmt('applied %d site(s); saved %d file(s), %d failed, %d of them on disk',
-          [Length(APlan.Edits), LSaved, LFailed, Length(LDiskPaths)]);
-        ReportRename(APlan, LDiskCount, LFiles.Count, LFailed);
+        GApplied := TAppliedRename.Create(APlan);
+        TraceFmt('applied %d site(s); saved %d file(s), %d failed, %d of them ' +
+          'on disk, %d form-file site(s) not confirmed', [Length(APlan.Edits),
+          LSaved, LFailed, Length(LDiskPaths), Length(LUnconfirmed)]);
+        ReportRename(APlan, LDiskCount, LFileCount, LFailed, LUnconfirmed);
         LogDiagnostic(Format('rename: %s -> %s, %d site(s) in %d file(s), ' +
           '%d of them not open in the IDE%s - Revert in the PasTree Rename tab',
-          [APlan.OldName, APlan.NewName, Length(APlan.Edits), LFiles.Count,
+          [APlan.OldName, APlan.NewName, Length(APlan.Edits), LFileCount,
            LDiskCount, IfThen(LFailed > 0,
              Format(', %d could not be saved', [LFailed]), '')]));
         // Two audiences at the server: the buffers it holds overlays for (the

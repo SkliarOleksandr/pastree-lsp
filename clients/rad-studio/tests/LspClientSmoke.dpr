@@ -2283,6 +2283,87 @@ begin
     'and the declaration row carries TBox as a type span at column 3');
 end;
 
+{ 5d-quater. FORM FILES: a component and a handler named by DemoForm.dfm.
+  references lists the form-file rows by default, each with formKind and
+  formObject; renamePlan plans the form edit with its kind, says whose symbol
+  it is (formRole), and carries a component's handler named after it and its
+  caption along; textDocument/rename edits the form file as the text file it
+  is. }
+procedure TestFormFiles;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+  LParams: TJSONObject;
+begin
+  Writeln;
+  Writeln('=== 5d-quater. form files: references and rename reach the .dfm ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoForm.pas');
+  FindPos(LFile, 'procedure GoButtonClick', 'GoButtonClick', LLine, LChar);
+  Check(Ask('textDocument/references', PositionParams(LFile, LLine, LChar)),
+    'references on a handler answered');
+  Check(GOk and GResultJson.Contains('DemoForm.dfm') and
+    GResultJson.Contains('"start":{"line":4,"character":14}'),
+    'and it lists the form file''s OnClick line, positioned');
+  Check(GOk and GResultJson.Contains('"formKind":"handler"') and
+    GResultJson.Contains('"formObject":"GoButton"'),
+    'with what the site is and the component it is on');
+
+  FindPos(LFile, 'GoButton: TObject', 'GoButton', LLine, LChar);
+  Check(Ask('textDocument/references', PositionParams(LFile, LLine, LChar)),
+    'references on a component field answered');
+  Check(GOk and GResultJson.Contains('"formKind":"component"') and
+    GResultJson.Contains('"start":{"line":2,"character":9}'),
+    'and it lists the component''s object header');
+
+  FindPos(LFile, 'procedure GoButtonClick', 'GoButtonClick', LLine, LChar);
+  LParams := PositionParams(LFile, LLine, LChar);
+  LParams.AddPair('newName', 'StartClick');
+  Check(Ask('pastree/renamePlan', LParams), 'renamePlan on the handler answered');
+  Check(GOk and GResultJson.Contains('"formKind":"handler"') and
+    GResultJson.Contains('"snippet":"    OnClick = StartClick"') and
+    GResultJson.Contains('"formVia":"own"') and
+    GResultJson.Contains('"formProp":"OnClick"'),
+    'and the form file''s edit is in the plan, previewed, with its kind');
+  Check(GOk and GResultJson.Contains(
+    '"formRole":{"kind":"handler","ownerClass":"TDemoForm"') and
+    GResultJson.Contains('DemoForm.dfm"}') and
+    GResultJson.Contains('"carried":[]'),
+    'and the plan says whose handler it is, in which form, carrying nothing');
+
+  // A COMPONENT's rename carries its handler named after it and the caption
+  // that reads its name - what the form designer does to them.
+  FindPos(LFile, 'GoButton: TObject', 'GoButton', LLine, LChar);
+  LParams := PositionParams(LFile, LLine, LChar);
+  LParams.AddPair('newName', 'StartButton');
+  Check(Ask('pastree/renamePlan', LParams),
+    'renamePlan on the component answered');
+  Check(GOk and GResultJson.Contains(
+    '"carried":[{"oldName":"GoButtonClick","newName":"StartButtonClick",' +
+    '"role":{"kind":"handler","ownerClass":"TDemoForm"'),
+    'and it carries GoButtonClick along as StartButtonClick');
+  Check(GOk and GResultJson.Contains('"snippet":"    OnClick = StartButtonClick"') and
+    GResultJson.Contains('"newText":"StartButtonClick"') and
+    GResultJson.Contains('"snippet":"procedure TDemoForm.StartButtonClick(Sender: TObject);"') and
+    GResultJson.Contains('"snippet":"    StartButtonClick(Sender);"'),
+    'with its own edits: the form file''s link, the implementation header, the call');
+  Check(GOk and GResultJson.Contains('"formKind":"caption"') and
+    GResultJson.Contains('"snippet":"    Caption = ''StartButton''"') and
+    not GResultJson.Contains('"snippet":"  Caption = ''StartButton''"'),
+    'and the button''s caption that read its name - not the form''s');
+  Check(GOk and GResultJson.Contains(
+    '"formRole":{"kind":"component","ownerClass":"TDemoForm"'),
+    'and the plan says it is a component of TDemoForm');
+
+  FindPos(LFile, 'GoButton: TObject', 'GoButton', LLine, LChar);
+  LParams := PositionParams(LFile, LLine, LChar);
+  LParams.AddPair('newName', 'StartButton');
+  Check(Ask('textDocument/rename', LParams), 'rename of the component answered');
+  Check(GOk and GResultJson.Contains('DemoForm.dfm') and
+    GResultJson.Contains('"newText":"StartButton"') and
+    GResultJson.Contains('"newText":"StartButtonClick"'),
+    'and the workspace edit reaches the form file, the handler carried along');
+end;
+
 { 5d-ter. rename: prepareRename, textDocument/rename and pastree/renamePlan.
 
   Nothing here APPLIES anything - the server plans, a host edits - so the
@@ -4048,6 +4129,7 @@ begin
       TestOutline;
       TestSemanticTokens;
       TestRename;
+      TestFormFiles;
       TestInferredTypes;
       TestClassComplete;
       TestClassCompleteScope;

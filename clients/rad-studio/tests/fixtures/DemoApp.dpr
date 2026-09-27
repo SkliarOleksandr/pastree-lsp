@@ -21,6 +21,7 @@ uses
   DemoClassCompleteBase in 'DemoClassCompleteBase.pas',
   DemoClassCompleteForeign in 'DemoClassCompleteForeign.pas',
   DemoDiagnostics in 'DemoDiagnostics.pas',
+  DemoForm in 'DemoForm.pas',
   DemoMissingUnit in 'DemoMissingUnit.pas';
 
 var

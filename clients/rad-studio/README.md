@@ -325,6 +325,89 @@ once, with one button to take it back.
 - **A compiler builtin is refused** - there is no declaration to rename - as
   is a `uses` spelling the analysis has no rule for. Both refusals are the
   server's own sentence.
+- **Form files follow** (0.57.0): a component's `object X`, a handler's
+  `OnClick = X`, a reference `FocusControl = X` / `DataModule1.X`, a class in
+  an object header. Renaming a component also renames its handlers named
+  after it (Button1Click -> OKButtonClick - declaration, implementation,
+  calls, every form link) and a caption that read its name, as the Object
+  Inspector does; the results tab says "Carried along" for each such
+  handler. A form that is not loaded is edited on disk; a LOADED one through
+  its designer - see "Form files and the form designer" below.
+
+#### Form files and the form designer
+
+A loaded form's file cannot take a text edit: the designer holds the form as
+live components and writes them out over the file on every save. So the
+designer makes the rename itself - a component's Name set in the designer of
+the form whose class declares it (`SetPropByName('Name')`), a handler through
+`IDesigner.RenameMethod` there - and the plan writes everything the designer
+does not reach, after checking that it did exactly the plan's part:
+
+- the handlers the designer will rename with a component are predicted from
+  the live component (each event whose handler is named after it) and must
+  be the plan's carried ones - a difference means the form in the designer
+  differs from the file, and the rename is refused before anything happens;
+- afterwards every site must read its old or its new name, every line the
+  designer changed must be the plan's (its old text with the sites it
+  renamed), and the designer must hold the new names - otherwise the same
+  request the other way round undoes the designer's change and nothing is
+  written;
+- every loaded form the plan names is marked modified and saved, the owner
+  first, and its file is read back: a site that does not read the new name
+  there is listed in the results tab.
+
+Refused while the form is loaded, each with the form named: a class, a site
+inside an inline frame's block, a handler that another loaded form links, a
+carried handler that belongs to another loaded form. File > Close All and
+rename again works for all of them.
+
+What the five spike runs measured (RAD Studio 13, 2026-09-27, scratch project
+`local/dfmspike`; the spike unit itself is kept in `local/` and is not part
+of the package) - the facts the design stands on, and the ones a next step
+starts from:
+
+- Opening a form loads its ancestors, inline frames and referenced data
+  modules as background modules (no view). A form is loaded far more often
+  than it is on screen.
+- `SetPropByName('Name')` (identical: `INTAComponent.GetComponent.Name :=`)
+  renames the field and the handlers NAMED AFTER the component - its name +
+  the event's without "On", on its own events (Button1Click, Edit1Change,
+  Action1Execute; not Edit1Whatever on OnEnter, not SharedExit) - both
+  headers, and no call or other code reference. A Caption/Text equal to the
+  old name follows (csSetCaption). The module is marked modified.
+- That rename propagates LIVE: loaded descendants (`inherited X`, their links
+  to the renamed handler), forms referencing it from another module
+  (`Action = SpikeData.Action1`), and - run 5 - the hosts of an inline frame
+  (`inherited FrameBtn` in both hosts; the HOST's handler named after the
+  frame child, SpikeFrame1FrameButtonClick, is not renamed). Those forms are
+  NOT marked modified: marked and saved they write the new names (run 4,
+  verified on disk).
+- `IDesigner.RenameMethod` renames both headers, no call. Its own form's
+  links follow, a link inside an inline frame's block too (run 5, I). A
+  loaded DESCENDANT's link reads the new name through
+  `IDesigner.GetMethodName` at once (run 5, R), but its streamed text keeps
+  the old one until the event is assigned again - `SetMethodProp` with a
+  TMethod of that handler read back from the descendant's designer (run 5
+  took an inherited component's) writes the new name with no stub and marks
+  only its form file modified. `CreateMethod` in a descendant would instead
+  ADD an `inherited;` stub. RenameMethod on the descendant's own designer
+  does nothing (not its method).
+- A class renamed in the SOURCE is not picked up by a loaded designer.
+  Renaming through the ROOT's Name does rename the class, the global var, a
+  descendant's heritage and the .dpr comment - and, for a frame, left the
+  host's field type to a save-time "Correct the declaration?" dialog and
+  rewrote an unrelated `CreateForm` line of the .dpr into a class that does
+  not exist. A form Name equal to a unit name raises EModuleError.
+- "View as Text" is refused for a module with open descendants or linked
+  modules. `IOTAActionServices.OpenFile(<form>.dfm)` opens a form that is not
+  loaded as a text source module, and SHOWS the designer of one that is
+  (run 5, O).
+- `INTAFormEditor.GetFormResource` writes the form as TEXT (the stream the
+  designer last wrote - a descendant's is refreshed by assigning an event
+  again). The IDE never saved a file by itself during a spike run.
+- Holding a module's `IOTASourceEditor` past the operation is the
+  "TEditSource has dangling reference count" error the moment the user
+  closes its tab - no interface to the IDE's objects outlives a rename.
 - **Switchable off** in Tools > PasTree > Settings. Off hides the menu item
   and hands Ctrl+Shift+E back to the IDE - the same off-switch shape the
   decl/impl toggle has, and a feature that edits your code should have one.

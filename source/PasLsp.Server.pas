@@ -64,6 +64,8 @@ uses
   PasTree.Sema.Project,
   PasTree.Sema.Async,
   PasTree.Sema.Nav,
+  PasTree.Sema.Dfm,
+  PasTree.Dfm,
   PasTree.Outline,
   PasLsp.Protocol,
   PasLsp.Documents,
@@ -89,15 +91,27 @@ type
     the file as it is now, NewFilePath is the two combined, and StaleInPaths
     lists the project files whose `uses ... in '...'` still spells the old
     file name - the one part of a unit rename no plan can express (see
-    UsesInPathSites). All of those are empty for a symbol rename. }
+    UsesInPathSites). FormPath/NewFormPath are the unit's FORM FILE and what
+    it must be called: `$R *.dfm` names the resource after the unit's file,
+    so a unit whose file is renamed and whose form file is not links nothing.
+    All of those are empty for a symbol rename.
+
+    FormRole and Carried are the SYMBOL's side of form files: where the
+    symbol lives in them (whose form's designer owns it) and the handlers a
+    component's rename carries along (see PasTree's TPasCarriedRename) - for
+    a host that must apply the form part through a live designer. }
   TLspRenamePlanned = record
     IsUnit: Boolean;
     OldName: string;
     RequiredFileName: string;
     UnitPath: string;
     NewFilePath: string;
+    FormPath: string;
+    NewFormPath: string;
     StaleInPaths: TArray<string>;
     Edits: TArray<TPasRenameEdit>;
+    FormRole: TPasFormRole;
+    Carried: TArray<TPasCarriedRename>;
   end;
 
   { The three filtered reference searches of the Find All family that share
@@ -3212,6 +3226,56 @@ begin
     Result[LIdx] := AHits[LIdx].Hit;
 end;
 
+{ What a FORM-FILE site is, as the plan and the references rows spell it -
+  '' for a Pascal source site. A host holding a live form designer applies a
+  form edit through the designer by this word (component: rename the
+  component; handler: rename the method; componentRef/class: follow the
+  component or class), which is why it rides with the edit at all. }
+function FormKindWord(AKind: TPasFormSiteKind): string;
+begin
+  case AKind of
+    fskComponent: Result := 'component';
+    fskClass: Result := 'class';
+    fskHandler: Result := 'handler';
+    fskComponentRef: Result := 'componentRef';
+    fskCaption: Result := 'caption';
+  else
+    Result := '';
+  end;
+end;
+
+{ How a form-file site reaches its symbol (PasTree's TPasFormSiteVia): a
+  designer propagates a rename differently along each path. }
+function FormViaWord(AVia: TPasFormSiteVia): string;
+begin
+  case AVia of
+    fsvInline: Result := 'inline';
+    fsvModule: Result := 'module';
+  else
+    Result := 'own';
+  end;
+end;
+
+{ The members a form-file row adds to its object - none for a Pascal row, so
+  every existing reader sees exactly what it saw before. }
+function FormMembersJson(AKind: TPasFormSiteKind; const AObject: string;
+  AVia: TPasFormSiteVia; const AProp: string): string;
+begin
+  if AKind = fskNone then
+    Exit('');
+  Result := Format(',"formKind":%s,"formObject":%s,"formVia":%s,' +
+    '"formProp":%s', [JsonQuote(FormKindWord(AKind)), JsonQuote(AObject),
+    JsonQuote(FormViaWord(AVia)), JsonQuote(AProp)]);
+end;
+
+// A TPasFormRole as JSON - see TLspRenamePlanned.
+function FormRoleJson(const ARole: TPasFormRole): string;
+begin
+  Result := Format('{"kind":%s,"ownerClass":%s,"formFile":%s}',
+    [JsonQuote(FormKindWord(ARole.Kind)), JsonQuote(ARole.OwnerClass),
+     JsonQuote(ARole.FormFile)]);
+end;
+
 { textDocument/references - the three-identity model, straight from the
   navigator (see PasTree.Sema.Nav's own comments for why three): a SYMBOL
   (unit, symbol id - the normal case), a UNIT (header/uses click: each
@@ -3228,17 +3292,26 @@ end;
   implementation headers that spell a symbol's name without using it - a
   type's name in every `procedure TFoo.Bar;`, a routine's own implementation
   header. Off by default because on a form's class it is one row per event
-  handler; rename always takes them (PlanRename), whatever this says. }
+  handler; rename always takes them (PlanRename), whatever this says.
+
+  FORM FILES are always searched for a symbol (FindFormSites): a component's
+  `object X: TC`, a handler's `OnClick = X`, a component reference, a class
+  in an object header. They are USES in every sense that matters - a handler
+  with no form row looks unused, and the form is where it is used - so they
+  are not behind an option. Each such row carries `formKind` and
+  `formObject` (the component it is on) besides the Location, for a host
+  that navigates to the component rather than to a line of text. }
 function TLspServer.HandleReferences(const AMsg: TLspIncoming): string;
 var
   LPath, LName: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
   LInclDecl, LImplHeaders: Boolean;
   LHits: TArray<TPasRefHit>;
+  LForms: TArray<TPasFormSite>;
   LDecl: TPasRefHit;
   LSB: TStringBuilder;
   LIdx: Integer;
-  LKind: string;
+  LKind, LRow: string;
 begin
   LPath := DocPathOf(AMsg.Params);
   Log('textDocument/references: ' + LPath);
@@ -3262,6 +3335,7 @@ begin
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
 
   LHits := nil;
+  LForms := nil;
   // UnitAt BEFORE SymbolAt (the IDE plugin now uses the same order):
   // UnitAt only ever matches a `uses` item or the module's own header
   // name - positions where the unit identity IS the right answer - while
@@ -3283,6 +3357,7 @@ begin
     LHits := FNav.FindReferences(LTMid, LSym, LImplHeaders);
     if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
       LHits := [LDecl] + LHits;
+    LForms := FNav.FindFormSites(LTMid, LSym);
   end
   else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
   begin
@@ -3304,8 +3379,10 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
 
-  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits',
-    [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits)]));
+  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits%s',
+    [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits),
+     IfThen(Length(LForms) > 0,
+       Format(' + %d in form files', [Length(LForms)]), '')]));
   LSB := TStringBuilder.Create;
   try
     LSB.Append('[');
@@ -3315,6 +3392,17 @@ begin
         LSB.Append(',');
       LSB.Append(WithTypeSpans(HitLocationJson(LHits[LIdx]),
         LineTypeSpansJson(LHits[LIdx].FilePath, LHits[LIdx].Line)));
+    end;
+    for LIdx := 0 to High(LForms) do
+    begin
+      if (LIdx > 0) or (Length(LHits) > 0) then
+        LSB.Append(',');
+      LRow := WithTypeSpans(LocationJson(LForms[LIdx].FilePath,
+        LForms[LIdx].Line, LForms[LIdx].Col, LForms[LIdx].Len), '[]');
+      LSB.Append(Copy(LRow, 1, Length(LRow) - 1))
+        .Append(FormMembersJson(LForms[LIdx].Kind, LForms[LIdx].ObjectName,
+          LForms[LIdx].Via, LForms[LIdx].PropName))
+        .Append('}');
     end;
     LSB.Append(']');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
@@ -3333,26 +3421,17 @@ begin
     Result := 'symbol';
 end;
 
-{ The text a planned edit writes. PasTree does not carry it as a field, and
-  does not need to: the preview snippet already holds the line as it will
-  read, so the new spelling is the highlighted span of it. That matters most
-  for a UNIT rename, where two sites on one line can legally get DIFFERENT
-  texts - the full dotted name where it was written in full, the bare leaf
-  where a namespace prefix resolved it - so nothing here may assume the
-  requested name is what lands. }
+{ The text a planned edit writes - its own, never the requested name. Two
+  plans write different texts at different sites: a UNIT rename (the full
+  dotted name where it was written in full, the bare leaf where a namespace
+  prefix resolved it) and a COMPONENT rename, which carries the handlers
+  named after the component along under their own new names (Button1Click ->
+  OKButtonClick - PasTree's TPasCarriedRename). Since PasTree 0.59.0 the edit
+  carries it (NewText); before that it was read back out of the preview. }
 function EditNewText(const AEdit: TPasRenameEdit): string;
 begin
-  Result := Copy(AEdit.Snippet, AEdit.HiFrom + 1, AEdit.HiTo - AEdit.HiFrom);
+  Result := AEdit.NewText;
 end;
-type
-  { A planned edit and the text it writes, together. The text is normally
-    derivable from the edit's own preview (EditNewText), which is exactly why
-    this pairing is needed here: AugmentUsesInPaths REBUILDS those previews,
-    so it cannot read the answer back out of them while it works. }
-  TPlannedEdit = record
-    Edit: TPasRenameEdit;
-    NewText: string;
-  end;
 
 { THE `in '...'` PATH OF A `uses` ITEM, TURNED INTO AN EDIT - the last piece
   of a unit rename, and the one that cost the most to find.
@@ -3381,8 +3460,8 @@ procedure AugmentUsesInPaths(var AEdits: TArray<TPasRenameEdit>;
 var
   LIdx, LEnd, LQuote, LClose, LNameAt, LDelta, LGroup, LRun, LAdded: Integer;
   LOrig, LLiteral, LLine: string;
-  LList: TList<TPlannedEdit>;
-  LItem: TPlannedEdit;
+  LList: TList<TPasRenameEdit>;
+  LItem: TPasRenameEdit;
 
   // The line as it read BEFORE an edit: its preview minus its own
   // replacement. The plan carries no original text, but it carries both ends
@@ -3396,14 +3475,9 @@ var
 begin
   if (AOldFile = '') or (ANewFile = '') or (Length(AEdits) = 0) then
     Exit;
-  LList := TList<TPlannedEdit>.Create;
+  LList := TList<TPasRenameEdit>.Create;
   try
-    for LIdx := 0 to High(AEdits) do
-    begin
-      LItem.Edit := AEdits[LIdx];
-      LItem.NewText := EditNewText(AEdits[LIdx]);
-      LList.Add(LItem);
-    end;
+    LList.AddRange(AEdits);
 
     LAdded := 0;
     for LIdx := 0 to High(AEdits) do
@@ -3433,11 +3507,11 @@ begin
         Continue;   // a path to some other file, or a spelling with no rule
       // 1-based column of the file NAME inside the literal.
       LNameAt := LQuote + 1 + (Length(LLiteral) - Length(AOldFile));
-      LItem.Edit := AEdits[LIdx];
-      LItem.Edit.Col := LNameAt;
-      LItem.Edit.Len := Length(AOldFile);
-      LItem.Edit.OldText := Copy(LOrig, LNameAt, Length(AOldFile));
-      LItem.Edit.IsDecl := False;
+      LItem := AEdits[LIdx];
+      LItem.Col := LNameAt;
+      LItem.Len := Length(AOldFile);
+      LItem.OldText := Copy(LOrig, LNameAt, Length(AOldFile));
+      LItem.IsDecl := False;
       LItem.NewText := ANewFile;
       LList.Add(LItem);
       Inc(LAdded);
@@ -3445,58 +3519,53 @@ begin
     if LAdded = 0 then
       Exit;
 
-    LList.Sort(TComparer<TPlannedEdit>.Construct(
-      function(const A, B: TPlannedEdit): Integer
+    LList.Sort(TComparer<TPasRenameEdit>.Construct(
+      function(const A, B: TPasRenameEdit): Integer
       begin
-        Result := CompareText(A.Edit.FilePath, B.Edit.FilePath);
+        Result := CompareText(A.FilePath, B.FilePath);
         if Result = 0 then
-          Result := A.Edit.Line - B.Edit.Line;
+          Result := A.Line - B.Line;
         if Result = 0 then
-          Result := A.Edit.Col - B.Edit.Col;
+          Result := A.Col - B.Col;
       end));
 
-    { THE PREVIEWS, REBUILT PER LINE. PasTree builds them assuming every edit
-      on a line writes the same new name; the path edit writes a different one,
-      so any line that now holds more than one edit is re-derived here. Same
-      arithmetic as the library's own pass: left to right, carrying the
-      accumulated length delta. }
+    { THE PREVIEWS, REBUILT PER LINE. PasTree built them without the path
+      edit, so any line that now holds more than one edit is re-derived here.
+      Same arithmetic as the library's own pass: left to right, carrying the
+      accumulated length delta, each edit writing its own NewText. }
     LGroup := 0;
     while LGroup < LList.Count do
     begin
       LRun := LGroup;
       while (LRun + 1 < LList.Count) and
-            (LList[LRun + 1].Edit.Line = LList[LGroup].Edit.Line) and
-            SameText(LList[LRun + 1].Edit.FilePath,
-              LList[LGroup].Edit.FilePath) do
+            (LList[LRun + 1].Line = LList[LGroup].Line) and
+            SameText(LList[LRun + 1].FilePath, LList[LGroup].FilePath) do
         Inc(LRun);
       if LRun > LGroup then
       begin
-        LLine := OriginalLine(LList[LGroup].Edit);
+        LLine := OriginalLine(LList[LGroup]);
         LDelta := 0;
         for LIdx := LGroup to LRun do
         begin
           LItem := LList[LIdx];
-          LLine := Copy(LLine, 1, LItem.Edit.Col - 1 + LDelta) +
-            LItem.NewText +
-            Copy(LLine, LItem.Edit.Col + LItem.Edit.Len + LDelta, MaxInt);
-          LItem.Edit.HiFrom := LItem.Edit.Col - 1 + LDelta;
-          LItem.Edit.HiTo := LItem.Edit.HiFrom + Length(LItem.NewText);
-          Inc(LDelta, Length(LItem.NewText) - LItem.Edit.Len);
+          LLine := Copy(LLine, 1, LItem.Col - 1 + LDelta) + LItem.NewText +
+            Copy(LLine, LItem.Col + LItem.Len + LDelta, MaxInt);
+          LItem.HiFrom := LItem.Col - 1 + LDelta;
+          LItem.HiTo := LItem.HiFrom + Length(LItem.NewText);
+          Inc(LDelta, Length(LItem.NewText) - LItem.Len);
           LList[LIdx] := LItem;
         end;
         for LIdx := LGroup to LRun do
         begin
           LItem := LList[LIdx];
-          LItem.Edit.Snippet := LLine;
+          LItem.Snippet := LLine;
           LList[LIdx] := LItem;
         end;
       end;
       LGroup := LRun + 1;
     end;
 
-    SetLength(AEdits, LList.Count);
-    for LIdx := 0 to LList.Count - 1 do
-      AEdits[LIdx] := LList[LIdx].Edit;
+    AEdits := LList.ToArray;
   finally
     LList.Free;
   end;
@@ -3583,6 +3652,11 @@ begin
     end;
     APlan.NewFilePath := RenamedFilePath(APlan.UnitPath,
       APlan.RequiredFileName);
+    // The form file follows the unit's file (see TLspRenamePlanned).
+    APlan.FormPath := PasDfmFileOfUnit(APlan.UnitPath);
+    if (APlan.FormPath <> '') and (APlan.NewFilePath <> '') then
+      APlan.NewFormPath := ChangeFileExt(APlan.NewFilePath,
+        ExtractFileExt(APlan.FormPath));
     { The `in '...'` paths, fixed in the plan itself - see
       AugmentUsesInPaths. Before the report below, so what it reports is
       only what could NOT be fixed. }
@@ -3612,9 +3686,14 @@ begin
   if ANewName = '' then
     Exit(True);
   Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} APlan.Edits,
-    {out} AError);
+    {out} APlan.Carried, {out} AError);
   if not Result then
+  begin
     APlan.Edits := nil;
+    APlan.Carried := nil;
+    Exit;
+  end;
+  APlan.FormRole := FNav.FormRoleOf(LTMid, LSym);
 end;
 
 { Every `uses` item that names the renamed unit with an explicit
@@ -3838,6 +3917,10 @@ begin
       LSB.AppendFormat('{"kind":"rename","oldUri":%s,"newUri":%s}',
         [JsonQuote(PathToUri(LPlan.UnitPath)),
          JsonQuote(PathToUri(LPlan.NewFilePath))]);
+      if LPlan.NewFormPath <> '' then
+        LSB.AppendFormat(',{"kind":"rename","oldUri":%s,"newUri":%s}',
+          [JsonQuote(PathToUri(LPlan.FormPath)),
+           JsonQuote(PathToUri(LPlan.NewFormPath))]);
       LSB.Append(']}');
     end
     else
@@ -3874,7 +3957,15 @@ end;
   name the file rename the host must ALSO perform, and `staleInPaths` lists
   the project files whose `uses ... in '...'` still points at the old file
   name. Announcing none of that and leaving it out would be the worst
-  outcome: text edits that do not compile. }
+  outcome: text edits that do not compile.
+
+  For a symbol, `formRole` says where it lives in the project's form files
+  (`kind` component/handler/class or '', `ownerClass`, and `formFile`, the
+  form whose root is that class), and `carried` lists the handlers a
+  component's rename carries along (`oldName`, `newName`, `role`) - a form-
+  file edit then also says `formVia` (own/inline/module) and `formProp`.
+  What a host needs whose forms a live designer holds: the designer must
+  make those renames itself, and propagates them differently by path. }
 function TLspServer.HandleRenamePlan(const AMsg: TLspIncoming): string;
 var
   LPath, LNewName, LError: string;
@@ -3899,18 +3990,25 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s',
+  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s%s%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName, LNewName, Length(LPlan.Edits),
-     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, '')]));
+     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, ''),
+     IfThen(LPlan.FormRole.Kind <> fskNone, Format(' (a %s of %s, form %s)',
+       [FormKindWord(LPlan.FormRole.Kind), LPlan.FormRole.OwnerClass,
+        IfThen(LPlan.FormRole.FormFile = '', '-',
+          ExtractFileName(LPlan.FormRole.FormFile))]), ''),
+     IfThen(Length(LPlan.Carried) > 0, Format(' + %d carried handler(s)',
+       [Length(LPlan.Carried)]), '')]));
   LSB := TStringBuilder.Create;
   try
     LSB.AppendFormat('{"kind":%s,"oldName":%s,"newName":%s,' +
       '"requiredFileName":%s,"filePath":%s,"newFilePath":%s,' +
-      '"staleInPaths":[',
+      '"formFilePath":%s,"newFormFilePath":%s,"staleInPaths":[',
       [JsonQuote(RenameKindWord(LPlan.IsUnit)), JsonQuote(LPlan.OldName),
        JsonQuote(LNewName), JsonQuote(LPlan.RequiredFileName),
-       JsonQuote(LPlan.UnitPath), JsonQuote(LPlan.NewFilePath)]);
+       JsonQuote(LPlan.UnitPath), JsonQuote(LPlan.NewFilePath),
+       JsonQuote(LPlan.FormPath), JsonQuote(LPlan.NewFormPath)]);
     for LIdx := 0 to High(LPlan.StaleInPaths) do
     begin
       if LIdx > 0 then
@@ -3924,7 +4022,7 @@ begin
         LSB.Append(',');
       LSB.AppendFormat('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
         '"len":%d,"oldText":%s,"newText":%s,"isDecl":%s,"snippet":%s,' +
-        '"hiFrom":%d,"hiTo":%d,"typeSpans":%s}',
+        '"hiFrom":%d,"hiTo":%d,"typeSpans":%s%s}',
         [JsonQuote(PathToUri(LPlan.Edits[LIdx].FilePath)),
          JsonQuote(LPlan.Edits[LIdx].FilePath),
          LPlan.Edits[LIdx].Line, LPlan.Edits[LIdx].Col,
@@ -3935,7 +4033,21 @@ begin
          JsonQuote(LPlan.Edits[LIdx].Snippet),
          LPlan.Edits[LIdx].HiFrom, LPlan.Edits[LIdx].HiTo,
          LineTypeSpansJson(LPlan.Edits[LIdx].FilePath,
-           LPlan.Edits[LIdx].Line)]);
+           LPlan.Edits[LIdx].Line),
+         FormMembersJson(LPlan.Edits[LIdx].FormKind,
+           LPlan.Edits[LIdx].FormObject, LPlan.Edits[LIdx].FormVia,
+           LPlan.Edits[LIdx].FormProp)]);
+    end;
+    LSB.Append('],"formRole":').Append(FormRoleJson(LPlan.FormRole))
+      .Append(',"carried":[');
+    for LIdx := 0 to High(LPlan.Carried) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.AppendFormat('{"oldName":%s,"newName":%s,"role":%s}',
+        [JsonQuote(LPlan.Carried[LIdx].OldName),
+         JsonQuote(LPlan.Carried[LIdx].NewName),
+         FormRoleJson(LPlan.Carried[LIdx].Role)]);
     end;
     LSB.Append(']}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);

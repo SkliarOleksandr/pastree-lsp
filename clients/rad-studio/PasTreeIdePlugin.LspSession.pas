@@ -64,6 +64,11 @@ type
     /// so a Messages row paints types like the editor does. nil from a
     /// server that sends none.
     TypeSpans: TArray<Integer>;
+    /// A row in a FORM FILE (.dfm/.fmx): what the site is ('component',
+    /// 'class', 'handler', 'componentRef') and the component it is on ('' for
+    /// the form itself). FormKind is '' for a Pascal source row.
+    FormKind: string;
+    FormObject: string;
   end;
 
   /// <summary>
@@ -360,6 +365,42 @@ type
     Snippet: string;
     HiFrom, HiTo: Integer;
     TypeSpans: TArray<Integer>;   // as TLspHit.TypeSpans
+    // A FORM-FILE edit (.dfm/.fmx): what the site is - 'component', 'class',
+    // 'handler', 'componentRef', 'caption' - and the component it belongs to
+    // ('' for the form itself). FormKind is '' for a Pascal source edit.
+    // FormVia is how the site reaches the symbol - 'own' (the form's own
+    // lookup root), 'inline' (inside an inline frame, or through a component
+    // path), 'module' (through another module's root Name) - because a live
+    // designer propagates a rename differently along each; FormProp is the
+    // property the site is the value of ('' for an object header).
+    FormKind: string;
+    FormObject: string;
+    FormVia: string;
+    FormProp: string;
+  end;
+
+  /// <summary>
+  /// Where a symbol lives in the project's form files (the server's
+  /// formRole): Kind 'component' (a published field of a form class),
+  /// 'handler' (a published method), 'class' (a form's class) or '', the
+  /// class that declares it, and the form file whose ROOT is that class -
+  /// the one whose designer owns the symbol ('' when that class has none).
+  /// </summary>
+  TLspFormRole = record
+    Kind: string;
+    OwnerClass: string;
+    FormFile: string;
+  end;
+
+  /// <summary>
+  /// A rename the plan CARRIED ALONG: a handler named after a renamed
+  /// component (Button1Click -> OKButtonClick), which the form designer
+  /// renames with it. Its edits are in the plan; this says what they rename.
+  /// </summary>
+  TLspCarriedRename = record
+    OldName: string;
+    NewName: string;
+    Role: TLspFormRole;
   end;
 
   /// <summary>
@@ -386,6 +427,9 @@ type
     NewFilePath: string;
     StaleInPaths: TArray<string>;
     Edits: TArray<TLspRenameEdit>;
+    // The symbol's side of form files - see TLspFormRole/TLspCarriedRename.
+    FormRole: TLspFormRole;
+    Carried: TArray<TLspCarriedRename>;
     // How far across the group the plan reached: the projects whose server
     // answered, out of the projects in the group. See LspRenamePlan.
     ProjectsAnswered, ProjectsInGroup: Integer;
@@ -2390,6 +2434,8 @@ function ParseHits(AResult: TJSONValue): TArray<TLspHit>;
       Exit;
     LspToIde(LLine, LChar, AHit.Row, AHit.Col);
     AHit.TypeSpans := ReadIntArray(AObj, 'typeSpans');
+    AHit.FormKind := AObj.GetValue<string>('formKind', '');
+    AHit.FormObject := AObj.GetValue<string>('formObject', '');
     Result := True;
   end;
 
@@ -2953,17 +2999,39 @@ end;
 /// this one does NOT convert (see TLspRenameEdit). An edit missing its
 /// position or its old text is dropped rather than applied blind.
 /// </summary>
+function ParseFormRole(AValue: TJSONValue): TLspFormRole;
+begin
+  Result := Default(TLspFormRole);
+  if not (AValue is TJSONObject) then
+    Exit;
+  Result.Kind := AValue.GetValue<string>('kind', '');
+  Result.OwnerClass := AValue.GetValue<string>('ownerClass', '');
+  Result.FormFile := AValue.GetValue<string>('formFile', '');
+end;
+
 function ParseRenamePlan(AResult: TJSONValue): TLspRenamePlan;
 var
-  LEdits, LStale: TJSONArray;
+  LEdits, LStale, LCarriedArr: TJSONArray;
   LValue: TJSONValue;
   LObj: TJSONObject;
   LEdit: TLspRenameEdit;
+  LCarried: TLspCarriedRename;
   LCount: Integer;
 begin
   Result := Default(TLspRenamePlan);
   if not (AResult is TJSONObject) then
     Exit;
+  Result.FormRole := ParseFormRole(TJSONObject(AResult).GetValue('formRole'));
+  if AResult.TryGetValue<TJSONArray>('carried', LCarriedArr) then
+    for LValue in LCarriedArr do
+      if LValue is TJSONObject then
+      begin
+        LCarried.OldName := LValue.GetValue<string>('oldName', '');
+        LCarried.NewName := LValue.GetValue<string>('newName', '');
+        LCarried.Role := ParseFormRole(TJSONObject(LValue).GetValue('role'));
+        if (LCarried.OldName <> '') and (LCarried.NewName <> '') then
+          Result.Carried := Result.Carried + [LCarried];
+      end;
   Result.OldName := AResult.GetValue<string>('oldName', '');
   Result.NewName := AResult.GetValue<string>('newName', '');
   Result.IsUnit := SameText(AResult.GetValue<string>('kind', ''), 'unit');
@@ -2997,6 +3065,10 @@ begin
     LEdit.HiFrom := LObj.GetValue<Integer>('hiFrom', 0);
     LEdit.HiTo := LObj.GetValue<Integer>('hiTo', 0);
     LEdit.TypeSpans := ReadIntArray(LObj, 'typeSpans');
+    LEdit.FormKind := LObj.GetValue<string>('formKind', '');
+    LEdit.FormObject := LObj.GetValue<string>('formObject', '');
+    LEdit.FormVia := LObj.GetValue<string>('formVia', '');
+    LEdit.FormProp := LObj.GetValue<string>('formProp', '');
     if (LEdit.FilePath = '') or (LEdit.Row < 1) or (LEdit.Col < 1) or
        (LEdit.Len < 1) or (LEdit.OldText = '') or (LEdit.NewText = '') then
       Continue;
@@ -5010,6 +5082,29 @@ begin
       Result := Result + [LSorted[LIdx]];
 end;
 
+{ AMore's carried renames joined to AHave, once each: another project's
+  closure can hold a descendant form the owner's lacks, and so carry one
+  more handler. }
+function MergeCarried(const AHave,
+  AMore: TArray<TLspCarriedRename>): TArray<TLspCarriedRename>;
+var
+  LNew, LOld: TLspCarriedRename;
+  LKnown: Boolean;
+begin
+  Result := AHave;
+  for LNew in AMore do
+  begin
+    LKnown := False;
+    for LOld in Result do
+      if SameText(LOld.OldName, LNew.OldName) and
+         (LOld.NewName = LNew.NewName) and
+         SameText(LOld.Role.OwnerClass, LNew.Role.OwnerClass) then
+        LKnown := True;
+    if not LKnown then
+      Result := Result + [LNew];
+  end;
+end;
+
 { THE WHOLE GROUP, the shape of LspReferencesInGroup: the owning session
   first and unconditionally - the position is in a file of its project, so
   it is the one that can answer - and then every other project of the group
@@ -5043,6 +5138,7 @@ var
   LOwnerOk, LOwnerDone: Boolean;
   LOwnerError: string;
   LCollected: TArray<TLspRenameEdit>;
+  LCarried: TArray<TLspCarriedRename>;
   LFinish: TProc;
 begin
   LOwner := SessionForRequest(AFileName);
@@ -5064,6 +5160,7 @@ begin
   LOutstanding := Length(LTargets);
   LAnswered := 0;
   LCollected := nil;
+  LCarried := nil;
   LOwnerOk := False;
   LOwnerDone := False;
   LOwnerError := '';
@@ -5086,7 +5183,10 @@ begin
       end;
       LMerged := LOwnerPlan;
       if not LMerged.IsUnit then
+      begin
         LMerged.Edits := MergeRenameEdits(LCollected);
+        LMerged.Carried := LCarried;
+      end;
       LMerged.ProjectsAnswered := LAnswered;
       LMerged.ProjectsInGroup := LInGroup;
       AOnDone(True, LMerged, '');
@@ -5105,6 +5205,7 @@ begin
         LOwnerPlan := APlan;
         Inc(LAnswered);
         LCollected := LCollected + APlan.Edits;
+        LCarried := MergeCarried(APlan.Carried, LCarried);
       end;
       Dec(LOutstanding);
       LFinish();
@@ -5122,6 +5223,7 @@ begin
           begin
             Inc(LAnswered);
             LCollected := LCollected + APlan.Edits;
+            LCarried := MergeCarried(LCarried, APlan.Carried);
           end;
           Dec(LOutstanding);
           LFinish();
