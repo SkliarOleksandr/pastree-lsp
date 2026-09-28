@@ -949,11 +949,22 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    owner first: the designer updates descendants and cross-module references
    LIVE but leaves them unmodified, and unsaved their files would keep the
    old names. The saved files are read back, and a site that does not read
-   the new name is reported in the results tab. REFUSED while loaded: a
-   class, a site inside an inline frame's block, a handler another loaded
-   form links (RenameMethod reaches no other form), a carried handler that
-   belongs to another loaded form. Revert asks the same question again, of
-   the forms as they are then, and runs the same path backward.
+   the new name is reported in the results tab. **Since 0.58.0** (spike run
+   5) a frame's component is renamed with its hosts loaded - they follow
+   the frame's designer live, `inherited X` inside the inline block - and a
+   handler with other loaded forms linking it: RenameMethod renames the
+   links in its own form, an inline block's included, and a loaded
+   descendant's links read the new name but its form stream keeps the old
+   one until the event is assigned again, so each such link is set to the
+   TMethod it already holds (no stub, only that form file modified) before
+   the save. REFUSED while loaded: a class, a carried handler that belongs
+   to another loaded form, a handler linked by a loaded form without a
+   designer. Revert asks the same question again, of the forms as they are
+   then, and runs the same path backward. A Find References or Rename row
+   in a form file goes through `IOTAActionServices.OpenFile` instead of the
+   IDE's jump (which shows a form that is not loaded as its designer): a
+   loaded form's designer, a form that is not loaded as text at the site -
+   both measured.
 
    **No interface to the IDE's objects outlives one rename or one Revert.**
    The Revert state is the plan alone; the touched files' `IOTAModule` and

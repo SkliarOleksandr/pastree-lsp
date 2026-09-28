@@ -100,7 +100,9 @@ function NewFileHeaderRow(const AFilePath: string;
 /// "Name.pas (line): " prefix in front of it. AMatchStart (1-based index
 /// into ASnippet) and AMatchLen mark the identifier painted bold+underlined;
 /// both 0 means no highlight. ATag, if not empty, is painted in the green
-/// accent after the snippet - the "declaration" label.
+/// accent after the snippet - the "declaration" label. A row in a form
+/// file jumps its own way: the designer while its form is loaded, the file
+/// as text at the line while it is not (FormModules.ShowFormFileSite).
 /// </summary>
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
@@ -184,7 +186,7 @@ implementation
 
 uses
   System.SysUtils, System.Types, System.StrUtils,
-  System.UITypes, ToolsAPI.UI,
+  System.UITypes, ToolsAPI.UI, PasTreeIdePlugin.FormModules,
   PasTreeIdePlugin.Settings;   // the Highlighting tab's type colour
 
 { ------------------------------------------------------------------------- }
@@ -957,14 +959,26 @@ begin
   Result := (FFilePath <> '') and not (FIsHeader or FIsTitle);
 end;
 
+{ A row in a FORM FILE is not the IDE's jump: on a form that is not loaded
+  that opens the form in its designer rather than the file at the line
+  (Alex, 2026-09-28), and on a loaded one it was never measured. OpenFile
+  was, for both (FormModules.ShowFormFileSite). Tracking takes the same way,
+  so a row selected from the keyboard does not land where the double click
+  does not. }
 procedure TResultRow.TrackSource(var DefaultHandling: Boolean);
 begin
   DefaultHandling := not (FIsHeader or FIsTitle);
+  if DefaultHandling and
+     ShowFormFileSite(FFilePath, FLine, FCol) then
+    DefaultHandling := False;
 end;
 
 procedure TResultRow.GotoSource(var DefaultHandling: Boolean);
 begin
   DefaultHandling := not (FIsHeader or FIsTitle);
+  if DefaultHandling and
+     ShowFormFileSite(FFilePath, FLine, FCol) then
+    DefaultHandling := False;
 end;
 
 { One routine for both Draw and CalcRect, because the width IS the layout:

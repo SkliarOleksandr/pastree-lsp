@@ -78,6 +78,7 @@ contains
   PasTreeIdePlugin.FindHierarchy in 'PasTreeIdePlugin.FindHierarchy.pas',
   PasTreeIdePlugin.FindDefines in 'PasTreeIdePlugin.FindDefines.pas',
   PasTreeIdePlugin.ResultRows in 'PasTreeIdePlugin.ResultRows.pas',
+  PasTreeIdePlugin.FormModules in 'PasTreeIdePlugin.FormModules.pas',
   PasTreeIdePlugin.WaitDialog in 'PasTreeIdePlugin.WaitDialog.pas',
   PasTreeIdePlugin.GotoDeclaration in 'PasTreeIdePlugin.GotoDeclaration.pas',
   PasTreeIdePlugin.DcuNames in 'PasTreeIdePlugin.DcuNames.pas',

@@ -112,6 +112,7 @@
         <DCCReference Include="PasTreeIdePlugin.FindHierarchy.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindDefines.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ResultRows.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.FormModules.pas"/>
         <DCCReference Include="PasTreeIdePlugin.WaitDialog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.GotoDeclaration.pas"/>
         <DCCReference Include="PasTreeIdePlugin.DcuNames.pas"/>

@@ -162,7 +162,6 @@ uses
   System.SysUtils, System.StrUtils, System.Classes, System.Character,
   System.Generics.Collections, System.TypInfo,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
-  System.IOUtils,
   // DesignIntf: IDesigner, for a loaded form's handlers (RenameMethod,
   // MethodExists) - see TDesignerAction.
   DesignIntf,
@@ -174,7 +173,7 @@ uses
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar,
   PasTreeIdePlugin.KeyBindings, PasTreeIdePlugin.GroupScope,
-  PasTreeIdePlugin.RenameForm;
+  PasTreeIdePlugin.RenameForm, PasTreeIdePlugin.FormModules;
 
 const
   cMessageGroupName = 'PasTree Rename';
@@ -239,15 +238,22 @@ type
     IDE then renames the field and every handler named after the component
     (the plan's carried renames, predicted and checked), a caption that read
     the name, and - LIVE, in every other loaded form - the descendants'
-    `inherited` headers, their links to those handlers, and the references
-    from other modules (`DataModule1.Action1`).
+    `inherited` headers, their links to those handlers, the references
+    from other modules (`DataModule1.Action1`) and, for a frame's component,
+    the `inherited X` headers in its hosts' inline blocks (spike run 5, F).
     dakHandler: IDesigner.RenameMethod in the form of the class that declares
-    it - both headers and that form's own links, and nothing in any other
-    form (not even a loaded descendant's link), which is why such a rename is
-    refused when another loaded form links the handler.
+    it - both headers and that form's own links, one inside an inline
+    frame's block too (run 5, I). A loaded DESCENDANT's link reads the new
+    name at once but its form stream keeps the old one until the event is
+    assigned again (run 5, R) - so every other loaded form that links a
+    renamed handler (Relinks) has its links re-assigned afterwards, each
+    with its own TMethod read back (RelinkHandlers). Done for a component's
+    carried handlers too: re-assigning a link that is already right changes
+    nothing.
 
     FormFile is the form whose designer acts; Handlers the carried renames
-    that designer makes along with a component's. }
+    that designer makes along with a component's; Relinks the other loaded
+    forms whose handler links are re-assigned after it. }
   TDesignerActionKind = (dakNone, dakComponent, dakHandler);
 
   TDesignerAction = record
@@ -255,6 +261,7 @@ type
     FormFile: string;
     OldName, NewName: string;
     Handlers: TArray<TLspCarriedRename>;
+    Relinks: TArray<string>;
   end;
 
   { Which way a plan is being applied. Forward is the rename: each site reads
@@ -511,56 +518,6 @@ begin
     LMessageServices.AddTitleMessage(AText, GMessageGroup);
 end;
 
-{ Is APath the same file as BPath? Compared as PATHS, not as strings.
-
-  THIS IS LOAD-BEARING, and the way it is written is the fix for the ugliest
-  bug of the 2026-08-31 live runs. Every path in a rename plan comes from
-  PasTree, which spells the drive letter in lower case (`c:\Repos\...`); the
-  IDE spells its own as the user opened them (`C:\Repos\...`). Comparing those
-  as strings makes an OPEN file look closed - and a file that looks closed is
-  rewritten on disk, under a buffer that still holds the old text. The IDE
-  then asks what to do about the file having changed underneath it, for every
-  file, which is exactly what "it keeps asking me to save things" was. }
-function SameFile(const APath, BPath: string): Boolean;
-begin
-  Result := False;
-  if (APath = '') or (BPath = '') then
-    Exit;
-  try
-    Result := SameText(TPath.GetFullPath(APath), TPath.GetFullPath(BPath));
-  except
-    // A path the RTL cannot expand (a stale entry, a bad drive) is not equal
-    // to anything rather than an exception in the middle of a rename.
-    Result := SameText(APath, BPath);
-  end;
-end;
-
-{ The ALREADY-OPEN module for APath, spelling-tolerantly. Never opens one:
-  nil here is what makes a file the disk kind (CollectFiles).
-
-  FindModule FIRST, then the module list by hand: FindModule matches on the
-  name it is given, and "the same file, spelled differently" is a case it
-  answers nil to (see SameFile). Getting that wrong used to silently turn an
-  open file into a disk write, and it still would: a file this misses is
-  held for the disk, under a buffer that still reads the old text, and the
-  IDE then asks what to do about the file having changed underneath it. }
-function ModuleOf(const APath: string): IOTAModule;
-var
-  LModuleServices: IOTAModuleServices;
-  LIdx: Integer;
-begin
-  Result := nil;
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-    Exit;
-  Result := LModuleServices.FindModule(APath);
-  if Assigned(Result) then
-    Exit;
-  for LIdx := 0 to LModuleServices.ModuleCount - 1 do
-    if SameFile(LModuleServices.Modules[LIdx].FileName, APath) then
-      Exit(LModuleServices.Modules[LIdx]);
-  Result := nil;
-end;
-
 function SourceEditorOf(const AModule: IOTAModule): IOTASourceEditor;
 var
   LIdx: Integer;
@@ -570,24 +527,6 @@ begin
       Result) then
       Exit;
   Result := nil;
-end;
-
-// A FORM FILE - see CollectFiles for why its edits are a kind of their own.
-function IsFormFile(const APath: string): Boolean;
-begin
-  Result := SameText(ExtractFileExt(APath), '.dfm') or
-    SameText(ExtractFileExt(APath), '.fmx');
-end;
-
-{ The loaded module that owns form file AFormPath, or nil. A form file is
-  never a module of its own - its unit's module holds it - so both names are
-  asked: FindModule may answer for the form file's name, and the module list
-  certainly knows the unit's. }
-function FormOwnerModule(const AFormPath: string): IOTAModule;
-begin
-  Result := ModuleOf(AFormPath);
-  if not Assigned(Result) then
-    Result := ModuleOf(ChangeFileExt(AFormPath, '.pas'));
 end;
 
 { Every file the plan touches, told apart into the two kinds - see
@@ -1105,28 +1044,6 @@ end;
   expects - a designer that did more, or less, is undone before anything
   else is written. }
 
-function FormEditorOf(const AModule: IOTAModule): IOTAFormEditor;
-var
-  LIdx: Integer;
-begin
-  Result := nil;
-  if not Assigned(AModule) then
-    Exit;
-  for LIdx := 0 to AModule.GetModuleFileCount - 1 do
-    if Supports(AModule.GetModuleFileEditor(LIdx), IOTAFormEditor, Result) then
-      Exit;
-  Result := nil;
-end;
-
-function DesignerOf(const AModule: IOTAModule): IDesigner;
-var
-  LNta: INTAFormEditor;
-begin
-  Result := nil;
-  if Supports(FormEditorOf(AModule), INTAFormEditor, LNta) then
-    Result := LNta.FormDesigner;
-end;
-
 function Opposite(ADirection: TApplyDirection): TApplyDirection;
 begin
   if ADirection = adForward then
@@ -1178,14 +1095,20 @@ end;
   refused before anything is touched (False, AError for the user):
 
   - a component: the form of the class that declares it must be loaded (its
-    designer sets the Name), and no loaded form may reach it from inside an
-    inline frame (a frame's host was never measured following a rename);
-    every carried handler linked in a loaded form must be that same form's
-    own method - the one designer renames only its own;
-  - a handler: the form of the class that declares it must be loaded, and it
-    must be the only loaded form that links the handler, outside an inline
-    frame - RenameMethod reaches no other form, not even a loaded descendant;
-  - anything else a loaded form names (a class) is refused as before. }
+    designer sets the Name); every carried handler linked in a loaded form
+    must be that same form's own method - the one designer renames only its
+    own. Sites inside an inline frame's block follow the frame's designer
+    live (spike run 5, F), and so do descendants and other modules;
+  - a handler: the form of the class that declares it must be loaded (its
+    designer runs RenameMethod), and every OTHER loaded form that links it -
+    a descendant, or one inside an inline block of a descendant host - must
+    have a designer, where its links are re-assigned afterwards (Relinks,
+    run 5, R and I);
+  - anything else a loaded form names (a class) is refused as before.
+
+  Until 0.58.0 an inline site and a handler linked by another loaded form
+  were refused too - before spike run 5 measured what the designer does
+  there. }
 function ResolveDesignerAction(const APlan: TLspRenamePlan;
   AFiles: TRenameFiles; out AAction: TDesignerAction;
   out AError: string): Boolean;
@@ -1200,6 +1123,7 @@ var
   LFile: TRenameFile;
   LCarried: TLspCarriedRename;
   LLinkedLive: Boolean;
+  LHandlers: TArray<string>;
 begin
   Result := False;
   AAction := Default(TDesignerAction);
@@ -1238,30 +1162,6 @@ begin
       APlan.OldName, APlan.FormRole.OwnerClass, cCloseHint]);
     Exit;
   end;
-  for LEdit in APlan.Edits do
-  begin
-    if not AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) or
-       not LFile.LiveForm then
-      Continue;
-    if SameText(LEdit.FormVia, 'inline') then
-    begin
-      AError := Format('%s line %d reaches %s inside an inline frame, and ' +
-        'that form is loaded - a frame''s host is not renamed through the ' +
-        'designer yet.%s', [ExtractFileName(LEdit.FilePath), LEdit.Row,
-        LEdit.OldText, cCloseHint]);
-      Exit;
-    end;
-    if (AAction.Kind = dakHandler) and
-       not SameFile(LEdit.FilePath, AAction.FormFile) then
-    begin
-      AError := Format('%s is loaded and links the handler %s (line %d) - ' +
-        'the designer renames a handler only in the form that declares it ' +
-        '(%s), so this one would keep the old name.%s',
-        [ExtractFileName(LEdit.FilePath), APlan.OldName, LEdit.Row,
-         ExtractFileName(AAction.FormFile), cCloseHint]);
-      Exit;
-    end;
-  end;
   for LCarried in APlan.Carried do
   begin
     if SameFile(LCarried.Role.FormFile, AAction.FormFile) then
@@ -1286,6 +1186,35 @@ begin
         ExtractFileName(AAction.FormFile), cCloseHint]);
       Exit;
     end;
+  end;
+  // The handlers the designer renames - the one, or a component's carried
+  // ones - and every other loaded form that links one of them.
+  if AAction.Kind = dakHandler then
+    LHandlers := [APlan.OldName]
+  else
+  begin
+    LHandlers := nil;
+    for LCarried in AAction.Handlers do
+      LHandlers := LHandlers + [LCarried.OldName];
+  end;
+  for LEdit in APlan.Edits do
+  begin
+    if not SameText(LEdit.FormKind, 'handler') or
+       (IndexText(LEdit.OldText, LHandlers) < 0) or
+       SameFile(LEdit.FilePath, AAction.FormFile) or
+       not AFiles.TryGetValue(LowerCase(LEdit.FilePath), LFile) or
+       not LFile.LiveForm or
+       (IndexText(LEdit.FilePath, AAction.Relinks) >= 0) then
+      Continue;
+    if not Assigned(DesignerOf(LFile.Module)) then
+    begin
+      AError := Format('%s is loaded and links the handler %s (line %d), but ' +
+        'its form designer is not available to take the new name.%s',
+        [ExtractFileName(LEdit.FilePath), LEdit.OldText, LEdit.Row,
+         cCloseHint]);
+      Exit;
+    end;
+    AAction.Relinks := AAction.Relinks + [LEdit.FilePath];
   end;
   Result := True;
 end;
@@ -1566,6 +1495,112 @@ begin
   Result := True;
 end;
 
+{ A LOADED FORM'S LINKS TO A RENAMED HANDLER, ASSIGNED AGAIN, after the
+  designer of the form that declares the handler renamed it. Measured, spike
+  run 5 (R, I): a loaded descendant's link reads the new name through its
+  designer at once, but its form stream - what Save writes - keeps the old
+  one until the event is assigned again; SetMethodProp with the TMethod the
+  event already holds then writes the new name, marks only the form file
+  modified and adds no stub (CreateMethod would add an `inherited;` one).
+
+  Every event of every component under the form's root is looked at - the
+  root's own, and those inside an inline frame's block, where a host's
+  handler is linked on the frame's child (I) - and each that reads one of
+  ANames (the names the handlers have NOW) is assigned its own value back.
+  The count comes back for the trace; the saved file is what is checked
+  (ConfirmLiveForms). -1: no designer. }
+function RelinkHandlers(const AFormFile: string;
+  const ANames: TArray<string>): Integer;
+var
+  LDesigner: IDesigner;
+  LCount: Integer;
+
+  procedure Walk(AComp: TComponent);
+  var
+    LProps: PPropList;
+    LPropCount, LIdx: Integer;
+    LMethod: TMethod;
+    LName: string;
+  begin
+    LPropCount := GetPropList(AComp.ClassInfo, [tkMethod], nil);
+    if LPropCount > 0 then
+    begin
+      GetMem(LProps, LPropCount * SizeOf(PPropInfo));
+      try
+        GetPropList(AComp.ClassInfo, [tkMethod], LProps);
+        for LIdx := 0 to LPropCount - 1 do
+        begin
+          LMethod := GetMethodProp(AComp, LProps^[LIdx]);
+          if LMethod.Code = nil then
+            Continue;
+          try
+            LName := LDesigner.GetMethodName(LMethod);
+          except
+            LName := '';   // not a method this designer knows
+          end;
+          if (LName = '') or (IndexText(LName, ANames) < 0) then
+            Continue;
+          SetMethodProp(AComp, LProps^[LIdx], LMethod);
+          Inc(LCount);
+          TraceFmt('  %s: %s.%s = %s assigned again',
+            [ExtractFileName(AFormFile), AComp.Name,
+             string(LProps^[LIdx]^.Name), LName]);
+        end;
+      finally
+        FreeMem(LProps);
+      end;
+    end;
+    for LIdx := 0 to AComp.ComponentCount - 1 do
+      Walk(AComp.Components[LIdx]);
+  end;
+
+begin
+  LDesigner := DesignerOf(FormOwnerModule(AFormFile));
+  if not Assigned(LDesigner) or not Assigned(LDesigner.Root) then
+    Exit(-1);
+  LCount := 0;
+  Walk(LDesigner.Root);
+  if LCount > 0 then
+    LDesigner.Modified;
+  Result := LCount;
+end;
+
+// RelinkHandlers over every form of AAction.Relinks, with the names the
+// handlers have after the designer ran in ADirection.
+procedure RelinkLiveForms(const AAction: TDesignerAction;
+  ADirection: TApplyDirection);
+var
+  LNames: TArray<string>;
+  LCarried: TLspCarriedRename;
+  LFrom, LTo, LForm: string;
+  LCount: Integer;
+begin
+  if Length(AAction.Relinks) = 0 then
+    Exit;
+  LNames := nil;
+  if AAction.Kind = dakHandler then
+  begin
+    ActionNames(AAction.OldName, AAction.NewName, ADirection, LFrom, LTo);
+    LNames := [LTo];
+  end
+  else
+    for LCarried in AAction.Handlers do
+    begin
+      ActionNames(LCarried.OldName, LCarried.NewName, ADirection, LFrom, LTo);
+      LNames := LNames + [LTo];
+    end;
+  for LForm in AAction.Relinks do
+  begin
+    LCount := RelinkHandlers(LForm, LNames);
+    if LCount < 0 then
+      TraceFmt('  %s: no form designer - its links were not assigned again',
+        [ExtractFileName(LForm)])
+    else
+      TraceFmt('  %s: %d link(s) to [%s] assigned again',
+        [ExtractFileName(LForm), LCount, string.Join(', ', LNames)]);
+  end;
+end;
+
 function SplitLines(const AText: UTF8String): TArray<string>;
 begin
   Result := UTF8ToString(AText).Replace(#13#10, #10).Split([#10]);
@@ -1704,9 +1739,10 @@ end;
   (every site still reads what it should), then asked (CheckDesignerReady,
   RunDesignerAction), then checked - every site reads its old or its new
   text, every line it changed is one the plan explains, it holds the new
-  names - and only then is the rest written, the sites it already did left
-  alone (Done). A check that fails undoes the designer's change and writes
-  nothing. }
+  names - and only then are the other loaded forms' links to a renamed
+  handler assigned again (RelinkLiveForms) and the rest written, the sites
+  it already did left alone (Done). A check that fails undoes the designer's
+  change and writes nothing. }
 function ApplyDirection(const APlan: TLspRenamePlan; AFiles: TRenameFiles;
   ADirection: TApplyDirection; const AAction: TDesignerAction;
   out AError: string): Boolean;
@@ -1731,6 +1767,10 @@ begin
     if AAction.Kind <> dakNone then
     begin
       Trace('designer: ' + DescribeAction(AAction, ADirection));
+      if Length(AAction.Relinks) > 0 then
+        TraceFmt('  then the links in %d other loaded form(s) assigned ' +
+          'again: %s', [Length(AAction.Relinks), string.Join(', ',
+          AAction.Relinks)]);
       if not CheckDesignerReady(AAction, ADirection, {out} AError) then
       begin
         Trace('designer not ready: ' + AError);
@@ -1758,6 +1798,7 @@ begin
         if LPost[LIdx].State = ssDone then
           Inc(LDone);
       TraceFmt('designer done: %d site(s) already renamed by it', [LDone]);
+      RelinkLiveForms(AAction, ADirection);
       NoteChangedBuffers(AFiles, LTexts, LAfter);
       LTexts.Free;
       LTexts := LAfter;

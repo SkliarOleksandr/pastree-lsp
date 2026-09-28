@@ -352,14 +352,22 @@ does not reach, after checking that it did exactly the plan's part:
   renamed), and the designer must hold the new names - otherwise the same
   request the other way round undoes the designer's change and nothing is
   written;
+- every OTHER loaded form that links a handler the designer renamed - a
+  descendant, or a descendant host linking it inside an inline frame's
+  block - has those links assigned again (0.58.0): each event that reads
+  the handler's new name is set to the TMethod it already holds, which is
+  what makes its form stream, and so its saved file, carry the new name
+  (spike run 5, R);
 - every loaded form the plan names is marked modified and saved, the owner
   first, and its file is read back: a site that does not read the new name
   there is listed in the results tab.
 
-Refused while the form is loaded, each with the form named: a class, a site
-inside an inline frame's block, a handler that another loaded form links, a
-carried handler that belongs to another loaded form. File > Close All and
-rename again works for all of them.
+Refused while the form is loaded, each with the form named: a class, a
+carried handler that belongs to another loaded form, a handler linked by a
+loaded form that has no designer. File > Close All and rename again works
+for all of them. Until 0.58.0 a site inside an inline frame's block and a
+handler another loaded form links were refused too; spike run 5 measured
+what the designer does with each, below.
 
 What the five spike runs measured (RAD Studio 13, 2026-09-27, scratch project
 `local/dfmspike`; the spike unit itself is kept in `local/` and is not part
@@ -388,8 +396,8 @@ starts from:
   `IDesigner.GetMethodName` at once (run 5, R), but its streamed text keeps
   the old one until the event is assigned again - `SetMethodProp` with a
   TMethod of that handler read back from the descendant's designer (run 5
-  took an inherited component's) writes the new name with no stub and marks
-  only its form file modified. `CreateMethod` in a descendant would instead
+  took an inherited component's; the rename takes each event's own) writes
+  the new name with no stub and marks only its form file modified. `CreateMethod` in a descendant would instead
   ADD an `inherited;` stub. RenameMethod on the descendant's own designer
   does nothing (not its method).
 - A class renamed in the SOURCE is not picked up by a loaded designer.
@@ -422,6 +430,15 @@ starts from:
   per file, the same `Parent`/`LineRef` tree structure "Find in Files" uses),
   each hit carrying file/line/column so the IDE's own message navigation
   (double-click, Enter, F8/Shift+F8) jumps straight to it.
+- **A form-file row** (0.58.0) is the one exception, and goes through
+  `IOTAActionServices.OpenFile`, which the spike runs measured doing the
+  right thing for both kinds: a LOADED form's designer is shown (run 5, O;
+  a loaded form cannot be shown as text - its designer writes over the file,
+  and "View as Text" is refused with descendants or linked modules open), a
+  form that is NOT loaded opens as text with the caret at the site (B2). The IDE's own jump opens a form that is not loaded in its designer
+  instead (Alex, 2026-09-28) and was never measured on a loaded one.
+  `PasTreeIdePlugin.FormModules.ShowFormFileSite`; the Rename tab's rows do
+  the same.
 - The rows are **owner-drawn**, not plain tool messages:
   `AddCustomMessagePtr`/`AddCustomMessage` over `INTACustomDrawMessage`
   implementations in `PasTreeIdePlugin.ResultRows`, which is what lets a hit

@@ -244,7 +244,13 @@ const
   /// The parameter is a compile error without it; what is silent is the
   /// rename - against an older library it renames the class and leaves every
   /// method implementation spelling the old name, E2003 on each.
-  cMinPasTreeVersion = '0.56.0';
+  /// 0.63.1 (2026-09-28): a descendant host's `inherited Frame1` block is the
+  /// frame's (the ancestor's `inline` made the component csInline), so the
+  /// frame's components inside it are found and renamed. Silent without it:
+  /// a rename of a frame's component leaves `inherited FrameButton` in every
+  /// descendant host's form file, which then fails to load, and Find
+  /// References lists none of them.
+  cMinPasTreeVersion = '0.63.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
