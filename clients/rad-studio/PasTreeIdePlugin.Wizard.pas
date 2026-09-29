@@ -77,6 +77,7 @@ uses
   PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.DfmExplicitFix,
   PasTreeIdePlugin.ClassComplete,
   PasTreeIdePlugin.SyncPrototypes,
   PasTreeIdePlugin.AnnotateArgs,
@@ -832,6 +833,9 @@ begin
   // once per start, in case Tools > Options changed it since.
   InitializeErrorPaint;
   ApplyErrorInsightChoice;
+  // IDE Fixes: the form designer stops writing Explicit* into form files - a
+  // patch of TControl.DefineProperties in the IDE's VCL, see the unit.
+  SetDfmExplicitFix(DfmNoExplicitProperties);
   // Type names in their own colour, from the server's semantic tokens.
   InitializeSemanticPaint;
   // Idle-debounced didChange - keeps the squiggles (and every other answer)
@@ -903,6 +907,9 @@ begin
   // item whose OnClick points into an unloaded BPL is the same crash as a
   // keystroke or a notification arriving late.
   FinalizeSettings;
+  // The jump in the IDE's VCL points into this BPL: the next form save after
+  // an unload would run freed code. The unit's finalization does it too.
+  SetDfmExplicitFix(False);
   FinalizeGotoDeclaration;
   // Closes the generated .dcu tabs and unregisters their file system while
   // the IDE can still call into it; the session it listens to goes last.

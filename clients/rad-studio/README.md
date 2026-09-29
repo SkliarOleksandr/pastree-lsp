@@ -637,6 +637,37 @@ IDE's own navigation finds the open module. Alt+Left/Alt+Right work across
 it: a history entry captured in such a tab stores the module name, and a tab
 closed by a configuration change is regenerated when the entry is replayed.
 
+### IDE Fixes: no `Explicit*` in form files (0.59.0)
+
+The form designer writes `ExplicitLeft/Top/Width/Height` for every aligned or
+anchored control whose pre-alignment bounds differ from its current ones, and
+in an inherited form or a frame whenever they differ from the ancestor's. The
+aligned bounds follow the parent, which follows the DPI and monitor the form
+was opened on, so the values move on nearly every save. With the IDE Fixes
+switch on (default) they are never written, inherited forms included; values a
+file already holds are still read, so it loads, and are dropped at its next
+save.
+
+**How: a patch of `TControl.DefineProperties` inside the IDE's `vcl*.bpl`**,
+the approach of bero/DControlsFix (after Andreas Hausladen's VCLFixPack): its
+first bytes become a jump to a copy of the method whose `Explicit*`
+definitions have `HasData` False. Nothing on the ToolsAPI side can do it - a
+file rewritten after `AfterSave` is a file the designer no longer agrees with,
+and misses binary forms and the clipboard. Two things DControlsFix gets wrong
+on Win64 are done differently, and `PasTreeIdePlugin.DfmExplicitFix`'s header
+has both: the jump is the 14-byte absolute `FF 25` form there (a rel32 `E9`
+reaches 2 GB, and a package loaded further away would jump into garbage), and
+the address comes from `TControl`'s virtual method table rather than from
+decoding an import thunk. A patch someone else put there (DDevExtensions,
+DControlsFix) is overwritten, not detected - they do the same thing.
+
+Checked outside the IDE on 2026-09-29 with a console program over the unit,
+Win32 and Win64, the VCL linked in and from runtime packages (the Win64 one
+loaded at `7FFB...` against the exe at `1A0000`, i.e. beyond rel32): no
+`Explicit*` written while patched, a file with them still loads and fills
+`ExplicitWidth`, and the output is byte-identical to the unpatched VCL again
+after removal and after repeated toggling.
+
 ### Diagnostics
 
 Logged only on failure (no active project, cursor's file not analyzed, no
@@ -1166,6 +1197,9 @@ log anything leaves its last words.
   single editor-menu action list (Find Declaration + Find References,
   both under Identifier), the Ctrl+Click notifier's lifetime, and the LSP
   session's.
+- `PasTreeIdePlugin.DfmExplicitFix.pas` - the IDE Fixes tab's first fix: the
+  patch of `TControl.DefineProperties` that keeps `Explicit*` out of form
+  files, installed and removed by the setting, removed at unload.
 - `PasTreeIdePlugin.KeyBindings.pas` - the package's ONE
   `IOTAKeyboardBinding`: features register a key and a handler, the wizard
   binds them all at once and removes them all at once. See "Keyboard

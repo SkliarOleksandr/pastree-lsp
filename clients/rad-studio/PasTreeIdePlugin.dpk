@@ -126,6 +126,9 @@ contains
     rather than in code. See PasTreeIdePlugin.SettingsForm's header. }
   PasTreeIdePlugin.Settings in 'PasTreeIdePlugin.Settings.pas',
   PasTreeIdePlugin.SettingsForm in 'PasTreeIdePlugin.SettingsForm.pas' {PasTreeSettingsForm},
+  { IDE Fixes: the form designer stops writing Explicit* properties - a patch
+    of TControl.DefineProperties in the IDE's VCL. See the unit's header. }
+  PasTreeIdePlugin.DfmExplicitFix in 'PasTreeIdePlugin.DfmExplicitFix.pas',
   { Every AV in the IDE, with a stack, beside the server log - see the unit. }
   PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas',
   { The startup splash line. Nothing uses this unit - it acts from its own

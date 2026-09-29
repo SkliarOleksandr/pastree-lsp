@@ -364,8 +364,8 @@ switch.
 
 ### Settings dialog and splash line
 
-Tools > PasTree > Settings holds every switch above, on four tabs - Navigation,
-Editing, Diagnostics, Highlighting - and is themed through the IDE's own theming services, so
+Tools > PasTree > Settings holds every switch above, on five tabs - Navigation,
+Editing, Diagnostics, Highlighting, IDE Fixes - and is themed through the IDE's own theming services, so
 it is not a bright form in a dark IDE. It also shows the compiled-in version and
 the loaded BPL's own file timestamp, which together answer "is the package the
 IDE loaded the one I just built?". The same question gets an earlier answer on
@@ -382,6 +382,18 @@ sources and every third-party library on the IDE's Search and Browsing paths -
 is read out of the IDE and passed alongside. Switching the active project,
 platform or build configuration restarts the server with fresh options, which
 costs the next navigation a restart and nothing else.
+
+## IDE Fixes
+
+### No `Explicit*` properties in form files
+
+The form designer stops writing `ExplicitLeft`, `ExplicitTop`, `ExplicitWidth`
+and `ExplicitHeight` into `.dfm` files - in inherited forms and frames too.
+They are a control's bounds from before `Align` or `Anchors` stretched it, they
+change with the DPI and monitor a form is opened on, and so they clutter nearly
+every diff of a form file. A file that already has them still loads; they are
+dropped the next time the form is saved. On by default, switched on the
+IDE Fixes tab, and the switch takes effect at once.
 
 ## Through the Code Insight Manager
 

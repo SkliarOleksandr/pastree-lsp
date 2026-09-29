@@ -20,7 +20,9 @@ unit PasTreeIdePlugin.SettingsForm;
   in two group boxes had become a column that no longer fit the screen at the
   IDE's default DPI. A switch goes on the tab that answers "what does this
   turn off": a feature that EDITS the user's code is Editing regardless of
-  how it is triggered.
+  how it is triggered. Highlighting came later, and IDE Fixes (0.59.0) holds
+  what corrects the IDE's own behaviour rather than adding a feature - first
+  the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix).
 
   IF YOU ARE EDITING THE .dfm: the only names the code depends on are the ones
   bound below (the checkboxes, their hint labels, the readout labels and the
@@ -104,6 +106,9 @@ type
     lblErrorSquiggles: TLabel;
     cbxErrorSquiggles: TComboBox;
     lblErrorSquigglesHint: TLabel;
+    tsIdeFixes: TTabSheet;
+    chkNoExplicitProps: TCheckBox;
+    lblNoExplicitPropsHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
@@ -332,6 +337,7 @@ begin
     LForm.chkTypeItalic.Checked := fsItalic in LSettings.TypeFontStyle;
     LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
+    LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -360,6 +366,7 @@ begin
     LSettings.TypeColor := LForm.cbxTypeColor.Selected;
     LSettings.TypeFontStyle := LForm.TypeStyles;
     LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
+    LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally

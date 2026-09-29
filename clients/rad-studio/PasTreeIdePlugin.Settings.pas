@@ -18,7 +18,10 @@ unit PasTreeIdePlugin.Settings;
   installation, a user who never opened the dialog - must read as "behave as
   before". "Advanced logging" and Find References' implementation headers are
   the exceptions, and the rule is the same one seen from the other side: each
-  turns something ON, so its default is OFF. Written only by the dialog:
+  turns something ON, so its default is OFF. The IDE Fixes tab is the
+  exception to the exception: each fix turns something on and is still ON by
+  default (Alex, 2026-09-29), because a fix nobody enables fixes nothing.
+  Written only by the dialog:
   nothing else in the package writes to the registry - except the Go To
   picker's own sizes (WritePickerValue) and the IDE's Error Insight level,
   which the error underline choice has to move with it
@@ -231,6 +234,16 @@ function ClearLogOnProjectOpen: Boolean;
 /// </summary>
 function PasTreeErrorSquigglesEnabled: Boolean;
 
+/// <summary>
+/// IDE Fixes tab: whether the form designer is kept from writing ExplicitLeft/
+/// Top/Width/Height into form files (PasTreeIdePlugin.DfmExplicitFix). ON BY
+/// DEFAULT - see this unit's header. NOT read at the point of use: it is a
+/// patch of the VCL in the IDE process, applied at package load and
+/// re-applied by SaveSettings, so a change in the dialog still takes effect
+/// on the next form save.
+/// </summary>
+function DfmNoExplicitProperties: Boolean;
+
 type
   /// <summary>
   /// Tools > Options > Language > Delphi > Error Insight > "Editor rendering
@@ -323,6 +336,8 @@ type
     // False = the IDE's Error Insight draws the error underlines, True = we
     // do (and the IDE's level is set to None) - see ApplyErrorInsightChoice.
     PasTreeErrorSquiggles: Boolean;
+    // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
+    DfmNoExplicitProps: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -355,7 +370,8 @@ uses
   // a cycle Delphi permits precisely here. The split is deliberate: the
   // store must be readable (OverrideStructureView, from Outline and the key
   // binding) without dragging a form and its .dfm into the caller.
-  PasTreeIdePlugin.SettingsForm;
+  PasTreeIdePlugin.SettingsForm,
+  PasTreeIdePlugin.DfmExplicitFix;
 
 const
   cSettingsKey = 'PasTree';
@@ -377,6 +393,7 @@ const
   cValueTypeColor = 'TypeColor';
   cValueTypeFontStyle = 'TypeFontStyle';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
+  cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   // The IDE level ApplyErrorInsightChoice replaced with None, to put back.
   // cLevelAbsent stands for "the IDE had no value at all", put back by
   // deleting ours rather than by guessing the IDE's default.
@@ -535,6 +552,7 @@ begin
   Result.TypeColor := cDefaultTypeColor;
   Result.TypeFontStyle := [];
   Result.PasTreeErrorSquiggles := False;
+  Result.DfmNoExplicitProps := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -580,6 +598,8 @@ begin
         ReadFlag(LReg, cValueClearLogOnOpen, Result.ClearLogOnOpen);
       Result.PasTreeErrorSquiggles :=
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
+      Result.DfmNoExplicitProps :=
+        ReadFlag(LReg, cValueDfmNoExplicit, Result.DfmNoExplicitProps);
     finally
       LReg.CloseKey;
     end;
@@ -638,6 +658,8 @@ begin
           StyleBits(ASettings.TypeFontStyle));
         LReg.WriteInteger(cValueErrorSquiggles,
           Ord(ASettings.PasTreeErrorSquiggles));
+        LReg.WriteInteger(cValueDfmNoExplicit,
+          Ord(ASettings.DfmNoExplicitProps));
       finally
         LReg.CloseKey;
       end;
@@ -650,6 +672,7 @@ begin
     LReg.Free;
   end;
   ApplyErrorInsightChoice;
+  SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -789,6 +812,11 @@ end;
 function PasTreeErrorSquigglesEnabled: Boolean;
 begin
   Result := CurrentSettings.PasTreeErrorSquiggles;
+end;
+
+function DfmNoExplicitProperties: Boolean;
+begin
+  Result := CurrentSettings.DfmNoExplicitProps;
 end;
 
 function ReadIdeErrorMarkStyle: TErrorMarkStyle;

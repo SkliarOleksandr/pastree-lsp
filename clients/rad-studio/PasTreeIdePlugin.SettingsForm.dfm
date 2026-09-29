@@ -21,7 +21,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Height = 2
     Align = alTop
     Shape = bsTopLine
-    ExplicitWidth = 460
   end
   object pnlHeader: TPanel
     Left = 0
@@ -71,7 +70,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       Top = 41
       Width = 215
       Height = 19
-      Caption =
+      Caption = 
         '<a href="https://github.com/SkliarOleksandr/pastree-lsp">github.' +
         'com/SkliarOleksandr/pastree-lsp</a>'
       TabOrder = 0
@@ -82,7 +81,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       Top = 60
       Width = 253
       Height = 19
-      Caption =
+      Caption = 
         '<a href="https://github.com/SkliarOleksandr/object-pascal-tree">' +
         'github.com/SkliarOleksandr/object-pascal-tree</a>'
       TabOrder = 1
@@ -101,9 +100,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblCtrlClickHint: TLabel
         Left = 35
         Top = 41
-        Width = 405
+        Width = 403
         Height = 30
-        Caption =
+        Caption = 
           'Ctrl+Click and the editor menu item resolve through PasTree. The' +
           ' menu half only changes at the next IDE restart.'
         WordWrap = True
@@ -111,9 +110,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblDeclImplToggleHint: TLabel
         Left = 35
         Top = 111
-        Width = 405
+        Width = 315
         Height = 30
-        Caption =
+        Caption = 
           'Off hands the keystroke back to the IDE, which runs its own decl' +
           'aration/implementation jump.'
         WordWrap = True
@@ -123,11 +122,34 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Top = 181
         Width = 405
         Height = 60
-        Caption =
-          'References, Overrides, Implementations, Descendants, Assignments,' +
-          ' Creations and Destructions of the symbol under the cursor, across' +
-          ' the whole project group, each in its own Messages tab. Items that' +
-          ' do not apply at the cursor are greyed. Off hides the submenu.'
+        Caption = 
+          'References, Overrides, Implementations, Descendants, Assignments' +
+          ', Creations and Destructions of the symbol under the cursor, acr' +
+          'oss the whole project group, each in its own Messages tab. Items' +
+          ' that do not apply at the cursor are greyed. Off hides the subme' +
+          'nu.'
+        WordWrap = True
+      end
+      object lblGoToHint: TLabel
+        Left = 35
+        Top = 301
+        Width = 384
+        Height = 30
+        Caption = 
+          'A picker over the declarations of the current unit and the proje' +
+          'ct - type a name or a line number. Off hands Ctrl+G back to the ' +
+          'IDE.'
+        WordWrap = True
+      end
+      object lblUnitDialogsHint: TLabel
+        Left = 35
+        Top = 371
+        Width = 397
+        Height = 45
+        Caption = 
+          'Replace the IDE'#39's View Unit and Use Unit dialogs with lists of e' +
+          'very unit the analysis reached - implicit units and libraries in' +
+          'cluded. Off hands both keys back to the IDE.'
         WordWrap = True
       end
       object chkCtrlClick: TCheckBox
@@ -169,16 +191,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Caption = 'References include method implementations (TFoo.Bar)'
         TabOrder = 3
       end
-      object lblGoToHint: TLabel
-        Left = 35
-        Top = 301
-        Width = 405
-        Height = 45
-        Caption =
-          'A picker over the declarations of the current unit and the' +
-          ' project - type a name or a line number. Off hands Ctrl+G back to the IDE.'
-        WordWrap = True
-      end
       object chkGoTo: TCheckBox
         Left = 16
         Top = 280
@@ -188,17 +200,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Checked = True
         State = cbChecked
         TabOrder = 4
-      end
-      object lblUnitDialogsHint: TLabel
-        Left = 35
-        Top = 371
-        Width = 405
-        Height = 45
-        Caption =
-          'Replace the IDE'#39's View Unit and Use Unit dialogs with lists of' +
-          ' every unit the analysis reached - implicit units and libraries' +
-          ' included. Off hands both keys back to the IDE.'
-        WordWrap = True
       end
       object chkUnitDialogs: TCheckBox
         Left = 16
@@ -217,9 +218,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblRenameHint: TLabel
         Left = 35
         Top = 41
-        Width = 405
+        Width = 400
         Height = 30
-        Caption =
+        Caption = 
           'Renames a symbol across the project and lists every changed line' +
           ' in its own Messages tab. Off hides the command entirely.'
         WordWrap = True
@@ -227,9 +228,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblClassCompleteHint: TLabel
         Left = 35
         Top = 111
-        Width = 405
+        Width = 402
         Height = 30
-        Caption =
+        Caption = 
           'Implements what is declared, and first mirrors a changed signatu' +
           're onto the routine'#39's other half. Off leaves the key to the IDE.'
         WordWrap = True
@@ -237,10 +238,20 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblClassCompleteOrder: TLabel
         Left = 35
         Top = 149
-        Width = 108
+        Width = 124
         Height = 15
         Caption = 'New method bodies go'
         FocusControl = cbxClassCompleteOrder
+      end
+      object lblBlockCompletionHint: TLabel
+        Left = 35
+        Top = 211
+        Width = 390
+        Height = 30
+        Caption = 
+          'Inserts the missing end;/until ; on the next line when Enter is ' +
+          'pressed right after an unclosed block opener.'
+        WordWrap = True
       end
       object cbxClassCompleteOrder: TComboBox
         Left = 170
@@ -252,16 +263,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Items.Strings = (
           'In alphabetical order (like Delphi)'
           'In declaration order')
-      end
-      object lblBlockCompletionHint: TLabel
-        Left = 35
-        Top = 211
-        Width = 405
-        Height = 30
-        Caption =
-          'Inserts the missing end;/until ; on the next line when Enter is ' +
-          'pressed right after an unclosed block opener.'
-        WordWrap = True
       end
       object chkRename: TCheckBox
         Left = 16
@@ -301,9 +302,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblLoggingHint: TLabel
         Left = 35
         Top = 41
-        Width = 405
+        Width = 390
         Height = 30
-        Caption =
+        Caption = 
           'Writes pastree-lsp.log next to the project file - the handshake,' +
           ' the analysis timings and every failed navigation. Off writes no' +
           'thing.'
@@ -312,11 +313,22 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblAdvancedLoggingHint: TLabel
         Left = 35
         Top = 111
-        Width = 405
+        Width = 380
         Height = 30
-        Caption =
+        Caption = 
           'Adds every search path, define, namespace and unit alias to the ' +
           'log. Off keeps the one-line summary with the counts.'
+        WordWrap = True
+      end
+      object lblClearLogOnOpenHint: TLabel
+        Left = 35
+        Top = 181
+        Width = 370
+        Height = 30
+        Caption = 
+          'Empties the project'#39's log when the project is opened, so the log' +
+          ' is this session'#39's alone. Off appends every run, separated by a ' +
+          'line of dashes.'
         WordWrap = True
       end
       object chkLogging: TCheckBox
@@ -337,17 +349,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Height = 17
         Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
         TabOrder = 1
-      end
-      object lblClearLogOnOpenHint: TLabel
-        Left = 35
-        Top = 181
-        Width = 405
-        Height = 30
-        Caption =
-          'Empties the project'#39's log when the project is opened, so the ' +
-          'log is this session'#39's alone. Off appends every run, separated ' +
-          'by a line of dashes.'
-        WordWrap = True
       end
       object chkClearLogOnOpen: TCheckBox
         Left = 16
@@ -383,6 +384,26 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Width = 405
         Height = 40
         OnPaint = pbxPreviewPaint
+      end
+      object lblErrorSquiggles: TLabel
+        Left = 16
+        Top = 190
+        Width = 135
+        Height = 15
+        Caption = 'Error underlines drawn by'
+        FocusControl = cbxErrorSquiggles
+      end
+      object lblErrorSquigglesHint: TLabel
+        Left = 35
+        Top = 216
+        Width = 403
+        Height = 45
+        Caption = 
+          'PasTree draws the analysis'#39's errors and warnings itself and sets' +
+          ' the IDE'#39's Error Insight level to None, so they are not drawn tw' +
+          'ice. Switching back restores the level it replaced. The IDE may ' +
+          'need a restart to pick up its own level.'
+        WordWrap = True
       end
       object chkHighlightTypes: TCheckBox
         Left = 16
@@ -431,14 +452,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 4
         OnClick = TypeStyleChanged
       end
-      object lblErrorSquiggles: TLabel
-        Left = 16
-        Top = 190
-        Width = 128
-        Height = 15
-        Caption = 'Error underlines drawn by'
-        FocusControl = cbxErrorSquiggles
-      end
       object cbxErrorSquiggles: TComboBox
         Left = 170
         Top = 186
@@ -450,17 +463,32 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'RAD Studio (Error Insight)'
           'PasTree (experimental)')
       end
-      object lblErrorSquigglesHint: TLabel
+    end
+    object tsIdeFixes: TTabSheet
+      Caption = 'IDE Fixes'
+      ImageIndex = 4
+      object lblNoExplicitPropsHint: TLabel
         Left = 35
-        Top = 216
-        Width = 405
+        Top = 41
+        Width = 392
         Height = 60
-        Caption =
-          'PasTree draws the analysis'#39's errors and warnings itself and sets' +
-          ' the IDE'#39's Error Insight level to None, so they are not drawn tw' +
-          'ice. Switching back restores the level it replaced. The IDE may ' +
-          'need a restart to pick up its own level.'
+        Caption = 
+          'The form designer stops writing ExplicitLeft, ExplicitTop, Expli' +
+          'citWidth and ExplicitHeight into .dfm files, inherited forms and' +
+          ' frames included. They change with the DPI a form is opened at, ' +
+          'so they clutter every diff. Values already in a file are still r' +
+          'ead and dropped at the next save.'
         WordWrap = True
+      end
+      object chkNoExplicitProps: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Do not write Explicit* properties to form files'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
       end
     end
   end

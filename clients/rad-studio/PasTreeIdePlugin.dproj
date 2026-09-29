@@ -148,6 +148,7 @@
         <DCCReference Include="PasTreeIdePlugin.SettingsForm.pas">
             <Form>PasTreeSettingsForm</Form>
         </DCCReference>
+        <DCCReference Include="PasTreeIdePlugin.DfmExplicitFix.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Splash.pas"/>
         <RcCompile Include="PasTreeIdePlugin.Logo.rc"/>
