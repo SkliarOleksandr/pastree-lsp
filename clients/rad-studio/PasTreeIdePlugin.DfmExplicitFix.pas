@@ -13,34 +13,12 @@ unit PasTreeIdePlugin.DfmExplicitFix;
   monitor and the scaling the form was opened under, so the values move on
   every open-and-save and a form file's diff fills with them.
 
-  HOW. The first bytes of TControl.DefineProperties inside the IDE's vcl*.bpl
-  are overwritten with a jump to DefinePropertiesNoExplicit below: the same
-  method with every Explicit* HasData argument False, the ancestor case
-  included (Alex, 2026-09-29 - an inherited form must not write them either).
-  The same approach as bero/DControlsFix, with two things that code does not
-  do on Win64 done here:
-
-  - THE JUMP. Win32 uses the 5-byte E9 rel32. Win64 cannot: rel32 reaches
-    only 2 GB, and nothing places this BPL within 2 GB of vcl*.bpl - an
-    offset that does not fit would be truncated silently and the next form
-    save would jump into garbage. So Win64 writes the 14-byte absolute form,
-    FF 25 00000000 followed by the 8-byte target address.
-
-  - THE ADDRESS. Taken from TControl's virtual method table (TargetAddress),
-    which holds the real code address inside vcl*.bpl. `@TControl.
-    DefineProperties` in a package is an import thunk instead, and
-    DControlsFix's thunk decoder reads the Win32 form (FF 25 abs32) - on
-    Win64 the operand is RIP-relative and that decoder yields garbage.
-
-  NOTHING OF THE ORIGINAL IS EVER CALLED WHILE PATCHED, which is what keeps
-  this simple: no trampoline, no relocating the instructions the jump
-  overwrites. The bytes are saved and put back by RemovePatch.
-
-  NO CHECK FOR SOMEONE ELSE'S PATCH (Alex, 2026-09-29): with DDevExtensions or
-  DControlsFix loaded as well, ours simply overwrites theirs - they do the same
-  thing. The one check kept is that the address lies in the module TControl
-  lives in; anything else means the lookup went wrong, and writing there would
-  be a crash of our own making.
+  HOW. TControl.DefineProperties inside the IDE's vcl*.bpl is replaced
+  (PasTreeIdePlugin.CodePatch has the mechanism and its Win64 details) by
+  DefinePropertiesNoExplicit below: the same method with every Explicit*
+  HasData argument False, the ancestor case included (Alex, 2026-09-29 - an
+  inherited form must not write them either). Its address is taken from
+  TControl's virtual method table (TargetAddress).
 
   READING IS UNTOUCHED. The Explicit* properties are still DEFINED, with
   readers, because a form file that has them must still load - an undefined
@@ -77,11 +55,11 @@ function DfmExplicitFixActive: Boolean;
 implementation
 
 uses
-  Winapi.Windows,
   System.SysUtils,
   System.Classes,
   Vcl.Controls,
-  ToolsAPI;
+  ToolsAPI,
+  PasTreeIdePlugin.CodePatch;
 
 type
   // Protected access to TControl's fields and IsControl. Never instantiated:
@@ -99,20 +77,8 @@ type
     procedure DefinePropertiesNoExplicit(Filer: TFiler);
   end;
 
-const
-{$IFDEF CPUX64}
-  cPatchSize = 14;   // FF 25 00000000 + 8-byte absolute address
-{$ELSE}
-  cPatchSize = 5;    // E9 + rel32
-{$ENDIF}
-
-type
-  TPatchBytes = array[0..cPatchSize - 1] of Byte;
-
 var
-  GTarget: Pointer = nil;
-  GSaved: TPatchBytes;
-  GActive: Boolean = False;
+  GPatch: TCodePatch;
 
 { TControlNoExplicit }
 
@@ -194,88 +160,22 @@ begin
   Result := TMethod(LMethod).Code;
 end;
 
-function ReplacementAddress: Pointer;
-begin
-  Result := @TControlNoExplicit.DefinePropertiesNoExplicit;
-end;
-
-function WriteCode(ATarget: Pointer; const ABytes: TPatchBytes): Boolean;
-var
-  LOld, LIgnored: DWORD;
-begin
-  Result := VirtualProtect(ATarget, cPatchSize, PAGE_EXECUTE_READWRITE, LOld);
-  if not Result then
-    Exit;
-  Move(ABytes, ATarget^, cPatchSize);
-  VirtualProtect(ATarget, cPatchSize, LOld, LIgnored);
-  FlushInstructionCache(GetCurrentProcess, ATarget, cPatchSize);
-end;
-
-function JumpBytes(AFrom, ATo: Pointer): TPatchBytes;
-{$IFDEF CPUX64}
-var
-  LAddress: UInt64;
-begin
-  Result[0] := $FF;
-  Result[1] := $25;
-  PCardinal(@Result[2])^ := 0;   // [rip+0]: the address right after
-  LAddress := UInt64(ATo);
-  Move(LAddress, Result[6], SizeOf(LAddress));
-end;
-{$ELSE}
-begin
-  Result[0] := $E9;
-  PInteger(@Result[1])^ := Integer(NativeInt(ATo) - NativeInt(AFrom)
-    - cPatchSize);
-end;
-{$ENDIF}
-
-procedure InstallPatch;
-var
-  LTarget: Pointer;
-begin
-  LTarget := TargetAddress;
-  // The one sanity check - see the unit header.
-  if (LTarget = nil)
-    or (FindHInstance(LTarget) <> FindHInstance(Pointer(TControl))) then
-  begin
-    LogDiagnostic('Explicit* fix not applied: TControl.DefineProperties was '
-      + 'not found in the module TControl lives in.');
-    Exit;
-  end;
-  Move(LTarget^, GSaved, cPatchSize);
-  if not WriteCode(LTarget, JumpBytes(LTarget, ReplacementAddress)) then
-  begin
-    LogDiagnostic('Explicit* fix not applied: VirtualProtect failed ('
-      + SysErrorMessage(GetLastError) + ').');
-    Exit;
-  end;
-  GTarget := LTarget;
-  GActive := True;
-end;
-
-procedure RemovePatch;
-begin
-  if not GActive then
-    Exit;
-  if not WriteCode(GTarget, GSaved) then
-    LogDiagnostic('Explicit* fix could not be removed: VirtualProtect failed ('
-      + SysErrorMessage(GetLastError) + ').');
-  // Considered gone either way: a failed restore leaves the jump pointing at
-  // this package, which is still loaded, and a second try would fail alike.
-  GActive := False;
-  GTarget := nil;
-end;
-
 procedure SetDfmExplicitFix(AEnabled: Boolean);
+var
+  LError: string;
 begin
-  if AEnabled = GActive then
+  if AEnabled = GPatch.Active then
     Exit;
   try
     if AEnabled then
-      InstallPatch
-    else
-      RemovePatch;
+    begin
+      if not GPatch.Install(TargetAddress,
+        @TControlNoExplicit.DefinePropertiesNoExplicit, TControl, LError) then
+        LogDiagnostic('Explicit* fix not applied: TControl.DefineProperties - '
+          + LError + '.');
+    end
+    else if not GPatch.Remove(LError) then
+      LogDiagnostic('Explicit* fix could not be removed: ' + LError + '.');
   except
     on E: Exception do
       LogDiagnostic('Explicit* fix: ' + E.ClassName + ': ' + E.Message);
@@ -284,14 +184,17 @@ end;
 
 function DfmExplicitFixActive: Boolean;
 begin
-  Result := GActive;
+  Result := GPatch.Active;
 end;
+
+var
+  GIgnored: string;
 
 initialization
 
 finalization
   // Before the BPL unloads, whatever the wizard's teardown did or did not
   // reach: the jump points into this package.
-  RemovePatch;
+  GPatch.Remove(GIgnored);
 
 end.

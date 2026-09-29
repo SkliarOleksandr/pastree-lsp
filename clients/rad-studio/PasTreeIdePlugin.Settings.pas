@@ -244,6 +244,13 @@ function PasTreeErrorSquigglesEnabled: Boolean;
 /// </summary>
 function DfmNoExplicitProperties: Boolean;
 
+/// <summary>
+/// IDE Fixes tab: whether an inherited form or a frame is kept from writing
+/// an unchanged StyleElements (PasTreeIdePlugin.DfmStyleElementsFix). ON BY
+/// DEFAULT, applied like DfmNoExplicitProperties.
+/// </summary>
+function DfmNoDefaultStyleElements: Boolean;
+
 type
   /// <summary>
   /// Tools > Options > Language > Delphi > Error Insight > "Editor rendering
@@ -338,6 +345,8 @@ type
     PasTreeErrorSquiggles: Boolean;
     // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
     DfmNoExplicitProps: Boolean;
+    // IDE Fixes tab - see DfmNoDefaultStyleElements. Default True.
+    DfmNoDefaultStyleElems: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -371,7 +380,8 @@ uses
   // store must be readable (OverrideStructureView, from Outline and the key
   // binding) without dragging a form and its .dfm into the caller.
   PasTreeIdePlugin.SettingsForm,
-  PasTreeIdePlugin.DfmExplicitFix;
+  PasTreeIdePlugin.DfmExplicitFix,
+  PasTreeIdePlugin.DfmStyleElementsFix;
 
 const
   cSettingsKey = 'PasTree';
@@ -394,6 +404,7 @@ const
   cValueTypeFontStyle = 'TypeFontStyle';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
+  cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
   // The IDE level ApplyErrorInsightChoice replaced with None, to put back.
   // cLevelAbsent stands for "the IDE had no value at all", put back by
   // deleting ours rather than by guessing the IDE's default.
@@ -553,6 +564,7 @@ begin
   Result.TypeFontStyle := [];
   Result.PasTreeErrorSquiggles := False;
   Result.DfmNoExplicitProps := True;
+  Result.DfmNoDefaultStyleElems := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -600,6 +612,8 @@ begin
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
       Result.DfmNoExplicitProps :=
         ReadFlag(LReg, cValueDfmNoExplicit, Result.DfmNoExplicitProps);
+      Result.DfmNoDefaultStyleElems := ReadFlag(LReg,
+        cValueDfmNoDefaultStyleElements, Result.DfmNoDefaultStyleElems);
     finally
       LReg.CloseKey;
     end;
@@ -660,6 +674,8 @@ begin
           Ord(ASettings.PasTreeErrorSquiggles));
         LReg.WriteInteger(cValueDfmNoExplicit,
           Ord(ASettings.DfmNoExplicitProps));
+        LReg.WriteInteger(cValueDfmNoDefaultStyleElements,
+          Ord(ASettings.DfmNoDefaultStyleElems));
       finally
         LReg.CloseKey;
       end;
@@ -673,6 +689,7 @@ begin
   end;
   ApplyErrorInsightChoice;
   SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
+  SetDfmStyleElementsFix(ASettings.DfmNoDefaultStyleElems);
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -817,6 +834,11 @@ end;
 function DfmNoExplicitProperties: Boolean;
 begin
   Result := CurrentSettings.DfmNoExplicitProps;
+end;
+
+function DfmNoDefaultStyleElements: Boolean;
+begin
+  Result := CurrentSettings.DfmNoDefaultStyleElems;
 end;
 
 function ReadIdeErrorMarkStyle: TErrorMarkStyle;

@@ -490,6 +490,28 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 0
       end
+      object lblNoDefaultStyleElementsHint: TLabel
+        Left = 35
+        Top = 141
+        Width = 392
+        Height = 60
+        Caption =
+          'An inherited form or a frame no longer gets StyleElements = [seF' +
+          'ont, seClient, seBorder] written when nobody changed it - the de' +
+          'signer compared it with a styled ancestor'#39's reduced set. A value' +
+          ' you really changed is still written.'
+        WordWrap = True
+      end
+      object chkNoDefaultStyleElements: TCheckBox
+        Left = 16
+        Top = 120
+        Width = 430
+        Height = 17
+        Caption = 'Do not write unchanged StyleElements to form files'
+        Checked = True
+        State = cbChecked
+        TabOrder = 1
+      end
     end
   end
   object btnOK: TButton

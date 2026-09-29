@@ -22,7 +22,9 @@ unit PasTreeIdePlugin.SettingsForm;
   turn off": a feature that EDITS the user's code is Editing regardless of
   how it is triggered. Highlighting came later, and IDE Fixes (0.59.0) holds
   what corrects the IDE's own behaviour rather than adding a feature - first
-  the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix).
+  the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix),
+  then the unchanged StyleElements of inherited forms (0.60.0,
+  PasTreeIdePlugin.DfmStyleElementsFix).
 
   IF YOU ARE EDITING THE .dfm: the only names the code depends on are the ones
   bound below (the checkboxes, their hint labels, the readout labels and the
@@ -109,6 +111,8 @@ type
     tsIdeFixes: TTabSheet;
     chkNoExplicitProps: TCheckBox;
     lblNoExplicitPropsHint: TLabel;
+    chkNoDefaultStyleElements: TCheckBox;
+    lblNoDefaultStyleElementsHint: TLabel;
     btnOK: TButton;
     btnCancel: TButton;
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
@@ -338,6 +342,7 @@ begin
     LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
+    LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -367,6 +372,7 @@ begin
     LSettings.TypeFontStyle := LForm.TypeStyles;
     LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
+    LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally

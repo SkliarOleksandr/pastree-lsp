@@ -654,7 +654,7 @@ first bytes become a jump to a copy of the method whose `Explicit*`
 definitions have `HasData` False. Nothing on the ToolsAPI side can do it - a
 file rewritten after `AfterSave` is a file the designer no longer agrees with,
 and misses binary forms and the clipboard. Two things DControlsFix gets wrong
-on Win64 are done differently, and `PasTreeIdePlugin.DfmExplicitFix`'s header
+on Win64 are done differently, and `PasTreeIdePlugin.CodePatch`'s header
 has both: the jump is the 14-byte absolute `FF 25` form there (a rel32 `E9`
 reaches 2 GB, and a package loaded further away would jump into garbage), and
 the address comes from `TControl`'s virtual method table rather than from
@@ -667,6 +667,35 @@ loaded at `7FFB...` against the exe at `1A0000`, i.e. beyond rel32): no
 `Explicit*` written while patched, a file with them still loads and fills
 `ExplicitWidth`, and the output is byte-identical to the unpatched VCL again
 after removal and after repeated toggling.
+
+The jump mechanism moved to `PasTreeIdePlugin.CodePatch` in 0.60.0, when the
+second fix needed it; its header now carries the Win64 details.
+
+### IDE Fixes: no unchanged `StyleElements` in inherited forms (0.60.0)
+
+An inherited form or a frame gets `StyleElements = [seFont, seClient,
+seBorder]` - the default - written for the form and for each control when a
+VCL style is active in the designer. The cause is the comparison, not the
+value: `TControl.GetStyleElements` answers the designer's reduced set
+(`IDesignerHook.GetExcludedStyleElements` taken out) for any control not being
+written, and a descendant is compared with its ANCESTOR's value
+(`IsDefaultPropertyValue`, `GetOrdProp(Ancestor, ...)`), which is not being
+written. 22.0 read the field directly and does not have it.
+
+`PasTreeIdePlugin.DfmStyleElementsFix` replaces two methods, both or neither:
+`TWriter.WriteProperties` (a verbatim copy that counts writes in progress on
+the thread - the static method's address from its import thunk) and
+`TControl.GetStyleElements` (the original, except that during a write it
+answers the real value for every control). `TComponent.WriteState` would have
+been the obvious counter, but the `TWriter.WriteData` it calls is private.
+
+Reproduced and checked outside the IDE on 2026-09-29, Win32 and Win64, the VCL
+linked in and from runtime packages: two forms with `csDesigning`, a stand-in
+`IDesignerHook` excluding `seClient`, the Amakrits style loaded as the
+designing style. Unpatched, `WriteDescendent` writes the default for the form
+and the panel; patched, neither; a changed value (`[seFont]`) is still
+written; the ancestor still answers the reduced set outside a write; the
+output after removal is byte-identical to the unpatched one.
 
 ### Diagnostics
 
@@ -1200,6 +1229,10 @@ log anything leaves its last words.
 - `PasTreeIdePlugin.DfmExplicitFix.pas` - the IDE Fixes tab's first fix: the
   patch of `TControl.DefineProperties` that keeps `Explicit*` out of form
   files, installed and removed by the setting, removed at unload.
+- `PasTreeIdePlugin.DfmStyleElementsFix.pas` - the second fix: an inherited
+  form's unchanged `StyleElements`, two patches that go in and out together.
+- `PasTreeIdePlugin.CodePatch.pas` - the jump both fixes use: install, restore,
+  the Win32/Win64 encodings and the import-thunk decoder.
 - `PasTreeIdePlugin.KeyBindings.pas` - the package's ONE
   `IOTAKeyboardBinding`: features register a key and a handler, the wizard
   binds them all at once and removes them all at once. See "Keyboard

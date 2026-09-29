@@ -395,6 +395,15 @@ every diff of a form file. A file that already has them still loads; they are
 dropped the next time the form is saved. On by default, switched on the
 IDE Fixes tab, and the switch takes effect at once.
 
+### No unchanged `StyleElements` in inherited forms
+
+With a VCL style active in the form designer, RAD Studio writes
+`StyleElements = [seFont, seClient, seBorder]` into an inherited form or a
+frame - for the form and every control - although nobody changed it: it
+compares each value with the ancestor's styled, reduced set. The plugin makes
+that comparison use the real values, so only a `StyleElements` you actually
+changed is written. On by default, its own switch on the IDE Fixes tab.
+
 ## Through the Code Insight Manager
 
 These are the features RAD Studio routes through whichever Insight Provider is

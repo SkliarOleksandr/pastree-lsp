@@ -129,6 +129,10 @@ contains
   { IDE Fixes: the form designer stops writing Explicit* properties - a patch
     of TControl.DefineProperties in the IDE's VCL. See the unit's header. }
   PasTreeIdePlugin.DfmExplicitFix in 'PasTreeIdePlugin.DfmExplicitFix.pas',
+  { And an inherited form's unchanged StyleElements - two patches. Both go
+    through CodePatch, the jump mechanism with its Win64 details. }
+  PasTreeIdePlugin.DfmStyleElementsFix in 'PasTreeIdePlugin.DfmStyleElementsFix.pas',
+  PasTreeIdePlugin.CodePatch in 'PasTreeIdePlugin.CodePatch.pas',
   { Every AV in the IDE, with a stack, beside the server log - see the unit. }
   PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas',
   { The startup splash line. Nothing uses this unit - it acts from its own
