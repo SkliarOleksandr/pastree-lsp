@@ -5408,7 +5408,7 @@ end;
   (on the routine's name - every argument); "" when there is no call. *)
 function TLspServer.HandleAnnotateArgs(const AMsg: TLspIncoming): string;
 var
-  LPath, LEdits, LMode: string;
+  LPath, LEdits, LMode, LDetail: string;
   LAnswer: TLspAnnotateAnswer;
   LOptions: TLspAnnotateOptions;
   LIdx, LLine, LChar, LPasLine, LPasCol: Integer;
@@ -5459,13 +5459,19 @@ begin
       [LStartLine, LStartChar, LEndLine, LEndChar,
        JsonQuote(LAnswer.Edits[LIdx].Text)]);
   end;
-  Log(Format('annotateArgs: %s -> scope %s, %d edit(s), %s in %d ms (%s)',
+  LDetail := '';
+  if LAnswer.Detail <> '' then
+    LDetail := ': ' + LAnswer.Detail;
+  Log(Format('annotateArgs: %s -> scope %s, %d edit(s), %s in %d ms (%s%s)',
     [PosTag(LPath, LPasLine, LPasCol), LAnswer.Scope, Length(LAnswer.Edits),
-     LAnswer.Routine, GetTickCount64 - LStart, LAnswer.Provider]));
+     LAnswer.Routine, GetTickCount64 - LStart, LAnswer.Provider, LDetail]));
+  // `detail` is the log's longer why; a client shows `provider`.
   Result := BuildResponse(AMsg.IdJson, Format(
-    '{"edits":[%s],"count":%d,"scope":%s,"routine":%s,"provider":%s}',
+    '{"edits":[%s],"count":%d,"scope":%s,"routine":%s,"provider":%s,'
+    + '"detail":%s}',
     [LEdits, Length(LAnswer.Edits), JsonQuote(LAnswer.Scope),
-     JsonQuote(LAnswer.Routine), JsonQuote(LAnswer.Provider)]));
+     JsonQuote(LAnswer.Routine), JsonQuote(LAnswer.Provider),
+     JsonQuote(LAnswer.Detail)]));
 end;
 
 { The text a parse-only request reads: the open document's overlay, else the

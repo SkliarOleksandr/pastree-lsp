@@ -22,6 +22,8 @@ uses
   DemoClassCompleteForeign in 'DemoClassCompleteForeign.pas',
   DemoDiagnostics in 'DemoDiagnostics.pas',
   DemoForm in 'DemoForm.pas',
+  DemoAnnotateLib in 'DemoAnnotateLib.pas',
+  DemoAnnotateUse in 'DemoAnnotateUse.pas',
   DemoMissingUnit in 'DemoMissingUnit.pas';
 
 var

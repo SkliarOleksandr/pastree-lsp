@@ -3369,6 +3369,30 @@ begin
     'answered with multiline over a mode that names nothing new');
   Check(GOk and GResultJson.Contains('"count":2'),
     'the layout applies to every argument, whatever the mode names');
+
+  // A NAMED constant is a name (Alex, 2026-09-30, AVImark's CreateOption
+  // calls): an enum value and a const of another unit are left alone like a
+  // variable, and only the literals get names.
+  LFile := TPath.Combine(GFixtureDir, 'DemoAnnotateUse.pas');
+  Check(AskAt('Paint(dcRed, cDemoLimit, S);', 'Paint', 'anonymous'),
+    'answered with mode=anonymous over an enum value, a const and a variable');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('"detail":"the 3 arguments without a name'),
+    'named constants read as their own annotation - nothing written, 3 said');
+  Check(AskAt('Paint(dcBlue, 3, ''x'');', 'Paint', 'anonymous'),
+    'answered with mode=anonymous over an enum value and two literals');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ALimit:} "')
+    and GResultJson.Contains('"newText":"{AName:} "')
+    and not GResultJson.Contains('{AColor:}'),
+    'the number and the string get their names, the enum value does not');
+  Check(AskAt('Echo(S);', 'Echo', 'anonymous'),
+    'answered with mode=anonymous over a call of self-naming arguments');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('"provider":"pastree/annotateArgs: nothing to annotate"')
+    and GResultJson.Contains('"detail":"the one argument without a name')
+    and not GResultJson.Contains('already annotated'),
+    'nothing written because the argument names itself - and said so');
 end;
 
 { 5l. Two PasTree 0.17 typings, through THIS server's seam: an inline

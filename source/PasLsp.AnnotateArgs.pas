@@ -74,7 +74,8 @@ type
     the list means the one argument there, on the name means all - and is
     what a client with no dialog asks for. amAnonymous is the convention the
     inlay-hint IDEs default to: only the arguments that do not name themselves
-    - a literal, an expression, a call - while `DoIt(Count)` is left alone.
+    - a literal (True, False and nil included), an expression, a call - while
+    a NAME is left alone, a named constant too: `DoIt(Count)`, `DoIt(cMax)`.
     amNone names nothing: the `{var}`/`{out}` marks and the layout alone,
     for a call whose names are already there or not wanted. *)
   TLspAnnotateMode = (amAuto, amAll, amAnonymous, amCurrent, amNone);
@@ -116,6 +117,10 @@ type
     Routine: string;
     { Names the outcome; every refusal says WHY. }
     Provider: string;
+    { The longer why behind a short Provider, for the log only - the IDE
+      shows Provider in the Build tab, and a sentence there is noise (Alex,
+      2026-09-30). '' when Provider says it all. }
+    Detail: string;
   end;
 
 { The annotation edits for the call at (APasLine, APasCol). ACompletion is a
@@ -759,45 +764,25 @@ begin
   Result := Copy(LText, 1, LIdx - 1);
 end;
 
-{ An argument that does not name itself: anything but a plain identifier or
-  a member chain (`Count`, `Self.FCount`, `Rec.Field`), which read as their
-  own annotation. }
-function IsAnonymousArg(AModel: TPasSemaModel; AProject: TPasSemaProject;
-  AArg: Integer): Boolean;
+{ An argument that does not name itself: a LITERAL or an expression - a
+  number, a string, a call, an operator, and the three words that are
+  literals in all but spelling: True, False, nil. Every NAME reads as its
+  own annotation, a named constant included - `ostBoolean`, `SSCH03`,
+  `MaxInt`, `Self.FCount`, `TFoo.cLimit` (Alex, 2026-09-30, over AVImark's
+  CreateOption calls: "named constants such as enum values and plain
+  constants are not annotated, True or a GUID string are"). A name is told by
+  its node, so this needs no binding - the live buffer's own model does not
+  know a used unit's symbols, and it does not have to. }
+function IsAnonymousArg(AModel: TPasSemaModel; AArg: Integer): Boolean;
 var
-  LNode: Integer;
-  LExt: TPasExtRef;
   LText: string;
-  LKind: TSemaSymbolKind;
 begin
-  if not (AModel.Tree.Nodes[AArg].Kind in [nkIdent, nkMember]) then
+  if AModel.Tree.Nodes[AArg].Kind = nkMember then
+    Exit(False);
+  if AModel.Tree.Nodes[AArg].Kind <> nkIdent then
     Exit(True);
-  { A name that is a CONSTANT reads as a literal, not as a name: `True`,
-    `False`, `nil`, `MaxInt`, an enum value, a declared const
-    (ActiveRoutineTarget(True, ...) - Alex, 2026-09-15). The binding says
-    which; an unbound True/False/nil is caught by its spelling. }
-  LNode := AArg;
-  if AModel.Tree.Nodes[LNode].Kind = nkMember then
-  begin
-    LNode := AModel.Tree.Nodes[LNode].FirstChild;
-    while (LNode <> NIL_NODE) and
-          (AModel.Tree.Nodes[LNode].NextSibling <> NIL_NODE) do
-      LNode := AModel.Tree.Nodes[LNode].NextSibling;
-    if LNode = NIL_NODE then
-      Exit(False);
-  end;
-
-  if (LNode <= High(AModel.RefMap)) and (AModel.RefMap[LNode] <> NIL_SYM) then
-    LKind := AModel.Symbols[AModel.RefMap[LNode]].Kind
-  else if (AProject <> nil) and AModel.ExtRefMap.TryGetValue(LNode, LExt) and
-          (AProject.Model(LExt.UnitId) <> nil) then
-    LKind := AProject.Model(LExt.UnitId).Symbols[LExt.Sym].Kind
-  else
-  begin
-    LText := AModel.Tree.NodeNameLower(LNode);
-    Exit((LText = 'true') or (LText = 'false') or (LText = 'nil'));
-  end;
-  Result := LKind in [skConst, skEnumValue];
+  LText := AModel.Tree.NodeNameLower(AArg);
+  Result := (LText = 'true') or (LText = 'false') or (LText = 'nil');
 end;
 
 function DefaultAnnotateOptions: TLspAnnotateOptions;
@@ -840,7 +825,7 @@ var
   LInfo: TPasCallInfo;
   LCall, LOnlyArg, LArg, LArgIdx, LFirst, LLast: Integer;
   LOpenLine, LOpenCol, LLine, LCol: Integer;
-  LIdx, LChosen, LFitting, LArgCount: Integer;
+  LIdx, LChosen, LFitting, LArgCount, LSelfNamed: Integer;
   LModel: TPasSemaModel;
   LParams, LCand: TArray<TParamInfo>;
   LVarargs, LCandVarargs: Boolean;
@@ -1037,6 +1022,7 @@ begin
     because two edits at one spot are two things a writer must order and a
     client must not reorder. }
   LArgIdx := 0;
+  LSelfNamed := 0;
   LArg := LTree.Nodes[LTree.Nodes[LCall].FirstChild].NextSibling;
   while LArg <> NIL_NODE do
   begin
@@ -1061,11 +1047,12 @@ begin
       if LNameIt then
       begin
         LComments := LeadingBraceComments(LTree, LFirst);
-        if (AOptions.Mode <> amNone) and
-           ((AOptions.Mode <> amAnonymous) or
-            IsAnonymousArg(AModel, AProject, LArg)) and
-           not HasNameComment(LComments) then
-          LText := '{' + LParams[LArgIdx].Name + ':} ';
+        if (AOptions.Mode <> amNone) and not HasNameComment(LComments) then
+          if (AOptions.Mode <> amAnonymous) or
+             IsAnonymousArg(AModel, LArg) then
+            LText := '{' + LParams[LArgIdx].Name + ':} '
+          else
+            Inc(LSelfNamed);
         if AOptions.MarkByRef and (LParams[LArgIdx].Modifier <> '') and
            (LParams[LArgIdx].Modifier <> 'const') and
            not HasModifierComment(LComments) then
@@ -1105,7 +1092,23 @@ begin
     LArg := LTree.Nodes[LArg].NextSibling;
   end;
 
-  if Length(Result.Edits) = 0 then
+  { NOT "already annotated" when nothing was written because the anonymous
+    mode skipped arguments that name themselves - that read as the command
+    having looked and found names there, and sent the user looking for a
+    bug in the wrong place (2026-09-30). }
+  if (Length(Result.Edits) = 0) and (LSelfNamed > 0) then
+  begin
+    Result.Provider := cProvider + ': nothing to annotate';
+    if LSelfNamed = 1 then
+      Result.Detail := 'the one argument without a name is a plain name '
+        + 'that reads as its own annotation, and only anonymous arguments '
+        + 'were asked for'
+    else
+      Result.Detail := Format('the %d arguments without a name are plain '
+        + 'names that read as their own annotation, and only anonymous '
+        + 'arguments were asked for', [LSelfNamed]);
+  end
+  else if Length(Result.Edits) = 0 then
     Result.Provider := cProvider + ': already annotated'
   else
     Result.Provider := cProvider;
