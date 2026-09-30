@@ -30,6 +30,9 @@ unit DemoAnnotateArgs;
                                the engine's signature table.
     Read with a string       - an intrinsic with an optional LEADING file:
                                one argument skips it.
+    the Defaults call        - parameters whose defaults are IDENTIFIERS
+                               (True, MaxInt): a default is not a name, so
+                               every argument keeps its own parameter's.
 *)
 
 interface
@@ -47,6 +50,9 @@ procedure Same(A: Integer); overload;
 procedure Same(const S: string); overload;
 function Inner(X: Integer): Integer;
 procedure Outer(AValue: Integer; AExtra: Integer);
+procedure Defaults(AFlag: Boolean; AVisible: Boolean = True; ACacheable:
+  Boolean =
+  True; AMax: Integer = MaxInt);
 
 type
   TGateway = procedure(const ARequest: string; out AReply: string);
@@ -92,6 +98,11 @@ procedure Outer(AValue: Integer; AExtra: Integer);
 begin
 end;
 
+procedure Defaults(AFlag: Boolean; AVisible: Boolean; ACacheable: Boolean;
+  AMax: Integer);
+begin
+end;
+
 procedure Demo;
 var
   S: string;
@@ -115,6 +126,7 @@ begin
   Hook(M);
   Outer(True, M);
   Open({AFileName:} S, M, {AHandle:} H);
+  Defaults(False, True, True, 5);
   M := 0;
 end;
 

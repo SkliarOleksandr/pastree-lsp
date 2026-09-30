@@ -344,10 +344,16 @@ begin
           nkIdent:
             // A plain type name (`: string`, `: Integer`) is an nkIdent child
             // too, and nothing but the colon in front of it tells it from a
-            // parameter name - so the colon is what is checked.
-            if (AModel.Tree.Nodes[LChild].FirstToken > 0) and
-               AModel.Tree.Source.VisibleTextEquals(
-                 AModel.Tree.Nodes[LChild].FirstToken - 1, ':') then
+            // parameter name - so the colon is what is checked. So is a
+            // DEFAULT that is an identifier (`= True`, `= MaxInt`, `= alNone`),
+            // behind `=` rather than a colon: anything after the type is not
+            // a name. Missing that turned `AVisible: Boolean = True;
+            // ACacheable: ...` into the names AVisible, True, ACacheable and
+            // wrote `{True:}` on the argument after (AVImark, 2026-09-30).
+            if (LNonName > 0) or
+               ((AModel.Tree.Nodes[LChild].FirstToken > 0) and
+                AModel.Tree.Source.VisibleTextEquals(
+                  AModel.Tree.Nodes[LChild].FirstToken - 1, ':')) then
               Inc(LNonName)
             else
             begin

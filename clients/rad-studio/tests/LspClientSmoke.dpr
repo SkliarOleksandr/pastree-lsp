@@ -3293,6 +3293,16 @@ begin
     '"range":{"start":{"line":' + IntToStr(LLine) + ',"character":37},'
     + '"end":{"line":' + IntToStr(LLine) + ',"character":37}}'),
     'placed at the argument itself, past the name comment');
+  // Defaults that are identifiers, one of them on the next line: never names.
+  Check(AskAt('Defaults(False, True, True, 5);', 'Defaults'),
+    'answered for a routine with identifier defaults');
+  Check(GOk and GResultJson.Contains('"count":4')
+    and GResultJson.Contains('"newText":"{AVisible:} "')
+    and GResultJson.Contains('"newText":"{ACacheable:} "')
+    and GResultJson.Contains('"newText":"{AMax:} "')
+    and not GResultJson.Contains('{True:}')
+    and not GResultJson.Contains('{MaxInt:}'),
+    'a default `= True` or `= MaxInt` is not a parameter name');
   Check(AskAt('M := 0;', 'M'), 'answered outside any call');
   Check(GOk and GResultJson.Contains('"count":0')
     and GResultJson.Contains('"scope":""'),
