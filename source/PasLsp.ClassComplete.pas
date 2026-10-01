@@ -1156,7 +1156,10 @@ begin
     LChild := ATree.Nodes[ATypeNode].FirstChild;
     while LChild <> NIL_NODE do
     begin
-      if not (ATree.Nodes[LChild].Kind in [nkVisibility, nkGuid]) then
+      // An attribute group is skipped for the reason the private walk
+      // below gives.
+      if not (ATree.Nodes[LChild].Kind in [nkVisibility, nkGuid,
+         nkAttrGroup]) then
         LAnchor := LChild;
       LChild := ATree.Nodes[LChild].NextSibling;
     end;
@@ -1186,7 +1189,11 @@ begin
         LPrivAnchor := NIL_NODE;
       end;
     end
-    else if LInPrivate then
+    // Not an attribute group: it belongs to what FOLLOWS it, and since
+    // PasTree 0.77.0 a group after a `var` / `const` section is a sibling of
+    // the members rather than inside the section - anchoring on it would put
+    // the new method between the group and the member it decorates.
+    else if LInPrivate and (ATree.Nodes[LChild].Kind <> nkAttrGroup) then
       LPrivAnchor := LChild;
     LChild := ATree.Nodes[LChild].NextSibling;
   end;

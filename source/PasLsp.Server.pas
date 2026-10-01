@@ -3351,6 +3351,11 @@ begin
     fskHandler: Result := 'handler';
     fskComponentRef: Result := 'componentRef';
     fskCaption: Result := 'caption';
+    // A line setting a published property (PasTree 0.68.0/0.70.0) - a
+    // reference-search row only, a rename of such a property is refused.
+    // Before this word it went out as '', which a client reads as a Pascal
+    // source row.
+    fskProperty: Result := 'property';
   else
     Result := '';
   end;

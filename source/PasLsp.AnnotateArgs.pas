@@ -314,7 +314,7 @@ end;
 function ParamsOfNode(AModel: TPasSemaModel; AOwner: Integer;
   out AParams: TArray<TParamInfo>): Boolean;
 var
-  LParams, LParam, LChild, LVis, LNameVis: Integer;
+  LParams, LParam, LChild: Integer;
   LModifier: string;
   LNames: TArray<string>;
   LHasDefault: Boolean;
@@ -341,7 +341,6 @@ begin
       LModifier := '';
       LHasDefault := False;
       LNonName := 0;
-      LNameVis := -1;
       LChild := AModel.Tree.Nodes[LParam].FirstChild;
       while LChild <> NIL_NODE do
       begin
@@ -363,8 +362,6 @@ begin
             else
             begin
               LNames := LNames + [AModel.Tree.NodeText(LChild)];
-              if LNameVis < 0 then
-                LNameVis := AModel.Tree.Nodes[LChild].FirstToken;
             end;
           nkAttrGroup, nkAttribute:
             ;   // `[Ref]`, `[weak]` - not a name, not the type
@@ -377,20 +374,16 @@ begin
           LHasDefault := True;
         LChild := AModel.Tree.Nodes[LChild].NextSibling;
       end;
-      // The modifier is a token in FRONT of the first name, past any
-      // attribute group: var / const / out (the parser records `out` in
-      // Aux because it is a directive word, but its text is enough here).
-      LVis := AModel.Tree.Nodes[LParam].FirstToken;
-      while (LVis >= 0) and (LVis < LNameVis) do
-      begin
-        if AModel.Tree.Source.VisibleTextEquals(LVis, 'var') then
-          LModifier := 'var'
-        else if AModel.Tree.Source.VisibleTextEquals(LVis, 'out') then
-          LModifier := 'out'
-        else if AModel.Tree.Source.VisibleTextEquals(LVis, 'const') then
-          LModifier := 'const';
-        Inc(LVis);
-      end;
+      // The mode is in the tree since PasTree 0.81.0 (nfVar / nfConst /
+      // nfOut on nkParam). It used to be read back from the tokens in front
+      // of the first name, which a `var` / `out` / `const` word inside a
+      // leading attribute's arguments could fake.
+      if nfVar in AModel.Tree.Nodes[LParam].Flags then
+        LModifier := 'var'
+      else if nfOut in AModel.Tree.Nodes[LParam].Flags then
+        LModifier := 'out'
+      else if nfConst in AModel.Tree.Nodes[LParam].Flags then
+        LModifier := 'const';
       for LIdx := 0 to High(LNames) do
       begin
         LInfo.Name := LNames[LIdx];

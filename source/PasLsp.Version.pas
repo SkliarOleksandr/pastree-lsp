@@ -250,7 +250,11 @@ const
   /// a rename of a frame's component leaves `inherited FrameButton` in every
   /// descendant host's form file, which then fails to load, and Find
   /// References lists none of them.
-  cMinPasTreeVersion = '0.63.1';
+  /// 0.81.0 (2026-10-01): a parameter's var / const / out mode is a node flag
+  /// (nfVar / nfConst / nfOut), which Annotate arguments reads instead of the
+  /// tokens. Loud without it (the flags do not compile), raised to keep the
+  /// floor honest about what this code is written against.
+  cMinPasTreeVersion = '0.81.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
