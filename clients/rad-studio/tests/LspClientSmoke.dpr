@@ -475,6 +475,12 @@ begin
   Check(GClient.State = lcsReady, 'state is Ready once the handshake landed');
   Check(GResultJson.Contains('DemoUnit.pas'),
     'definition of Greet points into DemoUnit.pas');
+  // The status panel's data: the answer waited out the first analysis, whose
+  // $/progress stream - begin and end - arrives ahead of it on the pipe.
+  Check(GClient.ActivityRuns >= 1,
+    'the server reported the analysis as $/progress (window.workDoneProgress)');
+  Check(GClient.Activity = laIdle,
+    'and closed the stream when it finished');
 end;
 
 { 2. Real navigation answers over documents the client has opened. }

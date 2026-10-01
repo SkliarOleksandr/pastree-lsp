@@ -156,6 +156,7 @@ type
     FStartedAt: TDateTime;
     FDocs: TLspDocumentStore;
     FOutgoing: TList<string>;   // notifications queued during Handle
+    FOnFlush: TProc;            // see OnFlush
     // Configuration (fixed at initialize)
     FPlatform: TPasPlatform;
     FMainSource: string;
@@ -183,6 +184,13 @@ type
     // every library unit importing the same name resolved the original.
     FProjectFiles: TArray<string>;
     FProjectDir: string;
+    // What initialize named, kept so pastree/projectChanged can read the
+    // same .dproj the same way again, and what that read produced
+    // (DProjSignature) - '' parts for a bare .dpr or a failed load.
+    FInitProjectFile: string;
+    FInitPlatform: string;
+    FInitConfig: string;
+    FProjectSig: TArray<string>;
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
     // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
@@ -398,6 +406,7 @@ type
     function HandleFindDefines(const AMsg: TLspIncoming): string;
     function HandleDefinesAt(const AMsg: TLspIncoming): string;
     function HandleDcuSource(const AMsg: TLspIncoming): string;
+    function HandleProjectChanged(const AMsg: TLspIncoming): string;
     function HandleOutline(const AMsg: TLspIncoming): string;
     function HandleOutlineTarget(const AMsg: TLspIncoming): string;
     function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
@@ -430,9 +439,14 @@ type
     function Handle(const AJson: string): string;
     { Server-initiated notifications produced while handling the last
       message (publishDiagnostics, ...) - the caller sends each and the
-      queue resets. Drained AFTER the Handle reply by the main loop; order
-      within the queue is preserved. }
+      queue resets. Drained AFTER the Handle reply by the main loop - and
+      during one, through OnFlush, while a request waits out an analysis;
+      order within the queue is preserved. }
     function TakeOutgoing: TArray<string>;
+    /// <summary>Drains TakeOutgoing to the wire - set by the main program,
+    /// called while a request waits out an analysis (WaitAnalyzed), on the
+    /// dispatcher thread like every other write.</summary>
+    property OnFlush: TProc read FOnFlush write FOnFlush;
     property ExitRequested: Boolean read FExitRequested;
     property ExitCode: Integer read FExitCode;
   end;
@@ -453,6 +467,12 @@ function MemoryLine: string; forward;
   builtins (sfBuiltin / skBuiltinType) - a unit under a library path would be
   the natural extension, but the navigator keeps that test private today. }
 const
+  // The `begin` titles of the two kinds of analysis run. Part of the
+  // protocol: the IDE plugin tells them apart by the word "incremental"
+  // (PasTreeIdePlugin.LspClient, ProgressKindOf) - see SPEC.md.
+  cProgressTitleFull = 'PasTree: analyzing';
+  cProgressTitleIncremental = 'PasTree: incremental';
+
   ST_NAMESPACE = 0;
   ST_TYPE = 1;
   ST_CLASS = 2;
@@ -739,6 +759,61 @@ end;
 
 { -------- configuration -------- }
 
+const
+  // The parts of a .dproj the server takes at initialize, in the order
+  // DProjSignature returns them - what pastree/projectChanged names when one
+  // differs.
+  cDProjParts: array[0..6] of string = ('main source', 'platform',
+    'search paths', 'defines', 'unit list', 'namespaces', 'unit aliases');
+
+{ What of a loaded .dproj the analysis depends on, one string per part of
+  cDProjParts. Order-preserving on purpose: the search path order decides
+  which copy of a unit wins, so a reordered path is a changed configuration. }
+function DProjSignature(ADProj: TPasDProj): TArray<string>;
+
+  function Joined(const AItems: TArray<string>): string;
+  begin
+    Result := string.Join(#10, AItems);
+  end;
+
+var
+  LFiles: TArray<string>;
+  LItem: string;
+  LAliases: TArray<string>;
+  LAlias: TPasUnitAlias;
+begin
+  // Only .pas rows, as ApplyInitOptions takes them: a .dfm/.res row is not a
+  // unit, so one appearing or going changes nothing the analysis reads.
+  LFiles := nil;
+  for LItem in ADProj.Files do
+    if SameText(TPath.GetExtension(LItem), '.pas') then
+      LFiles := LFiles + [LItem];
+  LAliases := nil;
+  for LAlias in ADProj.UnitAliases do
+    LAliases := LAliases + [LAlias.Alias + '=' + LAlias.UnitName];
+  Result := [ADProj.MainSource, PlatformName(ADProj.Platform),
+    Joined(ADProj.SearchPaths), Joined(ADProj.Defines), Joined(LFiles),
+    Joined(ADProj.Namespaces), Joined(LAliases)];
+end;
+
+{ "process started HH:MM:SS.zzz, N ms before initialize" - see the caller. }
+function ProcessStartLine: string;
+var
+  LCreation, LExit, LKernel, LUser: TFileTime;
+  LLocal: TFileTime;
+  LSys: TSystemTime;
+  LStarted: TDateTime;
+begin
+  if not GetProcessTimes(GetCurrentProcess, LCreation, LExit, LKernel,
+       LUser) or not FileTimeToLocalFileTime(LCreation, LLocal) or
+     not FileTimeToSystemTime(LLocal, LSys) then
+    Exit('process start time unavailable');
+  LStarted := SystemTimeToDateTime(LSys);
+  Result := Format('process started %s, %d ms before initialize',
+    [FormatDateTime('hh:nn:ss.zzz', LStarted),
+     Round((Now - LStarted) * MSecsPerDay)]);
+end;
+
 procedure TLspServer.ApplyInitOptions(AOptions: TJSONValue);
 var
   LProjectFile, LPlatformStr, LConfigStr, LItem, LHost: string;
@@ -804,6 +879,18 @@ begin
   // answer before anything else is worth reading.
   if LHost <> '' then
     LogHeader('host: ' + LHost);
+  // How long this process lived before initialize reached it. The version
+  // line above is the log's first, and it waits for initialize (the log path
+  // comes in it), so without this a slow start - the exe loading, a virus
+  // scan of a freshly built exe, a starved machine - cannot be told from a
+  // client that sent initialize late (AVImark, 2026-10-01: 20 s between the
+  // restart and the first line, nothing to say where they went).
+  Log(ProcessStartLine);
+
+  FInitProjectFile := LProjectFile;
+  FInitPlatform := LPlatformStr;
+  FInitConfig := LConfigStr;
+  FProjectSig := nil;
 
   if not ((LPlatformStr = '') or
     TryParsePlatformName(LPlatformStr, FPlatform)) then
@@ -816,6 +903,7 @@ begin
     try
       if LDProj.Load(LProjectFile, LPlatformStr, LConfigStr) then
       begin
+        FProjectSig := DProjSignature(LDProj);
         FMainSource := LDProj.MainSource;
         FPlatform := LDProj.Platform;
         FSearchPaths := LDProj.SearchPaths;
@@ -1089,7 +1177,7 @@ begin
   FStartedParts := OverlayParts(True);
   FBuildStart := GetTickCount64;
   FBuildDiskReadAt := Now;   // before the worker reads anything
-  StartProgress('PasTree: analyzing');
+  StartProgress(cProgressTitleFull);
   // "full rebuild" spelled out on purpose: this is the line that tells a
   // full rebuild from the incremental one TryStartModuleAnalysis logs, which
   // is the first question a "the analysis got slow while typing" report asks
@@ -1291,7 +1379,12 @@ begin
   FreeAndNil(FLineTokenCache);
   FreeAndNil(FSession);
   if FProject = nil then
+  begin
+    // The stream has to close here too: a client showing "analyzing" off it
+    // (the IDE's status panel) would otherwise say so until the next build.
+    EndProgress('no result');
     Exit;
+  end;
   FNav := NewNavigator;
   CommitBuiltParts;
   LWasModule := FModuleMode;
@@ -1856,6 +1949,11 @@ begin
   FPendingDue := 0;
   FPendingPriority := '';
   FBuildStart := GetTickCount64;
+  // A stream per incremental run as well: most finish in tens of
+  // milliseconds, and it is the CLIENT that decides what is worth showing
+  // (the IDE's status panel waits 250 ms). The title is what tells the two
+  // kinds apart - see SPEC.md, "$/progress".
+  StartProgress(cProgressTitleIncremental);
   Log(Format('analysis started: incremental, one module (%s)%s',
     [LPath, LTakeInNote]));
   FSession.Start;
@@ -1864,8 +1962,13 @@ end;
 
 procedure TLspServer.StartProgress(const ATitle: string);
 begin
-  if not FClientProgress or (FProgressToken <> '') then
+  if not FClientProgress then
     Exit;
+  // A stream still open belongs to a run that was replaced (a refused
+  // incremental becoming a full rebuild, a stale result restarting): close
+  // it, so the title a client shows is the run actually going on.
+  if FProgressToken <> '' then
+    EndProgress('');
   Inc(FProgressSeq);
   FProgressToken := Format('pastree-%d', [FProgressSeq]);
   Inc(FNextServerId);
@@ -2210,6 +2313,15 @@ begin
       Exit(False);   // the idle tick ends the session
     ReportProgress;
     FinalizeAnalysisIfDone;   // also handles the stale->restart loop
+    // OUT NOW, not after the reply: everything queued so far - the
+    // progress stream above all - would otherwise wait in FOutgoing until
+    // this handler returns, so a client would see the run begin and end
+    // only after the answer it waited for (the IDE's status panel said
+    // "Ready" through a 38 s rebuild started by a request, 2026-10-01).
+    // Inside the loop, so the iteration that finalized also sends the
+    // `end` and the diagnostics ahead of the reply.
+    if Assigned(FOnFlush) then
+      FOnFlush;
     if FSession <> nil then
       TThread.Sleep(10);
   end;
@@ -4629,6 +4741,70 @@ begin
        JsonQuote(LText)]));
 end;
 
+{ pastree/projectChanged - OURS, not LSP. The client saw the .dproj saved
+  and asks whether that matters: the .dproj is read again exactly as
+  initialize read it, and the answer is an object whose `changed` is false
+  when every part the analysis took from it is the same, else true with
+  `what` naming the parts (cDProjParts). The client restarts the server only
+  on true.
+
+  WHY ASK RATHER THAN RESTART: the IDE re-saves the .dproj with every save of
+  the .dpr, and the restart that followed cost a full analysis - 38 s on
+  AVImark under load, 2026-10-01, for a space typed and deleted in the .dpr.
+  Re-reading the .dproj costs about a second and blocks only this server.
+
+  NOT A RECONFIGURE. A changed configuration still goes through a restart:
+  everything below initialize assumes it is fixed, and a restart is the path
+  that is known to get all of it right. }
+function TLspServer.HandleProjectChanged(const AMsg: TLspIncoming): string;
+var
+  LDProj: TPasDProj;
+  LSig: TArray<string>;
+  LWhat: string;
+  LIdx: Integer;
+  LStart: UInt64;
+begin
+  // A bare .dpr, or no project at all: nothing was read from a .dproj, so
+  // nothing of one can have changed.
+  if (FInitProjectFile = '') or
+     not SameText(TPath.GetExtension(FInitProjectFile), '.dproj') then
+    Exit(BuildResponse(AMsg.IdJson, '{"changed":false}'));
+  LStart := GetTickCount64;
+  LSig := nil;
+  LDProj := TPasDProj.Create;
+  try
+    if LDProj.Load(FInitProjectFile, FInitPlatform, FInitConfig) then
+      LSig := DProjSignature(LDProj);
+  finally
+    LDProj.Free;
+  end;
+  LWhat := '';
+  if (LSig = nil) or (FProjectSig = nil) then
+    // Unreadable now, or unreadable at initialize: either way this server's
+    // configuration is not known to match the file, and a restart says so
+    // in the place the user reads (Tell, at initialize).
+    LWhat := 'unreadable'
+  else
+    for LIdx := 0 to High(cDProjParts) do
+      if LSig[LIdx] <> FProjectSig[LIdx] then
+      begin
+        if LWhat <> '' then
+          LWhat := LWhat + ', ';
+        LWhat := LWhat + cDProjParts[LIdx];
+      end;
+  if LWhat = '' then
+  begin
+    Log(Format('pastree/projectChanged: %s re-read in %d ms - same '
+      + 'configuration, nothing to restart for',
+      [TPath.GetFileName(FInitProjectFile), GetTickCount64 - LStart]));
+    Exit(BuildResponse(AMsg.IdJson, '{"changed":false}'));
+  end;
+  Log(Format('pastree/projectChanged: %s re-read in %d ms - changed: %s',
+    [TPath.GetFileName(FInitProjectFile), GetTickCount64 - LStart, LWhat]));
+  Result := BuildResponse(AMsg.IdJson,
+    Format('{"changed":true,"what":%s}', [JsonQuote(LWhat)]));
+end;
+
 { pastree/outline - OURS, not LSP. The Go To picker's lists (the RAD Studio
   client's Ctrl+G, copied from PasTree's demo): every row a TPasOutlineEntry,
   serialized field for field, so the picker draws the head word, the name,
@@ -6940,6 +7116,8 @@ begin
         Exit(HandleDefinesAt(LMsg));
       if LMsg.Method = 'pastree/dcuSource' then
         Exit(HandleDcuSource(LMsg));
+      if LMsg.Method = 'pastree/projectChanged' then
+        Exit(HandleProjectChanged(LMsg));
       if LMsg.Method = 'pastree/outline' then
         Exit(HandleOutline(LMsg));
       if LMsg.Method = 'pastree/outlineTarget' then

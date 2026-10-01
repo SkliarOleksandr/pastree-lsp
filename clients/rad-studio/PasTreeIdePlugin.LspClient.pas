@@ -71,6 +71,13 @@ type
   );
 
   /// <summary>
+  /// What the server's analysis is doing, off its `$/progress` stream: no
+  /// stream open, an incremental (one module) run, or a full rebuild. Reset to
+  /// laIdle whenever the connection goes, since a new server starts silent.
+  /// </summary>
+  TLspActivity = (laIdle, laIncremental, laFull);
+
+  /// <summary>
   /// What the server needs to know about the project, mirroring
   /// initializationOptions in the server's own PasLsp.Server header. Nothing
   /// is mandatory: with no ProjectFile the server treats the open documents as
@@ -160,7 +167,17 @@ type
     FAttempts: Integer;
     FLastAttemptTick: UInt64;
     FGaveUpLogged: Boolean;
+    // The analysis run the server is reporting (see TLspActivity), the token
+    // of its stream - an `end` for another token closes nothing - and when
+    // it began, GetTickCount64.
+    FActivity: TLspActivity;
+    FActivityToken: string;
+    FActivitySince: UInt64;
+    FActivityRuns: Integer;   // `begin`s seen, for the harness
+    FSpawnTick: UInt64;       // when Connect started this server
     procedure Log(const AText: string);
+    procedure HandleProgress(AParams: TJSONValue);
+    procedure ClearActivity;
     function Connect: Boolean;
     procedure Teardown;
     /// <summary>
@@ -297,6 +314,11 @@ type
     /// against - both '' until a handshake has completed.</summary>
     property ServerVersion: string read FServerVersion;
     property PasTreeVersion: string read FPasTreeVersion;
+    /// <summary>The analysis run in progress and its start tick
+    /// (GetTickCount64); ActivitySince means nothing for laIdle.</summary>
+    property Activity: TLspActivity read FActivity;
+    property ActivitySince: UInt64 read FActivitySince;
+    property ActivityRuns: Integer read FActivityRuns;
     property OnNotification: TLspNotifyProc read FOnNotification
       write FOnNotification;
 
@@ -747,6 +769,12 @@ begin
     end;
   end;
   FState := lcsStarting;
+  ClearActivity;
+  // Not the "silent on a successful spawn" below: a timing line, under
+  // Advanced Logging only - the moment the restart happened, which the
+  // server's log cannot say (its first line waits for initialize).
+  FSpawnTick := GetTickCount64;
+  TimingLogFmt('server spawned: pid %d', [ProcessId]);
   { DELIBERATELY SILENT ON A SUCCESSFUL SPAWN. This used to announce the pid and
     the stderr path, and it was noise: 'server ready' follows a moment later
     with the version, which is the line that actually says something, and the
@@ -775,6 +803,7 @@ begin
     RetireConnection;
   end;
   FState := lcsStopped;
+  ClearActivity;
   FServerInfo := '';
   DiscardOutbox('server stopped');
   DisposeRetired;   // normally already done; picks up a deferred disposal
@@ -870,7 +899,13 @@ begin
   // because projectFile in initializationOptions is what scopes the analysis.
   LParams.AddPair('processId', TJSONNumber.Create(GetCurrentProcessId));
   LParams.AddPair('rootUri', TJSONNull.Create);
-  LParams.AddPair('capabilities', TJSONObject.Create);
+  // window.workDoneProgress: the server reports its background analysis as
+  // `$/progress`, which is what the editor's status panel shows
+  // (PasTreeIdePlugin.StatusPanel). Without it the server stays silent about
+  // it - see its StartProgress.
+  LParams.AddPair('capabilities', TJSONObject.Create(TJSONPair.Create(
+    'window', TJSONObject.Create(TJSONPair.Create('workDoneProgress',
+    TJSONTrue.Create)))));
   LParams.AddPair('initializationOptions', FOptions.ToJson);
   Request('initialize', LParams, OnInitializeAnswered);
 end;
@@ -943,6 +978,10 @@ begin
   end;
 
   FState := lcsReady;
+  // The status panel's "Starting...", measured: the server's own "process
+  // started" line splits it into the exe getting going and the .dproj read.
+  TimingLogFmt('handshake: %d ms after the spawn',
+    [GetTickCount64 - FSpawnTick]);
   // A completed handshake is what "working" means, so the whole failure
   // history goes - the attempt count AND the backoff clock. Measuring backoff
   // from the last attempt instead would punish a server that ran fine and then
@@ -1264,6 +1303,8 @@ begin
 
     if LIdVal <> nil then
       HandleServerRequest(LIdVal, LMethod)
+    else if LMethod = '$/progress' then
+      HandleProgress(LObj.FindValue('params'))
     else if Assigned(FOnNotification) then
       FOnNotification(LMethod, LObj.FindValue('params'));
   finally
@@ -1374,13 +1415,58 @@ end;
 procedure TLspClient.HandleServerRequest(AIdJson: TJSONValue;
   const AMethod: string);
 begin
-  // We advertise no client capabilities, so this should not happen. Answering
-  // anyway matters: an unanswered request leaves the server waiting forever.
+  // The one request our capabilities invite: the token the server's
+  // `$/progress` stream will use. Nothing to register - HandleProgress takes
+  // the token off the `begin` - so the answer is a plain null result.
+  if AMethod = 'window/workDoneProgress/create' then
+  begin
+    if Assigned(FConn) then
+      FConn.Send(Format('{"jsonrpc":"2.0","id":%s,"result":null}',
+        [AIdJson.ToJSON]));
+    Exit;
+  end;
+  // Nothing else should arrive. Answering anyway matters: an unanswered
+  // request leaves the server waiting forever.
   Log('unsupported server request: ' + AMethod);
   if Assigned(FConn) then
     FConn.Send(Format(
       '{"jsonrpc":"2.0","id":%s,"error":{"code":%d,"message":"not supported"}}',
       [AIdJson.ToJSON, cLspMethodNotFound]));
+end;
+
+{ `$/progress` from the server's background analysis. The `begin` title says
+  which kind of run it is - the server's cProgressTitleIncremental carries the
+  word "incremental", any other title is a full rebuild (PasLsp.Server). A
+  `report` changes nothing here; an `end` closes only its own token, so a late
+  `end` of a replaced run cannot clear the run that replaced it. }
+procedure TLspClient.HandleProgress(AParams: TJSONValue);
+var
+  LToken, LKind, LTitle: string;
+begin
+  if AParams = nil then
+    Exit;
+  LToken := AParams.GetValue<string>('token', '');
+  LKind := AParams.GetValue<string>('value.kind', '');
+  if LKind = 'begin' then
+  begin
+    LTitle := AParams.GetValue<string>('value.title', '');
+    FActivityToken := LToken;
+    FActivitySince := GetTickCount64;
+    Inc(FActivityRuns);
+    if Pos('incremental', LowerCase(LTitle)) > 0 then
+      FActivity := laIncremental
+    else
+      FActivity := laFull;
+  end
+  else if (LKind = 'end') and (LToken = FActivityToken) then
+    ClearActivity;
+end;
+
+procedure TLspClient.ClearActivity;
+begin
+  FActivity := laIdle;
+  FActivityToken := '';
+  FActivitySince := 0;
 end;
 
 procedure TLspClient.OnConnectionGone(const AReason: string);
@@ -1389,6 +1475,7 @@ begin
     Exit;   // our own teardown closing the pipe
 
   FState := lcsFailed;
+  ClearActivity;
   Log(Format('server connection lost: %s (stderr: %s)',
     [AReason, StdErrWhere]));
   // INTO THE SERVER'S LOG FILE AS WELL, directly - the server that would have

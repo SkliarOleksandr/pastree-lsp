@@ -90,6 +90,8 @@ contains
   PasTreeIdePlugin.TokenShift in 'PasTreeIdePlugin.TokenShift.pas',
   PasTreeIdePlugin.DirectiveText in 'PasTreeIdePlugin.DirectiveText.pas',
   PasTreeIdePlugin.IdleSync in 'PasTreeIdePlugin.IdleSync.pas',
+  { The analysis status panel in the editor's status bar. }
+  PasTreeIdePlugin.StatusPanel in 'PasTreeIdePlugin.StatusPanel.pas',
   PasTreeIdePlugin.Timing in 'PasTreeIdePlugin.Timing.pas',
   PasTreeIdePlugin.OutlineRows in 'PasTreeIdePlugin.OutlineRows.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',

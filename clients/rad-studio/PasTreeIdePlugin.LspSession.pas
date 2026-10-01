@@ -678,6 +678,27 @@ procedure LspFindAllInGroup(const AMethod, AFileName: string;
 /// </summary>
 function LspProjectServerRunning(const AProjectFile: string): Boolean;
 
+type
+  /// <summary>What the status panel says about one server.</summary>
+  TLspServerStatus = (
+    lssNone,         // no session answers this file
+    lssStarting,     // spawned, handshake not answered yet
+    lssReady,        // up, no analysis running
+    lssIncremental,  // an incremental (one module) analysis is running
+    lssFull,         // a full rebuild is running
+    lssFailed        // died or would not start
+  );
+
+/// <summary>
+/// The status of the server that answers AFileName - its owning project's,
+/// or the active session for a file no project owns - and, while an analysis
+/// runs, how long it has run (ARunningMs, 0 otherwise). Routed like
+/// LspTryGetDiagnostics, WITHOUT creating a session: the status panel asks
+/// this on a timer, and a timer may not start servers.
+/// </summary>
+function LspServerStatusFor(const AFileName: string;
+  out ARunningMs: UInt64): TLspServerStatus;
+
 /// <summary>
 /// Which Find All commands apply at the caret - SYNCHRONOUS, and the only
 /// synchronous question this unit asks. The editor's local menu is built on
@@ -1216,7 +1237,18 @@ type
     // old closure - the ORIGINAL - until the IDE was restarted, and looked
     // like the shadowing did not work at all (2026-09-16). One stat per
     // request is the price; a restart is one closure analysis.
+    //
+    // A NEW STAMP IS A QUESTION, NOT A RESTART (0.61.0). The IDE re-saves the
+    // .dproj with every save of the .dpr, and a restart per .dpr save cost a
+    // full analysis each time - 38 s on AVImark, 2026-10-01, for a space typed
+    // and deleted. So a new stamp sends pastree/projectChanged (CheckSaved),
+    // the server re-reads the .dproj and compares, and only a changed
+    // configuration restarts: FRestartWhy set, then EnsureSession again.
+    // FCheckingStamp is the stamp a question is out for - one at a time, and
+    // an answer about an older stamp is dropped.
     FStartedProjectStamp: string;
+    FCheckingStamp: string;
+    FRestartWhy: string;
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingDeclarationAt: Int64;
@@ -1244,6 +1276,7 @@ type
     function BuildOptions(const AProject: IOTAProject;
       out APlatform, AConfig: string): TLspInitOptions;
     function EnsureSession: Boolean;
+    procedure CheckSaved(const AStamp: string);
     procedure StoreDiagnostics(AParams: TJSONValue);
     procedure Ask(const AMethod: string; const AFileName: string;
       ARow, ACol: Integer; AIncludeDeclaration, AImplHeaders: Boolean;
@@ -2326,30 +2359,42 @@ begin
 
   // A different project, platform or configuration means a different server:
   // the server fixes its configuration at initialize and cannot be retargeted.
-  // A re-saved .dproj counts as a different configuration for the same
-  // reason - see FStartedProjectStamp.
+  // A re-saved .dproj whose configuration changed counts as a different
+  // configuration for the same reason - see FStartedProjectStamp: the save
+  // itself only asks the server (CheckSaved), and the answer restarts.
   LStamp := ProjectFileStamp(LOptions.ProjectFile);
+  if (FClient.State <> lcsStopped) and (FRestartWhy = '') and
+     (FStartedProjectStamp <> LStamp) and
+     SameText(FStartedProject, LOptions.ProjectFile) and
+     SameText(FStartedPlatform, LPlatform) and
+     SameText(FStartedConfig, LConfig) and
+     SameText(FStartedLogFile, LOptions.LogFile) and
+     (FStartedLogDetail = not LOptions.SuppressLogDetail) and
+     (FCheckingStamp <> LStamp) then
+    CheckSaved(LStamp);
   if (FClient.State = lcsStopped) or
      not SameText(FStartedProject, LOptions.ProjectFile) or
      not SameText(FStartedPlatform, LPlatform) or
      not SameText(FStartedConfig, LConfig) or
      not SameText(FStartedLogFile, LOptions.LogFile) or
      (FStartedLogDetail <> not LOptions.SuppressLogDetail) or
-     (FStartedProjectStamp <> LStamp) then
+     (FRestartWhy <> '') then
   begin
     if FClient.State <> lcsStopped then
     begin
-      if (FStartedProjectStamp <> LStamp) and
+      if (FRestartWhy <> '') and
          SameText(FStartedProject, LOptions.ProjectFile) then
-        LogDiagnostic(Format('%s was saved - restarting the server to read'
-          + ' its search paths, defines and unit list again.',
-          [ExtractFileName(LOptions.ProjectFile)]))
+        LogDiagnostic(Format('%s was saved and changed (%s) - restarting'
+          + ' the server to read it again.',
+          [ExtractFileName(LOptions.ProjectFile), FRestartWhy]))
       else
         LogDiagnostic(Format('project configuration changed (%s %s %s) - '
           + 'restarting the server.',
           [ExtractFileName(LOptions.ProjectFile), LPlatform, LConfig]));
     end;
     FStartedProjectStamp := LStamp;
+    FCheckingStamp := '';   // the new server reads the file itself
+    FRestartWhy := '';
     FDocs.Forget;   // the old server's documents die with it
     // And so do the generated .dcu tabs' texts - see
     // LspSetSessionRestartListener. Told BEFORE the new server starts, so a
@@ -2380,6 +2425,48 @@ begin
   end;
 
   Result := True;
+end;
+
+{ The .dproj was saved: ask the running server whether what it read from it
+  changed (pastree/projectChanged). Same configuration - the new stamp is
+  taken and nothing restarts; changed - FRestartWhy, and EnsureSession
+  restarts at once rather than at the next request. Until the answer the old
+  server keeps answering: that is what it did before 0.61.0 until the next
+  request came, and a second is shorter than that. }
+procedure TLspSession.CheckSaved(const AStamp: string);
+begin
+  FCheckingStamp := AStamp;
+  FClient.Request('pastree/projectChanged', TJSONObject.Create,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LWhat: string;
+    begin
+      if FDestroying or (FCheckingStamp <> AStamp) then
+        Exit;   // torn down, restarted, or saved again since
+      FCheckingStamp := '';
+      if not ASuccess then
+      begin
+        // A server going away fails its pending requests; whatever replaces
+        // it reads the file anew, and the next EnsureSession asks again.
+        if FClient.State <> lcsReady then
+          Exit;
+        LWhat := 'the server could not compare: ' + AError;
+      end
+      else if (AResult is TJSONObject) and
+              not AResult.GetValue<Boolean>('changed', True) then
+      begin
+        FStartedProjectStamp := AStamp;
+        TimingLogFmt('%s saved: same configuration, server kept',
+          [ExtractFileName(FStartedProject)]);
+        Exit;
+      end
+      else if AResult <> nil then
+        LWhat := AResult.GetValue<string>('what', 'unknown')
+      else
+        LWhat := 'unknown';
+      FRestartWhy := LWhat;
+      EnsureSession;
+    end);
 end;
 
 /// <summary>
@@ -4977,6 +5064,36 @@ begin
     Exit;
   LSession := GPool.SessionByProjectFile(AProjectFile);
   Result := Assigned(LSession) and LSession.IsReady;
+end;
+
+function LspServerStatusFor(const AFileName: string;
+  out ARunningMs: UInt64): TLspServerStatus;
+var
+  LSession: TLspSession;
+  LClient: TLspClient;
+begin
+  ARunningMs := 0;
+  Result := lssNone;
+  if not Assigned(GPool) then
+    Exit;
+  LSession := GPool.SessionForFile(AFileName, False);
+  if LSession = nil then
+    Exit;
+  LClient := LSession.FClient;
+  if LClient = nil then
+    Exit;
+  case LClient.State of
+    lcsStopped: Exit(lssNone);
+    lcsStarting: Exit(lssStarting);
+    lcsFailed: Exit(lssFailed);
+  end;
+  case LClient.Activity of
+    laIncremental: Result := lssIncremental;
+    laFull: Result := lssFull;
+  else
+    Exit(lssReady);
+  end;
+  ARunningMs := GetTickCount64 - LClient.ActivitySince;
 end;
 
 function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;

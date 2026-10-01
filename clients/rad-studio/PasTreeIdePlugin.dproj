@@ -124,6 +124,7 @@
         <DCCReference Include="PasTreeIdePlugin.TokenShift.pas"/>
         <DCCReference Include="PasTreeIdePlugin.DirectiveText.pas"/>
         <DCCReference Include="PasTreeIdePlugin.IdleSync.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.StatusPanel.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Timing.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>

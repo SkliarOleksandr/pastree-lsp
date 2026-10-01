@@ -338,6 +338,17 @@ begin
     'semanticTokens/range answered again with the document open');
   Check(GOk and HasToken(GResultJson, Length('TNTACodeEditorNotifier'), 2),
     'and the ancestor is still a `class` token');
+
+  // What a save of the .dproj asks before the plugin restarts the server
+  // (0.61.0): the file did not change, so the configuration is the same - a
+  // `true` here would mean every .dpr save in the IDE restarts the server
+  // again, which is the cost this request exists to remove.
+  Writeln;
+  Writeln('=== pastree/projectChanged over an unchanged .dproj ===');
+  Check(Ask('pastree/projectChanged', TJSONObject.Create),
+    'projectChanged answered');
+  Check(GOk and GResultJson.Contains('"changed":false'),
+    'and the configuration is the same');
 end;
 
 var

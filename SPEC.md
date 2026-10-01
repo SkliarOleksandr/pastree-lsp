@@ -221,7 +221,8 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/publishDiagnostics` | push, open documents; PasTree's `ReportUnresolvedMembers` is on since 0.52.4, so an unresolved member after a dot is E2003 like a bare name |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |
-| `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below) |
+| `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below); sent while a request waits out the analysis it started (`OnFlush`), not after its reply |
+| `pastree/projectChanged` | ours: the client saw the .dproj saved; the server re-reads it as initialize did and answers `changed` false when every part the analysis took (main source, platform, search paths, defines, .pas unit list, namespaces, aliases) is the same - the IDE re-saves the .dproj with every .dpr save, and the restart that used to follow cost a full analysis (0.61.0) |
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
 | `textDocument/typeDefinition` | three routes, in order: the declared type EXPRESSION (crosses units, follows an alias), the model-local `TypeSym`, and - for a symbol that names no type at all - the cross pass (`DeclTypeX`, then `SymDeclTypeX`). The third exists because an inferred inline `var` and a bare `property Items;` promotion name their type nowhere, and answered null here while member resolution THROUGH the same name worked (2026-09-07) |
 | `textDocument/documentHighlight` | occurrences in the current file |
@@ -599,6 +600,17 @@ All four shipped. Two notes worth keeping:
   a cancelled build leaves the user with no results at all - worse than
   waiting. The demo can offer a Stop button because it keeps the previous
   project; here that is what the next edit does anyway.
+- **One stream per run, incremental runs included (0.61.0), told apart by
+  the `begin` title**: `PasTree: analyzing` for a full rebuild,
+  `PasTree: incremental` for a one-module run (`cProgressTitleFull` /
+  `cProgressTitleIncremental` in PasLsp.Server). The IDE plugin's status
+  panel reads the word "incremental" off it, so the titles are protocol. A
+  stream still open when another run starts (a refused incremental becoming
+  a rebuild, a stale result restarting) is ended first, and a run that
+  produced no project ends its stream too - before 0.61.0 both left a stream
+  open, which nothing noticed while only VS Code showed it. Most incremental
+  runs take tens of milliseconds; deciding what is worth showing is the
+  client's job (the IDE waits 250 ms).
 
 ### Tier 2 - real features, bounded work
 

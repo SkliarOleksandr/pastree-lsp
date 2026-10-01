@@ -69,6 +69,12 @@ begin
   GCancels := TLspCancelSet.Create;
   GReader := TLspReader.Create(GTransport, GCancels);
   GServer := TLspServer.Create(GCancels);
+  GServer.OnFlush :=
+    procedure
+    begin
+      for var LNote in GServer.TakeOutgoing do
+        GTransport.WriteMessage(LNote);
+    end;
   try
     // Dispatch loop: the READER thread owns stdin (so $/cancelRequest is
     // seen even while a handler waits out an analysis); this thread owns

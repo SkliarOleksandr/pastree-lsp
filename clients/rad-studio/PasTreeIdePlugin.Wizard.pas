@@ -75,6 +75,7 @@ uses
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.SemanticPaint,
   PasTreeIdePlugin.IdleSync,
+  PasTreeIdePlugin.StatusPanel,
   PasTreeIdePlugin.Outline,
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.DfmExplicitFix,
@@ -845,6 +846,9 @@ begin
   // Idle-debounced didChange - keeps the squiggles (and every other answer)
   // tracking the buffer as it is typed, not as it was last saved.
   InitializeIdleSync;
+  // "PasTree: Ready / Incremental... / Full Parse..." in the editor's status
+  // bar, off the server's $/progress - see PasTreeIdePlugin.StatusPanel.
+  InitializeStatusPanel;
   // The Structure pane outline for the active source file.
   InitializeOutline;
   // Ctrl+Shift+C: our class completion, replacing the native one by keyboard
@@ -940,8 +944,10 @@ begin
   FinalizeIdeInsight;
   FinalizeCodeInsight;
   // The idle timer before the session: a tick after FinalizeLspSession
-  // would sync against a dead client.
+  // would sync against a dead client. The status panel's timer likewise
+  // asks the session pool.
   FinalizeIdleSync;
+  FinalizeStatusPanel;
   FinalizeSemanticPaint;
   FinalizeErrorPaint;
   FinalizeRename;
