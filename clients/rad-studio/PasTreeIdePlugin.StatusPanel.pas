@@ -2,7 +2,7 @@ unit PasTreeIdePlugin.StatusPanel;
 
 {
   THE ANALYSIS STATUS IN THE EDITOR'S STATUS BAR - "PasTree: Ready",
-  "PasTree: Incremental...", "PasTree: Full Parse...", in a panel of our own
+  "PasTree: analyzing (inc)...", "PasTree: analyzing...", in a panel of our own
   appended to every edit window's status bar (INTAEditWindow.StatusBar).
 
   DATA: the server's `$/progress` stream. The server opens one per analysis
@@ -14,7 +14,7 @@ unit PasTreeIdePlugin.StatusPanel;
 
   A RUN SHORTER THAN cBusyAfterMs IS NOT SHOWN. Most incremental runs end in
   tens of milliseconds, one per typing pause, and a panel switching to
-  "Incremental" and back on each would be a flicker, not information (Alex,
+  "analyzing (inc)" and back on each would be a flicker, not information (Alex,
   2026-10-01: 250 ms). Past that the dots move every tick, so a long run
   visibly is one.
 
@@ -200,7 +200,7 @@ begin
   // last panel of a status bar stretches to the right edge anyway, so this
   // only matters when the IDE adds panels after ours.
   ABar.Canvas.Font := ABar.Font;
-  Result.Width := ABar.Canvas.TextWidth(cPrefix + 'Incremental...') + 16;
+  Result.Width := ABar.Canvas.TextWidth(cPrefix + 'analyzing (inc)...') + 16;
   FPanels.AddOrSetValue(ABar, Result.ID);
 end;
 
@@ -240,12 +240,12 @@ begin
       if LRunningMs < cBusyAfterMs then
         Result := cPrefix + 'Ready'
       else
-        Result := cPrefix + 'Incremental' + LDots;
+        Result := cPrefix + 'analyzing (inc)' + LDots;
     lssFull:
       if LRunningMs < cBusyAfterMs then
         Result := cPrefix + 'Ready'
       else
-        Result := cPrefix + 'Full Parse' + LDots;
+        Result := cPrefix + 'analyzing' + LDots;
     lssFailed:
       Result := cPrefix + 'Stopped';
   else

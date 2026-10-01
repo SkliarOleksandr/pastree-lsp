@@ -846,7 +846,7 @@ begin
   // Idle-debounced didChange - keeps the squiggles (and every other answer)
   // tracking the buffer as it is typed, not as it was last saved.
   InitializeIdleSync;
-  // "PasTree: Ready / Incremental... / Full Parse..." in the editor's status
+  // "PasTree: Ready / analyzing (inc)... / analyzing..." in the editor's status
   // bar, off the server's $/progress - see PasTreeIdePlugin.StatusPanel.
   InitializeStatusPanel;
   // The Structure pane outline for the active source file.
