@@ -412,20 +412,16 @@ type
   TLspRenamePlan = record
     OldName: string;
     NewName: string;
-    { True when this renames a UNIT rather than a symbol, and then the four
+    { True when this renames a UNIT rather than a symbol, and then the three
       fields below are the part that has nothing to do with text: Object
       Pascal ties a unit's name to its FILE name, so RequiredFileName is
-      what the file must be called afterwards, FilePath/NewFilePath are the
-      rename to perform, and StaleInPaths lists the project files whose
-      `uses ... in '...'` still spells the old file name. That last one has
-      no edit in the plan at all - the literal has no position in the model
-      - so a host must handle it or refuse; renaming the file through the
-      IDE's own project API is what handles it here. }
+      what the file must be called afterwards and FilePath/NewFilePath are
+      the rename to perform. A `uses ... in '...'` path naming that file is
+      one more of the edits (PasTree plans it since 0.87.0). }
     IsUnit: Boolean;
     RequiredFileName: string;
     FilePath: string;
     NewFilePath: string;
-    StaleInPaths: TArray<string>;
     Edits: TArray<TLspRenameEdit>;
     // The symbol's side of form files - see TLspFormRole/TLspCarriedRename.
     FormRole: TLspFormRole;
@@ -3098,7 +3094,7 @@ end;
 
 function ParseRenamePlan(AResult: TJSONValue): TLspRenamePlan;
 var
-  LEdits, LStale, LCarriedArr: TJSONArray;
+  LEdits, LCarriedArr: TJSONArray;
   LValue: TJSONValue;
   LObj: TJSONObject;
   LEdit: TLspRenameEdit;
@@ -3126,12 +3122,6 @@ begin
     AResult.GetValue<string>('requiredFileName', '');
   Result.FilePath := AResult.GetValue<string>('filePath', '');
   Result.NewFilePath := AResult.GetValue<string>('newFilePath', '');
-  if AResult.TryGetValue<TJSONArray>('staleInPaths', LStale) then
-  begin
-    SetLength(Result.StaleInPaths, LStale.Count);
-    for LCount := 0 to LStale.Count - 1 do
-      Result.StaleInPaths[LCount] := LStale.Items[LCount].Value;
-  end;
   if not AResult.TryGetValue<TJSONArray>('edits', LEdits) then
     Exit;
   SetLength(Result.Edits, LEdits.Count);

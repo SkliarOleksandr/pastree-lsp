@@ -2506,17 +2506,19 @@ begin
   { THE `in '...'` PATH, WHICH IS PART OF THE PLAN NOW. DemoApp.dpr spells the
     unit as `DemoUnit in 'DemoUnit.pas'`, and renaming only the NAME leaves a
     line pointing at a file that no longer exists - in the IDE that line is the
-    project's own entry, and three live runs died on it. AugmentUsesInPaths
-    adds the edit; staleInPaths is then what could NOT be fixed, and for this
-    fixture that is nothing. }
+    project's own entry, and three live runs died on it. PasTree plans that
+    edit since 0.87.0 (the server added it from the line text before), so it
+    must be there exactly once - a second copy would be the old server-side
+    edit come back. }
   Check(GOk and GResultJson.Contains('"oldText":"DemoUnit.pas"') and
     GResultJson.Contains('"newText":"DemoUnitRenamed.pas"'),
     'the in-clause path is renamed too, as its own edit');
   Check(GOk and GResultJson.Contains(
     'DemoUnitRenamed in ''DemoUnitRenamed.pas'''),
     'and the preview of that line reads right end to end');
-  Check(GOk and GResultJson.Contains('"staleInPaths":[]'),
-    'so nothing is left for the host to fix by hand');
+  Check(GOk and (GResultJson.IndexOf('"oldText":"DemoUnit.pas"') =
+    GResultJson.LastIndexOf('"oldText":"DemoUnit.pas"')),
+    'and planned once, not twice');
 
   Check(Ask('textDocument/prepareRename',
     PositionParams(LAppFile, LLine, LChar)),

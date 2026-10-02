@@ -254,7 +254,14 @@ const
   /// (nfVar / nfConst / nfOut), which Annotate arguments reads instead of the
   /// tokens. Loud without it (the flags do not compile), raised to keep the
   /// floor honest about what this code is written against.
-  cMinPasTreeVersion = '0.81.0';
+  /// 0.87.0 (2026-10-02): PlanUnitRename plans the file name inside a `uses`
+  /// item's `in '...'` literal (directory kept), refuses a literal it cannot
+  /// read as the unit's file, and gives every edit the preview of its line
+  /// after all the edits on it. The server's own pass over the line text is
+  /// gone. Silent without it: against 0.86.x a unit rename leaves
+  /// `Foo2 in 'Foo.pas'` in the program - the IDE then refuses to re-register
+  /// the unit ("the project already contains a module named Foo2").
+  cMinPasTreeVersion = '0.87.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

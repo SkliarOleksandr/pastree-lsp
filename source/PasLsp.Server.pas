@@ -88,10 +88,9 @@ type
 
     IsUnit says which plan this is. For a UNIT: RequiredFileName is what the
     file MUST be called afterwards (Object Pascal ties the two), UnitPath is
-    the file as it is now, NewFilePath is the two combined, and StaleInPaths
-    lists the project files whose `uses ... in '...'` still spells the old
-    file name - the one part of a unit rename no plan can express (see
-    UsesInPathSites). FormPath/NewFormPath are the unit's FORM FILE and what
+    the file as it is now, NewFilePath is the two combined (a `uses ... in
+    '...'` path naming that file is one more of the plan's edits, PasTree's
+    since 0.87.0). FormPath/NewFormPath are the unit's FORM FILE and what
     it must be called: `$R *.dfm` names the resource after the unit's file,
     so a unit whose file is renamed and whose form file is not links nothing.
     All of those are empty for a symbol rename.
@@ -108,7 +107,6 @@ type
     NewFilePath: string;
     FormPath: string;
     NewFormPath: string;
-    StaleInPaths: TArray<string>;
     Edits: TArray<TPasRenameEdit>;
     FormRole: TPasFormRole;
     Carried: TArray<TPasCarriedRename>;
@@ -415,9 +413,6 @@ type
     function PlanRenameAt(const APath: string; APasLine, APasCol: Integer;
       const ANewName: string; out APlan: TLspRenamePlanned;
       out AError: string): Boolean;
-    function UsesInPathSites(ATargetMid: Integer;
-      const AUnitPath: string;
-      const AEdits: TArray<TPasRenameEdit>): TArray<string>;
     procedure SyncCompletionOverlays;
     procedure HandleDidOpen(AParams: TJSONValue);
     procedure HandleDidChange(AParams: TJSONValue);
@@ -3550,145 +3545,6 @@ begin
   Result := AEdit.NewText;
 end;
 
-{ THE `in '...'` PATH OF A `uses` ITEM, TURNED INTO AN EDIT - the last piece
-  of a unit rename, and the one that cost the most to find.
-
-  A program spells its units `Foo in 'Foo.pas'`, and RAD Studio writes every
-  one of them that way. PlanUnitRename renames the NAME; the path stays. The
-  result reads `Foo2 in 'Foo.pas'` - a line naming a file that no longer
-  exists, and in the IDE that line IS the project's own entry for the unit, so
-  the IDE then refuses to re-register it: "the project already contains a
-  module named Foo2". Three live runs ended there (2026-08-31). Reporting the
-  site and hoping the host would cope was not enough - there is nothing a host
-  can do about it that is not this edit.
-
-  WHY HERE AND NOT IN PasTree. The library records the path
-  (TPasUsesRef.InPath) but no POSITION for the literal, so it cannot plan the
-  edit; that gap belongs there eventually. What can be built from here is the
-  plan's own line: every `uses` edit carries the line it sits on, so the
-  literal is found by walking that ONE line forward from the end of the name,
-  at a site the resolver already resolved. Bounded, and not the text search
-  the rest of this file avoids.
-
-  ONLY THE FILE NAME INSIDE THE QUOTES CHANGES: `'..\src\Foo.pas'` keeps its
-  directory, because a unit rename never moves a file. }
-procedure AugmentUsesInPaths(var AEdits: TArray<TPasRenameEdit>;
-  const AOldFile, ANewFile: string);
-var
-  LIdx, LEnd, LQuote, LClose, LNameAt, LDelta, LGroup, LRun, LAdded: Integer;
-  LOrig, LLiteral, LLine: string;
-  LList: TList<TPasRenameEdit>;
-  LItem: TPasRenameEdit;
-
-  // The line as it read BEFORE an edit: its preview minus its own
-  // replacement. The plan carries no original text, but it carries both ends
-  // of the span it changed, which is the same thing.
-  function OriginalLine(const AEdit: TPasRenameEdit): string;
-  begin
-    Result := Copy(AEdit.Snippet, 1, AEdit.HiFrom) + AEdit.OldText +
-      Copy(AEdit.Snippet, AEdit.HiTo + 1, MaxInt);
-  end;
-
-begin
-  if (AOldFile = '') or (ANewFile = '') or (Length(AEdits) = 0) then
-    Exit;
-  LList := TList<TPasRenameEdit>.Create;
-  try
-    LList.AddRange(AEdits);
-
-    LAdded := 0;
-    for LIdx := 0 to High(AEdits) do
-    begin
-      if AEdits[LIdx].IsDecl then
-        Continue;   // the module's own header has no `in` clause
-      LOrig := OriginalLine(AEdits[LIdx]);
-      { Between the end of the name and the first quote after it there must be
-        nothing but whitespace and the word `in`. Anything else means this is
-        an ordinary uses item and the quote belongs to something further along
-        the line - a string constant, a comment - which must not be touched. }
-      LEnd := AEdits[LIdx].HiFrom + Length(AEdits[LIdx].OldText) + 1;
-      LQuote := LEnd;
-      while (LQuote <= Length(LOrig)) and (LOrig[LQuote] <> '''') do
-        Inc(LQuote);
-      if LQuote > Length(LOrig) then
-        Continue;
-      if LowerCase(Trim(Copy(LOrig, LEnd, LQuote - LEnd))) <> 'in' then
-        Continue;
-      LClose := LQuote + 1;
-      while (LClose <= Length(LOrig)) and (LOrig[LClose] <> '''') do
-        Inc(LClose);
-      if LClose > Length(LOrig) then
-        Continue;
-      LLiteral := Copy(LOrig, LQuote + 1, LClose - LQuote - 1);
-      if not SameText(TPath.GetFileName(LLiteral), AOldFile) then
-        Continue;   // a path to some other file, or a spelling with no rule
-      // 1-based column of the file NAME inside the literal.
-      LNameAt := LQuote + 1 + (Length(LLiteral) - Length(AOldFile));
-      LItem := AEdits[LIdx];
-      LItem.Col := LNameAt;
-      LItem.Len := Length(AOldFile);
-      LItem.OldText := Copy(LOrig, LNameAt, Length(AOldFile));
-      LItem.IsDecl := False;
-      LItem.NewText := ANewFile;
-      LList.Add(LItem);
-      Inc(LAdded);
-    end;
-    if LAdded = 0 then
-      Exit;
-
-    LList.Sort(TComparer<TPasRenameEdit>.Construct(
-      function(const A, B: TPasRenameEdit): Integer
-      begin
-        Result := CompareText(A.FilePath, B.FilePath);
-        if Result = 0 then
-          Result := A.Line - B.Line;
-        if Result = 0 then
-          Result := A.Col - B.Col;
-      end));
-
-    { THE PREVIEWS, REBUILT PER LINE. PasTree built them without the path
-      edit, so any line that now holds more than one edit is re-derived here.
-      Same arithmetic as the library's own pass: left to right, carrying the
-      accumulated length delta, each edit writing its own NewText. }
-    LGroup := 0;
-    while LGroup < LList.Count do
-    begin
-      LRun := LGroup;
-      while (LRun + 1 < LList.Count) and
-            (LList[LRun + 1].Line = LList[LGroup].Line) and
-            SameText(LList[LRun + 1].FilePath, LList[LGroup].FilePath) do
-        Inc(LRun);
-      if LRun > LGroup then
-      begin
-        LLine := OriginalLine(LList[LGroup]);
-        LDelta := 0;
-        for LIdx := LGroup to LRun do
-        begin
-          LItem := LList[LIdx];
-          LLine := Copy(LLine, 1, LItem.Col - 1 + LDelta) + LItem.NewText +
-            Copy(LLine, LItem.Col + LItem.Len + LDelta, MaxInt);
-          LItem.HiFrom := LItem.Col - 1 + LDelta;
-          LItem.HiTo := LItem.HiFrom + Length(LItem.NewText);
-          Inc(LDelta, Length(LItem.NewText) - LItem.Len);
-          LList[LIdx] := LItem;
-        end;
-        for LIdx := LGroup to LRun do
-        begin
-          LItem := LList[LIdx];
-          LItem.Snippet := LLine;
-          LList[LIdx] := LItem;
-        end;
-      end;
-      LGroup := LRun + 1;
-    end;
-
-    AEdits := LList.ToArray;
-  finally
-    LList.Free;
-  end;
-end;
-
-
 { The file a renamed unit must end up in: the required name, in the folder the
   unit lives in now. A unit rename never MOVES a file - the name decides the
   file name and nothing else. '' in, '' out, because the callers use that to
@@ -3774,13 +3630,6 @@ begin
     if (APlan.FormPath <> '') and (APlan.NewFilePath <> '') then
       APlan.NewFormPath := ChangeFileExt(APlan.NewFilePath,
         ExtractFileExt(APlan.FormPath));
-    { The `in '...'` paths, fixed in the plan itself - see
-      AugmentUsesInPaths. Before the report below, so what it reports is
-      only what could NOT be fixed. }
-    AugmentUsesInPaths(APlan.Edits, TPath.GetFileName(APlan.UnitPath),
-      APlan.RequiredFileName);
-    APlan.StaleInPaths := UsesInPathSites(LTMid, APlan.UnitPath,
-      APlan.Edits);
     Exit;
   end;
   if not FNav.SymbolAt(LMid, APasLine, APasCol, LTMid, LSym, APlan.OldName)
@@ -3811,69 +3660,6 @@ begin
     Exit;
   end;
   APlan.FormRole := FNav.FormRoleOf(LTMid, LSym);
-end;
-
-{ Every `uses` item that names the renamed unit with an explicit
-  `in '<file>'` - the ONE thing a rename plan cannot express today, and the
-  reason it is reported rather than ignored.
-
-  A .dpr written by RAD Studio spells every unit that way, so this is the
-  ordinary case rather than an exotic one: `DemoUnit in 'DemoUnit.pas'`
-  becomes `DemoUnitRenamed in 'DemoUnit.pas'` after the plan is applied, and
-  the file no longer exists under that name. PasTree records the path
-  (TPasUsesRef.InPath) but not a POSITION for the literal, so an edit for it
-  cannot be planned here - which is why this returns the SITES, for a host to
-  fix its own way. The RAD Studio client does: renaming the file through
-  IOTAProject.RemoveFile/AddFile makes the IDE rewrite the entry itself.
-  textDocument/rename has no such lever and refuses instead.
-
-  A position for the literal belongs in PasTree, next to the name node; then
-  this becomes one more edit and both hosts stop caring. }
-function TLspServer.UsesInPathSites(ATargetMid: Integer;
-  const AUnitPath: string;
-  const AEdits: TArray<TPasRenameEdit>): TArray<string>;
-var
-  LMi, LIdx: Integer;
-  LModel: TPasSemaModel;
-  LOldFile: string;
-  LSites: TList<string>;
-
-  // Is this file's `in '...'` already covered by an edit? AugmentUsesInPaths
-  // adds one whose OldText is the file name itself, which no other edit in a
-  // rename can be - a unit rename replaces NAMES everywhere else.
-  function AlreadyPlanned(const AFile: string): Boolean;
-  var
-    LEi: Integer;
-  begin
-    Result := False;
-    for LEi := 0 to High(AEdits) do
-      if SameText(AEdits[LEi].FilePath, AFile) and
-         SameText(AEdits[LEi].OldText, LOldFile) then
-        Exit(True);
-  end;
-
-begin
-  Result := nil;
-  if (FProject = nil) or (AUnitPath = '') then
-    Exit;
-  LOldFile := TPath.GetFileName(AUnitPath);
-  LSites := TList<string>.Create;
-  try
-    for LMi := 0 to FProject.ModelCount - 1 do
-    begin
-      LModel := FProject.Model(LMi);
-      for LIdx := 0 to High(LModel.UsesList) do
-        if (LModel.UsesList[LIdx].UnitId = ATargetMid) and
-           (LModel.UsesList[LIdx].InPath <> '') and
-           SameText(TPath.GetFileName(LModel.UsesList[LIdx].InPath),
-             LOldFile) and
-           not AlreadyPlanned(FProject.ModelFile(LMi)) then
-          LSites.Add(FProject.ModelFile(LMi));
-    end;
-    Result := LSites.ToArray;
-  finally
-    LSites.Free;
-  end;
 end;
 
 { textDocument/prepareRename - the range F2 pre-fills from, and the earliest
@@ -3954,12 +3740,10 @@ end;
   applying the text half of a unit rename leaves a project that does not
   compile, which is worse than doing nothing.
 
-  It is refused for the same reason when a `uses` item spells this unit with
-  an `in ''<file>''` this server could not plan an edit for - see
-  AugmentUsesInPaths, which handles the ordinary spellings, and
-  UsesInPathSites, which reports whatever is left. A path left pointing at the
-  old file name is a project that does not compile, so half of one is worse
-  than none.
+  A `uses` item's `in ''<file>''` path is one more edit of the plan, and a
+  path PasTree cannot read as the unit's file refuses the plan whole (since
+  PasTree 0.87.0): a path left pointing at the old file name is a project
+  that does not compile, so half of one is worse than none.
 
   Every newText comes from the plan rather than from the request: see
   EditNewText. }
@@ -3995,17 +3779,6 @@ begin
       'Renaming unit %s also renames its file to %s, and this editor did ' +
       'not advertise support for file renames in a workspace edit. Nothing ' +
       'was changed.', [LPlan.OldName, LPlan.RequiredFileName])));
-  end;
-  if LPlan.IsUnit and (Length(LPlan.StaleInPaths) > 0) then
-  begin
-    Log('rename: unit rename refused - uses ... in ''...'' in '
-      + string.Join(', ', LPlan.StaleInPaths));
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, Format(
-      '%s names unit %s as `in ''%s''`, and a workspace edit cannot update ' +
-      'that path - the rename would leave the project unable to compile. ' +
-      'Nothing was changed.',
-      [TPath.GetFileName(LPlan.StaleInPaths[0]), LPlan.OldName,
-       TPath.GetFileName(LPlan.UnitPath)])));
   end;
   Log(Format('rename: %s %s ''%s'' -> ''%s'': %d edits%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
@@ -4071,10 +3844,10 @@ end;
   References-shaped results tab with the OUTCOME rather than a promise.
 
   For a unit, `kind` is `unit`, `requiredFileName`/`filePath`/`newFilePath`
-  name the file rename the host must ALSO perform, and `staleInPaths` lists
-  the project files whose `uses ... in '...'` still points at the old file
-  name. Announcing none of that and leaving it out would be the worst
-  outcome: text edits that do not compile.
+  name the file rename the host must ALSO perform; a `uses ... in '...'`
+  path is one more edit of the plan (PasTree's, since 0.87.0). Announcing
+  none of that and leaving it out would be the worst outcome: text edits
+  that do not compile.
 
   For a symbol, `formRole` says where it lives in the project's form files
   (`kind` component/handler/class or '', `ownerClass`, and `formFile`, the
@@ -4121,18 +3894,11 @@ begin
   try
     LSB.AppendFormat('{"kind":%s,"oldName":%s,"newName":%s,' +
       '"requiredFileName":%s,"filePath":%s,"newFilePath":%s,' +
-      '"formFilePath":%s,"newFormFilePath":%s,"staleInPaths":[',
+      '"formFilePath":%s,"newFormFilePath":%s,"edits":[',
       [JsonQuote(RenameKindWord(LPlan.IsUnit)), JsonQuote(LPlan.OldName),
        JsonQuote(LNewName), JsonQuote(LPlan.RequiredFileName),
        JsonQuote(LPlan.UnitPath), JsonQuote(LPlan.NewFilePath),
        JsonQuote(LPlan.FormPath), JsonQuote(LPlan.NewFormPath)]);
-    for LIdx := 0 to High(LPlan.StaleInPaths) do
-    begin
-      if LIdx > 0 then
-        LSB.Append(',');
-      LSB.Append(JsonQuote(LPlan.StaleInPaths[LIdx]));
-    end;
-    LSB.Append('],"edits":[');
     for LIdx := 0 to High(LPlan.Edits) do
     begin
       if LIdx > 0 then

@@ -436,21 +436,18 @@ one, because applying the text half alone produces a project that does not
 compile.
 
 A program's `uses Foo in 'Foo.pas'` needs the PATH renamed too, and that edit
-is in the plan - but it is the server's, not PasTree's. The library records the
-path (`TPasUsesRef.InPath`) and no POSITION for the literal, so
-`AugmentUsesInPaths` derives one: every `uses` edit carries the line it sits
-on, and the literal is found by walking that one line forward from the end of
-the name (only the file name inside the quotes changes - a unit rename never
-moves a file). Bounded to one line, at a site the resolver already resolved.
+is in the plan - PasTree's own since 0.87.0 (`PlanUnitRename`; until 0.61.2 the
+server derived it from the line text, `AugmentUsesInPaths`). Only
+the file name inside the quotes changes - a unit rename never moves a file -
+and a literal PasTree cannot read as the unit's file refuses the whole plan.
 
 Skipping it is not an option, and three live runs proved it: renaming only the
 name leaves `Foo2 in 'Foo.pas'`, a line naming a file that no longer exists -
 and in the IDE that line IS the project's entry for the unit, so the IDE then
 refuses to re-register it ("the project already contains a module named Foo2")
-and the rename looks like a failure after having entirely succeeded.
-`staleInPaths` now reports only what could NOT be fixed, and a position for
-that literal still belongs in PasTree - then this becomes one more of its own
-edits.
+and the rename looks like a failure after having entirely succeeded. So there
+is nothing left over for a host to fix: `renamePlan` no longer carries
+`staleInPaths`, and `textDocument/rename` no longer refuses on it.
 
 **Form files (.dfm/.fmx) are part of references and rename (0.57.0, PasTree
 0.59.0).** A form file names Pascal symbols - a component's `object X: TC`, a
