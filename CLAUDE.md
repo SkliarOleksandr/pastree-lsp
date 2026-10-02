@@ -192,6 +192,27 @@ the common case and never content. Never hand-roll it: go through
 than in a caller. Its header has the full story - one BOM made `IdentAt`
 resolve nothing anywhere in a file while the log said only `no identifier at`.
 
+## Reading Pascal code: pastree-mcp first, after `status`
+
+**Find a declaration, its callers, its references or a routine's text with
+the pastree MCP tools** (`find`, `definition`, `source`, `references`,
+`callers`, `outline`) before grep and before reading a file at a guessed
+offset - here and in the PasTree sources this server links, which are in
+the same index. Grep cannot tell two same-named routines in two units apart,
+and a large unit read in 200-line windows costs thousands of lines the tools
+answer in one row each.
+
+**Start with `status`, and check that the index holds this repository's
+units** - its member is `pastree-server.dproj`. A server pointed at another
+project answers "no declaration matches" for every name, without an error:
+that is what a stray `.mcp.json` with `--project ...\pastree-mcp.dproj` did
+in object-pascal-tree for a whole session (2026-10-02), and this repository
+carried the same file. The server is registered once for the user
+(`claude mcp add --scope user`, no `--project`) and finds the one `.dproj`
+at the repository root from any subdirectory; keep this repository free of
+an `.mcp.json` that overrides it. Grep stays the tool for text that is not
+a declaration - a comment, a log line, a message, the docs.
+
 ## Where the answers are
 
 - A failure a user reports: `<project-name>-pastree-lsp.log`, beside the
