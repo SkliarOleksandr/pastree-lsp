@@ -261,7 +261,12 @@ const
   /// gone. Silent without it: against 0.86.x a unit rename leaves
   /// `Foo2 in 'Foo.pas'` in the program - the IDE then refuses to re-register
   /// the unit ("the project already contains a module named Foo2").
-  cMinPasTreeVersion = '0.87.0';
+  /// 0.91.1 (2026-10-03): a pinned unit file that does not exist is dropped
+  /// and the unit looked up on the search path, as dcc does. Silent without
+  /// it: a .dproj listing a file that is gone (the client group's server
+  /// lists one and builds) is pinned from FProjectFiles, and the program and
+  /// every importer of the unit showed F1027.
+  cMinPasTreeVersion = '0.91.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
