@@ -258,7 +258,14 @@ Two masks to know about, both fixed but both instructive:
   a fault that never cleared; look at what the state says was in flight.
 
 **An access violation inside the IDE** is recorded in `pastree-ide-crash.log`
-beside the LSP log (the header of `PasTreeIdePlugin.CrashLog` has the format).
+beside the LSP log (the header of `PasTreeIdePlugin.CrashLog` has the format)
+when the plugin is on the faulting stack; since 0.62.2 the IDE's own faults
+are only counted (Settings > Diagnostics > "Log all IDE crashes" writes them
+all, for a fault of ours whose stack no longer reaches the plugin - a freed
+object the IDE still held). Blocks written before 0.62.2 start with a
+`PasTreeIdePlugin.bpl` frame whoever faulted - that frame was the handler
+itself - so in an old log only a frame after the three `ntdll.dll` lines says
+anything.
 Resolve a `PasTreeIdePlugin.bpl + offset` frame the same way, against the
 `.map` beside the BPL the block's header names - `out\<version>\win32\` or
 `out\<version>\win64\`. The two IDEs' packages are separate builds, and an

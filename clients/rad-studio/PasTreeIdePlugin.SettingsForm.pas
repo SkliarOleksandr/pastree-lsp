@@ -96,6 +96,8 @@ type
     lblAdvancedLoggingHint: TLabel;
     chkClearLogOnOpen: TCheckBox;
     lblClearLogOnOpenHint: TLabel;
+    chkLogAllIdeCrashes: TCheckBox;
+    lblLogAllIdeCrashesHint: TLabel;
     tsHighlighting: TTabSheet;
     chkHighlightTypes: TCheckBox;
     lblTypeColor: TLabel;
@@ -335,6 +337,7 @@ begin
     LForm.chkLogging.Checked := LSettings.EnableLogging;
     LForm.chkAdvancedLogging.Checked := LSettings.AdvancedLogging;
     LForm.chkClearLogOnOpen.Checked := LSettings.ClearLogOnOpen;
+    LForm.chkLogAllIdeCrashes.Checked := LSettings.LogAllIdeCrashes;
     LForm.chkHighlightTypes.Checked := LSettings.HighlightTypes;
     LForm.cbxTypeColor.Selected := LSettings.TypeColor;
     LForm.chkTypeBold.Checked := fsBold in LSettings.TypeFontStyle;
@@ -367,6 +370,7 @@ begin
     LSettings.EnableLogging := LForm.chkLogging.Checked;
     LSettings.AdvancedLogging := LForm.chkAdvancedLogging.Checked;
     LSettings.ClearLogOnOpen := LForm.chkClearLogOnOpen.Checked;
+    LSettings.LogAllIdeCrashes := LForm.chkLogAllIdeCrashes.Checked;
     LSettings.HighlightTypes := LForm.chkHighlightTypes.Checked;
     LSettings.TypeColor := LForm.cbxTypeColor.Selected;
     LSettings.TypeFontStyle := LForm.TypeStyles;

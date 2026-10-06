@@ -360,6 +360,25 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 2
       end
+      object lblLogAllIdeCrashesHint: TLabel
+        Left = 35
+        Top = 251
+        Width = 390
+        Height = 45
+        Caption =
+          'Writes every access violation in the IDE to pastree-ide-crash.lo' +
+          'g. Off writes only those with PasTree on the stack and counts t' +
+          'he IDE'#39's own.'
+        WordWrap = True
+      end
+      object chkLogAllIdeCrashes: TCheckBox
+        Left = 16
+        Top = 230
+        Width = 430
+        Height = 17
+        Caption = 'Log all IDE crashes'
+        TabOrder = 3
+      end
     end
     object tsHighlighting: TTabSheet
       Caption = 'Highlighting'

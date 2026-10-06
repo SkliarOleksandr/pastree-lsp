@@ -860,6 +860,9 @@ begin
   // And an inherited form stops writing an unchanged StyleElements - see the
   // unit.
   SetDfmStyleElementsFix(DfmNoDefaultStyleElements);
+  // The crash log's "every AV, not only ours" switch - pushed, since the
+  // handler must not read settings. Faults before this line are filtered.
+  SetCrashLogAll(LogAllIdeCrashes);
   // Type names in their own colour, from the server's semantic tokens.
   InitializeSemanticPaint;
   // Idle-debounced didChange - keeps the squiggles (and every other answer)

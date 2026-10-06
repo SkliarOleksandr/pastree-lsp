@@ -353,14 +353,18 @@ diagnosing a sluggish editor.
 
 ### IDE crash log
 
-A vectored exception handler records every access violation in the IDE process,
-on any thread, to `pastree-ide-crash.log` next to the project log. Each block
-holds the faulting address, the address it tried to touch, and the return
-addresses up the stack resolved to module plus offset - which is the difference
-between "somewhere in the plugin" and one line of one unit. It only observes:
-the IDE's own handling of the fault is unchanged, and faults the IDE swallows
-silently are recorded just the same. This one is not gated by the logging
-switch.
+A vectored exception handler watches every access violation in the IDE process,
+on any thread, and records to `pastree-ide-crash.log` next to the project log
+the ones with this plugin on the faulting stack - the IDE's own (the GetIt
+welcome page, the background compiler, VCL internals) are only counted, and
+the count appears in the next block written. "Log all IDE crashes" in the
+settings (off by default) records every one. Each block holds the faulting
+address, the address it tried to touch, and the return addresses up the
+faulting thread's stack resolved to module plus offset - which is the
+difference between "somewhere in the plugin" and one line of one unit. It only
+observes: the IDE's own handling of the fault is unchanged, and faults the IDE
+swallows silently are recorded just the same. This one is not gated by the
+logging switch.
 
 ### Settings dialog and splash line
 

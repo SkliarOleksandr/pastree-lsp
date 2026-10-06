@@ -1114,6 +1114,13 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    heads the fresh file. A running server is unaffected: it opens the file
    per line, and the stderr append handle it was given writes at the new
    end. Greyed with logging off, like Advanced logging.
+   **Log all IDE crashes** (added 2026-10-06, v0.62.2, default OFF) is the
+   crash record's switch. Since 0.62.2 `pastree-ide-crash.log` takes only
+   the access violations with the plugin on the faulting stack and counts
+   the IDE's own; on, it takes every one, as before - for a fault we caused
+   whose stack no longer reaches us. Not greyed with logging off: the crash
+   record is not gated by it. Pushed to the handler (`SetCrashLogAll`) at
+   load and on save, because the handler reads no settings.
 10. **The analysis starts when the project opens - DELIVERED 2026-09-01
    (v0.24.1).** It used to start on whichever came first: a `didOpen` or a
    request reaching `WaitAnalyzed`. Both are the wrong moment for a client

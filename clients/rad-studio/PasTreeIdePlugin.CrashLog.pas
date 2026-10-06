@@ -42,14 +42,39 @@ unit PasTreeIdePlugin.CrashLog;
   feature - the swallowed ones are the ones nobody has ever seen).
 
   WHAT A BLOCK CONTAINS: the fault address and the address it tried to touch,
-  then the return addresses up the stack, each resolved to MODULE + OFFSET. A
-  frame in PasTreeIdePlugin.bpl is the answer; its offset maps to a unit and
-  line through the .map file the build writes (build.bat passes DCC_MapFile=3)
-  - add the image base and the code section's RVA to a `0001:xxxxxxxx` entry
-  there. Frames are all this can give: a designtime BPL carries no symbols at
-  runtime, so resolving names would mean shipping a symbol reader, and the
-  offset is enough to find the site once. A block with no frame of ours is an
-  answer too - it says the fault was not in this plugin.
+  then the return addresses up the FAULTING thread's stack, each resolved to
+  MODULE + OFFSET. A frame in PasTreeIdePlugin.bpl is the answer; its offset
+  maps to a unit and line through the .map file the build writes (build.bat
+  passes DCC_MapFile=3) - add the image base and the code section's RVA to a
+  `0001:xxxxxxxx` entry there. Frames are all this can give: a designtime BPL
+  carries no symbols at runtime, so resolving names would mean shipping a
+  symbol reader, and the offset is enough to find the site once.
+
+  ONLY FAULTS WITH THIS PLUGIN ON THE STACK ARE WRITTEN (since 0.62.2). The
+  IDE faults and swallows AVs of its own all day - vcl370 + 3E28C at every
+  session, the GetIt welcome page, dcc32 during a background compile - and a
+  log of those buried the few that matter. A block is written when the fault
+  address or any frame of the walk is in this BPL; the rest are only counted,
+  and the count goes into the next block that is written, so "the IDE had 40
+  of its own" is still visible without 40 blocks. Settings > Diagnostics >
+  "Log all IDE crashes" (SetCrashLogAll, off by default) writes them all, for
+  the fault whose stack does not reach us although we caused it - a freed
+  object of ours used later by the IDE is the classic one.
+
+  THE WALK STARTS FROM THE FAULT'S CONTEXT, NOT FROM THIS HANDLER. Until
+  0.62.2 it was RtlCaptureStackBackTrace here, which starts in the handler
+  itself - so every block's first frame was PasTreeIdePlugin.bpl, ours or
+  not, then three ntdll dispatcher frames - and on Win32 a frame-pointer walk
+  mostly stops at KiUserExceptionDispatcher, so most blocks had nothing past
+  those four lines: no caller at all, and nothing a filter could decide on.
+  Now Win32 follows the EBP chain from the context's Eip/Ebp, and Win64
+  unwinds a copy of the context with RtlVirtualUnwind, both bounded by the
+  thread's stack limits and inside try/except - a fault inside an exception
+  handler is the one place this unit must not have one. A frameless routine
+  is skipped by the EBP walk (its caller is kept) - an IDE one costs a line
+  of the stack, and none of ours is frameless: the package is compiled with
+  the STACKFRAMES directive on (PasTreeIdePlugin.dpk), which this walk
+  depends on - keep it.
 
   WHICH .map is the one beside the BPL the block's header names by full path:
   out\<version>\win32\ or out\<version>\win64\. The frames say only
@@ -59,7 +84,7 @@ unit PasTreeIdePlugin.CrashLog;
 
   COST WHEN NOTHING IS WRONG: one comparison per exception raised in the
   process. The IDE raises (and handles) plenty, but only ACCESS VIOLATIONS get
-  past the first check.
+  past the first check, and a foreign one costs a stack walk and no file I/O.
 
   THIS IS PERMANENT, not scaffolding for one bug. An intermittent AV in a
   designtime package is found by accumulating occurrences across weeks of
@@ -89,6 +114,15 @@ procedure FinalizeCrashLog;
 /// the first call the fallback is %TEMP%.
 /// </summary>
 procedure SetCrashLogPath(const ALspLogPath: string);
+/// <summary>
+/// True writes every access violation in the IDE, with or without a frame of
+/// this plugin - the behaviour before 0.62.2, for chasing a fault the walk
+/// cannot attribute. Settings > Diagnostics > "Log all IDE crashes", OFF by
+/// default. Pushed by the wizard at load and by SaveSettings, never read
+/// from the settings here: the handler must not touch the registry or
+/// ToolsAPI.
+/// </summary>
+procedure SetCrashLogAll(AAll: Boolean);
 
 implementation
 
@@ -121,9 +155,18 @@ function AddVectoredExceptionHandler(AFirst: ULONG;
   AHandler: Pointer): Pointer; stdcall; external kernel32;
 function RemoveVectoredExceptionHandler(AHandle: Pointer): ULONG; stdcall;
   external kernel32;
-function RtlCaptureStackBackTrace(AFramesToSkip, AFramesToCapture: DWORD;
-  ABackTrace: Pointer; ABackTraceHash: PDWORD): Word; stdcall;
+// Windows 8 and later, which every supported RAD Studio requires. Declared
+// here because older Winapi.Windows units do not import it.
+procedure GetCurrentThreadStackLimits(out ALow, AHigh: ULONG_PTR); stdcall;
   external kernel32;
+{$IFDEF CPUX64}
+function RtlLookupFunctionEntry(AControlPc: DWORD64; out AImageBase: DWORD64;
+  AHistoryTable: Pointer): Pointer; stdcall; external kernel32;
+function RtlVirtualUnwind(AHandlerType: DWORD; AImageBase, AControlPc: DWORD64;
+  AFunctionEntry: Pointer; AContext: PContext; out AHandlerData: Pointer;
+  out AEstablisherFrame: DWORD64; AContextPointers: Pointer): Pointer; stdcall;
+  external kernel32;
+{$ENDIF}
 // Declared here rather than taken from Winapi.Windows, which does not import
 // it in this RTL. The FROM_ADDRESS flag makes the second parameter an ADDRESS
 // inside the module rather than a name - hence the Pointer, not a PChar.
@@ -140,6 +183,17 @@ var
   // out once at registration rather than inside the handler, which runs on
   // whatever thread faulted and should call as little as it can.
   GPackage: string = '';
+  // This BPL's image, [GOwnLow, GOwnHigh) - the test for "a frame of ours".
+  // From the PE header at registration, so the handler compares two numbers
+  // per frame rather than asking the loader.
+  GOwnLow: UIntPtr = 0;
+  GOwnHigh: UIntPtr = 0;
+  // Access violations with no frame of ours since the last block written.
+  GSkipped: Integer = 0;
+  // See SetCrashLogAll. One aligned Boolean, written on the main thread and
+  // read by the handler on any - a torn read is impossible, a stale one
+  // costs one block either way.
+  GLogAll: Boolean = False;
   // Re-entrancy: an AV raised by this handler's own code (or by the file
   // write) must not recurse into it.
   GInside: Boolean = False;
@@ -159,6 +213,11 @@ begin
   finally
     GLock.Leave;
   end;
+end;
+
+procedure SetCrashLogAll(AAll: Boolean);
+begin
+  GLogAll := AAll;
 end;
 
 { MODULE+OFFSET for one address - the only resolution available without
@@ -221,10 +280,106 @@ begin
   end;
 end;
 
+type
+  TFrames = array[0..cMaxFrames - 1] of Pointer;
+
+{ The faulting thread's stack as it was at the fault: AFrames[0] is the
+  faulting instruction, then the return addresses outward. Every read is of
+  this thread's own stack, checked against its limits first, and the whole
+  walk is under try/except - a corrupted stack is a common reason to be here,
+  and what was collected before it is kept. }
+function WalkFaultStack(AContext: PContext; var AFrames: TFrames): Integer;
+var
+  LLow, LHigh: ULONG_PTR;
+{$IFDEF CPUX86}
+  LFp, LNext, LSp: UIntPtr;
+  LModule: HMODULE;
+{$ENDIF}
+{$IFDEF CPUX64}
+  // CONTEXT must be 16-byte aligned for RtlVirtualUnwind, which a local
+  // record is not promised to be - so a buffer, aligned by hand.
+  LBuf: array[0..SizeOf(TContext) + 15] of Byte;
+  LCtx: PContext;
+  LEntry, LHandlerData: Pointer;
+  LImageBase, LEstablisher: DWORD64;
+{$ENDIF}
+begin
+  Result := 0;
+  GetCurrentThreadStackLimits(LLow, LHigh);
+  try
+{$IFDEF CPUX86}
+    AFrames[0] := Pointer(AContext.Eip);
+    Result := 1;
+    // A call through a bad pointer (Eip in no module, or nil) faults before
+    // the callee pushes anything, so [Esp] is still the return address - the
+    // caller, which the EBP chain would skip.
+    LSp := AContext.Esp;
+    LModule := 0;
+    if not GetModuleHandleEx($00000004 or $00000002, AFrames[0], LModule)
+       and (LSp >= LLow) and (LSp + SizeOf(Pointer) <= LHigh) then
+    begin
+      AFrames[Result] := PPointer(LSp)^;
+      Inc(Result);
+    end;
+    LFp := AContext.Ebp;
+    while (Result < cMaxFrames) and (LFp >= LLow)
+      and (LFp + 2 * SizeOf(Pointer) <= LHigh) and (LFp and 3 = 0) do
+    begin
+      AFrames[Result] := PPointer(LFp + SizeOf(Pointer))^;
+      if AFrames[Result] = nil then
+        Break;
+      Inc(Result);
+      LNext := UIntPtr(PPointer(LFp)^);
+      // The stack grows down: a caller's frame is always higher.
+      if LNext <= LFp then
+        Break;
+      LFp := LNext;
+    end;
+{$ENDIF}
+{$IFDEF CPUX64}
+    LCtx := PContext((UIntPtr(@LBuf[0]) + 15) and not UIntPtr(15));
+    Move(AContext^, LCtx^, SizeOf(TContext));
+    // Frame 0 is taken even when Rip is nil - a call through a nil pointer,
+    // whose caller is the next frame and the one that matters.
+    while Result < cMaxFrames do
+    begin
+      // Past frame 0 a nil Rip is the end of the stack.
+      if (LCtx.Rip = 0) and (Result > 0) then
+        Break;
+      AFrames[Result] := Pointer(LCtx.Rip);
+      Inc(Result);
+      LEntry := RtlLookupFunctionEntry(LCtx.Rip, LImageBase, nil);
+      if LEntry = nil then
+      begin
+        // A leaf (or a call through a bad pointer): the return address is
+        // at Rsp and nothing else was pushed.
+        if (LCtx.Rsp < LLow) or (LCtx.Rsp + SizeOf(Pointer) > LHigh) then
+          Break;
+        LCtx.Rip := PDWORD64(LCtx.Rsp)^;
+        Inc(LCtx.Rsp, SizeOf(Pointer));
+      end
+      else
+        RtlVirtualUnwind(0, LImageBase, LCtx.Rip, LEntry, LCtx, LHandlerData,
+          LEstablisher, nil);
+      if (LCtx.Rsp < LLow) or (LCtx.Rsp >= LHigh) then
+        Break;
+    end;
+{$ENDIF}
+  except
+    // Keep the frames collected before the walk hit garbage.
+  end;
+end;
+
+function IsOwnAddress(AAddr: Pointer): Boolean; inline;
+begin
+  Result := (UIntPtr(AAddr) >= GOwnLow) and (UIntPtr(AAddr) < GOwnHigh);
+end;
+
 function VectoredHandler(AInfo: PExceptionPointers): LongInt; stdcall;
 var
-  LFrames: array[0..cMaxFrames - 1] of Pointer;
+  LFrames: TFrames;
   LCount, LIdx: Integer;
+  LOurs: Boolean;
   LText: string;
   LRec: PExceptionRecord;
 begin
@@ -243,8 +398,18 @@ begin
       Exit;
     GInside := True;
     try
+      LCount := 0;
+      if AInfo.ContextRecord <> nil then
+        LCount := WalkFaultStack(AInfo.ContextRecord, LFrames);
+      LOurs := IsOwnAddress(LRec.ExceptionAddress);
+      for LIdx := 0 to LCount - 1 do
+        LOurs := LOurs or IsOwnAddress(LFrames[LIdx]);
+      if not (LOurs or GLogAll) then
+      begin
+        Inc(GSkipped);
+        Exit;
+      end;
       Inc(GEntries);
-      LCount := RtlCaptureStackBackTrace(0, cMaxFrames, @LFrames[0], nil);
       // ExceptionInformation[0] is 0 for a read, 1 for a write, 8 for a DEP
       // fault; [1] is the address that was touched - the "read of address
       // 00000020" half of the dialog, and the half that separates a nil
@@ -256,7 +421,13 @@ begin
          IfThen(LRec.ExceptionInformation[0] = 0, 'read', 'write'),
          Pointer(LRec.ExceptionInformation[1]), GetCurrentThreadId,
          GPackage]);
-      for LIdx := 0 to LCount - 1 do
+      if GSkipped > 0 then
+        LText := LText + Format(#13#10'  (%d access violation(s) without '
+          + 'this plugin on the stack since the previous block, not written)',
+          [GSkipped]);
+      GSkipped := 0;
+      // Frame 0 is the fault address the header already names.
+      for LIdx := 1 to LCount - 1 do
         LText := LText + #13#10 + '    ' + DescribeAddress(LFrames[LIdx]);
       AppendBlock(LText);
     finally
@@ -277,6 +448,10 @@ begin
   if GLock = nil then
     GLock := TCriticalSection.Create;
   GPackage := PasTreeLspVersion + ' at ' + ThisBinaryPath;
+  // HInstance is this package's module; SizeOfImage covers every section.
+  GOwnLow := UIntPtr(HInstance);
+  GOwnHigh := GOwnLow + PImageNtHeaders(GOwnLow
+    + UIntPtr(PImageDosHeader(GOwnLow)._lfanew)).OptionalHeader.SizeOfImage;
   // Until a project is open there is no per-project log yet, and an AV during
   // package load is exactly the kind this must not miss.
   GPath := TPath.Combine(TPath.GetTempPath, cCrashLogName);

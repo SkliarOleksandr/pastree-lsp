@@ -16,8 +16,8 @@ unit PasTreeIdePlugin.Settings;
   DEFAULT IS ON, FOR EVERY SWITCH THAT TURNS SOMETHING OFF. Those switches
   disable something this plugin already does, so a missing value - a fresh
   installation, a user who never opened the dialog - must read as "behave as
-  before". "Advanced logging" and Find References' implementation headers are
-  the exceptions, and the rule is the same one seen from the other side: each
+  before". "Advanced logging", "Log all IDE crashes" and Find References'
+  implementation headers are the exceptions, and the rule is the same one seen from the other side: each
   turns something ON, so its default is OFF. The IDE Fixes tab is the
   exception to the exception: each fix turns something on and is still ON by
   default (Alex, 2026-09-29), because a fix nobody enables fixes nothing.
@@ -222,6 +222,17 @@ function AdvancedLoggingEnabled: Boolean;
 function ClearLogOnProjectOpen: Boolean;
 
 /// <summary>
+/// Whether pastree-ide-crash.log takes every access violation in the IDE
+/// rather than only those with this plugin on the faulting stack (see
+/// PasTreeIdePlugin.CrashLog). OFF BY DEFAULT, for AdvancedLoggingEnabled's
+/// reason: a diagnostic turned on, and the IDE's own faults are the noise the
+/// filter exists to remove. Independent of LoggingEnabled, as the crash log
+/// is. Not read at the point of use - the handler must not read settings -
+/// but pushed with SetCrashLogAll at load and by SaveSettings.
+/// </summary>
+function LogAllIdeCrashes: Boolean;
+
+/// <summary>
 /// Whether the editor's error underlines are OURS (PasTreeIdePlugin.
 /// ErrorPaint, over the server's publishDiagnostics) rather than the IDE's
 /// Error Insight. One choice, not two switches: the two drawn together put
@@ -335,6 +346,8 @@ type
     EnableLogging: Boolean;
     AdvancedLogging: Boolean;
     ClearLogOnOpen: Boolean;
+    // See LogAllIdeCrashes. Default False.
+    LogAllIdeCrashes: Boolean;
     // Highlighting tab: a type name painted in its own colour and style
     // wherever the analysis resolved one (PasTreeIdePlugin.SemanticPaint).
     HighlightTypes: Boolean;
@@ -381,7 +394,8 @@ uses
   // binding) without dragging a form and its .dfm into the caller.
   PasTreeIdePlugin.SettingsForm,
   PasTreeIdePlugin.DfmExplicitFix,
-  PasTreeIdePlugin.DfmStyleElementsFix;
+  PasTreeIdePlugin.DfmStyleElementsFix,
+  PasTreeIdePlugin.CrashLog;
 
 const
   cSettingsKey = 'PasTree';
@@ -399,6 +413,7 @@ const
   cValueLogging = 'EnableLogging';
   cValueAdvancedLogging = 'AdvancedLogging';
   cValueClearLogOnOpen = 'ClearLogOnProjectOpen';
+  cValueLogAllIdeCrashes = 'LogAllIdeCrashes';
   cValueHighlightTypes = 'HighlightTypes';
   cValueTypeColor = 'TypeColor';
   cValueTypeFontStyle = 'TypeFontStyle';
@@ -559,6 +574,7 @@ begin
   // See AdvancedLoggingEnabled: the one default that is False.
   Result.AdvancedLogging := False;
   Result.ClearLogOnOpen := True;
+  Result.LogAllIdeCrashes := False;
   Result.HighlightTypes := True;
   Result.TypeColor := cDefaultTypeColor;
   Result.TypeFontStyle := [];
@@ -608,6 +624,8 @@ begin
         ReadFlag(LReg, cValueAdvancedLogging, Result.AdvancedLogging);
       Result.ClearLogOnOpen :=
         ReadFlag(LReg, cValueClearLogOnOpen, Result.ClearLogOnOpen);
+      Result.LogAllIdeCrashes :=
+        ReadFlag(LReg, cValueLogAllIdeCrashes, Result.LogAllIdeCrashes);
       Result.PasTreeErrorSquiggles :=
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
       Result.DfmNoExplicitProps :=
@@ -666,6 +684,8 @@ begin
           Ord(ASettings.AdvancedLogging));
         LReg.WriteInteger(cValueClearLogOnOpen,
           Ord(ASettings.ClearLogOnOpen));
+        LReg.WriteInteger(cValueLogAllIdeCrashes,
+          Ord(ASettings.LogAllIdeCrashes));
         LReg.WriteInteger(cValueHighlightTypes, Ord(ASettings.HighlightTypes));
         LReg.WriteInteger(cValueTypeColor, Integer(ASettings.TypeColor));
         LReg.WriteInteger(cValueTypeFontStyle,
@@ -690,6 +710,7 @@ begin
   ApplyErrorInsightChoice;
   SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
   SetDfmStyleElementsFix(ASettings.DfmNoDefaultStyleElems);
+  SetCrashLogAll(ASettings.LogAllIdeCrashes);
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -824,6 +845,11 @@ function ClearLogOnProjectOpen: Boolean;
 begin
   // Same dependency as AdvancedLoggingEnabled, for the same reason.
   Result := CurrentSettings.EnableLogging and CurrentSettings.ClearLogOnOpen;
+end;
+
+function LogAllIdeCrashes: Boolean;
+begin
+  Result := CurrentSettings.LogAllIdeCrashes;
 end;
 
 function PasTreeErrorSquigglesEnabled: Boolean;
