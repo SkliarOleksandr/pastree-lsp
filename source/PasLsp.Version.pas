@@ -274,7 +274,11 @@ const
   /// member after it, so `C.Substring(` with `C = 'abc'` reaches the string
   /// helper. Against 0.93.1 Annotate arguments says "the callee did not
   /// resolve", signature help and `C.` completion stay empty - silently.
-  cMinPasTreeVersion = '0.93.2';
+  /// 0.93.3 (2026-10-06): the unit of an ancestor of a class a form file
+  /// streams is used - the IDE puts it back into `uses` on the next save.
+  /// Against 0.93.2 Unused Units offers System.ImageList, System.Actions,
+  /// Vcl.ToolWin and the like, a save undoes the Remove and Revert refuses.
+  cMinPasTreeVersion = '0.93.3';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

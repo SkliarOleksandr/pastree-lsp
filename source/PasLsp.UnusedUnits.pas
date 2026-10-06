@@ -28,12 +28,23 @@ unit PasLsp.UnusedUnits;
   with a blank line around it when that would leave two blank lines in a
   row.
 
-  REFUSED, and said so per entry rather than guessed at: a clause with a
-  compiler directive inside it (`A{$IFDEF X}, B{$ENDIF}` - the directive
-  belongs to two entries' pieces at once, and any cut through it breaks the
-  conditional), a clause in an $I include (not the file the edit is for),
-  and a clause whose last token is not its `;` (the parser repaired it - the
-  user is typing in it).
+  A DIRECTIVE IS NEVER DROPPED. Before 0.62.1 any `{$` in a clause refused
+  every entry of it - on AVImark (2026-10-06) that was every row of the
+  Unused Units tab, `{$IFDEF}`s in `uses` being the norm there. What is
+  dropped is now checked instead: the layout cut above when it holds no
+  directive, else each removed entry goes with a comma of its own next to
+  it - the one after it (`B{$ENDIF},` cannot, `B,` can), or the one before
+  it (`A{$IFDEF X}, B{$ENDIF}` loses `, B` and reads `A{$IFDEF X}{$ENDIF}`)
+  - and only the entry, its comma and blanks, never a directive, go. A
+  conditional left empty stays: it is harmless, and what to do with it is
+  the user's.
+
+  REFUSED, and said so per entry rather than guessed at: an entry no comma
+  can be taken with without a directive (`A{$IFDEF X}, B{$ENDIF}` removing
+  A), a clause every visible entry of which goes while it holds a directive
+  (an entry under another define keeps it alive), a clause in an $I include
+  (not the file the edit is for), and a clause whose last token is not its
+  `;` (the parser repaired it - the user is typing in it).
 
   A pure function of the tree and its text, like PasLsp.UseUnit.
 *)
@@ -160,18 +171,113 @@ begin
   Result := AEnd;
 end;
 
+// Whether AText[AFrom, ATo) (0-based) holds a compiler directive.
+function HasDirective(const AText: string; AFrom, ATo: Integer): Boolean;
+var
+  LSpan: string;
+begin
+  LSpan := Copy(AText, AFrom + 1, ATo - AFrom);
+  Result := (Pos('{$', LSpan) > 0) or (Pos('(*$', LSpan) > 0);
+end;
+
+type
+  // A 0-based [Start, Stop) of the clause's text that a removal drops.
+  TDropRange = record
+    Start, Stop: Integer;
+  end;
+
 // One clause: AItems its items in order, ARemove which of them go. Offsets
 // are 0-based into AText. False with AReason when it cannot be rewritten.
 function RewriteClause(const ATree: TPasTree; AClause: Integer;
   const AItems: TArray<Integer>; const ARemove: TArray<Boolean>;
   out AEdit: TLspUsesRemoval; out AReason: string): Boolean;
 var
-  LText, LOut, LPiece: string;
-  LStart, LEnd, LIdx, LKept, LPrevKept: Integer;
-  LS, LC: TArray<Integer>;   // item start; its comma (or the `;`)
+  LText, LOut: string;
+  LStart, LEnd, LIdx, LRunEnd, LAt, LFrom: Integer;
+  LS, LE, LC: TArray<Integer>;   // item start; item end; its comma (or `;`)
   LAll: Boolean;
   LLine, LCol: Integer;
   LFile: TPasTokenStream;
+  LDrops: TArray<TDropRange>;
+
+  procedure Drop(AFrom, ATo: Integer);
+  var
+    LRange: TDropRange;
+  begin
+    LRange.Start := AFrom;
+    LRange.Stop := ATo;
+    LDrops := LDrops + [LRange];
+  end;
+
+  // Item AItem with the comma after it: from its start through that comma
+  // and the blanks behind it - its whole line when nothing else is on it.
+  function FollowingSpan(AItem: Integer): TDropRange;
+  var
+    LLineStart: Integer;
+  begin
+    Result.Start := LS[AItem];
+    Result.Stop := LC[AItem] + 1;
+    while (Result.Stop < Length(LText)) and IsBlank(LText[Result.Stop + 1]) do
+      Inc(Result.Stop);
+    LLineStart := Result.Start;
+    while (LLineStart > 0) and IsBlank(LText[LLineStart]) do
+      Dec(LLineStart);
+    if ((LLineStart = 0) or (LText[LLineStart] = #10)) and
+       (Result.Stop < Length(LText)) and
+       CharInSet(LText[Result.Stop + 1], [#13, #10]) then
+    begin
+      Result.Start := LLineStart;
+      if LText[Result.Stop + 1] = #13 then
+        Inc(Result.Stop);
+      if (Result.Stop < Length(LText)) and (LText[Result.Stop + 1] = #10) then
+        Inc(Result.Stop);
+    end;
+  end;
+
+  // Item AItem with the comma before it: from that comma to the item's end.
+  function PrecedingSpan(AItem: Integer): TDropRange;
+  begin
+    Result.Start := LC[AItem - 1];
+    Result.Stop := LE[AItem];
+  end;
+
+  // Items AFrom..ATo of one run, each with a comma of its own next to it -
+  // the one after it first - and no span dropping a directive. ACommaFree:
+  // the comma before AFrom is still there to take. Depth-first; the spans
+  // of a full assignment go to LDrops.
+  function AssignCommas(AFrom, ATo: Integer; ACommaFree: Boolean): Boolean;
+  var
+    LSpan: TDropRange;
+    LKeep: Integer;
+  begin
+    if AFrom > ATo then
+      Exit(True);
+    LKeep := Length(LDrops);
+    if AFrom < High(AItems) then
+    begin
+      LSpan := FollowingSpan(AFrom);
+      if not HasDirective(LText, LSpan.Start, LSpan.Stop) then
+      begin
+        Drop(LSpan.Start, LSpan.Stop);
+        if AssignCommas(AFrom + 1, ATo, False) then
+          Exit(True);
+        SetLength(LDrops, LKeep);
+      end;
+    end;
+    if ACommaFree and (AFrom > 0) then
+    begin
+      LSpan := PrecedingSpan(AFrom);
+      if not HasDirective(LText, LSpan.Start, LSpan.Stop) then
+      begin
+        Drop(LSpan.Start, LSpan.Stop);
+        if AssignCommas(AFrom + 1, ATo, True) then
+          Exit(True);
+        SetLength(LDrops, LKeep);
+      end;
+    end;
+    Result := False;
+  end;
+
 begin
   Result := False;
   AEdit := Default(TLspUsesRemoval);
@@ -190,22 +296,17 @@ begin
     AReason := 'the uses clause has no closing `;` yet';
     Exit;
   end;
-  if (Pos('{$', Copy(LText, LStart + 1, LEnd - LStart)) > 0) or
-     (Pos('(*$', Copy(LText, LStart + 1, LEnd - LStart)) > 0) then
-  begin
-    AReason := 'a compiler directive inside the uses clause - remove it by ' +
-      'hand';
-    Exit;
-  end;
   SetLength(LS, Length(AItems));
+  SetLength(LE, Length(AItems));
   SetLength(LC, Length(AItems));
   LAll := True;
   for LIdx := 0 to High(AItems) do
   begin
     LS[LIdx] := TokStart(ATree, ATree.NodeLeftmostVis(AItems[LIdx]));
+    LE[LIdx] := TokEnd(ATree, ATree.Nodes[AItems[LIdx]].LastToken);
     // The token after the item: its comma, or the clause's `;`.
     LC[LIdx] := TokStart(ATree, ATree.Nodes[AItems[LIdx]].LastToken + 1);
-    if (LS[LIdx] < 0) or (LC[LIdx] < LS[LIdx]) then
+    if (LS[LIdx] < 0) or (LE[LIdx] < LS[LIdx]) or (LC[LIdx] < LE[LIdx]) then
     begin
       AReason := 'the uses clause is in an include file';
       Exit;
@@ -215,6 +316,15 @@ begin
 
   if LAll then
   begin
+    // Every entry visible here goes - but a directive means the clause holds
+    // more than that (an entry under another define), and it cannot go
+    // whole.
+    if HasDirective(LText, LStart, LEnd) then
+    begin
+      AReason := 'every entry the compiler sees goes, and the clause holds a ' +
+        'compiler directive - remove it by hand';
+      Exit;
+    end;
     // The whole clause, with its own line when it has one to itself.
     LOut := '';
     while (LStart > 0) and IsBlank(LText[LStart]) do
@@ -238,28 +348,61 @@ begin
   end
   else
   begin
-    // Before the first item, then each kept piece behind the separator that
-    // stood in front of it, then the `;`.
-    LOut := Copy(LText, LStart + 1, LS[0] - LStart);
-    LPrevKept := -1;
-    LKept := 0;
-    for LIdx := 0 to High(AItems) do
+    // Run by run of removed items (kept items between them): the layout
+    // drop when it holds no directive, else a comma of its own per item.
+    LDrops := nil;
+    LIdx := 0;
+    while LIdx <= High(AItems) do
     begin
-      if ARemove[LIdx] then
+      if not ARemove[LIdx] then
+      begin
+        Inc(LIdx);
         Continue;
-      if LKept > 0 then
-        LOut := LOut + Copy(LText, LC[LIdx - 1] + 1, LS[LIdx] - LC[LIdx - 1]);
-      LPiece := Copy(LText, LS[LIdx] + 1, LC[LIdx] - LS[LIdx]);
-      LOut := LOut + LPiece;
-      Inc(LKept);
-      LPrevKept := LIdx;
+      end;
+      LRunEnd := LIdx;
+      while (LRunEnd < High(AItems)) and ARemove[LRunEnd + 1] do
+        Inc(LRunEnd);
+      if LRunEnd < High(AItems) then
+      begin
+        // A kept item follows: the run goes with the separator in front of
+        // it (its line), the kept item keeps the separator in front of it.
+        if LIdx = 0 then
+          LFrom := LS[0]
+        else
+          LFrom := LC[LIdx - 1];
+        LAt := LC[LRunEnd];
+        if LIdx = 0 then
+          LAt := LS[LRunEnd + 1];
+      end
+      else
+      begin
+        // The run ends the clause: the comma of the kept item before it goes,
+        // and the blanks and line breaks between that item and its comma.
+        LFrom := LC[LIdx - 1];
+        while (LFrom > LE[LIdx - 1]) and (LText[LFrom] <= ' ') do
+          Dec(LFrom);
+        LAt := LC[LRunEnd];
+      end;
+      if not HasDirective(LText, LFrom, LAt) then
+        Drop(LFrom, LAt)
+      else if not AssignCommas(LIdx, LRunEnd, LIdx > 0) then
+      begin
+        AReason := 'a compiler directive stands between the entry and the ' +
+          'comma it would take with it - remove it by hand';
+        Exit;
+      end;
+      LIdx := LRunEnd + 1;
     end;
-    // The last kept item was followed by a comma it no longer needs: what
-    // stood between it and that comma (blanks, a line break) goes too.
-    if LPrevKept < High(AItems) then
-      LOut := TrimRight(LOut);
-    LOut := LOut + Copy(LText, LC[High(AItems)] + 1,
-      LEnd - LC[High(AItems)]);
+    // The text with the drops left out; they come in order and never
+    // overlap (runs are apart by a kept item, a run's spans by its commas).
+    LOut := '';
+    LAt := LStart;
+    for var LRange in LDrops do
+    begin
+      LOut := LOut + Copy(LText, LAt + 1, LRange.Start - LAt);
+      LAt := LRange.Stop;
+    end;
+    LOut := LOut + Copy(LText, LAt + 1, LEnd - LAt);
   end;
 
   LFile.OffsetToLineCol(LStart, AEdit.Line, AEdit.Col);

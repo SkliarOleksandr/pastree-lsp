@@ -96,15 +96,27 @@ procedure HideResultToolbar(const AGroupCaption: string);
 
 /// <summary>
 /// The row focused in the Messages window's tree in front - the tab's own
-/// while its toolbar is clicked. AChain: the focused row's node, then its
-/// parent's, up to the top level - the pointers AddCustomMessage handed
-/// back. ATopIndex: the top-level row's position (0 = the group's first),
-/// -1 when unknown. False when nothing is focused or the tree cannot be
-/// read (it is the IDE's, through RTTI - see the implementation); the log
-/// says why.
+/// while its toolbar is clicked. AChain: per row, the focused one first,
+/// then its parent, up to the top level - the pointers that may be the one
+/// AddCustomMessage handed back for it: the tree node itself, then what its
+/// data holds. On 13.1 the node is NOT that pointer - a row under a
+/// top-level row was told only by its top-level position until 0.62.1, so
+/// Remove on one entry took its whole section (Alex, 2026-10-06).
+/// ATopIndex: the top-level row's position (0 = the group's first), -1 when
+/// unknown. False when nothing is focused or the tree cannot be read (it is
+/// the IDE's, through RTTI - see the implementation); the log says why.
 /// </summary>
-function ResultFocusedRow(out AChain: TArray<Pointer>;
+function ResultFocusedRow(out AChain: TArray<TArray<Pointer>>;
   out ATopIndex: Integer): Boolean;
+
+/// <summary>
+/// Focuses and selects, in the Messages window's tree in front, the row
+/// AddCustomMessage handed back ARow for, and scrolls it into view - the
+/// reverse of ResultFocusedRow, for a tab that was rebuilt (the ToolsAPI
+/// can only clear a group and fill it again) and wants its selection on the
+/// row after the one removed. False, and a log line, when it cannot.
+/// </summary>
+function ResultSelectRow(ARow: Pointer): Boolean;
 
 /// <summary>
 /// Puts (or re-creates) the Revert toolbar into the Messages window,
@@ -125,7 +137,7 @@ implementation
 
 uses
   System.Classes, System.TypInfo, System.Rtti, System.StrUtils,
-  System.Generics.Collections,
+  System.Generics.Collections, System.Math,
   Vcl.Controls, Vcl.Forms, Vcl.ComCtrls, Vcl.Graphics, Vcl.ToolWin, Vcl.Tabs,
   Vcl.ExtCtrls, Vcl.ActnList,
   ToolsAPI,
@@ -557,7 +569,49 @@ begin
   Result := PPointer(LValue.GetReferenceToRawData)^;
 end;
 
-function ResultFocusedRow(out AChain: TArray<Pointer>;
+{ What may be the AddCustomMessage pointer of tree node ANode: the node,
+  then - through GetNodeData by RTTI, when the tree has it - the node's data
+  and the pointer at its start, then the first words of the node's block,
+  which VirtualTrees allocates with the data in it. The caller matches them
+  against the pointers it was handed. A node field is another node, never a
+  message line - but the words read past the node's own block can be the
+  NEXT node's, its data included: the earlier a candidate, the surer it is
+  the node's own (ResultSelectRow picks by that). }
+function RowCandidates(ATree: TObject; AGetData: TRttiMethod;
+  ANode: Pointer): TArray<Pointer>;
+const
+  cScanWords = 32;
+var
+  LArg, LValue: TValue;
+  LParamType: TRttiType;
+  LData: Pointer;
+begin
+  Result := [ANode];
+  if Assigned(AGetData) then
+    try
+      LParamType := AGetData.GetParameters[0].ParamType;
+      if Assigned(LParamType) then
+        TValue.Make(@ANode, LParamType.Handle, LArg)
+      else
+        TValue.Make(@ANode, TypeInfo(Pointer), LArg);
+      LValue := AGetData.Invoke(ATree, [LArg]);
+      LData := PPointer(LValue.GetReferenceToRawData)^;
+      if LData <> nil then
+        Result := Result + [LData, PPointer(LData)^];
+    except
+      on E: Exception do
+        Trace(Format('focused row: GetNodeData failed with %s: %s',
+          [E.ClassName, E.Message]));
+    end;
+  try
+    for var LIdx := 0 to cScanWords - 1 do
+      Result := Result + [PPointer(PByte(ANode) + LIdx * SizeOf(Pointer))^];
+  except
+    // Past the end of a mapped block: what was read is what there is.
+  end;
+end;
+
+function ResultFocusedRow(out AChain: TArray<TArray<Pointer>>;
   out ATopIndex: Integer): Boolean;
 var
   LForm: TCustomForm;
@@ -566,11 +620,13 @@ var
   LType: TRttiType;
   LFocused: TRttiProperty;
   LParent: TRttiIndexedProperty;
+  LGetData: TRttiMethod;
   LValue: TValue;
   LNode, LUp: Pointer;
 begin
   Result := False;
   AChain := nil;
+  LGetData := nil;
   ATopIndex := -1;
   try
     LForm := FindMessageForm;
@@ -598,6 +654,11 @@ begin
     begin
       LFocused := LType.GetProperty('FocusedNode');
       LParent := LType.GetIndexedProperty('NodeParent');
+      for var LMethod in LType.GetMethods('GetNodeData') do
+        if (Length(LMethod.GetParameters) = 1) and
+           Assigned(LMethod.ReturnType) and
+           (LMethod.ReturnType.TypeKind = tkPointer) then
+          LGetData := LMethod;
     end;
     if not Assigned(LFocused) then
     begin
@@ -612,14 +673,14 @@ begin
       Trace(Format('focused row: nothing focused in %s', [LTree.Name]));
       Exit;
     end;
-    AChain := [LNode];
+    AChain := [RowCandidates(LTree, LGetData, LNode)];
     if Assigned(LParent) then
     begin
       LUp := NodeParentOf(LTree, LParent, LNode);
       while LUp <> nil do
       begin
         LNode := LUp;
-        AChain := AChain + [LNode];
+        AChain := AChain + [RowCandidates(LTree, LGetData, LNode)];
         LUp := NodeParentOf(LTree, LParent, LNode);
       end;
       ATopIndex := Integer(PCardinal(LNode)^);
@@ -627,12 +688,163 @@ begin
     else
       Trace('focused row: no NodeParent in the RTTI - the focused row only');
     if AdvancedLoggingEnabled then
-      Trace(Format('focused row: %s, depth %d, top index %d',
-        [LTree.Name, Length(AChain) - 1, ATopIndex]));
+      Trace(Format('focused row: %s, depth %d, top index %d, GetNodeData ' +
+        '%s', [LTree.Name, Length(AChain) - 1, ATopIndex,
+        IfThen(Assigned(LGetData), 'found', 'not in the RTTI')]));
     Result := True;
   except
     on E: Exception do
       Trace(Format('focused row: FAILED with %s: %s', [E.ClassName,
+        E.Message]));
+  end;
+end;
+
+// The tree's method AName taking a node first (any further parameters are
+// Booleans, passed as False), or nil.
+function NodeMethod(AType: TRttiType; const AName: string;
+  AWithNode: Boolean): TRttiMethod;
+begin
+  Result := nil;
+  for var LMethod in AType.GetMethods(AName) do
+  begin
+    var LParams := LMethod.GetParameters;
+    var LOk := (Length(LParams) > 0) = AWithNode;
+    for var LIdx := 0 to High(LParams) do
+      if Assigned(LParams[LIdx].ParamType) and
+         (((LIdx = 0) and AWithNode and
+           (LParams[LIdx].ParamType.TypeKind <> tkPointer)) or
+          (((LIdx > 0) or not AWithNode) and
+           (LParams[LIdx].ParamType.Handle <> TypeInfo(Boolean)))) then
+        LOk := False;
+    if LOk then
+      Exit(LMethod);
+  end;
+end;
+
+function NodeArg(AParam: TRttiParameter; ANode: Pointer): TValue;
+begin
+  if Assigned(AParam.ParamType) then
+    TValue.Make(@ANode, AParam.ParamType.Handle, Result)
+  else
+    TValue.Make(@ANode, TypeInfo(Pointer), Result);
+end;
+
+// Calls AMethod on ATree with ANode (when it takes one) and False for the
+// rest; the pointer it answers, nil when it answers none.
+function CallNodeMethod(AMethod: TRttiMethod; ATree: TObject;
+  ANode: Pointer): Pointer;
+var
+  LArgs: TArray<TValue>;
+  LParams: TArray<TRttiParameter>;
+  LValue: TValue;
+begin
+  LParams := AMethod.GetParameters;
+  SetLength(LArgs, Length(LParams));
+  for var LIdx := 0 to High(LParams) do
+    if (LIdx = 0) and (LParams[0].ParamType.TypeKind = tkPointer) then
+      LArgs[0] := NodeArg(LParams[0], ANode)
+    else
+      LArgs[LIdx] := TValue.From<Boolean>(False);
+  LValue := AMethod.Invoke(ATree, LArgs);
+  Result := nil;
+  if Assigned(AMethod.ReturnType) and
+     (AMethod.ReturnType.TypeKind = tkPointer) then
+    Result := PPointer(LValue.GetReferenceToRawData)^;
+end;
+
+function ResultSelectRow(ARow: Pointer): Boolean;
+var
+  LForm: TCustomForm;
+  LTree: TControl;
+  LCtx: TRttiContext;
+  LType: TRttiType;
+  LFocused: TRttiProperty;
+  LSelected: TRttiIndexedProperty;
+  LGetData, LFirst, LNext, LClear, LScroll: TRttiMethod;
+  LNode, LFound: Pointer;
+  LValue: TValue;
+  LCount, LBest: Integer;
+begin
+  Result := False;
+  if ARow = nil then
+    Exit;
+  try
+    LForm := FindMessageForm;
+    if not Assigned(LForm) then
+      Exit;
+    LTree := nil;
+    for var LIdx := 0 to LForm.ControlCount - 1 do
+      if LForm.Controls[LIdx].Visible and
+         ContainsText(LForm.Controls[LIdx].ClassName, 'VirtualDrawTree') then
+        LTree := LForm.Controls[LIdx];
+    if not Assigned(LTree) then
+    begin
+      Trace('select row: no visible VirtualDrawTree in the Messages window');
+      Exit;
+    end;
+    LCtx := TRttiContext.Create;
+    LType := LCtx.GetType(LTree.ClassType);
+    if not Assigned(LType) then
+      Exit;
+    LFocused := LType.GetProperty('FocusedNode');
+    LSelected := LType.GetIndexedProperty('Selected');
+    LGetData := nil;
+    for var LMethod in LType.GetMethods('GetNodeData') do
+      if (Length(LMethod.GetParameters) = 1) and
+         Assigned(LMethod.ReturnType) and
+         (LMethod.ReturnType.TypeKind = tkPointer) then
+        LGetData := LMethod;
+    LFirst := NodeMethod(LType, 'GetFirst', False);
+    LNext := NodeMethod(LType, 'GetNext', True);
+    LClear := NodeMethod(LType, 'ClearSelection', False);
+    LScroll := NodeMethod(LType, 'ScrollIntoView', True);
+    if not Assigned(LFocused) or not LFocused.IsWritable or
+       not Assigned(LFirst) or not Assigned(LNext) then
+    begin
+      Trace(Format('select row: %s lacks FocusedNode/GetFirst/GetNext in ' +
+        'its RTTI', [LTree.ClassName]));
+      Exit;
+    end;
+    // Every node, children of collapsed rows too: GetNext walks them all.
+    // The node whose candidates hold ARow EARLIEST wins: the words scanned
+    // past a node's own block can be the next node's, data included - the
+    // first match in walk order put the selection on the row BEFORE the one
+    // meant (Alex, 2026-10-06).
+    LFound := nil;
+    LBest := MaxInt;
+    LCount := 0;
+    LNode := CallNodeMethod(LFirst, LTree, nil);
+    while (LNode <> nil) and (LCount < 100000) do
+    begin
+      var LCandidates := RowCandidates(LTree, LGetData, LNode);
+      for var LSlot := 0 to Min(High(LCandidates), LBest - 1) do
+        if LCandidates[LSlot] = ARow then
+        begin
+          LFound := LNode;
+          LBest := LSlot;
+          Break;
+        end;
+      LNode := CallNodeMethod(LNext, LTree, LNode);
+      Inc(LCount);
+    end;
+    if LFound = nil then
+    begin
+      Trace(Format('select row: the row is not among %d nodes', [LCount]));
+      Exit;
+    end;
+    if Assigned(LClear) then
+      CallNodeMethod(LClear, LTree, nil);
+    TValue.Make(@LFound, LFocused.PropertyType.Handle, LValue);
+    LFocused.SetValue(LTree, LValue);
+    if Assigned(LSelected) and LSelected.IsWritable then
+      LSelected.SetValue(LTree, [NodeArg(LSelected.ReadMethod.GetParameters[0],
+        LFound)], TValue.From<Boolean>(True));
+    if Assigned(LScroll) then
+      CallNodeMethod(LScroll, LTree, LFound);
+    Result := True;
+  except
+    on E: Exception do
+      Trace(Format('select row: FAILED with %s: %s', [E.ClassName,
         E.Message]));
   end;
 end;

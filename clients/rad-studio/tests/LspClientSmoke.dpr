@@ -3999,7 +3999,9 @@ end;
   with the doubt that removing it drops its initialization; UHelper is
   removable, and its edit is the clause minus its entry. UMulti lists one
   entry per line, two of them unused: the rewrite takes their lines. The
-  program lists UNobody and uses nothing of it. }
+  program lists UNobody and uses nothing of it. UDir has IFDEF directives in
+  its clause: they stay through every removal, and an entry with a directive
+  on both sides of it is refused. }
 procedure TestUnusedUnits(const AExe: string);
 var
   LDir, LUA: string;
@@ -4071,6 +4073,10 @@ begin
   WriteUnit('UMulti', 'unit UMulti;'#13#10'interface'#13#10'uses'#13#10 +
     '  UB,'#13#10'  UStr,'#13#10'  UHelper;'#13#10'procedure MultiP;'#13#10 +
     'implementation'#13#10'procedure MultiP; begin S; end;'#13#10'end.'#13#10);
+  WriteUnit('UDir', 'unit UDir;'#13#10'interface'#13#10'uses'#13#10 +
+    '  UB,'#13#10'  {$IFDEF MSWINDOWS}'#13#10'  UStr,'#13#10 +
+    '  {$ENDIF}'#13#10'  ULoc{$IFDEF MSWINDOWS}, UGlob{$ENDIF},'#13#10 +
+    '  UHelper;'#13#10'implementation'#13#10'end.'#13#10);
   WriteUnit('UNobody', 'unit UNobody;'#13#10'interface'#13#10 +
     'procedure N;'#13#10'implementation'#13#10'procedure N; begin end;'#13#10 +
     'end.'#13#10);
@@ -4119,6 +4125,29 @@ begin
       'usesRemoval (UMulti) answered');
     Check(GOk and GResultJson.Contains('"newText":"uses\r\n  UStr;"'),
       'UMulti: two entries go with their own lines, a name in any case');
+    // Directives in the clause stay; an entry goes with a comma of its own.
+    LParams := RemovalParams('UDir.pas', ['UStr']);
+    Check(Ask('pastree/usesRemoval', LParams), 'usesRemoval (UDir UStr) answered');
+    Check(GOk and GResultJson.Contains('"newText":"uses\r\n  UB,\r\n  ' +
+      '{$IFDEF MSWINDOWS}\r\n  {$ENDIF}\r\n  ULoc{$IFDEF MSWINDOWS}, ' +
+      'UGlob{$ENDIF},\r\n  UHelper;"'),
+      'UDir: an entry between directives takes its own line, they stay');
+    LParams := RemovalParams('UDir.pas', ['UGlob']);
+    Check(Ask('pastree/usesRemoval', LParams), 'usesRemoval (UDir UGlob) answered');
+    Check(GOk and GResultJson.Contains(
+      'ULoc{$IFDEF MSWINDOWS}{$ENDIF},\r\n  UHelper;"'),
+      'UDir: an entry before an $ENDIF goes with the comma before it');
+    LParams := RemovalParams('UDir.pas', ['UB', 'UStr', 'UHelper']);
+    Check(Ask('pastree/usesRemoval', LParams), 'usesRemoval (UDir three) answered');
+    Check(GOk and GResultJson.Contains('"newText":"uses\r\n  ' +
+      '{$IFDEF MSWINDOWS}\r\n  {$ENDIF}\r\n  ULoc{$IFDEF MSWINDOWS}, ' +
+      'UGlob{$ENDIF};"'),
+      'UDir: three entries around the directives, every directive kept');
+    LParams := RemovalParams('UDir.pas', ['ULoc']);
+    Check(Ask('pastree/usesRemoval', LParams), 'usesRemoval (UDir ULoc) answered');
+    Check(GOk and GResultJson.Contains('"edits":[]') and
+      GResultJson.Contains('UDir.pas: ULoc: a compiler directive stands'),
+      'UDir: an entry whose either comma is past a directive is refused');
     LParams := RemovalParams('UA.pas', ['UGone']);
     Check(Ask('pastree/usesRemoval', LParams),
       'usesRemoval (a name not there) answered');
