@@ -270,7 +270,11 @@ const
   /// Unused Units requests pass. An older library does not compile against
   /// them; the floor records that the rule they rely on (a class method
   /// called through its type counts as reaching outside) is 0.93.1's.
-  cMinPasTreeVersion = '0.93.1';
+  /// 0.93.2 (2026-10-06): an untyped constant or a literal is typed for a
+  /// member after it, so `C.Substring(` with `C = 'abc'` reaches the string
+  /// helper. Against 0.93.1 Annotate arguments says "the callee did not
+  /// resolve", signature help and `C.` completion stay empty - silently.
+  cMinPasTreeVersion = '0.93.2';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
