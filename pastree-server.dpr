@@ -21,6 +21,7 @@ uses
   PasLsp.SyncPrototypes in 'source\PasLsp.SyncPrototypes.pas',
   PasLsp.AnnotateArgs in 'source\PasLsp.AnnotateArgs.pas',
   PasLsp.UseUnit in 'source\PasLsp.UseUnit.pas',
+  PasLsp.UnusedUnits in 'source\PasLsp.UnusedUnits.pas',
   PasLsp.BlockClose in 'source\PasLsp.BlockClose.pas',
   PasLsp.XmlDoc in 'source\PasLsp.XmlDoc.pas',
   PasLsp.ProductVersion in 'source\PasLsp.ProductVersion.pas',

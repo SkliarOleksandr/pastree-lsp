@@ -77,6 +77,9 @@ contains
   PasTreeIdePlugin.FindReferences in 'PasTreeIdePlugin.FindReferences.pas',
   PasTreeIdePlugin.FindHierarchy in 'PasTreeIdePlugin.FindHierarchy.pas',
   PasTreeIdePlugin.FindDefines in 'PasTreeIdePlugin.FindDefines.pas',
+  { Find All > Unused Units and its two project-wide siblings, with the
+    Remove / Revert toolbar. See the unit's header. }
+  PasTreeIdePlugin.UnusedUnits in 'PasTreeIdePlugin.UnusedUnits.pas',
   PasTreeIdePlugin.ResultRows in 'PasTreeIdePlugin.ResultRows.pas',
   PasTreeIdePlugin.FormModules in 'PasTreeIdePlugin.FormModules.pas',
   PasTreeIdePlugin.WaitDialog in 'PasTreeIdePlugin.WaitDialog.pas',

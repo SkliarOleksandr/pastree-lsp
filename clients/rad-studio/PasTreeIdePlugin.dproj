@@ -111,6 +111,7 @@
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindHierarchy.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindDefines.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.UnusedUnits.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ResultRows.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FormModules.pas"/>
         <DCCReference Include="PasTreeIdePlugin.WaitDialog.pas"/>

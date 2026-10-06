@@ -3989,6 +3989,160 @@ begin
     'with the configuration line among them');
 end;
 
+{ 5x. pastree/unusedUses and pastree/unreferencedUnits (0.62.0), over a
+  project of their own in a scratch directory - its own server, swapped in
+  for the duration, so the shared fixture's counts stay what they are.
+
+  UA lists UB (used), ULoc (an initialization that keeps to itself), UGlob
+  (an initialization that calls UHelper.Reg - outside) and UHelper (unused,
+  and kept in the program by UGlob). UGlob is not offered at all; ULoc is,
+  with the doubt that removing it drops its initialization; UHelper is
+  removable, and its edit is the clause minus its entry. UMulti lists one
+  entry per line, two of them unused: the rewrite takes their lines. The
+  program lists UNobody and uses nothing of it. }
+procedure TestUnusedUnits(const AExe: string);
+var
+  LDir, LUA: string;
+  LSaved, LOwn: TLspClient;
+  LOptions: TLspInitOptions;
+  LParams, LDoc: TJSONObject;
+
+  procedure WriteUnit(const AName, AText: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'), AText);
+  end;
+
+  function UnusedParams(const AScope: string): TJSONObject;
+  begin
+    Result := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LUA));
+    Result.AddPair('textDocument', LDoc);
+    if AScope <> '' then
+      Result.AddPair('scope', AScope);
+  end;
+
+  function RemovalParams(const AFile: string;
+    const ANames: array of string): TJSONObject;
+  var
+    LFiles, LNames: TJSONArray;
+    LFile: TJSONObject;
+  begin
+    LNames := TJSONArray.Create;
+    for var LName in ANames do
+      LNames.Add(LName);
+    LFile := TJSONObject.Create;
+    LFile.AddPair('uri', PathToLspUri(TPath.Combine(LDir, AFile)));
+    LFile.AddPair('names', LNames);
+    LFiles := TJSONArray.Create;
+    LFiles.AddElement(LFile);
+    Result := TJSONObject.Create;
+    Result.AddPair('files', LFiles);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5x. unused units: rows, doubts, the clause rewrite ===');
+  LDir := TPath.Combine(TPath.GetTempPath,
+    'pastree-unused-' + IntToStr(GetCurrentProcessId));
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UMain.dpr'),
+    'program UMain;'#13#10'uses UA, UB, UMulti, UNobody;'#13#10 +
+    'begin'#13#10'  UseA;'#13#10'  MultiP;'#13#10'end.'#13#10);
+  WriteUnit('UA', 'unit UA;'#13#10'interface'#13#10 +
+    'uses UB, ULoc,'#13#10'  UGlob, UHelper;'#13#10 +
+    'procedure UseA;'#13#10'implementation'#13#10 +
+    'procedure UseA; begin BProc; end;'#13#10'end.'#13#10);
+  WriteUnit('UB', 'unit UB;'#13#10'interface'#13#10'procedure BProc;'#13#10 +
+    'implementation'#13#10'procedure BProc; begin end;'#13#10'end.'#13#10);
+  WriteUnit('UHelper', 'unit UHelper;'#13#10'interface'#13#10 +
+    'procedure Reg;'#13#10'implementation'#13#10 +
+    'procedure Reg; begin end;'#13#10'end.'#13#10);
+  WriteUnit('UGlob', 'unit UGlob;'#13#10'interface'#13#10'implementation' +
+    #13#10'uses UHelper;'#13#10'initialization'#13#10'  Reg;'#13#10'end.'#13#10);
+  WriteUnit('ULoc', 'unit ULoc;'#13#10'interface'#13#10'implementation' +
+    #13#10'var L: Integer;'#13#10'initialization'#13#10'  L := 1;'#13#10 +
+    'end.'#13#10);
+  WriteUnit('UStr', 'unit UStr;'#13#10'interface'#13#10 +
+    'function S: Integer;'#13#10'implementation'#13#10 +
+    'function S: Integer; begin Result := 1; end;'#13#10'end.'#13#10);
+  WriteUnit('UMulti', 'unit UMulti;'#13#10'interface'#13#10'uses'#13#10 +
+    '  UB,'#13#10'  UStr,'#13#10'  UHelper;'#13#10'procedure MultiP;'#13#10 +
+    'implementation'#13#10'procedure MultiP; begin S; end;'#13#10'end.'#13#10);
+  WriteUnit('UNobody', 'unit UNobody;'#13#10'interface'#13#10 +
+    'procedure N;'#13#10'implementation'#13#10'procedure N; begin end;'#13#10 +
+    'end.'#13#10);
+  LUA := TPath.Combine(LDir, 'UA.pas');
+
+  LSaved := GClient;
+  LOwn := TLspClient.Create(AExe, ExtractFilePath(AExe),
+    procedure(const AText: string)
+    begin
+      Writeln('  [log] ' + AText);
+    end);
+  GClient := LOwn;
+  try
+    LOptions := Default(TLspInitOptions);
+    LOptions.ProjectFile := TPath.Combine(LDir, 'UMain.dpr');
+    LOptions.Platform := 'Win32';
+    LOptions.SearchPaths := [LDir];
+    Check(LOwn.Start(LOptions), 'a server for the scratch project');
+
+    LParams := UnusedParams('unit');
+    Check(Ask('pastree/unusedUses', LParams), 'unusedUses (unit) answered');
+    Check(GOk and GResultJson.Contains('"unitName":"ULoc"') and
+      GResultJson.Contains('"unitName":"UHelper"'),
+      'UA: ULoc and UHelper are unused');
+    Check(GOk and not GResultJson.Contains('"unitName":"UGlob"'),
+      'UA: UGlob, whose initialization calls into UHelper, is not offered');
+    Check(GOk and GResultJson.Contains('initialization'),
+      'UA: ULoc carries the doubt about its initialization');
+    Check(GOk and not GResultJson.Contains('"edits"'),
+      'UA: no edits with the rows - they are asked for at Remove');
+
+    LParams := UnusedParams('project');
+    Check(Ask('pastree/unusedUses', LParams), 'unusedUses (project) answered');
+    Check(GOk and GResultJson.Contains('"unitName":"UB"') and
+      not GResultJson.Contains('"unitName":"UStr"'),
+      'UMulti: UB is unused there, UStr is used');
+
+    // Remove: the edits on the text as it is now (pastree/usesRemoval).
+    LParams := RemovalParams('UA.pas', ['UHelper']);
+    Check(Ask('pastree/usesRemoval', LParams), 'usesRemoval (UA) answered');
+    Check(GOk and GResultJson.Contains(
+      '"newText":"uses UB, ULoc,\r\n  UGlob;"'),
+      'UA: the edit is the clause without UHelper, its layout kept');
+    LParams := RemovalParams('UMulti.pas', ['UB', 'uhelper']);
+    Check(Ask('pastree/usesRemoval', LParams),
+      'usesRemoval (UMulti) answered');
+    Check(GOk and GResultJson.Contains('"newText":"uses\r\n  UStr;"'),
+      'UMulti: two entries go with their own lines, a name in any case');
+    LParams := RemovalParams('UA.pas', ['UGone']);
+    Check(Ask('pastree/usesRemoval', LParams),
+      'usesRemoval (a name not there) answered');
+    Check(GOk and GResultJson.Contains('"edits":[]') and
+      GResultJson.Contains('"missing":["UA.pas: UGone"]'),
+      'UA: a name no clause holds is missing, and no edit');
+
+    LParams := UnusedParams('');
+    Check(Ask('pastree/unreferencedUnits', LParams),
+      'unreferencedUnits answered');
+    Check(GOk and GResultJson.Contains('"unitName":"UNobody"') and
+      GResultJson.Contains('"program":true'),
+      'UNobody: nobody uses it, the program lists it');
+    Check(GOk and not GResultJson.Contains('"unitName":"UGlob"') and
+      not GResultJson.Contains('"unitName":"UHelper"'),
+      'UGlob is kept for its initialization, and UHelper with it');
+  finally
+    GClient := LSaved;
+    LOwn.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestRestartOnConfigChange(const AExe: string);
 var
   LOldPid, LNewPid: DWORD;
@@ -4189,6 +4343,7 @@ begin
       TestWorkspaceSymbol;
       TestOnTypeFormatting;
       TestCancelHygiene;
+      TestUnusedUnits(GExe);
       // Empties the server log: after every section that reads it back.
       TestLogHeaderAfterClear;
       // These three each kill or replace the server, so they go last.

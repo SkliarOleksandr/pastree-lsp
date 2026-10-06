@@ -7,6 +7,10 @@ unit PasTreeIdePlugin.RenameToolbar;
   changes files nobody has open and opens no tabs, so there is no editor to
   press Ctrl+Z in for most of what it did).
 
+  SINCE 0.62.0 ANY RESULT TAB CAN HAVE ONE (ShowResultToolbar): one host per
+  tab, keyed by the tab's caption, with the buttons the caller passes - the
+  Unused Units tab's Remove and Revert. The Rename calls are wrappers.
+
   THE TOOLSAPI HAS NO SURFACE FOR THIS. IOTAMessageServices puts rows into a
   group and INTAMessageNotifier lets us add items to the rows' right-click
   menu; nothing lets a plugin put a control above its rows. So this unit
@@ -60,6 +64,48 @@ interface
 uses
   System.SysUtils;
 
+type
+  /// <summary>One button of a result tab's toolbar: ACaption beside the
+  /// glyph of the IDE action named AIdeAction (caption alone when there is
+  /// no such action), AOnClick its handler.</summary>
+  TResultToolButton = record
+    Caption: string;
+    IdeAction: string;
+    OnClick: TProc;
+  end;
+
+function ResultToolButton(const ACaption, AIdeAction: string;
+  const AOnClick: TProc): TResultToolButton;
+
+/// <summary>
+/// The general form, since 0.62.0 (the Unused Units tab - Remove and
+/// Revert): a toolbar with AButtons above the rows of the tab named
+/// AGroupCaption, one per tab. An earlier toolbar for the same tab is
+/// dropped first; another tab's is left alone. Silent when the window
+/// cannot be found, as below.
+/// </summary>
+procedure ShowResultToolbar(const AGroupCaption: string;
+  const AButtons: array of TResultToolButton);
+
+/// <summary>Enables or greys out button AIndex of that tab's toolbar.</summary>
+procedure SetResultToolbarEnabled(const AGroupCaption: string;
+  AIndex: Integer; AEnabled: Boolean);
+
+/// <summary>Removes that tab's toolbar, if it still exists.</summary>
+procedure HideResultToolbar(const AGroupCaption: string);
+
+/// <summary>
+/// The row focused in the Messages window's tree in front - the tab's own
+/// while its toolbar is clicked. AChain: the focused row's node, then its
+/// parent's, up to the top level - the pointers AddCustomMessage handed
+/// back. ATopIndex: the top-level row's position (0 = the group's first),
+/// -1 when unknown. False when nothing is focused or the tree cannot be
+/// read (it is the IDE's, through RTTI - see the implementation); the log
+/// says why.
+/// </summary>
+function ResultFocusedRow(out AChain: TArray<Pointer>;
+  out ATopIndex: Integer): Boolean;
+
 /// <summary>
 /// Puts (or re-creates) the Revert toolbar into the Messages window,
 /// shown while the tab named AGroupCaption is selected. Any earlier toolbar
@@ -78,7 +124,8 @@ procedure HideRenameToolbar;
 implementation
 
 uses
-  System.Classes, System.TypInfo, System.StrUtils,
+  System.Classes, System.TypInfo, System.Rtti, System.StrUtils,
+  System.Generics.Collections,
   Vcl.Controls, Vcl.Forms, Vcl.ComCtrls, Vcl.Graphics, Vcl.ToolWin, Vcl.Tabs,
   Vcl.ExtCtrls, Vcl.ActnList,
   ToolsAPI,
@@ -101,12 +148,12 @@ type
   TRenameToolbarHost = class(TComponent)
   private
     FToolbar: TToolBar;
-    FRevert: TToolButton;
+    FButtons: TArray<TToolButton>;   // Tag = the index into FHandlers
+    FHandlers: TArray<TProc>;
     FTabs: TTabSet;
     FTimer: TTimer;
     FCaption: string;
-    FOnRevert: TProc;
-    procedure RevertClick(ASender: TObject);
+    procedure ButtonClick(ASender: TObject);
     procedure Poll(ASender: TObject);
     procedure SyncVisible;
   protected
@@ -115,7 +162,25 @@ type
   end;
 
 var
-  GHost: TRenameToolbarHost = nil;
+  // One host per result tab, by lower-cased caption.
+  GHosts: TDictionary<string, TRenameToolbarHost> = nil;
+  // The tab the Rename wrappers below speak for.
+  GRenameCaption: string = '';
+
+function ResultToolButton(const ACaption, AIdeAction: string;
+  const AOnClick: TProc): TResultToolButton;
+begin
+  Result.Caption := ACaption;
+  Result.IdeAction := AIdeAction;
+  Result.OnClick := AOnClick;
+end;
+
+function HostOf(const ACaption: string): TRenameToolbarHost;
+begin
+  Result := nil;
+  if Assigned(GHosts) then
+    GHosts.TryGetValue(LowerCase(ACaption), Result);
+end;
 
 procedure Trace(const AWhat: string);
 begin
@@ -213,7 +278,7 @@ begin
   begin
     Trace('the IDE destroyed the toolbar''s form');
     FToolbar := nil;
-    FRevert := nil;
+    FButtons := nil;
     if Assigned(FTimer) then
       FTimer.Enabled := False;
   end;
@@ -221,10 +286,14 @@ begin
     FTabs := nil;
 end;
 
-procedure TRenameToolbarHost.RevertClick(ASender: TObject);
+procedure TRenameToolbarHost.ButtonClick(ASender: TObject);
+var
+  LIdx: Integer;
 begin
-  if Assigned(FOnRevert) then
-    FOnRevert();
+  LIdx := TComponent(ASender).Tag;
+  if (LIdx >= 0) and (LIdx < Length(FHandlers)) and
+     Assigned(FHandlers[LIdx]) then
+    FHandlers[LIdx]();
 end;
 
 { Shown while our tab is the selected one. The tab set's Tabs are the group
@@ -265,27 +334,47 @@ begin
   end;
 end;
 
-procedure HideRenameToolbar;
+procedure HideResultToolbar(const AGroupCaption: string);
+var
+  LHost: TRenameToolbarHost;
 begin
-  if not Assigned(GHost) then
+  LHost := HostOf(AGroupCaption);
+  if not Assigned(LHost) then
     Exit;
+  GHosts.Remove(LowerCase(AGroupCaption));
   try
-    if Assigned(GHost.FTimer) then
-      GHost.FTimer.Enabled := False;
+    if Assigned(LHost.FTimer) then
+      LHost.FTimer.Enabled := False;
     // Freeing the toolbar sends the notification that nils the fields, so
     // the order here is deliberate: the toolbar first, the host after.
-    GHost.FToolbar.Free;
+    LHost.FToolbar.Free;
   except
     // Teardown on a control the IDE may already have destroyed.
   end;
-  FreeAndNil(GHost);
+  LHost.Free;
+end;
+
+procedure SetResultToolbarEnabled(const AGroupCaption: string;
+  AIndex: Integer; AEnabled: Boolean);
+var
+  LHost: TRenameToolbarHost;
+begin
+  LHost := HostOf(AGroupCaption);
+  if not Assigned(LHost) or not Assigned(LHost.FToolbar) or (AIndex < 0) or
+     (AIndex >= Length(LHost.FButtons)) then
+    Exit;
+  LHost.FButtons[AIndex].Enabled := AEnabled;
+end;
+
+procedure HideRenameToolbar;
+begin
+  if GRenameCaption <> '' then
+    HideResultToolbar(GRenameCaption);
 end;
 
 procedure SetRenameToolbarEnabled(AEnabled: Boolean);
 begin
-  if not Assigned(GHost) or not Assigned(GHost.FToolbar) then
-    Exit;
-  GHost.FRevert.Enabled := AEnabled;
+  SetResultToolbarEnabled(GRenameCaption, 0, AEnabled);
 end;
 
 { The image index of one of the IDE's OWN actions - FileSaveCommand's floppy,
@@ -322,21 +411,23 @@ begin
     [ACaption, Result.ImageIndex, AIdeAction]));
 end;
 
-procedure BuildRenameToolbar(const AGroupCaption: string;
-  const AOnRevert: TProc);
+procedure BuildResultToolbar(const AGroupCaption: string;
+  const AButtons: array of TResultToolButton);
 var
   LForm: TCustomForm;
   LTabs: TTabSet;
   LTheming: IOTAIDEThemingServices;
   LServices: INTAServices;
+  LHost: TRenameToolbarHost;
+  LButton: TToolButton;
 begin
-  HideRenameToolbar;
+  HideResultToolbar(AGroupCaption);
   LForm := FindMessageForm;
   if not Assigned(LForm) then
   begin
     Trace('no ' + cMessageFormClass + ' among the forms - no toolbar');
-    LogDiagnostic('rename: the Messages window was not found, so there is ' +
-      'no Revert toolbar - see the pastree-lsp.log');
+    LogDiagnostic(AGroupCaption + ': the Messages window was not found, so ' +
+      'there is no toolbar - see the pastree-lsp.log');
     Exit;
   end;
   LTabs := FindTabSet(LForm);
@@ -349,7 +440,7 @@ begin
   if not Assigned(LTabs) then
   begin
     Trace('no TTabSet in the form - no toolbar');
-    LogDiagnostic('rename: no place for the Revert toolbar in the ' +
+    LogDiagnostic(AGroupCaption + ': no place for the toolbar in the ' +
       'Messages window - its control tree is in the pastree-lsp.log');
     Exit;
   end;
@@ -357,78 +448,209 @@ begin
     [LTabs.ClassName, LTabs.Name, LTabs.Tabs.Count, LTabs.TabIndex,
      LTabs.Tabs.CommaText]));
 
-  GHost := TRenameToolbarHost.Create(nil);
-  GHost.FCaption := AGroupCaption;
-  GHost.FOnRevert := AOnRevert;
-  GHost.FTabs := LTabs;
-  LTabs.FreeNotification(GHost);
-  GHost.FToolbar := TToolBar.Create(GHost);
-  GHost.FToolbar.FreeNotification(GHost);
-  GHost.FToolbar.Visible := False;
+  LHost := TRenameToolbarHost.Create(nil);
+  if not Assigned(GHosts) then
+    GHosts := TDictionary<string, TRenameToolbarHost>.Create;
+  GHosts.AddOrSetValue(LowerCase(AGroupCaption), LHost);
+  LHost.FCaption := AGroupCaption;
+  LHost.FTabs := LTabs;
+  LTabs.FreeNotification(LHost);
+  LHost.FToolbar := TToolBar.Create(LHost);
+  LHost.FToolbar.FreeNotification(LHost);
+  LHost.FToolbar.Visible := False;
   // PARENT FIRST, EVERYTHING ELSE AFTER. A TToolBar talks to its window
   // handle for its buttons, its image list and its List style, and it has no
   // handle until it has a parent window: each of those set before this line
   // raised EInvalidOperation "has no parent window" in a live run
   // (2026-09-11, twice - once for the buttons, once for Images).
-  GHost.FToolbar.Parent := LForm;
+  LHost.FToolbar.Parent := LForm;
   Trace('toolbar parented');
-  GHost.FToolbar.ShowCaptions := True;
+  LHost.FToolbar.ShowCaptions := True;
   // Caption beside the glyph rather than under it: one row, like the IDE's
   // own toolbars with captions on.
-  GHost.FToolbar.List := True;
+  LHost.FToolbar.List := True;
   if Supports(BorlandIDEServices, INTAServices, LServices) then
-    GHost.FToolbar.Images := LServices.ImageList;
-  GHost.FToolbar.AutoSize := True;
-  GHost.FToolbar.EdgeBorders := [ebBottom];
-  GHost.FToolbar.AlignWithMargins := True;   // breathing room, like the IDE's own
-  GHost.FToolbar.Align := alTop;
+    LHost.FToolbar.Images := LServices.ImageList;
+  LHost.FToolbar.AutoSize := True;
+  LHost.FToolbar.EdgeBorders := [ebBottom];
+  LHost.FToolbar.AlignWithMargins := True;   // breathing room, like the IDE's own
+  LHost.FToolbar.Align := alTop;
   // Under the IDE's own top panel (its search box, hidden by default):
   // Top := 0 among alTop siblings puts this one above, so ordered after it.
-  GHost.FToolbar.Top := LForm.ClientHeight;
-  GHost.FRevert := AddButton(GHost.FToolbar, 'Revert', 'EditUndoCommand',
-    GHost.RevertClick);
+  LHost.FToolbar.Top := LForm.ClientHeight;
+  // Added in reverse: a TToolBar lays a new button out in FRONT of the ones
+  // already there, so the last added is the first shown.
+  SetLength(LHost.FButtons, Length(AButtons));
+  SetLength(LHost.FHandlers, Length(AButtons));
+  for var LIdx := High(AButtons) downto 0 do
+  begin
+    LButton := AddButton(LHost.FToolbar, AButtons[LIdx].Caption,
+      AButtons[LIdx].IdeAction, LHost.ButtonClick);
+    LButton.Tag := LIdx;
+    LHost.FButtons[LIdx] := LButton;
+    LHost.FHandlers[LIdx] := AButtons[LIdx].OnClick;
+  end;
   Trace('toolbar buttons added');
   if Supports(BorlandIDEServices, IOTAIDEThemingServices, LTheming) and
      LTheming.IDEThemingEnabled then
     try
-      LTheming.ApplyTheme(GHost.FToolbar);
+      LTheming.ApplyTheme(LHost.FToolbar);
     except
-      // Colours. An unthemed toolbar is a blemish; a rename that fails to
+      // Colours. An unthemed toolbar is a blemish; a result that fails to
       // report because of one would be a bug.
     end;
   Trace('toolbar themed');
-  GHost.SyncVisible;
-  GHost.FTimer := TTimer.Create(GHost);
-  GHost.FTimer.Interval := cPollMs;
-  GHost.FTimer.OnTimer := GHost.Poll;
-  GHost.FTimer.Enabled := True;
+  LHost.SyncVisible;
+  LHost.FTimer := TTimer.Create(LHost);
+  LHost.FTimer.Interval := cPollMs;
+  LHost.FTimer.OnTimer := LHost.Poll;
+  LHost.FTimer.Enabled := True;
 end;
 
 { GUARDED, because everything above touches controls the IDE owns and an
-  exception there must not take the rename's report and its document sync
-  down with it - which is exactly what happened on 2026-09-11: the toolbar
-  raised after finding its tab set, the buffers were changed, and the server
-  was never told. The toolbar is decoration on the result; the result is not
-  decoration on the toolbar. }
-procedure ShowRenameToolbar(const AGroupCaption: string;
-  const AOnRevert: TProc);
+  exception there must not take the result's report and its document sync
+  down with it - which is exactly what happened to a rename on 2026-09-11:
+  the toolbar raised after finding its tab set, the buffers were changed, and
+  the server was never told. The toolbar is decoration on the result; the
+  result is not decoration on the toolbar. }
+procedure ShowResultToolbar(const AGroupCaption: string;
+  const AButtons: array of TResultToolButton);
 begin
   try
-    BuildRenameToolbar(AGroupCaption, AOnRevert);
+    BuildResultToolbar(AGroupCaption, AButtons);
   except
     on E: Exception do
     begin
       Trace(Format('FAILED with %s: %s', [E.ClassName, E.Message]));
-      LogDiagnostic(Format('rename: the Revert toolbar could not be ' +
-        'created (%s: %s) - see the pastree-lsp.log', [E.ClassName, E.Message]));
-      HideRenameToolbar;
+      LogDiagnostic(Format('%s: the toolbar could not be created (%s: %s) - ' +
+        'see the pastree-lsp.log', [AGroupCaption, E.ClassName, E.Message]));
+      HideResultToolbar(AGroupCaption);
     end;
   end;
+end;
+
+{ THE FOCUSED ROW. The ToolsAPI says nothing about the selection of a
+  message group (INTAMessageNotifier hands the focused row to a right-click
+  menu only), and a toolbar button needs it. The rows are a VirtualTrees
+  tree of the IDE's own (TBetterHintWindowVirtualDrawTree, in vclide), one
+  per group, the shown one brought to the front - so the LAST visible tree
+  among the form's controls. The package does not link VirtualTrees; its
+  public properties are reached through RTTI by name: FocusedNode (a
+  PVirtualNode) and NodeParent[Node] (nil at the top level). A
+  TVirtualNode starts with its Index among its siblings (a Cardinal) in
+  every VirtualTrees there has been - that is the top-level position. Every
+  step that fails says so in the log and answers False: a Remove that does
+  not know the row does nothing rather than a guess. }
+
+function NodeParentOf(ATree: TObject; AProp: TRttiIndexedProperty;
+  ANode: Pointer): Pointer;
+var
+  LArg, LValue: TValue;
+  LParamType: TRttiType;
+begin
+  LParamType := AProp.ReadMethod.GetParameters[0].ParamType;
+  if Assigned(LParamType) then
+    TValue.Make(@ANode, LParamType.Handle, LArg)
+  else
+    TValue.Make(@ANode, TypeInfo(Pointer), LArg);
+  LValue := AProp.GetValue(ATree, [LArg]);
+  Result := PPointer(LValue.GetReferenceToRawData)^;
+end;
+
+function ResultFocusedRow(out AChain: TArray<Pointer>;
+  out ATopIndex: Integer): Boolean;
+var
+  LForm: TCustomForm;
+  LTree: TControl;
+  LCtx: TRttiContext;
+  LType: TRttiType;
+  LFocused: TRttiProperty;
+  LParent: TRttiIndexedProperty;
+  LValue: TValue;
+  LNode, LUp: Pointer;
+begin
+  Result := False;
+  AChain := nil;
+  ATopIndex := -1;
+  try
+    LForm := FindMessageForm;
+    if not Assigned(LForm) then
+    begin
+      Trace('focused row: no Messages window');
+      Exit;
+    end;
+    LTree := nil;
+    for var LIdx := 0 to LForm.ControlCount - 1 do
+      if LForm.Controls[LIdx].Visible and
+         ContainsText(LForm.Controls[LIdx].ClassName, 'VirtualDrawTree') then
+        LTree := LForm.Controls[LIdx];
+    if not Assigned(LTree) then
+    begin
+      Trace('focused row: no visible VirtualDrawTree in the Messages window');
+      DumpControls(LForm, 1);
+      Exit;
+    end;
+    LCtx := TRttiContext.Create;
+    LType := LCtx.GetType(LTree.ClassType);
+    LFocused := nil;
+    LParent := nil;
+    if Assigned(LType) then
+    begin
+      LFocused := LType.GetProperty('FocusedNode');
+      LParent := LType.GetIndexedProperty('NodeParent');
+    end;
+    if not Assigned(LFocused) then
+    begin
+      Trace(Format('focused row: %s "%s" has no FocusedNode in its RTTI',
+        [LTree.ClassName, LTree.Name]));
+      Exit;
+    end;
+    LValue := LFocused.GetValue(LTree);
+    LNode := PPointer(LValue.GetReferenceToRawData)^;
+    if LNode = nil then
+    begin
+      Trace(Format('focused row: nothing focused in %s', [LTree.Name]));
+      Exit;
+    end;
+    AChain := [LNode];
+    if Assigned(LParent) then
+    begin
+      LUp := NodeParentOf(LTree, LParent, LNode);
+      while LUp <> nil do
+      begin
+        LNode := LUp;
+        AChain := AChain + [LNode];
+        LUp := NodeParentOf(LTree, LParent, LNode);
+      end;
+      ATopIndex := Integer(PCardinal(LNode)^);
+    end
+    else
+      Trace('focused row: no NodeParent in the RTTI - the focused row only');
+    if AdvancedLoggingEnabled then
+      Trace(Format('focused row: %s, depth %d, top index %d',
+        [LTree.Name, Length(AChain) - 1, ATopIndex]));
+    Result := True;
+  except
+    on E: Exception do
+      Trace(Format('focused row: FAILED with %s: %s', [E.ClassName,
+        E.Message]));
+  end;
+end;
+
+procedure ShowRenameToolbar(const AGroupCaption: string;
+  const AOnRevert: TProc);
+begin
+  GRenameCaption := AGroupCaption;
+  ShowResultToolbar(AGroupCaption,
+    [ResultToolButton('Revert', 'EditUndoCommand', AOnRevert)]);
 end;
 
 initialization
 
 finalization
-  HideRenameToolbar;
+  if Assigned(GHosts) then
+    for var LCaption in GHosts.Keys.ToArray do
+      HideResultToolbar(LCaption);
+  FreeAndNil(GHosts);
 
 end.

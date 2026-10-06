@@ -41,7 +41,8 @@ uses
   PasLsp.ClassComplete,
   PasLsp.SyncPrototypes,
   PasLsp.AnnotateArgs,
-  PasLsp.UseUnit;
+  PasLsp.UseUnit,
+  PasLsp.UnusedUnits;
 
 type
   TLspCompletionEntry = record
@@ -164,6 +165,11 @@ type
     function UseUnitAt(const AFileName, AText, AUnitName: string;
       AImplementation: Boolean; const AIndent: string;
       ARightMargin: Integer): TLspUseUnitAnswer;
+    { Unused Units' Remove: the clause rewrites that take ANames out of the
+      live text's uses (PasLsp.UnusedUnits.UsesRemovalByName). }
+    function UsesRemovalAt(const AFileName, AText: string;
+      const ANames: TArray<string>; out ARefused, AMissing: TArray<string>)
+      : TArray<TLspUsesRemoval>;
   end;
 
 implementation
@@ -984,6 +990,20 @@ begin
   LTree := TPasParser.ParseFile(LPre, LDiags);
   Result := UseUnitEdit(LTree, AText, AUnitName, AImplementation, AIndent,
     ARightMargin);
+end;
+
+function TLspCompletionEngine.UsesRemovalAt(const AFileName, AText: string;
+  const ANames: TArray<string>; out ARefused, AMissing: TArray<string>)
+  : TArray<TLspUsesRemoval>;
+var
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  // As UseUnitAt: a parse error inside a clause is the clause's refusal.
+  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  Result := UsesRemovalByName(LTree, ANames, ARefused, AMissing);
 end;
 
 end.

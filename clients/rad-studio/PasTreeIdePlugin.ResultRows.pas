@@ -95,6 +95,13 @@ function NewFileHeaderRow(const AFilePath: string;
   ARefCount: Integer): IOTACustomMessage;
 
 /// <summary>
+/// A header row with the file's name alone (Unit.pas), bold in the same
+/// blue - the Unused Units tab's top level (Alex, 2026-10-06). Not
+/// navigable, like the header.
+/// </summary>
+function NewFileNameRow(const AFilePath: string): IOTACustomMessage;
+
+/// <summary>
 /// A snippet row: ALine/ACol are the navigation target (1-based). ASnippet
 /// is the RAW source line, indentation included - the row paints its own
 /// "Name.pas (line): " prefix in front of it. AMatchStart (1-based index
@@ -108,6 +115,13 @@ function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
   const ATag: string; const ATypeSpans: TArray<Integer> = nil)
   : IOTACustomMessage;
+
+/// <summary>
+/// A remark under a row - why an unused unit is kept, why it cannot be
+/// removed: ALeadIn ("kept: ") bold in the orange accent, AText italic in
+/// the panel's colour. Not navigable, like a header.
+/// </summary>
+function NewNoteRow(const ALeadIn, AText: string): IOTACustomMessage;
 
 /// <summary>
 /// The colour a Find References row marks its match with - clMaroon, or the
@@ -882,6 +896,7 @@ type
     FCount: Integer; // header only: the [N]
     FIsHeader: Boolean;
     FIsTitle: Boolean;
+    FIsNote: Boolean;  // note: FSuffix the lead-in, FText the sentence
     procedure Paint(ACanvas: TCanvas; const ARect: TRect; ADoDraw: Boolean;
       out AWidth: Integer);
   public
@@ -925,6 +940,10 @@ begin
   // What the panel hands to the clipboard and to F1.
   if FIsTitle then
     Result := FText
+  else if FIsNote then
+    Result := FSuffix + FText
+  else if FIsHeader and (FCount < 0) then
+    Result := ExtractFileName(FFilePath)
   else if FIsHeader then
     Result := Format('%s [%d]', [FFilePath, FCount])
   else
@@ -955,8 +974,8 @@ begin
   // the file for no reason (user, 2026-08-31). With navigation refused,
   // double-click on a header is left to the panel's own tree behavior -
   // expand/collapse - and F8 walks straight past to the next real site.
-  DefaultHandling := not (FIsHeader or FIsTitle);
-  Result := (FFilePath <> '') and not (FIsHeader or FIsTitle);
+  DefaultHandling := not (FIsHeader or FIsTitle or FIsNote);
+  Result := (FFilePath <> '') and not (FIsHeader or FIsTitle or FIsNote);
 end;
 
 { A row in a FORM FILE is not the IDE's jump: on a form that is not loaded
@@ -967,7 +986,7 @@ end;
   does not. }
 procedure TResultRow.TrackSource(var DefaultHandling: Boolean);
 begin
-  DefaultHandling := not (FIsHeader or FIsTitle);
+  DefaultHandling := not (FIsHeader or FIsTitle or FIsNote);
   if DefaultHandling and
      ShowFormFileSite(FFilePath, FLine, FCol) then
     DefaultHandling := False;
@@ -975,7 +994,7 @@ end;
 
 procedure TResultRow.GotoSource(var DefaultHandling: Boolean);
 begin
-  DefaultHandling := not (FIsHeader or FIsTitle);
+  DefaultHandling := not (FIsHeader or FIsTitle or FIsNote);
   if DefaultHandling and
      ShowFormFileSite(FFilePath, FLine, FCol) then
     DefaultHandling := False;
@@ -1155,6 +1174,16 @@ begin
     else
       Put(FText, LBlue, LBaseStyle + [TFontStyle.fsBold]);
   end
+  else if FIsNote then
+  begin
+    // A remark under a row: the lead-in bold in the line-number orange, the
+    // sentence italic in the panel's own colour - set apart from the code
+    // rows without competing with their match marker.
+    Put(FSuffix, LOrange, LBaseStyle + [TFontStyle.fsBold]);
+    Put(FText, LBaseColor, LBaseStyle + [TFontStyle.fsItalic]);
+  end
+  else if FIsHeader and (FCount < 0) then
+    Put(ExtractFileName(FFilePath), LBlue, LBaseStyle + [TFontStyle.fsBold])
   else if FIsHeader then
   begin
     // The whole header bold: path and brackets in the same blue accent the
@@ -1233,6 +1262,12 @@ begin
   Result := LRow;
 end;
 
+function NewFileNameRow(const AFilePath: string): IOTACustomMessage;
+begin
+  // A header whose count is -1 paints the name alone.
+  Result := NewFileHeaderRow(AFilePath, -1);
+end;
+
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
   const ATag: string; const ATypeSpans: TArray<Integer>): IOTACustomMessage;
@@ -1254,6 +1289,17 @@ begin
   if ATag <> '' then
     LRow.FSuffix := '  (' + ATag + ')';
   LRow.FIsHeader := False;
+  Result := LRow;
+end;
+
+function NewNoteRow(const ALeadIn, AText: string): IOTACustomMessage;
+var
+  LRow: TResultRow;
+begin
+  LRow := TResultRow.Create;
+  LRow.FSuffix := ALeadIn;
+  LRow.FText := AText;
+  LRow.FIsNote := True;
   Result := LRow;
 end;
 

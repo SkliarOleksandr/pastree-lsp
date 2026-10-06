@@ -266,7 +266,11 @@ const
   /// it: a .dproj listing a file that is gone (the client group's server
   /// lists one and builds) is pinned from FProjectFiles, and the program and
   /// every importer of the unit showed F1027.
-  cMinPasTreeVersion = '0.91.1';
+  /// 0.93.1 (2026-10-06): PasTree.Sema.Lint's loHideGlobalInit, which the
+  /// Unused Units requests pass. An older library does not compile against
+  /// them; the floor records that the rule they rely on (a class method
+  /// called through its type counts as reaching outside) is 0.93.1's.
+  cMinPasTreeVersion = '0.93.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

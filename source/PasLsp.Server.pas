@@ -74,6 +74,8 @@ uses
   PasLsp.SyncPrototypes,
   PasLsp.AnnotateArgs,
   PasLsp.UseUnit,
+  PasLsp.UnusedUnits,
+  PasTree.Sema.Lint,
   PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
@@ -391,6 +393,14 @@ type
     function LiveTextOf(const APath: string): string;
     function HandleUnits(const AMsg: TLspIncoming): string;
     function HandleUseUnit(const AMsg: TLspIncoming): string;
+    function HandleUnusedUses(const AMsg: TLspIncoming): string;
+    function HandleUnreferencedUnits(const AMsg: TLspIncoming): string;
+    function ProjectUnitMids: TArray<Integer>;
+    function UsesEntryNode(AMid: Integer; const AUnitName: string;
+      ALine, ACol: Integer): Integer;
+    procedure RemovalRefusals(const AByModel: TDictionary<Integer,
+      TArray<Integer>>; ARefused: TDictionary<Int64, string>);
+    function HandleUsesRemoval(const AMsg: TLspIncoming): string;
     function HandleOnTypeFormatting(const AMsg: TLspIncoming): string;
     function HandlePrepareRename(const AMsg: TLspIncoming): string;
     function HandleRename(const AMsg: TLspIncoming): string;
@@ -5692,6 +5702,385 @@ begin
     [LEdits, JsonQuote(LAnswer.Section), JsonQuote(LAnswer.Provider)]));
 end;
 
+{ -------- unused units -------- }
+
+{ The units of the project the "in the project" checks look at: every model
+  outside LibraryPaths that is a source (not a .dcu) - what the demo's Unused
+  Units in the Project takes. }
+function TLspServer.ProjectUnitMids: TArray<Integer>;
+var
+  LPath: string;
+begin
+  Result := nil;
+  if FNav = nil then
+    Exit;
+  for var LMid := 0 to FProject.ModelCount - 1 do
+  begin
+    LPath := FProject.ModelFile(LMid);
+    if TPasSourceManager.IsDcuPath(LPath) or FNav.IsUnderLibraryPath(LPath)
+    then
+      Continue;
+    Result := Result + [LMid];
+  end;
+end;
+
+// Where a node's first visible token starts in the main file, 1-based;
+// False for a node in an include or out of range.
+function NodeMainPos(AModel: TPasSemaModel; ANode: Integer;
+  out ALine, ACol: Integer): Boolean;
+var
+  LVisIdx: Integer;
+  LVis: TPasVisibleToken;
+begin
+  Result := False;
+  ALine := 0;
+  ACol := 0;
+  LVisIdx := AModel.Tree.NodeLeftmostVis(ANode);
+  if (LVisIdx < 0) or (LVisIdx > High(AModel.Tree.Source.Visible)) then
+    Exit;
+  LVis := AModel.Tree.Source.Visible[LVisIdx];
+  if LVis.FileId <> 0 then
+    Exit;
+  AModel.Tree.Source.Files[0].OffsetToLineCol(
+    AModel.Tree.Source.Files[0].Tokens[LVis.TokenIndex].Start, ALine, ACol);
+  Result := True;
+end;
+
+{ The name node of model AMid's `uses` entry for AUnitName that starts at
+  ALine:ACol - the row PasTree.Sema.Lint answered with, back to the tree an
+  edit is computed on. NIL_NODE when there is none. }
+function TLspServer.UsesEntryNode(AMid: Integer; const AUnitName: string;
+  ALine, ACol: Integer): Integer;
+var
+  LModel: TPasSemaModel;
+  LLine, LCol: Integer;
+begin
+  Result := NIL_NODE;
+  if (AMid < 0) or (AMid >= FProject.ModelCount) then
+    Exit;
+  LModel := FProject.Model(AMid);
+  for var LU in LModel.UsesList do
+    if (LU.NameNode <> NIL_NODE) and SameText(LU.NameFull, AUnitName) and
+       NodeMainPos(LModel, LU.NameNode, LLine, LCol) and (LLine = ALine) and
+       (LCol = ACol) then
+      Exit(LU.NameNode);
+end;
+
+{ Why an entry AByModel names (model -> name nodes) could not be removed by
+  an edit, into ARefused (model shl 32 or name node -> why) - the edits
+  themselves are computed when the client removes (pastree/usesRemoval), on
+  the text as it is then. }
+procedure TLspServer.RemovalRefusals(const AByModel: TDictionary<Integer,
+  TArray<Integer>>; ARefused: TDictionary<Int64, string>);
+var
+  LRefused: TArray<TLspUsesRefusal>;
+begin
+  for var LPair in AByModel do
+  begin
+    if not FProject.EnsureHydrated(LPair.Key) then
+      Continue;
+    UsesRemovalEdits(FProject.Model(LPair.Key).Tree, LPair.Value, LRefused);
+    for var LR in LRefused do
+      ARefused.AddOrSetValue((Int64(LPair.Key) shl 32) or
+        Cardinal(LR.NameNode), LR.Reason);
+  end;
+end;
+
+function StringsJson(const AItems: TArray<string>): string;
+begin
+  Result := '';
+  for var LS in AItems do
+  begin
+    if Result <> '' then
+      Result := Result + ',';
+    Result := Result + JsonQuote(LS);
+  end;
+  Result := '[' + Result + ']';
+end;
+
+// AObjectJson with the members AMembers (',"a":1,...') appended.
+function WithMembers(const AObjectJson, AMembers: string): string;
+begin
+  Result := Copy(AObjectJson, 1, Length(AObjectJson) - 1) + AMembers + '}';
+end;
+
+{ pastree/unusedUses - OURS. The `uses` entries a unit does not need
+  (PasTree.Sema.Lint.FindUnusedUses): `scope` "unit" checks the document,
+  "project" every unit of the analysis outside LibraryPaths. Rows are
+  Locations of the entry's name with typeSpans, `unitName`, `section`
+  (interface / implementation), `doubts` (why removing it may be wrong -
+  such a row is shown, never removed) and `refused` (why no edit removes it,
+  '' when one does). The edits come later, from pastree/usesRemoval.
+
+  loHideGlobalInit, always: an entry naming a unit whose initialization
+  reaches outside itself, or whose removal would take one out of the
+  program, is not offered at all (Alex, 2026-10-05) - it is in `uses` for what it
+  registers. }
+function TLspServer.HandleUnusedUses(const AMsg: TLspIncoming): string;
+var
+  LPath, LScope, LReason: string;
+  LMids, LNodes: TArray<Integer>;
+  LRows: TArray<TPasUnusedUse>;
+  LMid, LNode: Integer;
+  LByModel: TDictionary<Integer, TArray<Integer>>;
+  LRefused: TDictionary<Int64, string>;
+  LRowMid, LRowNode: TArray<Integer>;
+  LSB: TStringBuilder;
+  LStart: UInt64;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  LScope := 'unit';
+  if AMsg.Params <> nil then
+    LScope := AMsg.Params.GetValue<string>('scope', 'unit');
+  if (LScope <> 'unit') and (LScope <> 'project') then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'unusedUses: scope must be "unit" or "project"'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
+  LStart := GetTickCount64;
+  if LScope = 'unit' then
+  begin
+    LMid := FNav.ModelIdOf(LPath);
+    if LMid < 0 then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
+        TPath.GetFileName(LPath) + ' is not part of the analysis'));
+    LMids := [LMid];
+  end
+  else
+    LMids := ProjectUnitMids;
+  LRows := FindUnusedUses(FNav, LMids, [loHideGlobalInit]);
+
+  LByModel := TDictionary<Integer, TArray<Integer>>.Create;
+  LRefused := TDictionary<Int64, string>.Create;
+  LSB := TStringBuilder.Create;
+  try
+    SetLength(LRowMid, Length(LRows));
+    SetLength(LRowNode, Length(LRows));
+    for var LIdx := 0 to High(LRows) do
+    begin
+      LMid := FNav.ModelIdOf(LRows[LIdx].Hit.FilePath);
+      LNode := UsesEntryNode(LMid, LRows[LIdx].UnitName, LRows[LIdx].Hit.Line,
+        LRows[LIdx].Hit.Col);
+      LRowMid[LIdx] := LMid;
+      LRowNode[LIdx] := LNode;
+      if (LRows[LIdx].Doubts <> nil) or (LNode = NIL_NODE) then
+        Continue;
+      if not LByModel.TryGetValue(LMid, LNodes) then
+        LNodes := nil;
+      LByModel.AddOrSetValue(LMid, LNodes + [LNode]);
+    end;
+    RemovalRefusals(LByModel, LRefused);
+    for var LIdx := 0 to High(LRows) do
+    begin
+      LReason := '';
+      if LRows[LIdx].Doubts = nil then
+        if LRowNode[LIdx] = NIL_NODE then
+          LReason := 'the entry was not found in the tree'
+        else
+          LRefused.TryGetValue((Int64(LRowMid[LIdx]) shl 32) or
+            Cardinal(LRowNode[LIdx]), LReason);
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(WithMembers(WithTypeSpans(HitLocationJson(LRows[LIdx].Hit),
+        LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line)),
+        Format(',"unitName":%s,"section":%s,"doubts":%s,"refused":%s',
+        [JsonQuote(LRows[LIdx].UnitName),
+         JsonQuote(IfThen(LRows[LIdx].InInterface, 'interface',
+           'implementation')), StringsJson(LRows[LIdx].Doubts),
+         JsonQuote(LReason)])));
+    end;
+    LMid := 0;
+    for var LRow in LRows do
+      if LRow.Doubts <> nil then
+        Inc(LMid);
+    Log(Format('pastree/unusedUses %s: %d units checked -> %d entries, %d ' +
+      'with a doubt, in %d ms', [LScope, Length(LMids), Length(LRows), LMid,
+      GetTickCount64 - LStart]));
+    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']}');
+  finally
+    LSB.Free;
+    LRefused.Free;
+    LByModel.Free;
+  end;
+end;
+
+{ pastree/unreferencedUnits - OURS. The project units nobody uses
+  (PasTree.Sema.Lint.FindUnreferencedUnits, with loHideGlobalInit as
+  pastree/unusedUses): a row is the unit's name in its own header, with
+  `unitName`, `doubts` and `listedBy` - every `uses` entry naming it, a
+  Location each with `note` (PasTree's words: "no name of it used",
+  "itself unreferenced") and `program` (true for the .dpr/.dpk, whose entry
+  the client removes by taking the unit out of the project). The client
+  removes the other entries through pastree/usesRemoval, so the project
+  still compiles once the unit is out of it. }
+function TLspServer.HandleUnreferencedUnits(const AMsg: TLspIncoming): string;
+var
+  LPath, LNote, LFileName, LLister: string;
+  LMids: TArray<Integer>;
+  LRows: TArray<TPasUnreferencedUnit>;
+  LRowMid: Integer;
+  LModel: TPasSemaModel;
+  LHit: TPasRefHit;
+  LIsProgram: Boolean;
+  LSB, LListed: TStringBuilder;
+  LStart: UInt64;
+  LLine, LCol: Integer;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
+  LStart := GetTickCount64;
+  LMids := ProjectUnitMids;
+  LRows := FindUnreferencedUnits(FNav, LMids, [loHideGlobalInit]);
+
+  LSB := TStringBuilder.Create;
+  LListed := TStringBuilder.Create;
+  try
+    for var LIdx := 0 to High(LRows) do
+    begin
+      LListed.Clear;
+      LRowMid := FNav.ModelIdOf(LRows[LIdx].Hit.FilePath);
+      if LRowMid >= 0 then
+        for var LM := 0 to FProject.ModelCount - 1 do
+        begin
+          if LM = LRowMid then
+            Continue;
+          LModel := FProject.Model(LM);
+          for var LU in LModel.UsesList do
+          begin
+            if (LU.UnitId <> LRowMid) or (LU.NameNode = NIL_NODE) or
+               not NodeMainPos(LModel, LU.NameNode, LLine, LCol) then
+              Continue;
+            LFileName := FProject.ModelFile(LM);
+            LIsProgram := MatchText(ExtractFileExt(LFileName),
+              ['.dpr', '.dpk']);
+            // PasTree's note for this lister, matched by its file name.
+            LNote := '';
+            for LLister in LRows[LIdx].ListedBy do
+              if StartsText(ExtractFileName(LFileName) + ' (', LLister) then
+              begin
+                LNote := Copy(LLister, Length(ExtractFileName(LFileName)) + 3,
+                  MaxInt);
+                if EndsText(')', LNote) then
+                  SetLength(LNote, Length(LNote) - 1);
+              end;
+            LHit := Default(TPasRefHit);
+            LHit.FilePath := LFileName;
+            LHit.Line := LLine;
+            LHit.Col := LCol;
+            LHit.HiFrom := LCol - 1;
+            LHit.HiTo := LHit.HiFrom + Length(LU.NameFull);
+            if LListed.Length > 0 then
+              LListed.Append(',');
+            LListed.Append(WithMembers(WithTypeSpans(HitLocationJson(LHit),
+              LineTypeSpansJson(LFileName, LLine)),
+              Format(',"note":%s,"program":%s', [JsonQuote(LNote),
+              IfThen(LIsProgram, 'true', 'false')])));
+            Break;   // listed twice (E2004): one row
+          end;
+        end;
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.Append(WithMembers(WithTypeSpans(HitLocationJson(LRows[LIdx].Hit),
+        LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line)),
+        Format(',"unitName":%s,"doubts":%s,"listedBy":[%s]',
+        [JsonQuote(LRows[LIdx].UnitName), StringsJson(LRows[LIdx].Doubts),
+         LListed.ToString])));
+    end;
+    Log(Format('pastree/unreferencedUnits: %d units checked -> %d nobody ' +
+      'uses, in %d ms', [Length(LMids), Length(LRows),
+      GetTickCount64 - LStart]));
+    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']}');
+  finally
+    LListed.Free;
+    LSB.Free;
+  end;
+end;
+
+{ pastree/usesRemoval - OURS. Unused Units' Remove: `files`, each a `uri`
+  and the `names` to take out of its `uses` clauses, answered with the
+  clause rewrites (uri, range, oldText, newText - PasLsp.UnusedUnits) on
+  the text as it is NOW - the open document, or the file on disk. Parse
+  only, no analysis to wait for: one Remove after another rewrites the same
+  clause again, and an edit computed with the search would no longer match
+  the clause the first one left. `refused` (why an entry stays, "File:
+  Name: why") and `missing` ("File: Name", a name no clause holds any
+  more) are for the client to say. }
+function TLspServer.HandleUsesRemoval(const AMsg: TLspIncoming): string;
+var
+  LFiles, LNames: TJSONArray;
+  LPath, LText: string;
+  LWanted, LRefused, LMissing, LAllRefused, LAllMissing: TArray<string>;
+  LEdits: TArray<TLspUsesRemoval>;
+  LLine, LChar, LEndLine, LEndChar, LCount: Integer;
+  LSB: TStringBuilder;
+begin
+  if (AMsg.Params = nil) or
+     not AMsg.Params.TryGetValue<TJSONArray>('files', LFiles) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'usesRemoval: files required'));
+  if FCompletion = nil then
+    FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
+      FDefines);
+  SyncCompletionOverlays;
+  LAllRefused := nil;
+  LAllMissing := nil;
+  LCount := 0;
+  LSB := TStringBuilder.Create;
+  try
+    for var LFile in LFiles do
+    begin
+      LPath := UriToPath(LFile.GetValue<string>('uri', ''));
+      LWanted := nil;
+      if LFile.TryGetValue<TJSONArray>('names', LNames) then
+        for var LName in LNames do
+          LWanted := LWanted + [LName.Value];
+      if (LPath = '') or (LWanted = nil) then
+        Continue;
+      LText := LiveTextOf(LPath);
+      if LText = '' then
+      begin
+        LAllRefused := LAllRefused + [ExtractFileName(LPath) +
+          ': the file could not be read'];
+        Continue;
+      end;
+      LEdits := FCompletion.UsesRemovalAt(LPath, LText, LWanted, LRefused,
+        LMissing);
+      for var LS in LRefused do
+        LAllRefused := LAllRefused + [ExtractFileName(LPath) + ': ' + LS];
+      for var LS in LMissing do
+        LAllMissing := LAllMissing + [ExtractFileName(LPath) + ': ' + LS];
+      for var LE in LEdits do
+      begin
+        PasTreeToLsp(LE.Line, LE.Col, LLine, LChar);
+        PasTreeToLsp(LE.EndLine, LE.EndCol, LEndLine, LEndChar);
+        if LSB.Length > 0 then
+          LSB.Append(',');
+        LSB.Append(Format('{"uri":%s,"range":{"start":{"line":%d,' +
+          '"character":%d},"end":{"line":%d,"character":%d}},' +
+          '"oldText":%s,"newText":%s}', [JsonQuote(PathToUri(LPath)), LLine,
+          LChar, LEndLine, LEndChar, JsonQuote(LE.OldText),
+          JsonQuote(LE.NewText)]));
+        Inc(LCount);
+      end;
+    end;
+    Log(Format('pastree/usesRemoval: %d file(s) -> %d edit(s), %d refused, ' +
+      '%d missing', [LFiles.Count, LCount, Length(LAllRefused),
+      Length(LAllMissing)]));
+    for var LS in LAllRefused do
+      Log('pastree/usesRemoval: refused ' + LS);
+    Result := BuildResponse(AMsg.IdJson, '{"edits":[' + LSB.ToString +
+      '],"refused":' + StringsJson(LAllRefused) + ',"missing":' +
+      StringsJson(LAllMissing) + '}');
+  finally
+    LSB.Free;
+  end;
+end;
+
 function TLspServer.HandleDocumentSymbol(const AMsg: TLspIncoming): string;
 var
   LPath, LItems, LParts: string;
@@ -6852,6 +7241,12 @@ begin
         Exit(HandleAnnotateArgs(LMsg));
       if LMsg.Method = 'pastree/units' then
         Exit(HandleUnits(LMsg));
+      if LMsg.Method = 'pastree/unusedUses' then
+        Exit(HandleUnusedUses(LMsg));
+      if LMsg.Method = 'pastree/unreferencedUnits' then
+        Exit(HandleUnreferencedUnits(LMsg));
+      if LMsg.Method = 'pastree/usesRemoval' then
+        Exit(HandleUsesRemoval(LMsg));
       if LMsg.Method = 'pastree/useUnit' then
         Exit(HandleUseUnit(LMsg));
       if LMsg.Method = 'textDocument/onTypeFormatting' then

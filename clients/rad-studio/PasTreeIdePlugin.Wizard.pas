@@ -70,6 +70,7 @@ uses
   Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
   PasTreeIdePlugin.FindDefines,
+  PasTreeIdePlugin.UnusedUnits,
   PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
@@ -117,7 +118,10 @@ type
     True for them, there being no findAllAt gate to ask. }
   TFindAllItem = (faiReferences, faiOverrides, faiImplementations,
     faiDescendants, faiAssignments, faiCreations, faiDestructions,
-    faiDefines, faiDefinesAtCursor);
+    faiDefines, faiDefinesAtCursor,
+    // PasTree 0.93.0's unused-units checks - PasTreeIdePlugin.UnusedUnits;
+    // project questions like the define inventories, never greyed.
+    faiUnusedUnits, faiProjectUnusedUnits, faiUnreferencedUnits);
 
   TMenuManager = class
   private
@@ -290,13 +294,15 @@ const
   cItemName: array[TFindAllItem] of string =
     ('References', 'Overrides', 'Implementations', 'Descendants',
      'Assignments', 'Creations', 'Destructions',
-     'Defines', 'DefinesAtCursor');
+     'Defines', 'DefinesAtCursor',
+     'UnusedUnits', 'ProjectUnusedUnits', 'UnreferencedUnits');
   // What the menu actually shows - "Defines at cursor" reads as PasTree's
   // own demo has it, a space its Name/Category may not carry.
   cItemCaption: array[TFindAllItem] of string =
     ('References', 'Overrides', 'Implementations', 'Descendants',
      'Assignments', 'Creations', 'Destructions',
-     'Defines', 'Defines at cursor');
+     'Defines', 'Defines at cursor',
+     'Unused Units', 'Unused Units in the Project', 'Units Nobody Uses');
 var
   LAction: TAction;
   LItem: TFindAllItem;
@@ -327,12 +333,16 @@ begin
       OnFindAllItemUpdate leaves it alone: ItemOf answers False for it (it
       is in no FItemActions slot), which disables it - exactly what a
       separator wants to be. }
-    if LItem = faiDefines then
+    if LItem in [faiDefines, faiUnusedUnits] then
     begin
+      // One more in front of the unused-units checks: a third family, as
+      // the demo's menu groups them. Names and categories must differ.
       LAction := TAction.Create(FActionList);
-      LAction.Name := 'PasTreeFindAllSeparator';
+      LAction.Name := 'PasTreeFindAllSeparator' +
+        IfThen(LItem = faiUnusedUnits, '2', '');
       LAction.Caption := '-';
-      LAction.Category := cFindAllCategory + '.Separator';
+      LAction.Category := cFindAllCategory + '.Separator' +
+        IfThen(LItem = faiUnusedUnits, '2', '');
       LAction.DisableIfNoHandler := False;
       LAction.OnUpdate := OnFindAllItemUpdate;
       LAction.Enabled := False;
@@ -555,6 +565,8 @@ begin
     // for them and they are always offered, exactly as PasTree's own demo
     // greys nothing on these two.
     faiDefines, faiDefinesAtCursor: Result := True;
+    faiUnusedUnits, faiProjectUnusedUnits, faiUnreferencedUnits:
+      Result := True;
   else
     Result := True;
   end;
@@ -637,6 +649,12 @@ begin
       faiDestructions:    ExecuteFindAll(facDestructions, FEditorServices.TopView);
       faiDefines:         ExecuteFindDefines(FEditorServices.TopView);
       faiDefinesAtCursor: ExecuteDefinesAtCursor(FEditorServices.TopView);
+      faiUnusedUnits:
+        ExecuteUnusedUnits(uucUnit, FEditorServices.TopView);
+      faiProjectUnusedUnits:
+        ExecuteUnusedUnits(uucProject, FEditorServices.TopView);
+      faiUnreferencedUnits:
+        ExecuteUnusedUnits(uucNobody, FEditorServices.TopView);
     end;
   except
     on E: Exception do
@@ -776,6 +794,7 @@ begin
     CloseFindReferencesResults;
     CloseFindHierarchyResults;
     CloseFindDefinesResults;
+    CloseUnusedUnitsResults;
   end;
 end;
 
@@ -954,6 +973,7 @@ begin
   FinalizeFindReferencesMessageGroup;
   FinalizeFindHierarchyMessageGroups;
   FinalizeFindDefinesMessageGroup;
+  FinalizeUnusedUnits;
   // Last of the teardowns and the least forgiving one: this stops the server
   // and joins the transport's reader thread. A reader thread still running
   // inside this package's code when the BPL unloads is an immediate crash, so

@@ -517,6 +517,82 @@ type
     const AAnswer: TLspUseUnit; const AError: string);
 
   /// <summary>
+  /// One rewrite of a uses clause (pastree/usesRemoval):
+  /// [Row:Col, EndRow:EndCol) - IDE 1-based, character columns - holds
+  /// OldText now and NewText after. Both may span lines.
+  /// </summary>
+  TLspUsesEdit = record
+    FilePath: string;
+    Row, Col, EndRow, EndCol: Integer;
+    OldText, NewText: string;
+  end;
+
+  /// <summary>
+  /// An unused `uses` entry: its name at Row/Col (Len chars), the section
+  /// it is in, why removing it may be wrong (Doubts - such an entry is
+  /// shown, never removed) and why no edit removes it (Refused, '' when an
+  /// edit does).
+  /// </summary>
+  TLspUnusedEntry = record
+    FilePath: string;
+    Row, Col, Len: Integer;
+    UnitName, Section: string;
+    Doubts: TArray<string>;
+    Refused: string;
+    TypeSpans: TArray<Integer>;
+  end;
+
+  /// <summary>A `uses` entry naming a unit nobody uses. IsProgram: the
+  /// .dpr/.dpk's, which goes with the unit when it leaves the project.
+  /// </summary>
+  TLspListedBy = record
+    FilePath: string;
+    Row, Col, Len: Integer;
+    Note: string;
+    IsProgram: Boolean;
+    TypeSpans: TArray<Integer>;
+  end;
+
+  /// <summary>A project unit nobody uses: its name in its own header.</summary>
+  TLspUnreferencedEntry = record
+    FilePath: string;
+    Row, Col, Len: Integer;
+    UnitName: string;
+    Doubts: TArray<string>;
+    TypeSpans: TArray<Integer>;
+    ListedBy: TArray<TLspListedBy>;
+  end;
+
+  /// <summary>Either answer: Entries for unusedUses, Units for
+  /// unreferencedUnits. ProjectFile is the .dproj of the server that
+  /// answered.</summary>
+  TLspUnusedAnswer = record
+    ProjectFile: string;
+    Entries: TArray<TLspUnusedEntry>;
+    Units: TArray<TLspUnreferencedEntry>;
+  end;
+
+  TLspUnusedProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspUnusedAnswer; const AError: string);
+
+  /// <summary>The `uses` entries to take out of one file, by name.</summary>
+  TLspRemovalFile = record
+    FilePath: string;
+    Names: TArray<string>;
+  end;
+
+  /// <summary>pastree/usesRemoval: the clause rewrites on the text as it
+  /// is now; Refused ("File: Name: why") and Missing ("File: Name") are the
+  /// entries no edit takes out.</summary>
+  TLspUsesRemovalAnswer = record
+    Edits: TArray<TLspUsesEdit>;
+    Refused, Missing: TArray<string>;
+  end;
+
+  TLspUsesRemovalProc = reference to procedure(ASuccess: Boolean;
+    const AAnswer: TLspUsesRemovalAnswer; const AError: string);
+
+  /// <summary>
   /// One node of a document's outline (textDocument/documentSymbol), in IDE
   /// coordinates. Children are the type's members, one level deep - the
   /// same shape the server builds.
@@ -939,6 +1015,24 @@ procedure LspUseUnit(const AFileName, AUnitName: string;
   AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
 
 /// <summary>
+/// pastree/unusedUses: AScope 'unit' (AFileName's own uses) or 'project'
+/// (every unit of AFileName's project outside the library paths). Asked of
+/// the owner, after a document sync.
+/// </summary>
+procedure LspUnusedUses(const AScope, AFileName: string;
+  const AOnDone: TLspUnusedProc);
+
+/// <summary>pastree/unreferencedUnits over AFileName's project.</summary>
+procedure LspUnreferencedUnits(const AFileName: string;
+  const AOnDone: TLspUnusedProc);
+
+/// <summary>pastree/usesRemoval: the edits that take AFiles' names out
+/// of their `uses`, computed on the text after a document sync. Asked of
+/// AFileName's owner.</summary>
+procedure LspUsesRemoval(const AFileName: string;
+  const AFiles: TArray<TLspRemovalFile>; const AOnDone: TLspUsesRemovalProc);
+
+/// <summary>
 /// The .dproj of the project that would answer for AFileName - the owner,
 /// or the active project for a file no project claims. '' without a pool.
 /// What the picker names its Project tab after.
@@ -1353,6 +1447,12 @@ type
     /// <summary>pastree/useUnit - AUnitName into AFileName's uses.</summary>
     procedure UseUnit(const AFileName, AUnitName: string;
       AImplementation: Boolean; const AOnDone: TLspUseUnitProc);
+    /// <summary>pastree/unusedUses or pastree/unreferencedUnits.</summary>
+    procedure UnusedUnits(const AMethod, AScope, AFileName: string;
+      const AOnDone: TLspUnusedProc);
+    /// <summary>pastree/usesRemoval.</summary>
+    procedure UsesRemoval(const AFiles: TArray<TLspRemovalFile>;
+      const AOnDone: TLspUsesRemovalProc);
     /// <summary>pastree/outlineTarget for a project row this server listed.</summary>
     procedure OutlineTarget(const ARow: TLspOutlineRow;
       const AOnDone: TLspHitsProc);
@@ -4099,6 +4199,198 @@ begin
     end);
 end;
 
+{ A Location object's file, start (IDE 1-based) and width - the rows of
+  pastree/unusedUses and unreferencedUnits are names on one line. }
+function ReadUnusedLocation(AObj: TJSONObject; out APath: string;
+  out ARow, ACol, ALen: Integer): Boolean;
+var
+  LLine, LChar, LEndChar: Integer;
+begin
+  APath := LspUriToPath(AObj.GetValue<string>('uri', ''));
+  LLine := AObj.GetValue<Integer>('range.start.line', -1);
+  LChar := AObj.GetValue<Integer>('range.start.character', -1);
+  LEndChar := AObj.GetValue<Integer>('range.end.character', LChar);
+  Result := (APath <> '') and (LLine >= 0) and (LChar >= 0);
+  if not Result then
+    Exit;
+  LspToIde(LLine, LChar, ARow, ACol);
+  ALen := LEndChar - LChar;
+end;
+
+function ReadStrings(AObj: TJSONObject; const AName: string): TArray<string>;
+var
+  LArr: TJSONArray;
+begin
+  Result := nil;
+  if AObj.TryGetValue<TJSONArray>(AName, LArr) then
+    for var LItem in LArr do
+      Result := Result + [LItem.Value];
+end;
+
+function ParseUnusedAnswer(AResult: TJSONValue): TLspUnusedAnswer;
+var
+  LArr, LListed: TJSONArray;
+  LObj: TJSONObject;
+  LEntry: TLspUnusedEntry;
+  LUnit: TLspUnreferencedEntry;
+  LBy: TLspListedBy;
+begin
+  Result := Default(TLspUnusedAnswer);
+  if not (AResult is TJSONObject) then
+    Exit;
+  if AResult.TryGetValue<TJSONArray>('rows', LArr) then
+    for var LValue in LArr do
+    begin
+      if not (LValue is TJSONObject) then
+        Continue;
+      LObj := TJSONObject(LValue);
+      if LObj.TryGetValue<TJSONArray>('listedBy', LListed) then
+      begin
+        LUnit := Default(TLspUnreferencedEntry);
+        if not ReadUnusedLocation(LObj, LUnit.FilePath, LUnit.Row, LUnit.Col,
+          LUnit.Len) then
+          Continue;
+        LUnit.UnitName := LObj.GetValue<string>('unitName', '');
+        LUnit.Doubts := ReadStrings(LObj, 'doubts');
+        LUnit.TypeSpans := ReadIntArray(LObj, 'typeSpans');
+        for var LByValue in LListed do
+        begin
+          LBy := Default(TLspListedBy);
+          if not (LByValue is TJSONObject) or
+             not ReadUnusedLocation(TJSONObject(LByValue), LBy.FilePath,
+             LBy.Row, LBy.Col, LBy.Len) then
+            Continue;
+          LBy.Note := LByValue.GetValue<string>('note', '');
+          LBy.IsProgram := LByValue.GetValue<Boolean>('program', False);
+          LBy.TypeSpans := ReadIntArray(TJSONObject(LByValue), 'typeSpans');
+          LUnit.ListedBy := LUnit.ListedBy + [LBy];
+        end;
+        Result.Units := Result.Units + [LUnit];
+      end
+      else
+      begin
+        LEntry := Default(TLspUnusedEntry);
+        if not ReadUnusedLocation(LObj, LEntry.FilePath, LEntry.Row,
+          LEntry.Col, LEntry.Len) then
+          Continue;
+        LEntry.UnitName := LObj.GetValue<string>('unitName', '');
+        LEntry.Section := LObj.GetValue<string>('section', '');
+        LEntry.Doubts := ReadStrings(LObj, 'doubts');
+        LEntry.Refused := LObj.GetValue<string>('refused', '');
+        LEntry.TypeSpans := ReadIntArray(LObj, 'typeSpans');
+        Result.Entries := Result.Entries + [LEntry];
+      end;
+    end;
+end;
+
+procedure TLspSession.UnusedUnits(const AMethod, AScope, AFileName: string;
+  const AOnDone: TLspUnusedProc);
+var
+  LParams, LDoc: TJSONObject;
+  LProjectFile: string;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspUnusedAnswer), 'no LSP server available');
+    Exit;
+  end;
+  // The rows are positions in the text the server holds: the buffers as
+  // they are now.
+  FDocs.Sync;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  if AScope <> '' then
+    LParams.AddPair('scope', AScope);
+  LProjectFile := FProjectFile;
+  FClient.Request(AMethod, LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LAnswer: TLspUnusedAnswer;
+    begin
+      if not ASuccess then
+      begin
+        AOnDone(False, Default(TLspUnusedAnswer), AError);
+        Exit;
+      end;
+      LAnswer := ParseUnusedAnswer(AResult);
+      LAnswer.ProjectFile := LProjectFile;
+      AOnDone(True, LAnswer, '');
+    end);
+end;
+
+function ParseUsesRemovalAnswer(AResult: TJSONValue): TLspUsesRemovalAnswer;
+var
+  LArr: TJSONArray;
+  LObj: TJSONObject;
+  LEdit: TLspUsesEdit;
+  LLine, LChar: Integer;
+begin
+  Result := Default(TLspUsesRemovalAnswer);
+  if not (AResult is TJSONObject) then
+    Exit;
+  if AResult.TryGetValue<TJSONArray>('edits', LArr) then
+    for var LValue in LArr do
+    begin
+      if not (LValue is TJSONObject) then
+        Continue;
+      LObj := TJSONObject(LValue);
+      LEdit := Default(TLspUsesEdit);
+      LEdit.FilePath := LspUriToPath(LObj.GetValue<string>('uri', ''));
+      LLine := LObj.GetValue<Integer>('range.start.line', -1);
+      LChar := LObj.GetValue<Integer>('range.start.character', -1);
+      if (LEdit.FilePath = '') or (LLine < 0) or (LChar < 0) then
+        Continue;
+      LspToIde(LLine, LChar, LEdit.Row, LEdit.Col);
+      LspToIde(LObj.GetValue<Integer>('range.end.line', LLine),
+        LObj.GetValue<Integer>('range.end.character', LChar), LEdit.EndRow,
+        LEdit.EndCol);
+      LEdit.OldText := LObj.GetValue<string>('oldText', '');
+      LEdit.NewText := LObj.GetValue<string>('newText', '');
+      Result.Edits := Result.Edits + [LEdit];
+    end;
+  Result.Refused := ReadStrings(TJSONObject(AResult), 'refused');
+  Result.Missing := ReadStrings(TJSONObject(AResult), 'missing');
+end;
+
+procedure TLspSession.UsesRemoval(const AFiles: TArray<TLspRemovalFile>;
+  const AOnDone: TLspUsesRemovalProc);
+var
+  LParams, LFile: TJSONObject;
+  LFiles, LNames: TJSONArray;
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, Default(TLspUsesRemovalAnswer), 'no LSP server available');
+    Exit;
+  end;
+  // The edits are computed on the text the server holds: it has to be the
+  // buffers as they are now, or every one is refused as stale.
+  FDocs.Sync;
+  LFiles := TJSONArray.Create;
+  for var LF in AFiles do
+  begin
+    LNames := TJSONArray.Create;
+    for var LName in LF.Names do
+      LNames.Add(LName);
+    LFile := TJSONObject.Create;
+    LFile.AddPair('uri', PathToLspUri(LF.FilePath));
+    LFile.AddPair('names', LNames);
+    LFiles.AddElement(LFile);
+  end;
+  LParams := TJSONObject.Create;
+  LParams.AddPair('files', LFiles);
+  FClient.Request('pastree/usesRemoval', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    begin
+      if not ASuccess then
+        AOnDone(False, Default(TLspUsesRemovalAnswer), AError)
+      else
+        AOnDone(True, ParseUsesRemovalAnswer(AResult), '');
+    end);
+end;
+
 procedure TLspSession.OutlineTarget(const ARow: TLspOutlineRow;
   const AOnDone: TLspHitsProc);
 var
@@ -5659,6 +5951,49 @@ begin
     Exit;
   end;
   LSession.UseUnit(AFileName, AUnitName, AImplementation, AOnDone);
+end;
+
+procedure LspUnusedUses(const AScope, AFileName: string;
+  const AOnDone: TLspUnusedProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspUnusedAnswer), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.UnusedUnits('pastree/unusedUses', AScope, AFileName, AOnDone);
+end;
+
+procedure LspUnreferencedUnits(const AFileName: string;
+  const AOnDone: TLspUnusedProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspUnusedAnswer), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.UnusedUnits('pastree/unreferencedUnits', '', AFileName, AOnDone);
+end;
+
+procedure LspUsesRemoval(const AFileName: string;
+  const AFiles: TArray<TLspRemovalFile>; const AOnDone: TLspUsesRemovalProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, Default(TLspUsesRemovalAnswer),
+      'LSP session not initialized');
+    Exit;
+  end;
+  LSession.UsesRemoval(AFiles, AOnDone);
 end;
 
 procedure LspOutlineTarget(const ARow: TLspOutlineRow;
