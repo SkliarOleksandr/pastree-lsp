@@ -167,9 +167,11 @@ var
 function GetOrCreateMessageGroup(ACommand: TFindAllCommand;
   const AMessageServices: IOTAMessageServices): IOTAMessageGroup;
 begin
-  if not Assigned(GMessageGroup[ACommand]) then
-    GMessageGroup[ACommand] :=
-      AMessageServices.GetGroup(cCommandName[ACommand]);
+  // Looked up every time, never trusted from the last search: a tab the user
+  // closed is a group the IDE has dropped - see
+  // FindReferences.GetOrCreateMessageGroup for the AV.
+  GMessageGroup[ACommand] :=
+    AMessageServices.GetGroup(cCommandName[ACommand]);
   if not Assigned(GMessageGroup[ACommand]) then
     GMessageGroup[ACommand] :=
       AMessageServices.AddMessageGroup(cCommandName[ACommand]);
@@ -179,18 +181,22 @@ end;
 { Not at IDE shutdown, and silently - the same two rules FindReferences
   learned from the AVs of 2026-08-22/24: by the time a designtime package is
   unloaded with the IDE closing, the Messages panel is gone and RemoveMessageGroup
-  faults inside the IDE. }
+  faults inside the IDE. And only the tabs the IDE still has - one the user
+  closed is gone already, and the reference held here is not it. }
 procedure RemoveGroups;
 var
   LMessageServices: IOTAMessageServices;
   LCommand: TFindAllCommand;
+  LGroup: IOTAMessageGroup;
 begin
   if not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     for LCommand := Low(TFindAllCommand) to High(TFindAllCommand) do
       if Assigned(GMessageGroup[LCommand]) then
         try
-          LMessageServices.RemoveMessageGroup(GMessageGroup[LCommand]);
+          LGroup := LMessageServices.GetGroup(cCommandName[LCommand]);
+          if Assigned(LGroup) then
+            LMessageServices.RemoveMessageGroup(LGroup);
         except
           // Cosmetic cleanup; nothing to report to and nowhere to report it.
         end;

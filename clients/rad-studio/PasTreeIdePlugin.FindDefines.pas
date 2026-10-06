@@ -84,11 +84,24 @@ var
 function GetOrCreateMessageGroup(
   const AMessageServices: IOTAMessageServices): IOTAMessageGroup;
 begin
-  if not Assigned(GMessageGroup) then
-    GMessageGroup := AMessageServices.GetGroup(cMessageGroupName);
+  // Looked up every time, never trusted from the last search: a tab the user
+  // closed is a group the IDE has dropped - see
+  // FindReferences.GetOrCreateMessageGroup for the AV.
+  GMessageGroup := AMessageServices.GetGroup(cMessageGroupName);
   if not Assigned(GMessageGroup) then
     GMessageGroup := AMessageServices.AddMessageGroup(cMessageGroupName);
   Result := GMessageGroup;
+end;
+
+// Removes the tab only while the IDE still has it - one the user closed is
+// gone already, and the reference held here is not it.
+procedure RemoveLiveGroup(const AMessageServices: IOTAMessageServices);
+var
+  LGroup: IOTAMessageGroup;
+begin
+  LGroup := AMessageServices.GetGroup(cMessageGroupName);
+  if Assigned(LGroup) then
+    AMessageServices.RemoveMessageGroup(LGroup);
 end;
 
 // Not at IDE shutdown - see FindReferences.FinalizeFindReferencesMessageGroup
@@ -101,7 +114,7 @@ begin
   if Assigned(GMessageGroup) and not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     try
-      LMessageServices.RemoveMessageGroup(GMessageGroup);
+      RemoveLiveGroup(LMessageServices);
     except
       // See FinalizeFindReferencesMessageGroup: cosmetic cleanup, no panel
       // left to report a failure to.
@@ -116,7 +129,7 @@ begin
   if Assigned(GMessageGroup) and not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     try
-      LMessageServices.RemoveMessageGroup(GMessageGroup);
+      RemoveLiveGroup(LMessageServices);
     except
       // As above - a closing project asked nothing of the Messages panel.
     end;

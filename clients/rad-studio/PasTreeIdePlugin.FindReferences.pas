@@ -107,11 +107,25 @@ var
 
 function GetOrCreateMessageGroup(const AMessageServices: IOTAMessageServices): IOTAMessageGroup;
 begin
-  if not Assigned(GMessageGroup) then
-    GMessageGroup := AMessageServices.GetGroup(cMessageGroupName);
+  // Looked up every time: a tab the user closed is a group the IDE has
+  // dropped, and the reference held here keeps only its object alive -
+  // ShowMessageView on it was an access violation in TTabSet.SetTabIndex
+  // (Unused Units, Alex, 2026-10-06: close the tab, search again).
+  GMessageGroup := AMessageServices.GetGroup(cMessageGroupName);
   if not Assigned(GMessageGroup) then
     GMessageGroup := AMessageServices.AddMessageGroup(cMessageGroupName);
   Result := GMessageGroup;
+end;
+
+// Removes the tab only while the IDE still has it - one the user closed is
+// gone already, and the reference held here is not it (see above).
+procedure RemoveLiveGroup(const AMessageServices: IOTAMessageServices);
+var
+  LGroup: IOTAMessageGroup;
+begin
+  LGroup := AMessageServices.GetGroup(cMessageGroupName);
+  if Assigned(LGroup) then
+    AMessageServices.RemoveMessageGroup(LGroup);
 end;
 
 { NOT AT IDE SHUTDOWN - this is the AV of 2026-08-22 and 2026-08-24, finally
@@ -145,7 +159,7 @@ begin
   if Assigned(GMessageGroup) and not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     try
-      LMessageServices.RemoveMessageGroup(GMessageGroup);
+      RemoveLiveGroup(LMessageServices);
     except
       // See above. The group is released either way by the line below.
     end;
@@ -164,7 +178,7 @@ begin
   if Assigned(GMessageGroup) and not Application.Terminated and
      Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     try
-      LMessageServices.RemoveMessageGroup(GMessageGroup);
+      RemoveLiveGroup(LMessageServices);
     except
       // Cosmetic cleanup on a path the user did not ask anything of: a
       // failure here must not become an error over a closing project.
