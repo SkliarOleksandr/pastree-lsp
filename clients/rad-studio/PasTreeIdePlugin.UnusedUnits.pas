@@ -4,9 +4,11 @@ unit PasTreeIdePlugin.UnusedUnits;
   Find All > Unused Units, Unused Units in the Project, Units Nobody Uses -
   PasTree 0.93.0's unused-units checks (PasTree.Sema.Lint, the demo's three
   commands), with the results as a tree in a tab of its own per command
-  ("PasTree Unused Units", "... in the Project", "PasTree Units Nobody
-  Uses") and a toolbar above it: Remove takes the selected unit out, Remove All
-  every one, Revert takes the last Remove back.
+  ("Unused Units", "Unused Units in the Project", "Units Nobody Uses" -
+  without the "PasTree " the other result tabs carry, which made these
+  captions too long, Alex 2026-10-06) and a toolbar above it: Remove takes
+  the selected unit out, Remove All every one, Revert takes the last Remove
+  back.
 
   WHAT IS OFFERED IS THE SERVER'S. It answers pastree/unusedUses (the unit
   in the editor, or every unit of the project outside the library paths)
@@ -98,9 +100,9 @@ const
   // A tab per command (Alex, 2026-10-06: Unused Units and Units Nobody Uses
   // shared one, and each search threw the other's results and Removes away).
   cMessageGroupName: array[TUnusedUnitsCommand] of string = (
-    'PasTree Unused Units',
-    'PasTree Unused Units in the Project',
-    'PasTree Units Nobody Uses');
+    'Unused Units',
+    'Unused Units in the Project',
+    'Units Nobody Uses');
   cRemoveButton = 0;
   cRemoveAllButton = 1;
   cRevertButton = 2;
