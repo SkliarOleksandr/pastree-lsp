@@ -278,7 +278,10 @@ const
   /// streams is used - the IDE puts it back into `uses` on the next save.
   /// Against 0.93.2 Unused Units offers System.ImageList, System.Actions,
   /// Vcl.ToolWin and the like, a save undoes the Remove and Revert refuses.
-  cMinPasTreeVersion = '0.93.3';
+  /// 0.93.4: the same for a component of a form the form INHERITS - one
+  /// its own form file does not name (Orpheus state components on a
+  /// third-level base form of AVImark's dialogs).
+  cMinPasTreeVersion = '0.93.4';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
