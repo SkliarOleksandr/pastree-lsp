@@ -71,10 +71,15 @@ unit PasTreeIdePlugin.CrashLog;
   unwinds a copy of the context with RtlVirtualUnwind, both bounded by the
   thread's stack limits and inside try/except - a fault inside an exception
   handler is the one place this unit must not have one. A frameless routine
-  is skipped by the EBP walk (its caller is kept) - an IDE one costs a line
-  of the stack, and none of ours is frameless: the package is compiled with
-  the STACKFRAMES directive on (PasTreeIdePlugin.dpk), which this walk
-  depends on - keep it.
+  is skipped by the EBP walk (its caller is kept). The package is compiled
+  with the STACKFRAMES directive on (PasTreeIdePlugin.dpk) - keep it - but
+  that did not give a frame to every routine in a test, and the IDE's code
+  promises nothing. So on Win32 two more sources (0.62.9): [Esp] when it is
+  a return address (a fault at a frameless routine's entry, `nil.Refresh`),
+  and, when the chain gives fewer than two callers, a scan of the stack
+  above Esp for return addresses - a word is one only if the bytes before
+  it are a CALL. Scanned frames are marked "(stack scan)": they can include
+  a stale address, and they count for the filter all the same.
 
   WHICH .map is the one beside the BPL the block's header names by full path:
   out\<version>\win32\ or out\<version>\win64\. The frames say only
@@ -283,17 +288,62 @@ end;
 type
   TFrames = array[0..cMaxFrames - 1] of Pointer;
 
+{$IFDEF CPUX86}
+const
+  // The share of the stack above Esp the fallback scan reads. Enough for a
+  // few IDE frames between the fault and the plugin's, small enough that the
+  // stale return addresses deeper in a long-lived stack stay out of reach.
+  cScanBytes = 2048;
+  cMemImage = $1000000;   // MEM_IMAGE
+  cExecutable = PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE
+    or PAGE_EXECUTE_WRITECOPY;
+
+{ Whether AValue, read off the stack, is a RETURN ADDRESS rather than any other
+  word that happens to point into code: it must lie in a module's executable
+  image, and the bytes just before it must be a CALL - E8 rel32, or FF /2 in
+  any of its encodings, 2 to 7 bytes long. That second test is what the scan
+  stands on; without it every function pointer in a local would read as a
+  caller. VirtualQuery first, so nothing here reads memory that may not be
+  there - this runs inside an exception handler. }
+function IsReturnAddress(AValue: UIntPtr): Boolean;
+var
+  LMbi: TMemoryBasicInformation;
+  LLen: Integer;
+  LCode: PByte;
+begin
+  Result := False;
+  if (AValue < $10000) or (VirtualQuery(Pointer(AValue), LMbi,
+       SizeOf(LMbi)) = 0) then
+    Exit;
+  if (LMbi.State <> MEM_COMMIT) or (LMbi.Type_9 <> cMemImage)
+     or (LMbi.Protect and cExecutable = 0)
+     or (AValue - 7 < UIntPtr(LMbi.BaseAddress)) then
+    Exit;
+  LCode := PByte(AValue);
+  if PByte(LCode - 5)^ = $E8 then
+    Exit(True);
+  for LLen in [2, 3, 4, 6, 7] do
+    if (PByte(LCode - LLen)^ = $FF)
+       and ((PByte(LCode - LLen + 1)^ shr 3) and 7 = 2) then
+      Exit(True);
+end;
+{$ENDIF}
+
 { The faulting thread's stack as it was at the fault: AFrames[0] is the
   faulting instruction, then the return addresses outward. Every read is of
   this thread's own stack, checked against its limits first, and the whole
   walk is under try/except - a corrupted stack is a common reason to be here,
-  and what was collected before it is kept. }
-function WalkFaultStack(AContext: PContext; var AFrames: TFrames): Integer;
+  and what was collected before it is kept. Frames from AScanFrom on came
+  from the Win32 fallback scan rather than a frame chain - see there. }
+function WalkFaultStack(AContext: PContext; var AFrames: TFrames;
+  out AScanFrom: Integer): Integer;
 var
   LLow, LHigh: ULONG_PTR;
 {$IFDEF CPUX86}
-  LFp, LNext, LSp: UIntPtr;
+  LFp, LNext, LSp, LTop, LWord: UIntPtr;
   LModule: HMODULE;
+  LIdx: Integer;
+  LKnown: Boolean;
 {$ENDIF}
 {$IFDEF CPUX64}
   // CONTEXT must be 16-byte aligned for RtlVirtualUnwind, which a local
@@ -305,21 +355,30 @@ var
 {$ENDIF}
 begin
   Result := 0;
+  AScanFrom := cMaxFrames;
   GetCurrentThreadStackLimits(LLow, LHigh);
   try
 {$IFDEF CPUX86}
     AFrames[0] := Pointer(AContext.Eip);
     Result := 1;
-    // A call through a bad pointer (Eip in no module, or nil) faults before
-    // the callee pushes anything, so [Esp] is still the return address - the
-    // caller, which the EBP chain would skip.
+    // [Esp] is the return address whenever the faulting routine has pushed
+    // nothing yet: a call through a bad pointer (Eip in no module, or nil -
+    // taken as it is), or a fault in the first instructions of a frameless
+    // one - `nil.Refresh` faults on TControl.Refresh's first `mov edx,[eax]`
+    // (vcl370 + 3E28C, 2026-10-06), and the EBP chain then starts one caller
+    // too far out, or nowhere. The second case is taken only when the word
+    // passes IsReturnAddress, since by then [Esp] may be anything.
     LSp := AContext.Esp;
-    LModule := 0;
-    if not GetModuleHandleEx($00000004 or $00000002, AFrames[0], LModule)
-       and (LSp >= LLow) and (LSp + SizeOf(Pointer) <= LHigh) then
+    if (LSp >= LLow) and (LSp + SizeOf(Pointer) <= LHigh) then
     begin
-      AFrames[Result] := PPointer(LSp)^;
-      Inc(Result);
+      LWord := UIntPtr(PPointer(LSp)^);
+      LModule := 0;
+      if not GetModuleHandleEx($00000004 or $00000002, AFrames[0], LModule)
+         or IsReturnAddress(LWord) then
+      begin
+        AFrames[Result] := Pointer(LWord);
+        Inc(Result);
+      end;
     end;
     LFp := AContext.Ebp;
     while (Result < cMaxFrames) and (LFp >= LLow)
@@ -328,12 +387,46 @@ begin
       AFrames[Result] := PPointer(LFp + SizeOf(Pointer))^;
       if AFrames[Result] = nil then
         Break;
-      Inc(Result);
+      // [Esp] above may already be this one: a frameless routine's caller
+      // with a frame of its own.
+      if (Result <> 2) or (AFrames[1] <> AFrames[2]) then
+        Inc(Result);
       LNext := UIntPtr(PPointer(LFp)^);
       // The stack grows down: a caller's frame is always higher.
       if LNext <= LFp then
         Break;
       LFp := LNext;
+    end;
+    // THE FALLBACK SCAN, when the chain gave fewer than two callers: EBP was
+    // not a frame pointer at the fault (IDE code built without frames, or a
+    // register reused), and the block had nothing under its header - the
+    // 2026-10-06 one. Every word in the first cScanBytes above Esp that
+    // passes IsReturnAddress, in stack order. It can pick up a STALE return
+    // address - a word left in a local by an earlier call - which is why its
+    // frames are marked in the block and why it runs only when the chain
+    // failed. It counts for "is this plugin on the stack" too: an extra
+    // block now and then is the cheaper mistake than a fault of ours
+    // dropped.
+    if Result < 3 then
+    begin
+      AScanFrom := Result;
+      LTop := LSp + cScanBytes;
+      if LTop > LHigh then
+        LTop := LHigh;
+      while (Result < cMaxFrames) and (LSp + SizeOf(Pointer) <= LTop) do
+      begin
+        LWord := UIntPtr(PPointer(LSp)^);
+        Inc(LSp, SizeOf(Pointer));
+        if not IsReturnAddress(LWord) then
+          Continue;
+        LKnown := False;
+        for LIdx := 1 to Result - 1 do
+          LKnown := LKnown or (AFrames[LIdx] = Pointer(LWord));
+        if LKnown then
+          Continue;
+        AFrames[Result] := Pointer(LWord);
+        Inc(Result);
+      end;
     end;
 {$ENDIF}
 {$IFDEF CPUX64}
@@ -378,7 +471,7 @@ end;
 function VectoredHandler(AInfo: PExceptionPointers): LongInt; stdcall;
 var
   LFrames: TFrames;
-  LCount, LIdx: Integer;
+  LCount, LIdx, LScanFrom: Integer;
   LOurs: Boolean;
   LText: string;
   LRec: PExceptionRecord;
@@ -399,8 +492,9 @@ begin
     GInside := True;
     try
       LCount := 0;
+      LScanFrom := cMaxFrames;
       if AInfo.ContextRecord <> nil then
-        LCount := WalkFaultStack(AInfo.ContextRecord, LFrames);
+        LCount := WalkFaultStack(AInfo.ContextRecord, LFrames, LScanFrom);
       LOurs := IsOwnAddress(LRec.ExceptionAddress);
       for LIdx := 0 to LCount - 1 do
         LOurs := LOurs or IsOwnAddress(LFrames[LIdx]);
@@ -428,7 +522,8 @@ begin
       GSkipped := 0;
       // Frame 0 is the fault address the header already names.
       for LIdx := 1 to LCount - 1 do
-        LText := LText + #13#10 + '    ' + DescribeAddress(LFrames[LIdx]);
+        LText := LText + #13#10 + '    ' + DescribeAddress(LFrames[LIdx])
+          + IfThen(LIdx >= LScanFrom, '  (stack scan)', '');
       AppendBlock(LText);
     finally
       GInside := False;
