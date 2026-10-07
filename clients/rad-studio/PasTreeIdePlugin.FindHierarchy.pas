@@ -107,6 +107,7 @@ uses
   Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
+  PasTreeIdePlugin.RenameToolbar,
   PasTreeIdePlugin.FindReferences;   // IdentifierAt, for the scope dialog
 
 const
@@ -435,6 +436,7 @@ begin
   end;
 
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
 end;
 
 /// <summary>
@@ -529,6 +531,7 @@ begin
   end;
 
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
 end;
 
 procedure ExecuteFindAll(ACommand: TFindAllCommand; const AView: IOTAEditView);

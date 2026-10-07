@@ -501,6 +501,7 @@ begin
     LFileCounts.Free;
   end;
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
   // AFTER ShowMessageView: the tab has to exist before a control can be put
   // in it, and showing the group is what makes the IDE build it.
   ShowRenameToolbar(cMessageGroupName, RevertApplied);

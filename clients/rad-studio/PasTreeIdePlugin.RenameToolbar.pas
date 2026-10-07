@@ -119,6 +119,14 @@ function ResultFocusedRow(out AChain: TArray<TArray<Pointer>>;
 function ResultSelectRow(ARow: Pointer): Boolean;
 
 /// <summary>
+/// Scrolls the Messages window's tree in front to its first row - call it
+/// after ShowMessageView, since the window follows every added row to the
+/// last one. Tried at once and again when the message queue is next empty;
+/// silent but for a log line when the tree cannot be read.
+/// </summary>
+procedure ResultScrollToTop;
+
+/// <summary>
 /// Puts (or re-creates) the Revert toolbar into the Messages window,
 /// shown while the tab named AGroupCaption is selected. Any earlier toolbar
 /// is dropped first. Silent when the window cannot be found - see the unit
@@ -847,6 +855,69 @@ begin
       Trace(Format('select row: FAILED with %s: %s', [E.ClassName,
         E.Message]));
   end;
+end;
+
+{ THE FIRST ROW AT THE TOP. The Messages window follows every
+  AddCustomMessage to the row just added, so a filled tab opened scrolled to
+  its last row (Alex, 2026-10-07). The first node is scrolled into view
+  through RTTI - GetFirst and ScrollIntoView, as ResultSelectRow does. }
+function ScrollFrontTreeToTop: Boolean;
+var
+  LForm: TCustomForm;
+  LTree: TControl;
+  LCtx: TRttiContext;
+  LType: TRttiType;
+  LFirst, LScroll: TRttiMethod;
+  LNode: Pointer;
+begin
+  Result := False;
+  try
+    LForm := FindMessageForm;
+    if not Assigned(LForm) then
+      Exit;
+    LTree := nil;
+    for var LIdx := 0 to LForm.ControlCount - 1 do
+      if LForm.Controls[LIdx].Visible and
+         ContainsText(LForm.Controls[LIdx].ClassName, 'VirtualDrawTree') then
+        LTree := LForm.Controls[LIdx];
+    if not Assigned(LTree) then
+    begin
+      Trace('scroll to top: no visible VirtualDrawTree in the Messages window');
+      Exit;
+    end;
+    LCtx := TRttiContext.Create;
+    LType := LCtx.GetType(LTree.ClassType);
+    if not Assigned(LType) then
+      Exit;
+    LFirst := NodeMethod(LType, 'GetFirst', False);
+    LScroll := NodeMethod(LType, 'ScrollIntoView', True);
+    if not Assigned(LFirst) or not Assigned(LScroll) then
+    begin
+      Trace(Format('scroll to top: %s lacks GetFirst/ScrollIntoView in its ' +
+        'RTTI', [LTree.ClassName]));
+      Exit;
+    end;
+    LNode := CallNodeMethod(LFirst, LTree, nil);
+    if LNode <> nil then
+      CallNodeMethod(LScroll, LTree, LNode);
+    Result := True;
+  except
+    on E: Exception do
+      Trace(Format('scroll to top: FAILED with %s: %s', [E.ClassName,
+        E.Message]));
+  end;
+end;
+
+procedure ResultScrollToTop;
+begin
+  ScrollFrontTreeToTop;
+  // Once more when the message queue is next empty, should the tree take
+  // the rows in - and follow them to the last - after the call.
+  TThread.ForceQueue(nil,
+    procedure
+    begin
+      ScrollFrontTreeToTop;
+    end);
 end;
 
 procedure ShowRenameToolbar(const AGroupCaption: string;

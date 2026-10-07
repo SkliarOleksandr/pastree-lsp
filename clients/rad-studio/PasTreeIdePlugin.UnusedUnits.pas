@@ -1339,6 +1339,9 @@ begin
             GTab.Removals := nil;
             GTab.Busy := False;
             Report;
+            // A new search only: after a Remove or a Revert the selection
+            // (SelectNode) decides what is in view.
+            ResultScrollToTop;
           end);
       end;
     case ACommand of

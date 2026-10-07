@@ -67,7 +67,7 @@ implementation
 uses
   System.SysUtils, System.Generics.Collections, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
-  PasTreeIdePlugin.WaitDialog;
+  PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar;
 
 const
   cMessageGroupName = 'Find Defines';
@@ -270,6 +270,7 @@ begin
     LGroupCounts.Free;
   end;
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
 end;
 
 /// <summary>
@@ -303,6 +304,7 @@ begin
       LGroup);
   end;
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
 end;
 
 procedure ExecuteFindDefines(const AView: IOTAEditView);

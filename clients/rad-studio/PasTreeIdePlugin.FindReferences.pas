@@ -77,7 +77,7 @@ uses
   Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
-  PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.Settings, PasTreeIdePlugin.RenameToolbar;
 
 const
   cMessageGroupName = 'Find References';
@@ -397,6 +397,7 @@ begin
   end;
 
   LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
 end;
 
 /// <summary>
