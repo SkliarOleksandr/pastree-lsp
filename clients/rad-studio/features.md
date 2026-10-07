@@ -438,12 +438,20 @@ Ctrl+Click hook is who does the work afterwards: here the plugin returns the
 target and the IDE navigates and keeps the history itself, which is the better
 arrangement of the two.
 
-### Tooltip insight (hover)
+### Hover hint
 
-Hovering an identifier shows the server's `textDocument/hover` answer as the
-editor's own tooltip, reduced to plain text. That is the declaration of the
-symbol under the pointer as PasTree resolved it, which is not necessarily what
-the IDE's own parser would have said about the same word.
+Resting the mouse on an identifier opens PasTree's own hint, under every
+Insight Provider: the declaration line in the editor's syntax colours (type
+names in the Highlighting tab's colour), a `Unit.pas (302)` link that jumps to
+the declaration with an Alt+Left entry, and the declaration's XMLDoc. While the
+analysis is still running the hint says so ("PasTree: analyzing...") and fills
+in when the answer comes. The IDE's own tooltip is switched off while this is
+on - it is the Tools > Options "Tooltip symbol insight" box, which is unticked
+for the time being and put back when the setting (Settings > Code Insight > Hover
+hints over identifiers) is turned off. The hint stays up over the identifier
+and over itself, so the link can be clicked, and closes on any key, wheel or
+click elsewhere. It is not shown while a debugged process is stopped, where the
+IDE's evaluation tooltips own the hover.
 
 ### Parameter insight
 

@@ -166,6 +166,19 @@ procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   APlain: Boolean = False);
 
 /// <summary>
+/// PaintSyntaxText with the editor's styles (bold reserved words) AND the
+/// analysis's type names: an identifier run inside one of ATypeSpans
+/// (1-based column/length pairs over AText) is painted in ATypeColor and
+/// ATypeStyle - the Highlighting tab's - unless ATypeColor is clNone.
+/// ADoDraw=False only advances AX, for a caller that measures the line before
+/// it lays the window out (the hover hint): the runs' widths depend on their
+/// styles, so a plain TextWidth of the whole line would be short.
+/// </summary>
+procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
+  const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
+  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean);
+
+/// <summary>
 /// PaintSyntaxText on a raw DC, colours only, for a caller that has taken
 /// the row painting away from TCanvas: the DC must hold the font, the
 /// background mode and TA_UPDATECP with the current position at the start
@@ -835,6 +848,44 @@ begin
     then
       Exit(True);
     Inc(LIdx, 2);
+  end;
+end;
+
+procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
+  const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
+  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean);
+var
+  LOptions: INTACodeEditorOptions;
+  LHavePalette: Boolean;
+  LRun: TTokenRun;
+  LText: string;
+  LColor: TColor;
+  LStyle: TFontStyles;
+begin
+  if AText = '' then
+    Exit;
+  LHavePalette := TryEditorOptions(LOptions);
+  for LRun in TokenizeLine(AText) do
+  begin
+    if LHavePalette then
+      PaletteEntry(LOptions, LRun.Code, LColor, LStyle)
+    else
+    begin
+      LColor := ADefault;
+      LStyle := [];
+    end;
+    if (ATypeColor <> clNone) and (LRun.Code = atIdentifier) and
+       InTypeSpan(ATypeSpans, LRun.Start) then
+    begin
+      LColor := ATypeColor;
+      LStyle := ATypeStyle;
+    end;
+    ACanvas.Font.Color := LColor;
+    ACanvas.Font.Style := LStyle;
+    LText := Copy(AText, LRun.Start, LRun.Len);
+    if ADoDraw then
+      ACanvas.TextOut(AX, AY, LText);
+    Inc(AX, ACanvas.TextWidth(LText));
   end;
 end;
 

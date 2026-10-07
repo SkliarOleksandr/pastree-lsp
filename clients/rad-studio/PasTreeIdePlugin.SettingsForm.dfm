@@ -296,6 +296,30 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 3
       end
     end
+    object tsCodeInsight: TTabSheet
+      Caption = 'Code Insight'
+      object lblHoverHintsHint: TLabel
+        Left = 35
+        Top = 41
+        Width = 405
+        Height = 45
+        Caption =
+          'The declaration under the mouse in the editor'#39's colours, its doc' +
+          'umentation and a link to it. Replaces the IDE'#39's own tooltip: Too' +
+          'ltip symbol insight is switched off while this is on.'
+        WordWrap = True
+      end
+      object chkHoverHints: TCheckBox
+        Left = 16
+        Top = 20
+        Width = 430
+        Height = 17
+        Caption = 'Hover hints over identifiers'
+        Checked = True
+        State = cbChecked
+        TabOrder = 0
+      end
+    end
     object tsDiagnostics: TTabSheet
       Caption = 'Diagnostics'
       ImageIndex = 2

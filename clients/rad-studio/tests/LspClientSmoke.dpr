@@ -19,6 +19,7 @@ program LspClientSmoke;
 uses
   Winapi.Windows,
   System.SysUtils,
+  System.StrUtils,
   System.Classes,
   System.IOUtils,
   System.JSON,
@@ -1805,6 +1806,69 @@ begin
   end;
 end;
 
+{ 5c, continued. Every shape of a declaration whose type is not written -
+  fixtures\DemoHoverInfer.pas - hovered at its declaration, and the composed
+  signature must carry the type the analysis inferred (Alex, 2026-10-07: a
+  for-in element over `[LDir] + FLastSearchPaths` showed `var LPath` alone). }
+procedure TestHoverInferred;
+const
+  // name on its declaring line, the line hint, the expected signature, and
+  // 'gap' for a shape PasTree does not type yet: reported, not failed - the
+  // row turns into a check the day the library types it.
+  cCases: array[0..14] of array[0..3] of string = (
+    ('IStr', 'var IStr :=', 'var IStr: string', ''),
+    ('IInt', 'var IInt :=', 'var IInt: Integer', ''),
+    ('IFloat', 'var IFloat :=', 'var IFloat: Extended', ''),
+    ('IBool', 'var IBool :=', 'var IBool: Boolean', ''),
+    ('ICall', 'var ICall :=', 'var ICall: TInferItem', ''),
+    ('ICtor', 'var ICtor :=', 'var ICtor: TInferItem', 'gap'),
+    ('IExpr', 'var IExpr :=', 'var IExpr: string', ''),
+    ('IMember', 'var IMember :=', 'var IMember: string', ''),
+    ('IConst', 'const IConst =', 'const IConst', ''),
+    ('ICount', 'for var ICount', 'var ICount: Integer', ''),
+    ('IPath', 'for var IPath', 'var IPath: string', 'gap'),
+    ('IJoined', 'for var IJoined', 'var IJoined: string', 'gap'),
+    ('ILiteral', 'for var ILiteral', 'var ILiteral: string', 'gap'),
+    ('IChar', 'for var IChar', 'var IChar: Char', ''),
+    ('IItem', 'for var IItem', 'var IItem: TInferItem', 'gap'));
+var
+  LFile, LCode: string;
+  LLine, LChar, LIdx, LAt: Integer;
+begin
+  Writeln;
+  Writeln('=== 5c. hover on declarations with an inferred type ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoHoverInfer.pas');
+  for LIdx := 0 to High(cCases) do
+  begin
+    FindPos(LFile, cCases[LIdx][1], cCases[LIdx][0], LLine, LChar);
+    Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+      'hover on ' + cCases[LIdx][0] + ' answered');
+    LCode := '';
+    LAt := Pos('"pastreeHover":{"code":"', GResultJson);
+    if GOk and (LAt > 0) then
+    begin
+      LCode := Copy(GResultJson, LAt + Length('"pastreeHover":{"code":"'), MaxInt);
+      LCode := Copy(LCode, 1, Pos('"', LCode) - 1);
+    end;
+    if cCases[LIdx][3] = 'gap' then
+      Writeln(Format('  [gap]  %s: PasTree infers no type yet (got "%s"%s)',
+        [cCases[LIdx][0], LCode,
+         IfThen(LCode.StartsWith(cCases[LIdx][2]), ' - TYPED NOW, make it a check', '')]))
+    else
+      Check(GOk and LCode.StartsWith(cCases[LIdx][2]),
+        Format('%s reads "%s" (got "%s")', [cCases[LIdx][0], cCases[LIdx][2],
+          LCode]));
+  end;
+  // The type inside a constant's qualified value is a type span too.
+  FindPos(LFile, 'CInferBlue =', 'CInferBlue', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on a constant with a qualified enum value answered');
+  LCode := 'const CInferBlue = DemoAnnotateLib.TDemoColor.dcBlue';
+  Check(GOk and GResultJson.Contains('"code":"' + LCode + '"') and
+    GResultJson.Contains(Format('[%d,10]', [Pos('TDemoColor', LCode)])),
+    'and marks TDemoColor in it as a type, the unit qualifier not');
+end;
+
 { 5c. Hover: the shape Tooltip Insight parses.
 
   The RAD plugin's hint path (PasTreeIdePlugin.LspSession.HoverPlainText)
@@ -1855,6 +1919,64 @@ begin
     'and the IDE''s own source-link scheme');
   Check(GOk and GResultJson.Contains('<dt><b>AName</b></dt>'),
     'and the parameters as a definition list, not as text');
+  // And as fields, for the RAD hover window that paints the card itself: the
+  // declaration line without its indentation, the doc, the kind and where the
+  // declaration is (the hint's link).
+  Check(GOk and GResultJson.Contains(
+    '"pastreeHover":{"code":"function Greet(const AName: string): string"'),
+    'hover carries the card as fields, the code a composed signature');
+  Check(GOk and GResultJson.Contains('"kind":"routine"'),
+    'with the kind word');
+  Check(GOk and GResultJson.Contains('DemoUnit.pas","line":'),
+    'and the declaration''s file and line for the link');
+  // The signature is composed, not the declaration line (Alex, 2026-10-07:
+  // a variable showed `LName, LDetail, LKindWord: string;`): a member is
+  // qualified by its type, as the native hint does it.
+  FindPos(LUnitFile, 'Value: string', 'Value', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
+    'hover on a record field answered');
+  Check(GOk and GResultJson.Contains('"code":"var TBox.Value: string"'),
+    'and reads var TBox.Value: string');
+  Check(GOk and GResultJson.Contains('"typeSpans":[5,4'),
+    'with the owner type among the type spans');
+  FindPos(LUnitFile, 'TBox = record', 'TBox', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
+    'hover on a type answered');
+  Check(GOk and GResultJson.Contains('"code":"type TBox = record"'),
+    'and reads type TBox = record');
+  FindPos(LUnitFile, 'CAnswer = 42', 'CAnswer', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
+    'hover on a constant answered');
+  Check(GOk and GResultJson.Contains('"code":"const CAnswer') and
+    GResultJson.Contains('= 42"'),
+    'and reads const CAnswer ... = 42');
+  // A parameter as the native hint spells one: `param`, the mode bracketed.
+  FindPos(LUnitFile, '+ AName', 'AName', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
+    'hover on a const parameter answered');
+  Check(GOk and GResultJson.Contains('"code":"param [const] AName: string"'),
+    'and reads param [const] AName: string');
+  Check(GOk and GResultJson.Contains('"headLen":13'),
+    'with the lead `param [const]` marked for the keyword colour');
+  // An enum value as the native hint has it: unit-qualified, the ordinal
+  // cast to its enum (Alex, 2026-10-07).
+  FindPos(TPath.Combine(GFixtureDir, 'DemoAnnotateLib.pas'), 'dcRed, dcBlue',
+    'dcBlue', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(
+    TPath.Combine(GFixtureDir, 'DemoAnnotateLib.pas'), LLine, LChar)),
+    'hover on an enum value answered');
+  Check(GOk and GResultJson.Contains(
+    '"code":"const DemoAnnotateLib.dcBlue = TDemoColor(1)"'),
+    'and reads const DemoAnnotateLib.dcBlue = TDemoColor(1)');
+  // An inline var with no written type shows the type the analysis inferred.
+  FindPos(TPath.Combine(GFixtureDir, 'DemoInference.pas'),
+    'var LFromCall :=', 'LFromCall', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(
+    TPath.Combine(GFixtureDir, 'DemoInference.pas'), LLine, LChar)),
+    'hover on an inline var answered');
+  Check(GOk and GResultJson.Contains('"code":"var LFromCall: THolder"'),
+    'and reads var LFromCall: THolder - the inferred type');
+  TestHoverInferred;
 end;
 
 { 5d. Signature help: the engine's CallAt through the seam.

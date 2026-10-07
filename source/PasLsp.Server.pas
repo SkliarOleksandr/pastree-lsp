@@ -3330,6 +3330,40 @@ begin
     ',"typeSpans":' + ATypeSpans + '}';
 end;
 
+{ A typeSpans array (`[5,7,15,7]`, 1-based column/length pairs) re-based onto
+  the same line with its first AShift characters cut off - the hover's `code`
+  is the declaration line without its indentation. A pair that would start
+  before the cut is dropped; it cannot happen for a type name, which never
+  sits in leading whitespace, but a wrong span is worse than none. }
+function ShiftSpansJson(const ASpansJson: string; AShift: Integer): string;
+var
+  LParts: TArray<string>;
+  LIdx, LCol: Integer;
+  LInner: string;
+begin
+  LInner := Trim(ASpansJson);
+  if (Length(LInner) < 2) or (AShift = 0) then
+    Exit(ASpansJson);
+  LInner := Copy(LInner, 2, Length(LInner) - 2);
+  if Trim(LInner) = '' then
+    Exit('[]');
+  LParts := LInner.Split([',']);
+  Result := '';
+  LIdx := 0;
+  while LIdx + 1 < Length(LParts) do
+  begin
+    LCol := StrToIntDef(Trim(LParts[LIdx]), 0) - AShift;
+    if LCol >= 1 then
+    begin
+      if Result <> '' then
+        Result := Result + ',';
+      Result := Result + IntToStr(LCol) + ',' + Trim(LParts[LIdx + 1]);
+    end;
+    Inc(LIdx, 2);
+  end;
+  Result := '[' + Result + ']';
+end;
+
 { The rows of FindDefineReferences as plain reference hits. Kind and Active
   are dropped: an LSP Location carries neither, and a `$DEFINE` site is a
   reference like any other (PasTree's own rule - the name can have several
@@ -6246,6 +6280,10 @@ var
   LIdent: TPasNavIdent;
   LHit: TPasRefHit;
   LStartLine, LStartChar, LEndLine, LEndChar: Integer;
+  LKind, LHitSnippet, LHoverCode, LTypeSpans, LHoverJson: string;
+  LIsSymbolHit, LIsSymbol: Boolean;
+  LIndent, LSpanIdx, LHeadLen: Integer;
+  LSigSpans: TArray<Integer>;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -6301,11 +6339,16 @@ begin
   LDeclFile := '';
   LDeclLine := 0;
   LDeclCol := 0;
+  LKind := '';
+  LHitSnippet := '';
+  LIsSymbolHit := False;
+  LIsSymbol := False;
   if LIsDefine then
   begin
     // What it is, then where it comes from: the `$DEFINE` this directive
     // sees, the project/platform, or nowhere (a name that is never on).
     LCode := '{$DEFINE ' + LName + '}';
+    LKind := 'conditional symbol';
     // Where it comes from: a project/platform define lands on the main
     // module's header (PasTree 0.27.2 - the project is its home, as
     // System.pas is a builtin's), a unit-local one on the $DEFINE this
@@ -6330,6 +6373,7 @@ begin
   else if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LCode := 'unit ' + LName + ';';
+    LKind := 'unit';
     if FNav.UnitDeclHit(LTMid, LHit) then
     begin
       LNote := Format('unit - %s', [TPath.GetFileName(LHit.FilePath)]);
@@ -6348,9 +6392,13 @@ begin
     // source at all.
     LRawDoc := FProject.SymDocComment(LTMid, LSymIdx);
     LDoc := XmlDocDisplayText(LRawDoc);
+    LKind := KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind);
+    LIsSymbol := True;
     if FNav.DeclHit(LTMid, LSymIdx, LHit) then
     begin
       LCode := Trim(LHit.Snippet);
+      LHitSnippet := TrimRight(LHit.Snippet);
+      LIsSymbolHit := True;
       LNote := Format('%s - %s:%d',
         [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind),
          TPath.GetFileName(LHit.FilePath), LHit.Line]);
@@ -6368,6 +6416,7 @@ begin
   begin
     LCode := LName;
     LNote := 'compiler builtin - no source declaration';
+    LKind := 'compiler builtin';
   end
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -6388,6 +6437,50 @@ begin
   // name, which IdentAt reports as one span.
   PasTreeToLsp(LIdent.Line, LIdent.ColFrom, LStartLine, LStartChar);
   PasTreeToLsp(LIdent.Line, LIdent.ColTo, LEndLine, LEndChar);
+  { `pastreeHover` is OURS too: the same card as fields, for a client that
+    paints the hint itself (the RAD Studio plugin's hover window) rather than
+    rendering markdown or HTML. `code` is the symbol's one-line signature as
+    the native hint spells it (SymbolSignatureText: `var LName: string`, not
+    the declaration line `LName, LDetail, LKind: string;`), or - for a kind it
+    does not compose - the declaration's source line without its indentation;
+    `typeSpans` are the type names in it, so they can be painted as the
+    editor paints them; `headLen` is the length of its lead (`var`,
+    `param [in/out]`), painted as a keyword; `file`/`line`/`col`
+    (1-based) is where the link in the hint goes; `kind` and `note` say what
+    it is. }
+  LHeadLen := 0;
+  LHoverCode := '';
+  if LIsSymbol then
+    LHoverCode := SymbolSignatureText(FProject, LTMid, LSymIdx, LDeclFile,
+      LSigSpans, LHeadLen);
+  if LHoverCode <> '' then
+  begin
+    LTypeSpans := '';
+    for LSpanIdx := 0 to High(LSigSpans) do
+    begin
+      if LTypeSpans <> '' then
+        LTypeSpans := LTypeSpans + ',';
+      LTypeSpans := LTypeSpans + IntToStr(LSigSpans[LSpanIdx]);
+    end;
+    LTypeSpans := '[' + LTypeSpans + ']';
+  end
+  else if LIsSymbolHit then
+  begin
+    LIndent := Length(LHitSnippet) - Length(TrimLeft(LHitSnippet));
+    LTypeSpans := ShiftSpansJson(LineTypeSpansJson(LDeclFile, LDeclLine),
+      LIndent);
+    LHoverCode := Trim(LHitSnippet);
+  end
+  else
+  begin
+    LTypeSpans := '[]';
+    LHoverCode := LCode;
+  end;
+  LHoverJson := Format('{"code":%s,"typeSpans":%s,"headLen":%d,"doc":%s,' +
+    '"kind":%s,"note":%s,"file":%s,"line":%d,"col":%d}',
+    [JsonQuote(LHoverCode), LTypeSpans, LHeadLen, JsonQuote(LDoc),
+     JsonQuote(LKind), JsonQuote(LNote), JsonQuote(LDeclFile), LDeclLine,
+     LDeclCol]);
   { `pastreeHtml` is OURS, alongside the standard contents: the same card as a
     Help Insight page, in the shape the IDE's own HelpInsight.xsl emits (see
     PasLsp.XmlDoc). The RAD client hands it to the IDE where an HTML surface
@@ -6398,11 +6491,13 @@ begin
   Result := BuildResponse(AMsg.IdJson, Format(
     '{"contents":{"kind":"markdown","value":%s},' +
     '"pastreeHtml":%s,' +
+    '"pastreeHover":%s,' +
     '"range":{"start":{"line":%d,"character":%d},' +
     '"end":{"line":%d,"character":%d}}}',
     [JsonQuote(LMd),
      JsonQuote(HelpInsightPage(LCode, LDeclFile,
        TPath.GetFileName(LDeclFile), LDeclLine, LDeclCol, LRawDoc)),
+     LHoverJson,
      LStartLine, LStartChar, LEndLine, LEndChar]));
 end;
 

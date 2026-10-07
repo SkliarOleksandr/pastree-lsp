@@ -186,6 +186,14 @@ function SettingsRegistryKey: string;
 function BlockCompletionEnabled: Boolean;
 
 /// <summary>
+/// Whether the editor's hover hint is ours (PasTreeIdePlugin.HoverHint) - the
+/// declaration in the editor's colours with its documentation and a link.
+/// While True the IDE's own tooltip (Tooltip symbol insight) is switched off
+/// and put back when this goes False or the package unloads.
+/// </summary>
+function HoverHintsEnabled: Boolean;
+
+/// <summary>
 /// Whether the server writes pastree-lsp.log beside the project at all.
 /// False sends no logFile to the server, which is what "no log" means on its
 /// side - nothing is written rather than written and discarded, so a
@@ -336,6 +344,7 @@ type
     // FindReferencesImplHeaders. Default False.
     FindRefsImplHeaders: Boolean;
     EnableBlockCompletion: Boolean;
+    EnableHoverHints: Boolean;
     EnableClassComplete: Boolean;
     // Where Ctrl+Shift+C puts a new body among its type's existing ones:
     // False = alphabetically (the native command's order, the default),
@@ -406,6 +415,7 @@ const
   cValueFindAll = 'EnableFindAll';
   cValueFindRefsImplHeaders = 'FindReferencesImplHeaders';
   cValueBlockCompletion = 'EnableBlockCompletion';
+  cValueHoverHints = 'EnableHoverHints';
   cValueClassComplete = 'EnableClassComplete';
   cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
   cValueGoTo = 'EnableGoTo';
@@ -566,6 +576,7 @@ begin
   Result.EnableFindAll := True;
   Result.FindRefsImplHeaders := False;
   Result.EnableBlockCompletion := True;
+  Result.EnableHoverHints := True;
   Result.EnableClassComplete := True;
   Result.ClassCompleteDeclOrder := False;
   Result.EnableGoTo := True;
@@ -611,6 +622,8 @@ begin
         Result.FindRefsImplHeaders);
       Result.EnableBlockCompletion :=
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
+      Result.EnableHoverHints :=
+        ReadFlag(LReg, cValueHoverHints, Result.EnableHoverHints);
       Result.EnableClassComplete :=
         ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
       Result.ClassCompleteDeclOrder := ReadFlag(LReg,
@@ -673,6 +686,7 @@ begin
           Ord(ASettings.FindRefsImplHeaders));
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
+        LReg.WriteInteger(cValueHoverHints, Ord(ASettings.EnableHoverHints));
         LReg.WriteInteger(cValueClassComplete,
           Ord(ASettings.EnableClassComplete));
         LReg.WriteInteger(cValueClassCompleteOrder,
@@ -759,6 +773,11 @@ end;
 function BlockCompletionEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableBlockCompletion;
+end;
+
+function HoverHintsEnabled: Boolean;
+begin
+  Result := CurrentSettings.EnableHoverHints;
 end;
 
 function ClassCompleteEnabled: Boolean;

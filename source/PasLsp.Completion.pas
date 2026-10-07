@@ -93,6 +93,21 @@ type
     Provider: string;    // names the provider+context in the server's log
   end;
 
+{ A symbol's one-line signature as the native hint spells it - `var Name:
+  Type`, `property TOwner.Name: Type`, `function TOwner.Name(params): Type`,
+  `const Name = Value`, `type Name = class(TBase)` - composed from the analysis
+  rather than read off the declaration line, which for a variable is
+  `LName, LDetail, LKind: string;` (Alex, 2026-10-07). The detail after the
+  name is the completion row's own (ItemDetailText). ATypeSpans are the type
+  names in it, 1-based column/length pairs; AHeadLen the length of the lead
+  (`var`, `param [in/out]`), painted as a keyword. An enum value reads
+  `const Unit.Name = TEnum(1)`, AUnitFile naming the unit. '' for a kind it
+  does not compose (a label) - the caller keeps the declaration line. }
+function SymbolSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  const AUnitFile: string; out ATypeSpans: TArray<Integer>;
+  out AHeadLen: Integer): string;
+
+type
   { One per server session - the preprocessor stack (source manager, defines)
     is configuration-derived, and the server's configuration is fixed at
     initialize. CompleteAt itself is stateless across calls. }
@@ -176,6 +191,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.Math,
   PasTree.Parser,
   PasTree.Ast,
   PasTree.Sema.Model,
@@ -493,6 +509,430 @@ begin
     FSourceManager.SetBuffer(APaths[LIdx], ATexts[LIdx]);
 end;
 
+{ What a completion row says after its name - and, from the hover, what
+  follows a symbol's name in its one-line signature: a routine's parameter
+  list and result type, a variable's or field's declared type, a constant's
+  value, a type's definition head. AOverlay is the model of the live buffer
+  (Mid = -1 items); AWithTypes says a project is there to resolve declared
+  types through. Moved out of CompleteAt unchanged when the hover needed the
+  same text (2026-10-07). }
+function ItemDetailText(ACompletion: TPasCompletion; AProject: TPasSemaProject;
+  AOverlay: TPasSemaModel; const AItem: TPasComplItem;
+  AWithTypes: Boolean): string;
+var
+  LX: TSemaXType;
+  LParamsText, LText: string;
+  LTypeSym, LDecl: Integer;
+  LItemModel: TPasSemaModel;
+  LSig: TPasBuiltinSig;
+begin
+  Result := '';
+  LParamsText := ACompletion.ItemParamsText(AItem);
+  if LParamsText <> '' then
+    Result := CapDisplay(LParamsText);
+  // ': <declared type>' - the demo's own recipe: the project resolves
+  // the symbol's declared type on demand, through the instantiation
+  // frame when the item came from a generic instance. For a routine
+  // this is its RESULT type, appended after the parameter list.
+  if AWithTypes and (AItem.Mid >= 0) and
+     (AItem.Sym <> NIL_SYM) and
+     (AItem.Kind in [skVar, skConst, skField, skParam,
+       skProperty, skRoutine]) then
+  begin
+    LX := AProject.SymDeclTypeX(AItem.Mid, AItem.Sym);
+    if AItem.Ctx <> NIL_INST then
+      LX := AProject.SubstX(LX, AItem.Ctx, 0);
+    if XValid(LX) then
+      Result := Result + ': ' + AProject.XTypeText(LX);
+  end
+  // OVERLAY-declared symbols - the edited file's own locals, params
+  // and members, i.e. the rows the user looks at most - have no
+  // project mid, but the fresh model resolved their declared type
+  // intra-unit: TypeSym's name is the honest (if unexpanded) answer.
+  // Without this branch the mixed list reads as types randomly
+  // missing (review finding, 2026-08-22).
+  else if (AItem.Mid < 0) and (AItem.Sym <> NIL_SYM) and
+     (AItem.Kind in [skVar, skConst, skField, skParam,
+       skProperty, skRoutine]) then
+  begin
+    LTypeSym := AOverlay.Symbols[AItem.Sym].TypeSym;
+    if LTypeSym <> NIL_SYM then
+      Result := Result + ': '
+        + AOverlay.Symbols[LTypeSym].Name;
+  end;
+  // Rows the paths above leave bare still say what they ARE (user
+  // ask, 2026-08-22): a type its definition head, a const its VALUE
+  // (always, appended after the type when one rendered), a
+  // var/property its declared type read off the declaration, a
+  // builtin routine its curated result type.
+  if AItem.Sym <> NIL_SYM then
+  begin
+    if AItem.Mid < 0 then
+      LItemModel := AOverlay
+    else if AProject <> nil then
+    begin
+      LItemModel := AProject.Model(AItem.Mid);
+      // Library units have their text demoted after a full build
+      // (TLspServer.DemoteLibraryText), and every helper below reads
+      // text - on a demoted model the token layer is nil. A unit whose
+      // stream cannot be reproduced stays demoted: no detail, not a
+      // fault.
+      if (LItemModel <> nil) and LItemModel.Demoted and
+         not AProject.EnsureHydrated(AItem.Mid) then
+        LItemModel := nil;
+    end
+    else
+      LItemModel := nil;
+    if LItemModel <> nil then
+      case AItem.Kind of
+        skType:
+          if Result = '' then
+          begin
+            LDecl := DeclOfKinds(LItemModel, AItem.Sym,
+              [nkTypeDecl]);
+            if LDecl <> NIL_NODE then
+            begin
+              LText := TypeDefHeadText(LItemModel, LDecl);
+              if LText <> '' then
+              begin
+                // Distinct alias (`= type Base`, nkTypeDecl Aux = 1).
+                if LItemModel.Tree.Nodes[LDecl].Aux = 1 then
+                  LText := 'type ' + LText;
+                Result := ' = ' + LText;
+              end;
+            end;
+          end;
+        skConst:
+          begin
+            LDecl := DeclOfKinds(LItemModel, AItem.Sym,
+              [nkConstDecl, nkInlineConst]);
+            if LDecl <> NIL_NODE then
+            begin
+              LText := ConstValueText(LItemModel, LDecl);
+              if LText <> '' then
+                Result := Result + ' = ' + LText;
+            end;
+          end;
+        skVar, skField, skParam, skProperty:
+          if Result = '' then
+          begin
+            LDecl := DeclOfKinds(LItemModel, AItem.Sym,
+              [nkVarDecl, nkParam, nkPropertyDecl, nkInlineVar]);
+            if LDecl <> NIL_NODE then
+            begin
+              LDecl := DeclTypeExprNode(LItemModel, LDecl);
+              if LDecl <> NIL_NODE then
+                Result := ': '
+                  + CapDisplay(LItemModel.Tree.NodeSpanText(LDecl));
+            end;
+          end;
+        skRoutine:
+          if (sfBuiltin in
+               LItemModel.Symbols[AItem.Sym].Flags) and
+             PasBuiltinSignature(
+               LItemModel.Symbols[AItem.Sym].NameLower, LSig) and
+             (LSig.ResultType <> '') then
+            Result := Result + ': ' + LSig.ResultType;
+      end;
+  end;
+end;
+
+{ The type a member is declared in - the symbol of the struct whose member
+  scope ASym's scope is - or NIL_SYM for anything that is not a member. A
+  struct's member scope is a child of the scope its type is declared in, so
+  that one scope's symbols are the only candidates. }
+function OwnerTypeSym(AModel: TPasSemaModel; ASym: Integer): Integer;
+var
+  LScope, LParent, LIdx, LCand: Integer;
+  LList: TSemaSymList;
+begin
+  Result := NIL_SYM;
+  LScope := AModel.Symbols[ASym].Scope;
+  if (LScope < 0) or (LScope >= AModel.Scopes.Count) or
+     (AModel.Scopes[LScope].Kind <> sckStruct) then
+    Exit;
+  LParent := AModel.Scopes[LScope].Parent;
+  if LParent = NIL_SCOPE then
+    Exit;
+  LList := AModel.Scopes[LParent].Symbols;
+  for LIdx := 0 to LList.Count - 1 do
+  begin
+    LCand := LList[LIdx];
+    if (AModel.Symbols[LCand].Kind = skType) and
+       (AModel.Symbols[LCand].MemberScope = LScope) then
+      Exit(LCand);
+  end;
+end;
+
+{ The identifiers of ASig that name types, as 1-based (column, length) pairs:
+  one right after a `:` or `of`, the owner qualifier in front of the dot, for
+  a type its own name and the ancestors in `class(...)` / `interface(...)`,
+  and anywhere a segment spelled AKnownType - the declared type of a
+  constant, which its value writes as `System.UITypes.TMsgDlgBtn.mbCancel`
+  (Alex, 2026-10-07). Of a dotted name only the segment that is the type is
+  marked, never the unit qualifier in front of it. A heuristic over text the
+  server composed itself, where those are the only places a type can stand -
+  the hover paints them in the type colour as the editor would. }
+function SignatureTypeSpans(const ASig: string; AOwnerLen, ANameStart,
+  ANameLen: Integer; AIsType: Boolean;
+  const AKnownType: string = ''): TArray<Integer>;
+var
+  LIdx, LFrom, LPrev, LSeg, LLastSeg: Integer;
+  LWord, LPrevWord: string;
+  LInHeritage, LTypePos: Boolean;
+  LResult: TArray<Integer>;
+
+  procedure Add(AFrom, ALen: Integer);
+  begin
+    LResult := LResult + [AFrom, ALen];
+  end;
+
+begin
+  LResult := nil;
+  if AOwnerLen > 0 then
+    Add(ANameStart - AOwnerLen - 1, AOwnerLen);
+  if AIsType then
+    Add(ANameStart, ANameLen);
+  LIdx := ANameStart + ANameLen;
+  LPrevWord := '';
+  LInHeritage := False;
+  while LIdx <= Length(ASig) do
+  begin
+    if CharInSet(ASig[LIdx], ['A'..'Z', 'a'..'z', '_']) then
+    begin
+      LFrom := LIdx;
+      while (LIdx <= Length(ASig)) and
+            CharInSet(ASig[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do
+        Inc(LIdx);
+      LWord := Copy(ASig, LFrom, LIdx - LFrom);
+      // What stands right before the word, spaces skipped.
+      LPrev := LFrom - 1;
+      while (LPrev >= 1) and (ASig[LPrev] = ' ') do
+        Dec(LPrev);
+      LTypePos := ((LPrev >= 1) and (ASig[LPrev] = ':')) or
+        SameText(LPrevWord, 'of') or
+        (LInHeritage and (LPrev >= 1) and CharInSet(ASig[LPrev], ['(', ',']));
+      // Segment by segment: in a type position the last one is the type, and
+      // a segment spelled AKnownType is one wherever it stands.
+      LLastSeg := LFrom;
+      for LSeg := LFrom to LIdx - 1 do
+        if ASig[LSeg] = '.' then
+          LLastSeg := LSeg + 1;
+      LSeg := LFrom;
+      while LSeg < LIdx do
+      begin
+        LPrev := LSeg;
+        while (LPrev < LIdx) and (ASig[LPrev] <> '.') do
+          Inc(LPrev);
+        if (LTypePos and (LSeg = LLastSeg)) or ((AKnownType <> '') and
+           SameText(Copy(ASig, LSeg, LPrev - LSeg), AKnownType)) then
+          Add(LSeg, LPrev - LSeg);
+        LSeg := LPrev + 1;
+      end;
+      if AIsType and (SameText(LWord, 'class') or SameText(LWord, 'interface')
+         or SameText(LWord, 'record')) and (LIdx <= Length(ASig)) and
+         (ASig[LIdx] = '(') then
+        LInHeritage := True;
+      LPrevWord := LWord;
+    end
+    else
+    begin
+      if ASig[LIdx] = ')' then
+        LInHeritage := False;
+      if ASig[LIdx] <> ' ' then
+        LPrevWord := '';
+      Inc(LIdx);
+    end;
+  end;
+  Result := LResult;
+end;
+
+{ An enum value's ordinal as the native hint writes it, `TEnum(1)`: counted
+  along its enum's values, restarting at an explicit `= N`; a value set by an
+  expression that is not a plain integer is shown as that expression. '' when
+  the declaration cannot be read. }
+function EnumValueText(AModel: TPasSemaModel; ASym: Integer): string;
+var
+  LValue, LEnum, LChild, LName, LExpr, LOrd, LLit: Integer;
+  LExprText: string;
+begin
+  Result := '';
+  LValue := AModel.Symbols[ASym].DeclNode;
+  while (LValue <> NIL_NODE) and
+        (AModel.Tree.Nodes[LValue].Kind <> nkEnumValue) do
+    LValue := AModel.Tree.Nodes[LValue].Parent;
+  if LValue = NIL_NODE then
+    Exit;
+  LEnum := AModel.Tree.Nodes[LValue].Parent;
+  if LEnum = NIL_NODE then
+    Exit;
+  LOrd := -1;
+  LChild := AModel.Tree.Nodes[LEnum].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkEnumValue then
+    begin
+      LExprText := '';
+      LName := AModel.Tree.Nodes[LChild].FirstChild;
+      LExpr := NIL_NODE;
+      if LName <> NIL_NODE then
+        LExpr := AModel.Tree.Nodes[LName].NextSibling;
+      if LExpr <> NIL_NODE then
+      begin
+        LExprText := Trim(AModel.Tree.NodeSpanText(LExpr));
+        if TryStrToInt(LExprText, LLit) then
+        begin
+          LOrd := LLit;
+          LExprText := '';
+        end;
+      end
+      else
+        Inc(LOrd);
+      if LChild = LValue then
+      begin
+        if LExprText <> '' then
+          Exit(LExprText);
+        Exit(IntToStr(LOrd));
+      end;
+    end;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function SymbolSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  const AUnitFile: string; out ATypeSpans: TArray<Integer>;
+  out AHeadLen: Integer): string;
+var
+  LModel: TPasSemaModel;
+  LCompletion: TPasCompletion;
+  LItem: TPasComplItem;
+  LHead, LName, LDetail, LUnit, LOrdinal: string;
+  LOwner, LOwnerLen, LNameStart, LDecl, LTypeSym: Integer;
+  LX: TSemaXType;
+  LKnownType: string;
+begin
+  Result := '';
+  ATypeSpans := nil;
+  AHeadLen := 0;
+  if (AProject = nil) or (AMid < 0) or (AMid >= AProject.ModelCount) or
+     (ASym = NIL_SYM) then
+    Exit;
+  LModel := AProject.Model(AMid);
+  if (LModel = nil) or (LModel.Demoted and not AProject.EnsureHydrated(AMid)) then
+    Exit;
+
+  // An enum value as the native hint has it: `const Unit.mpIsService =
+  // TMoreStuffParentIs(1)` (Alex, 2026-10-07) - unit-qualified, the ordinal
+  // cast to its enum. An anonymous enum's value has no type to cast to.
+  if LModel.Symbols[ASym].Kind = skEnumValue then
+  begin
+    LOrdinal := EnumValueText(LModel, ASym);
+    if LOrdinal = '' then
+      Exit;
+    LUnit := ChangeFileExt(ExtractFileName(AUnitFile), '');
+    LName := LModel.Symbols[ASym].Name;
+    if LUnit <> '' then
+      LName := LUnit + '.' + LName;
+    Result := 'const ' + LName + ' = ';
+    LTypeSym := LModel.Symbols[ASym].TypeSym;
+    if LTypeSym <> NIL_SYM then
+    begin
+      ATypeSpans := [Length(Result) + 1, Length(LModel.Symbols[LTypeSym].Name)];
+      Result := Result + LModel.Symbols[LTypeSym].Name + '(' + LOrdinal + ')';
+    end
+    else
+      Result := Result + LOrdinal;
+    AHeadLen := Length('const');
+    Exit;
+  end;
+
+  LItem := Default(TPasComplItem);
+  LItem.Name := LModel.Symbols[ASym].Name;
+  LItem.Kind := LModel.Symbols[ASym].Kind;
+  LItem.Bucket := cbUnitSym;
+  LItem.Mid := AMid;
+  LItem.Sym := ASym;
+  LItem.Ctx := NIL_INST;
+  LCompletion := TPasCompletion.Create(LModel, AProject, AMid);
+  try
+    case LItem.Kind of
+      skRoutine:
+        begin
+          LHead := LCompletion.ItemHeadWord(LItem);
+          if LHead = '' then
+            LHead := 'procedure';
+        end;
+      skVar, skField:
+        LHead := 'var';
+      // The native hint's own spelling (Alex, 2026-10-07): `param [in/out]
+      // CanExecute: Boolean` for a var parameter, the mode in brackets.
+      skParam:
+        begin
+          LHead := 'param';
+          LDecl := LModel.Symbols[ASym].DeclNode;
+          while (LDecl <> NIL_NODE) and
+                (LModel.Tree.Nodes[LDecl].Kind <> nkParam) do
+            LDecl := LModel.Tree.Nodes[LDecl].Parent;
+          if LDecl <> NIL_NODE then
+            if nfVar in LModel.Tree.Nodes[LDecl].Flags then
+              LHead := 'param [in/out]'
+            else if nfOut in LModel.Tree.Nodes[LDecl].Flags then
+              LHead := 'param [out]'
+            else if nfConst in LModel.Tree.Nodes[LDecl].Flags then
+              LHead := 'param [const]';
+        end;
+      skConst:
+        LHead := 'const';
+      skProperty:
+        LHead := 'property';
+      skType:
+        LHead := 'type';
+    else
+      Exit;   // the caller keeps the declaration line
+    end;
+    LDetail := ItemDetailText(LCompletion, AProject, LModel, LItem, True);
+  finally
+    LCompletion.Free;
+  end;
+  // An inline variable with no written type - `var AMessage := ''` - has the
+  // type the analysis INFERRED from its initializer; the declaration read
+  // above has none to give (Alex, 2026-10-07: the hint showed no type).
+  if (LItem.Kind = skVar) and (LDetail = '') then
+  begin
+    LX := AProject.DeclTypeX(AMid, ASym);
+    if XValid(LX) then
+      LDetail := ': ' + AProject.XTypeText(LX);
+  end;
+  // A member reads as the native hint has it - TOpenDialog.FileName.
+  LName := LItem.Name;
+  LOwnerLen := 0;
+  LOwner := OwnerTypeSym(LModel, ASym);
+  if LOwner <> NIL_SYM then
+  begin
+    LName := LModel.Symbols[LOwner].Name + '.' + LName;
+    LOwnerLen := Length(LModel.Symbols[LOwner].Name);
+  end;
+  Result := LHead + ' ' + LName + LDetail;
+  AHeadLen := Length(LHead);
+  LNameStart := Length(LHead) + 2 + IfThen(LOwnerLen > 0, LOwnerLen + 1, 0);
+  // A constant's value may name its own type inside a qualified value
+  // (`System.UITypes.TMsgDlgBtn.mbCancel`): that segment is a type too.
+  LKnownType := '';
+  if LItem.Kind = skConst then
+  begin
+    LX := AProject.DeclTypeX(AMid, ASym);
+    if XValid(LX) then
+    begin
+      LKnownType := AProject.XTypeText(LX);
+      if LastDelimiter('.', LKnownType) > 0 then
+        LKnownType := Copy(LKnownType, LastDelimiter('.', LKnownType) + 1,
+          MaxInt);
+    end;
+  end;
+  ATypeSpans := SignatureTypeSpans(Result, LOwnerLen, LNameStart,
+    Length(LItem.Name), LItem.Kind = skType, LKnownType);
+end;
+
 function TLspCompletionEngine.CompleteAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
   AProjectMid: Integer): TLspCompletionAnswer;
@@ -508,11 +948,6 @@ var
   LIdx: Integer;
   LEntry: TLspCompletionEntry;
   LWithTypes: Boolean;
-  LX: TSemaXType;
-  LParamsText, LText: string;
-  LTypeSym, LDecl: Integer;
-  LItemModel: TPasSemaModel;
-  LSig: TPasBuiltinSig;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -595,114 +1030,8 @@ begin
         // stops at the token before the declaration for every undocumented
         // row, which is nearly all of them.
         LEntry.Doc := LCompletion.ItemDocComment(LItems[LIdx]);
-        LParamsText := LCompletion.ItemParamsText(LItems[LIdx]);
-        if LParamsText <> '' then
-          LEntry.Detail := CapDisplay(LParamsText);
-        // ': <declared type>' - the demo's own recipe: the project resolves
-        // the symbol's declared type on demand, through the instantiation
-        // frame when the item came from a generic instance. For a routine
-        // this is its RESULT type, appended after the parameter list.
-        if LWithTypes and (LItems[LIdx].Mid >= 0) and
-           (LItems[LIdx].Sym <> NIL_SYM) and
-           (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
-             skProperty, skRoutine]) then
-        begin
-          LX := AProject.SymDeclTypeX(LItems[LIdx].Mid, LItems[LIdx].Sym);
-          if LItems[LIdx].Ctx <> NIL_INST then
-            LX := AProject.SubstX(LX, LItems[LIdx].Ctx, 0);
-          if XValid(LX) then
-            LEntry.Detail := LEntry.Detail + ': ' + AProject.XTypeText(LX);
-        end
-        // OVERLAY-declared symbols - the edited file's own locals, params
-        // and members, i.e. the rows the user looks at most - have no
-        // project mid, but the fresh model resolved their declared type
-        // intra-unit: TypeSym's name is the honest (if unexpanded) answer.
-        // Without this branch the mixed list reads as types randomly
-        // missing (review finding, 2026-08-22).
-        else if (LItems[LIdx].Mid < 0) and (LItems[LIdx].Sym <> NIL_SYM) and
-           (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
-             skProperty, skRoutine]) then
-        begin
-          LTypeSym := LModel.Symbols[LItems[LIdx].Sym].TypeSym;
-          if LTypeSym <> NIL_SYM then
-            LEntry.Detail := LEntry.Detail + ': '
-              + LModel.Symbols[LTypeSym].Name;
-        end;
-        // Rows the paths above leave bare still say what they ARE (user
-        // ask, 2026-08-22): a type its definition head, a const its VALUE
-        // (always, appended after the type when one rendered), a
-        // var/property its declared type read off the declaration, a
-        // builtin routine its curated result type.
-        if LItems[LIdx].Sym <> NIL_SYM then
-        begin
-          if LItems[LIdx].Mid < 0 then
-            LItemModel := LModel
-          else if AProject <> nil then
-          begin
-            LItemModel := AProject.Model(LItems[LIdx].Mid);
-            // Library units have their text demoted after a full build
-            // (TLspServer.DemoteLibraryText), and every helper below reads
-            // text - on a demoted model the token layer is nil. A unit whose
-            // stream cannot be reproduced stays demoted: no detail, not a
-            // fault.
-            if (LItemModel <> nil) and LItemModel.Demoted and
-               not AProject.EnsureHydrated(LItems[LIdx].Mid) then
-              LItemModel := nil;
-          end
-          else
-            LItemModel := nil;
-          if LItemModel <> nil then
-            case LItems[LIdx].Kind of
-              skType:
-                if LEntry.Detail = '' then
-                begin
-                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
-                    [nkTypeDecl]);
-                  if LDecl <> NIL_NODE then
-                  begin
-                    LText := TypeDefHeadText(LItemModel, LDecl);
-                    if LText <> '' then
-                    begin
-                      // Distinct alias (`= type Base`, nkTypeDecl Aux = 1).
-                      if LItemModel.Tree.Nodes[LDecl].Aux = 1 then
-                        LText := 'type ' + LText;
-                      LEntry.Detail := ' = ' + LText;
-                    end;
-                  end;
-                end;
-              skConst:
-                begin
-                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
-                    [nkConstDecl, nkInlineConst]);
-                  if LDecl <> NIL_NODE then
-                  begin
-                    LText := ConstValueText(LItemModel, LDecl);
-                    if LText <> '' then
-                      LEntry.Detail := LEntry.Detail + ' = ' + LText;
-                  end;
-                end;
-              skVar, skField, skParam, skProperty:
-                if LEntry.Detail = '' then
-                begin
-                  LDecl := DeclOfKinds(LItemModel, LItems[LIdx].Sym,
-                    [nkVarDecl, nkParam, nkPropertyDecl, nkInlineVar]);
-                  if LDecl <> NIL_NODE then
-                  begin
-                    LDecl := DeclTypeExprNode(LItemModel, LDecl);
-                    if LDecl <> NIL_NODE then
-                      LEntry.Detail := ': '
-                        + CapDisplay(LItemModel.Tree.NodeSpanText(LDecl));
-                  end;
-                end;
-              skRoutine:
-                if (sfBuiltin in
-                     LItemModel.Symbols[LItems[LIdx].Sym].Flags) and
-                   PasBuiltinSignature(
-                     LItemModel.Symbols[LItems[LIdx].Sym].NameLower, LSig) and
-                   (LSig.ResultType <> '') then
-                  LEntry.Detail := LEntry.Detail + ': ' + LSig.ResultType;
-            end;
-        end;
+        LEntry.Detail := ItemDetailText(LCompletion, AProject, LModel,
+          LItems[LIdx], LWithTypes);
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail
             + Format(' (+%d)', [LItems[LIdx].Overloads]);

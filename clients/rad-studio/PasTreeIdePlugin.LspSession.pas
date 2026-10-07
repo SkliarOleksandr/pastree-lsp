@@ -653,6 +653,38 @@ type
   TLspHoverProc = reference to procedure(ASuccess: Boolean;
     const AText: string; const AError: string);
 
+  /// <summary>
+  /// The hover card as fields - the server's `pastreeHover` - for the hover
+  /// window that paints it itself (PasTreeIdePlugin.HoverHint). Code is the
+  /// declaration line without its indentation, TypeSpans its type names as
+  /// 1-based (column, length) pairs over Code; FilePath/Line/Col (1-based)
+  /// the declaration, '' / 0 when it has none (a builtin, a define nobody
+  /// sets). Row/ColFrom/ColTo is the hovered identifier's own span in the
+  /// IDE's coordinates, ColTo exclusive - what the hint stays up over.
+  /// </summary>
+  TLspHoverInfo = record
+    Code: string;
+    TypeSpans: TArray<Integer>;
+    // The lead of Code - `var`, `param [in/out]` - painted as a reserved word.
+    HeadLen: Integer;
+    Doc: string;
+    Kind: string;
+    Note: string;
+    FilePath: string;
+    Line: Integer;
+    Col: Integer;
+    Row: Integer;
+    ColFrom: Integer;
+    ColTo: Integer;
+  end;
+
+  /// <summary>
+  /// AFound=False with ASuccess=True is "nothing under the pointer" - a
+  /// keyword, whitespace, a comment: the common answer, and no error.
+  /// </summary>
+  TLspHoverInfoProc = reference to procedure(ASuccess, AFound: Boolean;
+    const AInfo: TLspHoverInfo; const AError: string);
+
 /// <summary>
 /// Creates the session object. Call once from TIDEWizard.Create. Does NOT
 /// start a server - that happens on the first request, so loading the package
@@ -1056,6 +1088,15 @@ procedure LspHover(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspHoverProc);
 
 /// <summary>
+/// The same question as LspHover, answered as fields (`pastreeHover`) for the
+/// hover window that paints the card itself. Its own pending request, so a
+/// Tooltip Insight request and a hover-window request never cancel each
+/// other; a new LspHoverInfo supersedes an unanswered one.
+/// </summary>
+procedure LspHoverInfo(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverInfoProc);
+
+/// <summary>
 /// Asks for completion items at an IDE position - the plumbing half of
 /// COMPLETION.md. The IDE surface that shows them is the Code Insight manager
 /// (PasTreeIdePlugin.CodeInsight), registered and live. The server answers
@@ -1349,6 +1390,7 @@ type
     FPendingTypeDefinition: Int64;
     FPendingCompletion: Int64;
     FPendingHover: Int64;
+    FPendingHoverInfo: Int64;
     FPendingSignature: Int64;
     FPendingWorkspace: Int64;
     FPendingDocSymbols: Int64;
@@ -1402,6 +1444,8 @@ type
       const AOnDone: TLspHitsProc);
     procedure Completion(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspCompletionProc);
+    procedure HoverInfo(const AFileName: string; ARow, ACol: Integer;
+      const AOnDone: TLspHoverInfoProc);
     procedure Hover(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHoverProc);
     procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
@@ -3758,6 +3802,85 @@ begin
   FPendingHover := LIssuedId;
 end;
 
+{ `pastreeHover` plus the standard `range`, into the record. False when the
+  answer is null or carries no card - nothing under the pointer. }
+function ParseHoverInfo(AResult: TJSONValue; out AInfo: TLspHoverInfo): Boolean;
+var
+  LCard, LRoot: TJSONObject;
+  LLine, LChar: Integer;
+begin
+  AInfo := Default(TLspHoverInfo);
+  Result := False;
+  if not (AResult is TJSONObject) then
+    Exit;
+  LRoot := TJSONObject(AResult);
+  if not LRoot.TryGetValue<TJSONObject>('pastreeHover', LCard) then
+    Exit;
+  AInfo.Code := LCard.GetValue<string>('code', '');
+  AInfo.TypeSpans := ReadIntArray(LCard, 'typeSpans');
+  AInfo.HeadLen := LCard.GetValue<Integer>('headLen', 0);
+  AInfo.Doc := LCard.GetValue<string>('doc', '');
+  AInfo.Kind := LCard.GetValue<string>('kind', '');
+  AInfo.Note := LCard.GetValue<string>('note', '');
+  AInfo.FilePath := LCard.GetValue<string>('file', '');
+  AInfo.Line := LCard.GetValue<Integer>('line', 0);
+  AInfo.Col := LCard.GetValue<Integer>('col', 0);
+  if LRoot.TryGetValue<Integer>('range.start.line', LLine) and
+     LRoot.TryGetValue<Integer>('range.start.character', LChar) then
+    LspToIde(LLine, LChar, AInfo.Row, AInfo.ColFrom);
+  if LRoot.TryGetValue<Integer>('range.end.line', LLine) and
+     LRoot.TryGetValue<Integer>('range.end.character', LChar) then
+    LspToIde(LLine, LChar, LLine, AInfo.ColTo);
+  Result := AInfo.Code <> '';
+end;
+
+procedure TLspSession.HoverInfo(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverInfoProc);
+var
+  LParams, LDoc, LPos: TJSONObject;
+  LLine, LChar: Integer;
+  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
+begin
+  if not EnsureSession then
+  begin
+    AOnDone(False, False, Default(TLspHoverInfo), 'no LSP server available');
+    Exit;
+  end;
+
+  FDocs.Sync;
+  if FPendingHoverInfo <> 0 then
+    FClient.Cancel(FPendingHoverInfo);
+
+  IdeToLsp(ARow, ACol, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(AFileName));
+  LPos := TJSONObject.Create;
+  LPos.AddPair('line', TJSONNumber.Create(LLine));
+  LPos.AddPair('character', TJSONNumber.Create(LChar));
+  LParams := TJSONObject.Create;
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('position', LPos);
+
+  LIssuedId := 0;
+  LIssuedId := FClient.Request('textDocument/hover', LParams,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LInfo: TLspHoverInfo;
+      LFound: Boolean;
+    begin
+      if FPendingHoverInfo = LIssuedId then
+        FPendingHoverInfo := 0;
+      if ASuccess then
+      begin
+        LFound := ParseHoverInfo(AResult, LInfo);
+        AOnDone(True, LFound, LInfo, '');
+      end
+      else
+        AOnDone(False, False, Default(TLspHoverInfo), AError);
+    end);
+  FPendingHoverInfo := LIssuedId;
+end;
+
 function ParseSignatureHelp(AResult: TJSONValue): TLspSignatureHelp;
 var
   LSigs, LParams: TJSONArray;
@@ -5697,6 +5820,20 @@ begin
     Exit;
   end;
   LSession.Hover(AFileName, ARow, ACol, AOnDone);
+end;
+
+procedure LspHoverInfo(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspHoverInfoProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, False, Default(TLspHoverInfo), 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.HoverInfo(AFileName, ARow, ACol, AOnDone);
 end;
 
 procedure LspDocumentSymbols(const AFileName: string;

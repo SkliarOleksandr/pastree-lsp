@@ -20,6 +20,15 @@ interface
 function DirectiveSymbolAt(const ALine: string; ACol: Integer;
   out AFrom, ATo: Integer): Boolean;
 
+/// <summary>
+/// The identifier run covering 1-based ACol of S - letters, digits and
+/// underscores, not digit-led - AFrom/ATo bracketing it, ATo exclusive. Purely
+/// lexical: a keyword or a word in a comment is a run too. The hover hint
+/// uses it to ask the server only where an answer can come from.
+/// </summary>
+function IdentRunAt(const S: string; ACol: Integer;
+  out AFrom, ATo: Integer): Boolean;
+
 implementation
 
 uses
