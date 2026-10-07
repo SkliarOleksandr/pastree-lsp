@@ -284,7 +284,10 @@ const
   /// 0.93.12 (2026-10-07): a for-in element over an array constructor
   /// (`['.pas', '.inc']`) or a `+` of collections (`[LDir] + APaths`) has
   /// a type. Against 0.93.11 the hover shows `var LPath` with none.
-  cMinPasTreeVersion = '0.93.12';
+  /// 0.93.14 (2026-10-07): the names of a $IF expression are recorded
+  /// (TPasIfNameRef) and TPasNavigator.IfNameAt resolves them - the hover
+  /// and Ctrl+Click on `CompilerVersion`. An older library does not compile.
+  cMinPasTreeVersion = '0.93.14';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

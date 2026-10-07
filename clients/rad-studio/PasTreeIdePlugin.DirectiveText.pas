@@ -1,14 +1,16 @@
 unit PasTreeIdePlugin.DirectiveText;
 
 {
-  Which identifier in a line of source is a CONDITIONAL SYMBOL - the pure
-  string test behind the Ctrl+Click override's PointOnDefine (PasTreeIdePlugin.
-  GotoDeclaration), kept apart because it links nothing, so LspTextSmoke can
-  hold it to cases. Recognized: $IFDEF X, $IFNDEF X, $DEFINE X, $UNDEF X
-  (the one symbol after the keyword) and X inside Defined(X) in $IF and
-  $ELSEIF, in brace and (*$...*) spelling alike. (Directives are spelled
-  without braces in these comments: a brace would end the comment.)
-  One line at a time - a directive continued on the next line is not seen.
+  Which identifier in a line of source is a NAME INSIDE A DIRECTIVE - the pure
+  string test behind the Ctrl+Click override's PointOnDirectiveName
+  (PasTreeIdePlugin.GotoDeclaration), kept apart because it links nothing, so
+  LspTextSmoke can hold it to cases. Recognized: $IFDEF X, $IFNDEF X,
+  $DEFINE X, $UNDEF X (the one symbol after the keyword) and every name of a
+  $IF / $ELSEIF expression - a Defined(X) argument, a constant like
+  CompilerVersion, a Declared(X) argument - in brace and (*$...*) spelling
+  alike. (Directives are spelled without braces in these comments: a brace
+  would end the comment.) One line at a time - a directive continued on the
+  next line is not seen.
 }
 
 interface
@@ -17,7 +19,7 @@ interface
 /// Locates a conditional symbol at 1-based column ACol of ALine. On success
 /// AFrom/ATo bracket the identifier, ATo exclusive.
 /// </summary>
-function DirectiveSymbolAt(const ALine: string; ACol: Integer;
+function DirectiveNameAt(const ALine: string; ACol: Integer;
   out AFrom, ATo: Integer): Boolean;
 
 /// <summary>
@@ -121,11 +123,11 @@ begin
     Inc(Result);
 end;
 
-function DirectiveSymbolAt(const ALine: string; ACol: Integer;
+function DirectiveNameAt(const ALine: string; ACol: Integer;
   out AFrom, ATo: Integer): Boolean;
 var
-  LBodyFrom, LBodyTo, LAfter, LArg, LBefore, LWordFrom: Integer;
-  LKeyword: string;
+  LBodyFrom, LBodyTo, LAfter, LArg, LNext: Integer;
+  LKeyword, LWord: string;
 begin
   Result := False;
   if not DirectiveAround(ALine, ACol, LBodyFrom, LBodyTo) then
@@ -146,29 +148,21 @@ begin
   end;
   if (LKeyword = 'IF') or (LKeyword = 'ELSEIF') then
   begin
-    // Any identifier at the hover that is the argument of Defined(...):
-    // the token before it is `(`, and the word before that is DEFINED.
-    // Declared(...), SizeOf and plain constants in the expression are not
-    // conditional symbols and stay dark.
+    // Any NAME of the expression: a Defined(X) argument, a constant
+    // (CompilerVersion), a Declared(X) or SizeOf(T) argument - the server
+    // answers each (PasTree's DefineAt and IfNameAt). Not an operator word,
+    // and not a callee (Defined, Declared, SizeOf - a word followed by `(`).
     if not IdentRunAt(ALine, ACol, AFrom, ATo) then
       Exit;
     if (AFrom <= LAfter) or (ATo > LBodyTo) then
       Exit;
-    LBefore := AFrom - 1;
-    while (LBefore >= LAfter) and (ALine[LBefore] <= ' ') do
-      Dec(LBefore);
-    if (LBefore < LAfter) or (ALine[LBefore] <> '(') then
+    LWord := UpperCase(Copy(ALine, AFrom, ATo - AFrom));
+    if (LWord = 'AND') or (LWord = 'OR') or (LWord = 'NOT') or
+       (LWord = 'XOR') or (LWord = 'DIV') or (LWord = 'MOD') or
+       (LWord = 'SHL') or (LWord = 'SHR') or (LWord = 'IN') then
       Exit;
-    Dec(LBefore);
-    while (LBefore >= LAfter) and (ALine[LBefore] <= ' ') do
-      Dec(LBefore);
-    if LBefore < LAfter then
-      Exit;
-    LWordFrom := LBefore;
-    while (LWordFrom > LAfter) and IsIdentChar(ALine[LWordFrom - 1]) do
-      Dec(LWordFrom);
-    Result := UpperCase(Copy(ALine, LWordFrom, LBefore - LWordFrom + 1))
-      = 'DEFINED';
+    LNext := SkipBlanks(ALine, ATo, LBodyTo);
+    Result := (LNext >= LBodyTo) or (ALine[LNext] <> '(');
   end;
 end;
 

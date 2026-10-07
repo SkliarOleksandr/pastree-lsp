@@ -89,6 +89,10 @@ function XmlDocHtml(const ARaw: string): string;
 function HelpInsightPage(const ADeclaration, AFilePath, AFileShort: string;
   ALine, ACol: Integer; const ARawDoc: string): string;
 
+{ Every whitespace run becomes one space, the ends trimmed - source text
+  spread over several lines read as one. }
+function CollapseWs(const AText: string): string;
+
 implementation
 
 uses

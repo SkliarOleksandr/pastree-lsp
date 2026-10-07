@@ -687,7 +687,7 @@ type
       AX, AY: Integer): Boolean;
     procedure DoHookedClick(const AEditor: TWinControl; AX, AY: Integer);
 {$ENDIF}
-    function PointOnDefine(const Editor: TWinControl; X, Y: Integer): Boolean;
+    function PointOnDirectiveName(const Editor: TWinControl; X, Y: Integer): Boolean;
     function PointInSelection(const Editor: TWinControl;
       X, Y: Integer): Boolean;
     function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
@@ -750,16 +750,17 @@ begin
   Result := True;
 end;
 
-{ True when the editor pixel sits on a CONDITIONAL SYMBOL - the name in
-  $IFDEF / $IFNDEF / $DEFINE / $UNDEF / Defined(), located syntactically in
-  the line's own text (PasTreeIdePlugin.DirectiveText). Why the click needs
+{ True when the editor pixel sits on a NAME INSIDE A DIRECTIVE - the symbol
+  of $IFDEF / $IFNDEF / $DEFINE / $UNDEF, or any name of a $IF expression
+  (Defined(X), CompilerVersion, a constant) - located syntactically in the
+  line's own text (PasTreeIdePlugin.DirectiveText). Why the click needs
   to know: the IDE's tokenizer sees a comment there, so with PasTree as the
   Insight Provider its click chain never asks AsyncGotoDefinitionEx about the
   position and the click would do nothing - that one click is ours under
   every provider. (The IDE does draw its own Ctrl+hover underline over the
   directive token, so no painting of ours is needed; a painted overlay was
   tried and withdrawn on 2026-09-13.) }
-function TGotoDeclarationManager.PointOnDefine(const Editor: TWinControl;
+function TGotoDeclarationManager.PointOnDirectiveName(const Editor: TWinControl;
   X, Y: Integer): Boolean;
 var
   LState: INTACodeEditorState;
@@ -777,7 +778,7 @@ begin
   LLineState := LState.LineState[LVisibleLine];
   if not Assigned(LLineState) then
     Exit;
-  Result := DirectiveSymbolAt(LLineState.Text, LColumn, LFrom, LTo);
+  Result := DirectiveNameAt(LLineState.Text, LColumn, LFrom, LTo);
 end;
 
 { True when the editor pixel sits INSIDE the current selection. Such a click
@@ -863,7 +864,7 @@ begin
     and Assigned(GManager)
     and not GManager.PointInSelection(AEditor, X, Y)
     and (not PasTreeIsActiveInsightProvider
-      or GManager.PointOnDefine(AEditor, X, Y));
+      or GManager.PointOnDirectiveName(AEditor, X, Y));
 end;
 
 /// <summary>
@@ -941,7 +942,7 @@ begin
   Result := CtrlClickNavigation
     and not PointInSelection(AEditor, AX, AY)
     and (not PasTreeIsActiveInsightProvider
-      or PointOnDefine(AEditor, AX, AY));
+      or PointOnDirectiveName(AEditor, AX, AY));
 end;
 
 procedure TGotoDeclarationManager.DoHookedClick(const AEditor: TWinControl;

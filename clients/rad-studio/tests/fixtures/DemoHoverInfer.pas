@@ -22,9 +22,39 @@ type
   TInferCount = Cardinal;
   TInferReal = Double;
 
+  // Generic parameters, hovered for themselves rather than their owner.
+  TInferBox<TBoxed> = class
+    Boxed: TBoxed;
+    function Pick<TPicked>(const AValue: TPicked): TPicked;
+    function Make<TMade: class, constructor; TKept: TInferItem>(
+      const AKept: TKept): TMade;
+  end;
+
+  // Words before or after a type's head that are flags in the tree.
+  TInferFunc<TArg> = reference to function(const AArg: TArg): Boolean;
+  TInferBase = class abstract
+  end;
+
+  // A nested generic ancestor: every argument in it is painted as a type.
+  TInferNest<TNested> = class(TInferBox<TInferBox<TNested>>)
+  end;
+
 const
   // A constant whose value names its own type in a qualified spelling.
   CInferBlue = DemoAnnotateLib.TDemoColor.dcBlue;
+  CInferLevel = 3;
+
+// Names inside a $IF expression, hovered and Ctrl+Clicked like names in code.
+{$IF CompilerVersion > 20}
+const CInferModern = 1;
+{$IFEND}
+{$IF CInferLevel > 2}
+const CInferHigh = 1;
+{$IFEND}
+
+type
+  // A unit-qualified intrinsic type.
+  TInferQual = System.Byte;
 
 function MakeInferItem: TInferItem;
 
@@ -32,6 +62,16 @@ procedure InferAll(const ADir: string; const APaths: TArray<string>;
   AList: TList<TInferItem>);
 
 implementation
+
+function TInferBox<TBoxed>.Pick<TPicked>(const AValue: TPicked): TPicked;
+begin
+  Result := AValue;
+end;
+
+function TInferBox<TBoxed>.Make<TMade, TKept>(const AKept: TKept): TMade;
+begin
+  Result := TMade.Create;
+end;
 
 function MakeInferItem: TInferItem;
 begin
@@ -64,6 +104,11 @@ begin
     IStr := IItem.Name;
   if IBool and (IFloat > IConst) then
     ICtor.Free;
+  // Intrinsic routines and constants, hovered for their signature.
+  IInt := Length(ADir);
+  Inc(IInt);
+  IInt := High(APaths);
+  IBool := False;
 end;
 
 end.

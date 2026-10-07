@@ -1836,6 +1836,34 @@ const
     ('ILiteral', 'for var ILiteral', 'var ILiteral: string', ''),
     ('IChar', 'for var IChar', 'var IChar: Char', ''),
     ('IItem', 'for var IItem', 'var IItem: TInferItem', 'gap'));
+  // line hint, name, expected signature
+  // and generic parameters, which read as themselves, not as their owner
+  cIntrinsics: array[0..14] of array[0..2] of string = (
+    // a name of a $IF expression, resolved as the unit sees it
+    ('{$IF CompilerVersion', 'CompilerVersion', 'const System.CompilerVersion = '),
+    ('{$IF CInferLevel', 'CInferLevel', 'const CInferLevel = 3'),
+    // a unit-qualified intrinsic type, on its name
+    ('TInferQual = System.Byte', 'Byte', 'type System.Byte = 0..255'),
+    // the words a type's head keeps as flags, not text
+    ('TInferFunc<TArg> =', 'TInferFunc',
+     'type TInferFunc<TArg> = reference to function(const AArg: TArg): Boolean'),
+    ('TInferBase = class abstract', 'TInferBase',
+     'type TInferBase = class abstract'),
+    // a generic's parameters are part of its name, its owner's too
+    ('TInferBox<TBoxed> = class', 'TInferBox', 'type TInferBox<TBoxed> = class'),
+    ('function Pick<TPicked>', 'Pick',
+     'function TInferBox<TBoxed>.Pick<TPicked>(const AValue: TPicked): TPicked'),
+    ('Boxed: TBoxed', 'TBoxed', 'type TBoxed'),
+    ('const AValue: TPicked): TPicked;', 'TPicked', 'type TPicked'),
+    // with its constraints, as written
+    ('const AKept: TKept): TMade;', 'TMade', 'type TMade: class, constructor'),
+    ('const AKept: TKept): TMade;', 'TKept', 'type TKept: TInferItem'),
+    ('IInt := Length(', 'Length',
+     'function System.Length(const S: <string|array>): Integer'),
+    ('Inc(IInt)', 'Inc', 'procedure System.Inc(var X[; N])'),
+    ('IInt := High(', 'High',
+     'function System.High(const X: <type|array|string>)'),
+    ('IBool := False', 'False', 'const System.False: Boolean'));
 var
   LFile, LCode: string;
   LLine, LChar, LIdx, LAt: Integer;
@@ -1890,6 +1918,45 @@ begin
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"code":"type System.Double"'),
     'Double reads "type System.Double", no range');
+  // A nested generic ancestor: both TInferBox and TNested are type spans.
+  FindPos(LFile, 'TInferNest<TNested> =', 'TInferNest', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on a class with a nested generic ancestor answered');
+  LCode := '';
+  LAt := Pos('"pastreeHover":{"code":"', GResultJson);
+  if GOk and (LAt > 0) then
+  begin
+    LCode := Copy(GResultJson, LAt + Length('"pastreeHover":{"code":"'), MaxInt);
+    LCode := Copy(LCode, 1, Pos('"', LCode) - 1);
+  end;
+  LAt := Pos('<TInferBox<', LCode);
+  Check((LAt > 0) and
+    GResultJson.Contains(Format('%d,9', [LAt + 1])) and
+    GResultJson.Contains(Format('%d,7', [Pos('TNested>', LCode)])),
+    Format('in "%s" the inner TInferBox and TNested are types', [LCode]));
+  // Ctrl+Click on a $IF expression's constant lands on its declaration.
+  FindPos(LFile, '{$IF CInferLevel', 'CInferLevel', LLine, LChar);
+  FindPos(LFile, 'CInferLevel = 3', 'CInferLevel', LAt, LIdx);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)) and
+    GOk and GResultJson.Contains(Format('"start":{"line":%d,"character":%d}',
+      [LAt, LIdx])),
+    'definition on a $IF constant lands on its declaration');
+  // An intrinsic routine reads its curated signature, a constant its type.
+  for LIdx := 0 to High(cIntrinsics) do
+  begin
+    FindPos(LFile, cIntrinsics[LIdx][0], cIntrinsics[LIdx][1], LLine, LChar);
+    // An expectation ending in a blank is a prefix (a value that varies).
+    Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+      GOk and GResultJson.Contains('"code":"' + cIntrinsics[LIdx][2] +
+        IfThen(cIntrinsics[LIdx][2].EndsWith(' '), '', '"')),
+      Format('%s reads "%s"', [cIntrinsics[LIdx][1], cIntrinsics[LIdx][2]]));
+    // A generic parameter's row: `type T` [`: constraints`], no `=` and no `<`.
+    if cIntrinsics[LIdx][2].StartsWith('type T') and
+       (Pos('<', cIntrinsics[LIdx][2]) = 0) and
+       (Pos('=', cIntrinsics[LIdx][2]) = 0) then
+      Check(GOk and GResultJson.Contains('```pascal\n' + cIntrinsics[LIdx][2] +
+        '\n```'), '  and the markdown card names it too, not its owner');
+  end;
 end;
 
 { 5c. Hover: the shape Tooltip Insight parses.

@@ -2834,6 +2834,8 @@ var
   LIdent: TPasNavIdent;
   LTarget, LImplTarget, LDeclTarget: TPasNavTarget;
   LResolved, LOwnHeader: Boolean;
+  LIfStart, LIfLen, LIfMid, LIfSym: Integer;
+  LIfHit: TPasRefHit;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -2877,6 +2879,32 @@ begin
       Log(Format(AMsg.Method + ': %s define ''%s'' has no preceding active '
         + '$DEFINE in this unit', [PosTag(LPath, LPasLine, LPasCol), LDefName]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  // Any other name of a `$IF` expression - `{$IF CompilerVersion < 31}` -
+  // goes to the declaration it denotes as the unit sees it (PasTree's
+  // IfNameAt); a compiler-seeded one (CompilerVersion) to System.pas's
+  // header, where the hover's link goes too.
+  if FNav.IfNameAt(LMid, LPasLine, LPasCol, LDefName, LIfStart, LIfLen,
+    LIfMid, LIfSym) then
+  begin
+    LResolved := False;
+    if LIfSym <> NIL_SYM then
+      if sfBuiltin in FProject.Model(LIfMid).Symbols[LIfSym].Flags then
+        LResolved := FNav.UnitDeclHit(FProject.EnsureSystemUnit, LIfHit)
+      else
+        LResolved := FNav.DeclHit(LIfMid, LIfSym, LIfHit);
+    if not LResolved then
+    begin
+      Log(Format(AMsg.Method + ': %s ''%s'' in a $IF names no declaration',
+        [PosTag(LPath, LPasLine, LPasCol), LDefName]));
+      Exit(BuildResponse(AMsg.IdJson, 'null'));
+    end;
+    Log(Format(AMsg.Method + ': %s $IF name ''%s'' -> %s',
+      [PosTag(LPath, LPasLine, LPasCol), LDefName,
+       PosTag(LIfHit.FilePath, LIfHit.Line, LIfHit.Col)]));
+    Exit(BuildResponse(AMsg.IdJson,
+      LocationWithTypes(LIfHit.FilePath, LIfHit.Line, LIfHit.Col,
+        LIfHit.HiTo - LIfHit.HiFrom)));
   end;
   // Failures answer null to the client (per protocol) but SAY WHY in the
   // log - "F12 did nothing" is otherwise undebuggable from the outside.
@@ -6284,9 +6312,12 @@ var
   LIsSymbolHit, LIsSymbol: Boolean;
   LIndent, LSpanIdx, LHeadLen, LSysMid: Integer;
   LSigSpans: TArray<Integer>;
-  LBuiltinCode: string;
+  LBuiltinCode, LBuiltinKind: string;
+  LIsIfName: Boolean;
+  LIfStart, LIfLen, LIfMid, LIfSym, LBuiltinMid, LBuiltinSym: Integer;
 begin
   LBuiltinCode := '';
+  LIsIfName := False;
   LHeadLen := 0;
   LSigSpans := nil;
   LPath := DocPathOf(AMsg.Params);
@@ -6333,6 +6364,24 @@ begin
         Break;
       end;
   end
+  // Any other name of a `$IF` expression - `{$IF CompilerVersion < 31}` -
+  // is a declaration's name like one in code, resolved as the unit sees it
+  // (PasTree's IfNameAt; Alex, 2026-10-07: no hint, no Ctrl+Click there).
+  else if FNav.IfNameAt(LMid, LPasLine, LPasCol, LName, LIfStart, LIfLen,
+    LIfMid, LIfSym) then
+  begin
+    if LIfSym = NIL_SYM then
+      Exit(BuildResponse(AMsg.IdJson, 'null'));
+    LIsIfName := True;
+    // A declaration's name: the symbol branch below reads these.
+    LTMid := LIfMid;
+    LSymIdx := LIfSym;
+    LIdent := Default(TPasNavIdent);
+    LIdent.Name := LName;
+    FProject.Model(LMid).Tree.Source.Files[0].OffsetToLineCol(LIfStart,
+      LIdent.Line, LIdent.ColFrom);
+    LIdent.ColTo := LIdent.ColFrom + LIfLen;
+  end
   else if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
@@ -6374,7 +6423,8 @@ begin
     else
       LNote := 'conditional symbol - not defined here';
   end
-  else if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
+  else if not LIsIfName and
+    FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LCode := 'unit ' + LName + ';';
     LKind := 'unit';
@@ -6388,7 +6438,10 @@ begin
     else
       LNote := 'unit';
   end
-  else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
+  else if (LIsIfName and
+      not (sfBuiltin in FProject.Model(LIfMid).Symbols[LIfSym].Flags)) or
+    (not LIsIfName and
+      FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName)) then
   begin
     // Help Insight: the `///` block above the declaration, from the engine
     // (SymDocComment) and rendered here. A symbol is the only identity that
@@ -6401,6 +6454,11 @@ begin
     if FNav.DeclHit(LTMid, LSymIdx, LHit) then
     begin
       LCode := Trim(LHit.Snippet);
+      // A generic parameter's line is its owner's declaration; the card
+      // names the parameter itself, as pastreeHover does (SymbolSignatureText).
+      if FProject.Model(LTMid).Symbols[LSymIdx].Kind = skGenericParam then
+        LCode := SymbolSignatureText(FProject, LTMid, LSymIdx, LHit.FilePath,
+          LSigSpans, LHeadLen);
       LHitSnippet := TrimRight(LHit.Snippet);
       LIsSymbolHit := True;
       LNote := Format('%s - %s:%d',
@@ -6416,22 +6474,30 @@ begin
       LNote := Format('%s %s',
         [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind), LName]);
   end
-  else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
+  else if LIsIfName or FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName,
+    LBuiltinMid, LBuiltinSym) then
   begin
     LCode := LName;
     LNote := 'compiler builtin - no source declaration';
     LKind := 'compiler builtin';
-    // An intrinsic TYPE reads as the native hint has it - `type
-    // System.Integer = -2147483648..2147483647` - and links to System.pas's
-    // unit header, where the native hint goes too: System.pas says there
-    // that these are "treated as if they were declared" there (Alex,
-    // 2026-10-07).
-    LBuiltinCode := BuiltinTypeSignatureText(FProject, LMid,
-      FProject.Model(LMid).RefMap[LIdent.Node], LSigSpans, LHeadLen);
+    // An intrinsic reads as a declaration would - `type System.Integer =
+    // -2147483648..2147483647`, `function System.Length(...): Integer` -
+    // and links to System.pas's unit header, where the native hint goes
+    // too: System.pas says there that these are "treated as if they were
+    // declared" there (Alex, 2026-10-07).
+    // The seed may be System's own (`System.Byte` binds through its
+    // qualifier) - described from the model that holds it.
+    if LIsIfName then
+    begin
+      LBuiltinMid := LIfMid;
+      LBuiltinSym := LIfSym;
+    end;
+    LBuiltinCode := BuiltinSignatureText(FProject, LBuiltinMid, LBuiltinSym,
+      LSigSpans, LHeadLen, LBuiltinKind);
     if LBuiltinCode <> '' then
     begin
       LCode := LBuiltinCode;
-      LKind := 'type';
+      LKind := LBuiltinKind;
       LSysMid := FProject.EnsureSystemUnit;
       if FNav.UnitDeclHit(LSysMid, LHit) then
       begin

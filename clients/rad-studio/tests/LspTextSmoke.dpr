@@ -195,7 +195,7 @@ procedure TestDirectiveSymbol;
     LFrom, LTo: Integer;
     LGot: string;
   begin
-    if DirectiveSymbolAt(ALine, ACol, LFrom, LTo) then
+    if DirectiveNameAt(ALine, ACol, LFrom, LTo) then
       LGot := Copy(ALine, LFrom, LTo - LFrom)
     else
       LGot := '';
@@ -225,11 +225,15 @@ begin
   CheckHit('{$IFDEF FOO', 10, '', 'unterminated on this line');
   CheckHit('{ $IFDEF FOO }', 9, '', 'a comment that is not a directive');
   CheckHit(cIf, 16, 'MSWINDOWS', '{$IF Defined(X)}');
-  CheckHit(cIf, 42, '', '{$IF ...} Declared(T) is not a conditional');
+  CheckHit(cIf, 42, 'TFoo', '{$IF ...} a Declared(T) argument is a name');
   CheckHit(cIf, 61, 'X_1', '{$IF ...} Defined( X ) with spaces');
-  CheckHit(cIf, 8, '', '{$IF ...} the word Defined itself is not one');
+  CheckHit(cIf, 8, '', '{$IF ...} the callee Defined is not a name');
+  CheckHit(cIf, 33, '', '{$IF ...} nor is the callee Declared');
+  CheckHit(cIf, 25, '', '{$IF ...} nor an operator word');
   CheckHit('{$ELSEIF Defined(B)}', 18, 'B', '{$ELSEIF Defined(X)}');
-  CheckHit('{$IF FOO > 1}', 6, '', '{$IF} a bare constant is not one');
+  CheckHit('{$IF FOO > 1}', 6, 'FOO', '{$IF} a bare constant is a name');
+  CheckHit('  {$IF COMPILERVERSION < 31}function X;', 10, 'COMPILERVERSION',
+    '{$IF CompilerVersion < N}');
 end;
 { PasTreeIdePlugin.TokenShift: the last tokens answer carried onto the text
   on screen. The base is what the answer describes; each case is a line as

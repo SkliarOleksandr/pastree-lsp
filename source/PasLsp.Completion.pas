@@ -107,14 +107,23 @@ function SymbolSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
   const AUnitFile: string; out ATypeSpans: TArray<Integer>;
   out AHeadLen: Integer): string;
 
-{ A compiler-intrinsic type as the native hint spells it - `type
-  System.Integer = -2147483648..2147483647` for an integer, its range by its
-  width, `type System.string` for the rest (Alex, 2026-10-07). NativeInt and
-  NativeUInt take the width the analysis seeded for the target. ATypeSpans and
-  AHeadLen as for SymbolSignatureText. '' for a builtin that is not a type
-  (Writeln, True) - the caller keeps its plain name. }
-function BuiltinTypeSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
-  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer): string;
+{ A compiler-intrinsic name as the native hint spells a declaration, under
+  System since that is where the compiler treats them as declared (Alex,
+  2026-10-07):
+  - a type: `type System.Integer = -2147483648..2147483647` for an integer,
+    its range by its width (NativeInt/NativeUInt by the target's), `type
+    System.Double` for the rest;
+  - a routine: `function System.Length(const S: <string|array>): Integer`,
+    from PasTree's curated display signatures (PasBuiltinSignature) - a
+    function whose result depends on its argument (High, Abs) shows none;
+  - a constant: `const System.True: Boolean`, `const System.MaxInt =
+    2147483647`, `const System.CompilerVersion = 37.0`.
+  AKind is the card's kind word. ATypeSpans and AHeadLen as for
+  SymbolSignatureText. '' for a name it does not know - the caller keeps the
+  bare name. }
+function BuiltinSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer;
+  out AKind: string): string;
 
 type
   { One per server session - the preprocessor stack (source manager, defines)
@@ -206,7 +215,8 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Resolver,
   PasTree.Sema.Builtins,
-  PasTree.Sema.Complete;
+  PasTree.Sema.Complete,
+  PasLsp.XmlDoc;
 
 { LSP CompletionItemKind for a PasTree symbol kind. }
 function LspKindOf(AKind: TSemaSymbolKind): Integer;
@@ -327,7 +337,7 @@ function TypeDefHeadText(AModel: TPasSemaModel; ADecl: Integer): string;
 var
   LExpr, LChild: Integer;
   LSeenName: Boolean;
-  LRefs, LLast: string;
+  LRefs, LLast, LLead: string;
 begin
   Result := '';
   // nkTypeDecl children: [attrs] name [generic params] TypeExpr [hints].
@@ -345,7 +355,19 @@ begin
   end;
   if LExpr = NIL_NODE then
     Exit;
+  // The words that stand BEFORE the type's span - `reference to`, `packed` -
+  // are the parser's Aux and flags, not text NodeSpanText reaches (Alex,
+  // 2026-10-07: `reference to function(...)` read as a plain `function`).
+  LLead := '';
+  if nfPacked in AModel.Tree.Nodes[LExpr].Flags then
+    LLead := 'packed ';
   case AModel.Tree.Nodes[LExpr].Kind of
+    nkProcType:
+      begin
+        if AModel.Tree.Nodes[LExpr].Aux = 2 then
+          LLead := 'reference to ';
+        Exit(CapDisplay(LLead + AModel.Tree.NodeSpanText(LExpr)));
+      end;
     nkClassType:  Result := 'class';
     nkRecordType: Result := 'record';
     nkObjectType: Result := 'object';
@@ -360,8 +382,14 @@ begin
       else
         Result := 'class helper';
   else
-    Exit(CapDisplay(AModel.Tree.NodeSpanText(LExpr)));
+    Exit(CapDisplay(LLead + AModel.Tree.NodeSpanText(LExpr)));
   end;
+  Result := LLead + Result;
+  // `class abstract` / `class sealed` - words after the head, flags too.
+  if nfAbstract in AModel.Tree.Nodes[LExpr].Flags then
+    Result := Result + ' abstract'
+  else if nfSealed in AModel.Tree.Nodes[LExpr].Flags then
+    Result := Result + ' sealed';
   // Heritage: the leading type-ref children. For a helper the last of them
   // is the `for` target; for the rest they are the ancestor list.
   LRefs := '';
@@ -652,7 +680,7 @@ end;
   that one scope's symbols are the only candidates. }
 function OwnerTypeSym(AModel: TPasSemaModel; ASym: Integer): Integer;
 var
-  LScope, LParent, LIdx, LCand: Integer;
+  LScope, LParent, LIdx, LCand, LLevel: Integer;
   LList: TSemaSymList;
 begin
   Result := NIL_SYM;
@@ -660,22 +688,30 @@ begin
   if (LScope < 0) or (LScope >= AModel.Scopes.Count) or
      (AModel.Scopes[LScope].Kind <> sckStruct) then
     Exit;
+  // A generic type's member scope hangs under the scope of its parameters
+  // (`TBoxed` of `TInferBox<TBoxed>`), not straight under the type's own -
+  // so up to two levels are looked at.
   LParent := AModel.Scopes[LScope].Parent;
-  if LParent = NIL_SCOPE then
-    Exit;
-  LList := AModel.Scopes[LParent].Symbols;
-  for LIdx := 0 to LList.Count - 1 do
+  for LLevel := 1 to 2 do
   begin
-    LCand := LList[LIdx];
-    if (AModel.Symbols[LCand].Kind = skType) and
-       (AModel.Symbols[LCand].MemberScope = LScope) then
-      Exit(LCand);
+    if LParent = NIL_SCOPE then
+      Exit;
+    LList := AModel.Scopes[LParent].Symbols;
+    for LIdx := 0 to LList.Count - 1 do
+    begin
+      LCand := LList[LIdx];
+      if (AModel.Symbols[LCand].Kind = skType) and
+         (AModel.Symbols[LCand].MemberScope = LScope) then
+        Exit(LCand);
+    end;
+    LParent := AModel.Scopes[LParent].Parent;
   end;
 end;
 
 { The identifiers of ASig that name types, as 1-based (column, length) pairs:
   one right after a `:` or `of`, the owner qualifier in front of the dot, for
   a type its own name and the ancestors in `class(...)` / `interface(...)`,
+  every argument inside a generic's `<...>`, nested ones included,
   and anywhere a segment spelled AKnownType - the declared type of a
   constant, which its value writes as `System.UITypes.TMsgDlgBtn.mbCancel`
   (Alex, 2026-10-07). Of a dotted name only the segment that is the type is
@@ -686,7 +722,7 @@ function SignatureTypeSpans(const ASig: string; AOwnerLen, ANameStart,
   ANameLen: Integer; AIsType: Boolean;
   const AKnownType: string = ''): TArray<Integer>;
 var
-  LIdx, LFrom, LPrev, LSeg, LLastSeg: Integer;
+  LIdx, LFrom, LPrev, LSeg, LLastSeg, LAngle: Integer;
   LWord, LPrevWord: string;
   LInHeritage, LTypePos: Boolean;
   LResult: TArray<Integer>;
@@ -705,6 +741,7 @@ begin
   LIdx := ANameStart + ANameLen;
   LPrevWord := '';
   LInHeritage := False;
+  LAngle := 0;
   while LIdx <= Length(ASig) do
   begin
     if CharInSet(ASig[LIdx], ['A'..'Z', 'a'..'z', '_']) then
@@ -718,9 +755,14 @@ begin
       LPrev := LFrom - 1;
       while (LPrev >= 1) and (ASig[LPrev] = ' ') do
         Dec(LPrev);
+      // Inside a generic's angle brackets every argument is a type -
+      // `TEnumerable<TPair<K,V>>` paints TPair, K and V alike (Alex,
+      // 2026-10-07: only V was, by the heritage list's comma).
       LTypePos := ((LPrev >= 1) and (ASig[LPrev] = ':')) or
         SameText(LPrevWord, 'of') or
-        (LInHeritage and (LPrev >= 1) and CharInSet(ASig[LPrev], ['(', ',']));
+        ((LAngle > 0) and (LPrev >= 1) and CharInSet(ASig[LPrev], ['<', ','])) or
+        (LInHeritage and (LAngle = 0) and (LPrev >= 1) and
+         CharInSet(ASig[LPrev], ['(', ',']));
       // Segment by segment: in a type position the last one is the type, and
       // a segment spelled AKnownType is one wherever it stands.
       LLastSeg := LFrom;
@@ -746,8 +788,15 @@ begin
     end
     else
     begin
-      if ASig[LIdx] = ')' then
+      if (ASig[LIdx] = ')') and (LAngle = 0) then
         LInHeritage := False;
+      // A generic's `<` follows its name with no space; `<string|array>` in
+      // an intrinsic's display signature does not, and is no generic.
+      if (ASig[LIdx] = '<') and (LIdx > 1) and
+         CharInSet(ASig[LIdx - 1], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+        Inc(LAngle)
+      else if (ASig[LIdx] = '>') and (LAngle > 0) then
+        Dec(LAngle);
       if ASig[LIdx] <> ' ' then
         LPrevWord := '';
       Inc(LIdx);
@@ -808,9 +857,11 @@ begin
   end;
 end;
 
-function BuiltinTypeSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
-  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer): string;
+function BuiltinSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer;
+  out AKind: string): string;
 const
+  cQualifier = 'System.';
   // By NumRank, the width the builtins seed: 8, 16, 32, 64 bits.
   cSigned: array[1..4] of string = ('-128..127', '-32768..32767',
     '-2147483648..2147483647', '-9223372036854775808..9223372036854775807');
@@ -818,34 +869,123 @@ const
     '0..18446744073709551615');
 var
   LModel: TPasSemaModel;
-  LName, LLower: string;
-  LRank: Integer;
+  LName, LLower, LHead, LTail: string;
+  LRank, LTypeSym: Integer;
+  LSig: TPasBuiltinSig;
 begin
   Result := '';
   ATypeSpans := nil;
   AHeadLen := 0;
+  AKind := '';
   if (AProject = nil) or (AMid < 0) or (AMid >= AProject.ModelCount) or
      (ASym = NIL_SYM) then
     Exit;
   LModel := AProject.Model(AMid);
-  if (LModel = nil) or (LModel.Symbols[ASym].Kind <> skBuiltinType) then
+  if LModel = nil then
     Exit;
   LName := LModel.Symbols[ASym].Name;
-  Result := 'type System.' + LName;
-  AHeadLen := Length('type');
-  ATypeSpans := [Length('type System.') + 1, Length(LName)];
-  LRank := LModel.Symbols[ASym].NumRank;
-  if (LModel.Symbols[ASym].TypeCat = tcInteger) and (LRank >= 1) and
-     (LRank <= 4) then
-  begin
-    LLower := LowerCase(LName);
-    if (LLower = 'shortint') or (LLower = 'smallint') or
-       (LLower = 'integer') or (LLower = 'longint') or (LLower = 'int64') or
-       (LLower = 'nativeint') then
-      Result := Result + ' = ' + cSigned[LRank]
-    else
-      Result := Result + ' = ' + cUnsigned[LRank];
+  LLower := LowerCase(LName);
+  LTail := '';
+  case LModel.Symbols[ASym].Kind of
+    skBuiltinType:
+      begin
+        LHead := 'type';
+        AKind := 'type';
+        LRank := LModel.Symbols[ASym].NumRank;
+        if (LModel.Symbols[ASym].TypeCat = tcInteger) and (LRank >= 1) and
+           (LRank <= 4) then
+          if (LLower = 'shortint') or (LLower = 'smallint') or
+             (LLower = 'integer') or (LLower = 'longint') or
+             (LLower = 'int64') or (LLower = 'nativeint') then
+            LTail := ' = ' + cSigned[LRank]
+          else
+            LTail := ' = ' + cUnsigned[LRank];
+      end;
+    skRoutine:
+      begin
+        if not PasBuiltinSignature(LLower, LSig) then
+          Exit;
+        // A result shape the typers know makes it a function even where the
+        // display text leaves the result out (High's depends on X).
+        if (LSig.ResultType <> '') or (PasIntrinsicResult(LLower) <> irNone) then
+          LHead := 'function'
+        else
+          LHead := 'procedure';
+        AKind := LHead;
+        LTail := LSig.Params;
+        if LSig.ResultType <> '' then
+          LTail := LTail + ': ' + LSig.ResultType;
+      end;
+    skConst:
+      begin
+        LHead := 'const';
+        AKind := 'const';
+        if (LLower = 'maxint') or (LLower = 'maxlongint') then
+          LTail := ' = 2147483647'
+        else if LLower = 'compilerversion' then
+          LTail := ' = ' + FormatFloat('0.0', AProject.CompilerVersion,
+            TFormatSettings.Invariant)
+        else
+        begin
+          // True/False: their type. nil is a keyword, never hovered.
+          LTypeSym := LModel.Symbols[ASym].TypeSym;
+          if LTypeSym = NIL_SYM then
+            Exit;
+          LTail := ': ' + LModel.Symbols[LTypeSym].Name;
+        end;
+      end;
+  else
+    Exit;
   end;
+  Result := LHead + ' ' + cQualifier + LName + LTail;
+  AHeadLen := Length(LHead);
+  ATypeSpans := SignatureTypeSpans(Result, 0,
+    Length(LHead) + 2 + Length(cQualifier), Length(LName),
+    LModel.Symbols[ASym].Kind = skBuiltinType);
+end;
+
+{ A generic declaration's parameter list as part of its name - `<K,V>` - read
+  off the nkGenericParams that the parser puts right after the name's nkIdent
+  (a type's, or a routine's segment). Names only, constraints left out: the
+  name is what this is. AParamAt are the parameters' (1-based offset in the
+  result, length) pairs. '' when ADecl is not followed by one. }
+function GenericParamsText(AModel: TPasSemaModel; ADecl: Integer;
+  out AParamAt: TArray<Integer>): string;
+var
+  LList, LParam, LName: Integer;
+  LText: string;
+begin
+  Result := '';
+  AParamAt := nil;
+  if ADecl = NIL_NODE then
+    Exit;
+  LList := AModel.Tree.Nodes[ADecl].NextSibling;
+  if (LList = NIL_NODE) or
+     (AModel.Tree.Nodes[LList].Kind <> nkGenericParams) then
+    Exit;
+  LParam := AModel.Tree.Nodes[LList].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LParam].Kind = nkGenericParam then
+    begin
+      LName := AModel.Tree.Nodes[LParam].FirstChild;
+      while (LName <> NIL_NODE) and
+            (AModel.Tree.Nodes[LName].Kind = nkIdent) do
+      begin
+        LText := AModel.Tree.NodeText(LName);
+        if Result = '' then
+          Result := '<'
+        else
+          Result := Result + ',';
+        AParamAt := AParamAt + [Length(Result) + 1, Length(LText)];
+        Result := Result + LText;
+        LName := AModel.Tree.Nodes[LName].NextSibling;
+      end;
+    end;
+    LParam := AModel.Tree.Nodes[LParam].NextSibling;
+  end;
+  if Result <> '' then
+    Result := Result + '>';
 end;
 
 function SymbolSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
@@ -858,7 +998,9 @@ var
   LHead, LName, LDetail, LUnit, LOrdinal: string;
   LOwner, LOwnerLen, LNameStart, LDecl, LTypeSym: Integer;
   LX: TSemaXType;
-  LKnownType: string;
+  LKnownType, LSep, LText, LBase, LOwnerText: string;
+  LNode, LSegAt, LSpanIdx: Integer;
+  LOwnerSpans, LOwnerParamAt: TArray<Integer>;
 begin
   Result := '';
   ATypeSpans := nil;
@@ -892,6 +1034,57 @@ begin
     else
       Result := Result + LOrdinal;
     AHeadLen := Length('const');
+    Exit;
+  end;
+
+  // A generic type parameter is a type of its own, not the declaration it
+  // sits in - the declaration line put the whole owner (`TEnumerator<T> =
+  // class abstract`, a routine's full header) in the hint. The native hint
+  // reads `type T =` with nothing after it (Alex, 2026-10-07); the dangling
+  // `=` is left out here, and the constraints are added as written:
+  // `type T: class, constructor`, `type T: IComparable<T>`.
+  if LModel.Symbols[ASym].Kind = skGenericParam then
+  begin
+    LName := LModel.Symbols[ASym].Name;
+    Result := 'type ' + LName;
+    AHeadLen := Length('type');
+    ATypeSpans := [Length('type ') + 1, Length(LName)];
+    // The nkGenericParam holds its names (nkIdent), then one nkConstraint
+    // per constraint: a keyword one has no child, a type one its type.
+    LDecl := LModel.Symbols[ASym].DeclNode;
+    if LDecl <> NIL_NODE then
+      LDecl := LModel.Tree.Nodes[LDecl].Parent;
+    if (LDecl <> NIL_NODE) and
+       (LModel.Tree.Nodes[LDecl].Kind = nkGenericParam) then
+    begin
+      LNode := LModel.Tree.Nodes[LDecl].FirstChild;
+      LSep := ': ';
+      while LNode <> NIL_NODE do
+      begin
+        if LModel.Tree.Nodes[LNode].Kind = nkConstraint then
+        begin
+          LText := CollapseWs(LModel.Tree.NodeSpanText(LNode));
+          if LText <> '' then
+          begin
+            Result := Result + LSep;
+            LSep := ', ';
+            // A type constraint's type name - `IComparer` of
+            // `Generics.Defaults.IComparer<T>` - is painted as a type.
+            if LModel.Tree.Nodes[LNode].FirstChild <> NIL_NODE then
+            begin
+              LBase := LText;
+              if Pos('<', LBase) > 0 then
+                LBase := Copy(LBase, 1, Pos('<', LBase) - 1);
+              LSegAt := LastDelimiter('.', LBase);
+              ATypeSpans := ATypeSpans + [Length(Result) + LSegAt + 1,
+                Length(LBase) - LSegAt];
+            end;
+            Result := Result + LText;
+          end;
+        end;
+        LNode := LModel.Tree.Nodes[LNode].NextSibling;
+      end;
+    end;
     Exit;
   end;
 
@@ -952,14 +1145,27 @@ begin
     if XValid(LX) then
       LDetail := ': ' + AProject.XTypeText(LX);
   end;
-  // A member reads as the native hint has it - TOpenDialog.FileName.
-  LName := LItem.Name;
+  // A member reads as the native hint has it - TOpenDialog.FileName - and a
+  // generic's parameters are part of its name: `type TPair<K,V> = record`,
+  // `function TArray.BinarySearch<T>(...)`, `procedure TList<T>.Add(...)`
+  // (Alex, 2026-10-07).
+  LName := LItem.Name + GenericParamsText(LModel,
+    LModel.Symbols[ASym].DeclNode, LOwnerParamAt);
   LOwnerLen := 0;
+  LOwnerSpans := nil;
   LOwner := OwnerTypeSym(LModel, ASym);
   if LOwner <> NIL_SYM then
   begin
-    LName := LModel.Symbols[LOwner].Name + '.' + LName;
-    LOwnerLen := Length(LModel.Symbols[LOwner].Name);
+    LOwnerText := LModel.Symbols[LOwner].Name + GenericParamsText(LModel,
+      LModel.Symbols[LOwner].DeclNode, LOwnerParamAt);
+    LName := LOwnerText + '.' + LName;
+    LOwnerLen := Length(LOwnerText);
+    // The owner's name and its parameters are types, 1-based from the head.
+    LOwnerSpans := [Length(LHead) + 2, Length(LModel.Symbols[LOwner].Name)];
+    for LSpanIdx := 0 to Length(LOwnerParamAt) div 2 - 1 do
+      LOwnerSpans := LOwnerSpans + [Length(LHead) + 2 +
+        Length(LModel.Symbols[LOwner].Name) + LOwnerParamAt[LSpanIdx * 2] - 1,
+        LOwnerParamAt[LSpanIdx * 2 + 1]];
   end;
   Result := LHead + ' ' + LName + LDetail;
   AHeadLen := Length(LHead);
@@ -978,7 +1184,9 @@ begin
           MaxInt);
     end;
   end;
-  ATypeSpans := SignatureTypeSpans(Result, LOwnerLen, LNameStart,
+  // The name's own `<K,V>` follows it, so the scan from the name's end
+  // paints those parameters as a generic's arguments.
+  ATypeSpans := LOwnerSpans + SignatureTypeSpans(Result, 0, LNameStart,
     Length(LItem.Name), LItem.Kind = skType, LKnownType);
 end;
 

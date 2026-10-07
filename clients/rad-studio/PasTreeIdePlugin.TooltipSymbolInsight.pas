@@ -777,13 +777,12 @@ begin
   LLineState := LState.LineState[LVisibleLine];
   if not Assigned(LLineState) then
     Exit;
-  // A word of the line, or a conditional symbol inside a directive - the
-  // only places an answer can come from. Asking about blank space or
-  // punctuation would show "analyzing..." over nothing while the server is
-  // busy.
+  // A word of the line, or a name inside a directive - the only places an
+  // answer can come from. Asking about blank space or punctuation would show
+  // "analyzing..." over nothing while the server is busy.
   LText := LLineState.Text;
   if not IdentRunAt(LText, LColumn, LFrom, LTo) and
-     not DirectiveSymbolAt(LText, LColumn, LFrom, LTo) then
+     not DirectiveNameAt(LText, LColumn, LFrom, LTo) then
     Exit;
 
   FRow := LLineState.LogicalLineNum;
