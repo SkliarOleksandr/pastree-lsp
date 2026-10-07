@@ -1815,6 +1815,11 @@ const
   // name on its declaring line, the line hint, the expected signature, and
   // 'gap' for a shape PasTree does not type yet: reported, not failed - the
   // row turns into a check the day the library types it.
+  // ICtor, IPath and IItem are typed by PasTree 0.93.12 over the real RTL
+  // (TObject.Create, TArray<T>, TList<T>.GetEnumerator); they stay gaps HERE
+  // only because this harness's closure has no System and no
+  // System.Generics.Collections (F1027 in its log), so none of the three
+  // declarations their type comes from exists.
   cCases: array[0..14] of array[0..3] of string = (
     ('IStr', 'var IStr :=', 'var IStr: string', ''),
     ('IInt', 'var IInt :=', 'var IInt: Integer', ''),
@@ -1827,8 +1832,8 @@ const
     ('IConst', 'const IConst =', 'const IConst', ''),
     ('ICount', 'for var ICount', 'var ICount: Integer', ''),
     ('IPath', 'for var IPath', 'var IPath: string', 'gap'),
-    ('IJoined', 'for var IJoined', 'var IJoined: string', 'gap'),
-    ('ILiteral', 'for var ILiteral', 'var ILiteral: string', 'gap'),
+    ('IJoined', 'for var IJoined', 'var IJoined: string', ''),
+    ('ILiteral', 'for var ILiteral', 'var ILiteral: string', ''),
     ('IChar', 'for var IChar', 'var IChar: Char', ''),
     ('IItem', 'for var IItem', 'var IItem: TInferItem', 'gap'));
 var

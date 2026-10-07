@@ -281,7 +281,10 @@ const
   /// 0.93.4: the same for a component of a form the form INHERITS - one
   /// its own form file does not name (Orpheus state components on a
   /// third-level base form of AVImark's dialogs).
-  cMinPasTreeVersion = '0.93.4';
+  /// 0.93.12 (2026-10-07): a for-in element over an array constructor
+  /// (`['.pas', '.inc']`) or a `+` of collections (`[LDir] + APaths`) has
+  /// a type. Against 0.93.11 the hover shows `var LPath` with none.
+  cMinPasTreeVersion = '0.93.12';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
