@@ -6282,9 +6282,13 @@ var
   LStartLine, LStartChar, LEndLine, LEndChar: Integer;
   LKind, LHitSnippet, LHoverCode, LTypeSpans, LHoverJson: string;
   LIsSymbolHit, LIsSymbol: Boolean;
-  LIndent, LSpanIdx, LHeadLen: Integer;
+  LIndent, LSpanIdx, LHeadLen, LSysMid: Integer;
   LSigSpans: TArray<Integer>;
+  LBuiltinCode: string;
 begin
+  LBuiltinCode := '';
+  LHeadLen := 0;
+  LSigSpans := nil;
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
@@ -6417,6 +6421,27 @@ begin
     LCode := LName;
     LNote := 'compiler builtin - no source declaration';
     LKind := 'compiler builtin';
+    // An intrinsic TYPE reads as the native hint has it - `type
+    // System.Integer = -2147483648..2147483647` - and links to System.pas's
+    // unit header, where the native hint goes too: System.pas says there
+    // that these are "treated as if they were declared" there (Alex,
+    // 2026-10-07).
+    LBuiltinCode := BuiltinTypeSignatureText(FProject, LMid,
+      FProject.Model(LMid).RefMap[LIdent.Node], LSigSpans, LHeadLen);
+    if LBuiltinCode <> '' then
+    begin
+      LCode := LBuiltinCode;
+      LKind := 'type';
+      LSysMid := FProject.EnsureSystemUnit;
+      if FNav.UnitDeclHit(LSysMid, LHit) then
+      begin
+        LNote := Format('compiler builtin - %s',
+          [TPath.GetFileName(LHit.FilePath)]);
+        LDeclFile := LHit.FilePath;
+        LDeclLine := LHit.Line;
+        LDeclCol := LHit.Col;
+      end;
+    end;
   end
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -6448,8 +6473,13 @@ begin
     `param [in/out]`), painted as a keyword; `file`/`line`/`col`
     (1-based) is where the link in the hint goes; `kind` and `note` say what
     it is. }
-  LHeadLen := 0;
-  LHoverCode := '';
+  if LBuiltinCode <> '' then
+    LHoverCode := LBuiltinCode
+  else
+  begin
+    LHeadLen := 0;
+    LHoverCode := '';
+  end;
   if LIsSymbol then
     LHoverCode := SymbolSignatureText(FProject, LTMid, LSymIdx, LDeclFile,
       LSigSpans, LHeadLen);

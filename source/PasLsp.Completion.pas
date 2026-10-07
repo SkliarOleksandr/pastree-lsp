@@ -107,6 +107,15 @@ function SymbolSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
   const AUnitFile: string; out ATypeSpans: TArray<Integer>;
   out AHeadLen: Integer): string;
 
+{ A compiler-intrinsic type as the native hint spells it - `type
+  System.Integer = -2147483648..2147483647` for an integer, its range by its
+  width, `type System.string` for the rest (Alex, 2026-10-07). NativeInt and
+  NativeUInt take the width the analysis seeded for the target. ATypeSpans and
+  AHeadLen as for SymbolSignatureText. '' for a builtin that is not a type
+  (Writeln, True) - the caller keeps its plain name. }
+function BuiltinTypeSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer): string;
+
 type
   { One per server session - the preprocessor stack (source manager, defines)
     is configuration-derived, and the server's configuration is fixed at
@@ -796,6 +805,46 @@ begin
       end;
     end;
     LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function BuiltinTypeSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
+  out ATypeSpans: TArray<Integer>; out AHeadLen: Integer): string;
+const
+  // By NumRank, the width the builtins seed: 8, 16, 32, 64 bits.
+  cSigned: array[1..4] of string = ('-128..127', '-32768..32767',
+    '-2147483648..2147483647', '-9223372036854775808..9223372036854775807');
+  cUnsigned: array[1..4] of string = ('0..255', '0..65535', '0..4294967295',
+    '0..18446744073709551615');
+var
+  LModel: TPasSemaModel;
+  LName, LLower: string;
+  LRank: Integer;
+begin
+  Result := '';
+  ATypeSpans := nil;
+  AHeadLen := 0;
+  if (AProject = nil) or (AMid < 0) or (AMid >= AProject.ModelCount) or
+     (ASym = NIL_SYM) then
+    Exit;
+  LModel := AProject.Model(AMid);
+  if (LModel = nil) or (LModel.Symbols[ASym].Kind <> skBuiltinType) then
+    Exit;
+  LName := LModel.Symbols[ASym].Name;
+  Result := 'type System.' + LName;
+  AHeadLen := Length('type');
+  ATypeSpans := [Length('type System.') + 1, Length(LName)];
+  LRank := LModel.Symbols[ASym].NumRank;
+  if (LModel.Symbols[ASym].TypeCat = tcInteger) and (LRank >= 1) and
+     (LRank <= 4) then
+  begin
+    LLower := LowerCase(LName);
+    if (LLower = 'shortint') or (LLower = 'smallint') or
+       (LLower = 'integer') or (LLower = 'longint') or (LLower = 'int64') or
+       (LLower = 'nativeint') then
+      Result := Result + ' = ' + cSigned[LRank]
+    else
+      Result := Result + ' = ' + cUnsigned[LRank];
   end;
 end;
 

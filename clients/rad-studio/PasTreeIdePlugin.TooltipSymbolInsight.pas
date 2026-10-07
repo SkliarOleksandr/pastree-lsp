@@ -1,7 +1,8 @@
-unit PasTreeIdePlugin.HoverHint;
+unit PasTreeIdePlugin.TooltipSymbolInsight;
 
 {
-  THE EDITOR'S HOVER HINT, OURS: rest the mouse on an identifier and a popup
+  TOOLTIP SYMBOL INSIGHT, OURS - the editor's hover hint, named after the
+  IDE option it replaces: rest the mouse on an identifier and a popup
   shows its declaration line in the editor's own syntax colours (type names in
   the Highlighting tab's colour), the declaration's documentation, and a link
   "Unit.pas (302)" that jumps there the way Ctrl+Click does. It works under
@@ -54,8 +55,8 @@ unit PasTreeIdePlugin.HoverHint;
 
 interface
 
-procedure InitializeHoverHint;
-procedure FinalizeHoverHint;
+procedure InitializeTooltipSymbolInsight;
+procedure FinalizeTooltipSymbolInsight;
 
 implementation
 
@@ -86,7 +87,7 @@ const
   cValueSavedDeclInfo = 'SavedDeclarationInformation';
 
 type
-  THoverHintWindow = class(TCustomControl)
+  TSymbolInsightWindow = class(TCustomControl)
   private
     FInfo: TLspHoverInfo;
     FProgress: string;
@@ -125,17 +126,17 @@ type
     property Info: TLspHoverInfo read FInfo;
   end;
 
-  THoverHintNotifier = class(TNTACodeEditorNotifier)
+  TSymbolInsightNotifier = class(TNTACodeEditorNotifier)
   protected
     function AllowedEvents: TCodeEditorEvents; override;
   end;
 
-  THoverHintController = class(TComponent)
+  TSymbolInsightController = class(TComponent)
   private
     FServices: INTACodeEditorServices;
-    FNotifier: THoverHintNotifier;
+    FNotifier: TSymbolInsightNotifier;
     FNotifierIndex: Integer;
-    FWindow: THoverHintWindow;
+    FWindow: TSymbolInsightWindow;
     FShowTimer: TTimer;
     FCheckTimer: TTimer;
     FAppEvents: TApplicationEvents;
@@ -181,7 +182,7 @@ type
   end;
 
 var
-  GController: THoverHintController;
+  GController: TSymbolInsightController;
   // False from the moment the package starts unloading: an answer that comes
   // back after that must not touch a freed window (the LspSession callbacks
   // run on the main thread, but can still be queued behind the unload).
@@ -222,9 +223,9 @@ begin
     Result := ColorToRGB(AColor);
 end;
 
-{ THoverHintWindow }
+{ TSymbolInsightWindow }
 
-constructor THoverHintWindow.Create(AOwner: TComponent);
+constructor TSymbolInsightWindow.Create(AOwner: TComponent);
 begin
   inherited;
   ControlStyle := ControlStyle + [csOpaque];
@@ -233,7 +234,7 @@ begin
   FCodeFontSize := 10;
 end;
 
-procedure THoverHintWindow.CreateParams(var Params: TCreateParams);
+procedure TSymbolInsightWindow.CreateParams(var Params: TCreateParams);
 begin
   inherited;
   Params.Style := WS_POPUP;
@@ -242,29 +243,29 @@ begin
   Params.WndParent := Application.Handle;
 end;
 
-procedure THoverHintWindow.WMMouseActivate(var Message: TWMMouseActivate);
+procedure TSymbolInsightWindow.WMMouseActivate(var Message: TWMMouseActivate);
 begin
   Message.Result := MA_NOACTIVATE;
 end;
 
-procedure THoverHintWindow.WMNCHitTest(var Message: TWMNCHitTest);
+procedure TSymbolInsightWindow.WMNCHitTest(var Message: TWMNCHitTest);
 begin
   Message.Result := HTCLIENT;
 end;
 
-function THoverHintWindow.S(AValue: Integer): Integer;
+function TSymbolInsightWindow.S(AValue: Integer): Integer;
 begin
   Result := MulDiv(AValue, FPpi, 96);
 end;
 
-procedure THoverHintWindow.UseCodeFont;
+procedure TSymbolInsightWindow.UseCodeFont;
 begin
   Canvas.Font.Name := FCodeFontName;
   Canvas.Font.Height := -MulDiv(FCodeFontSize, FPpi, 72);
   Canvas.Font.Style := [];
 end;
 
-procedure THoverHintWindow.UseUiFont;
+procedure TSymbolInsightWindow.UseUiFont;
 begin
   Canvas.Font.Name := Screen.MessageFont.Name;
   Canvas.Font.Height := -MulDiv(9, FPpi, 72);
@@ -272,7 +273,7 @@ begin
   Canvas.Font.Color := FText;
 end;
 
-procedure THoverHintWindow.ReadColors;
+procedure TSymbolInsightWindow.ReadColors;
 var
   LUI: INTAIDEUIServices;
   LEditor: IOTAEditorServices;
@@ -302,7 +303,7 @@ end;
   the editor's reserved-word colour and style, whatever the tokenizer would
   make of `param`; the rest through the display tokenizer with the type
   spans re-based onto it. ADoDraw=False measures only. }
-procedure THoverHintWindow.PaintCode(var AX: Integer; AY: Integer;
+procedure TSymbolInsightWindow.PaintCode(var AX: Integer; AY: Integer;
   ADoDraw: Boolean);
 var
   LHead, LRest: string;
@@ -335,7 +336,7 @@ end;
   note (only where it says more than the link would) and the documentation go
   under it, wrapped to a width between cDocMinWidth and cDocMaxWidth - or to
   the declaration line, when that is wider. }
-function THoverHintWindow.Measure: TSize;
+function TSymbolInsightWindow.Measure: TSize;
 var
   LX, LCodeH, LUiH, LWidth, LTextW: Integer;
   LRect: TRect;
@@ -421,7 +422,7 @@ begin
   Inc(Result.cy, S(cPad));
 end;
 
-procedure THoverHintWindow.ShowAt(const AAnchor: TRect;
+procedure TSymbolInsightWindow.ShowAt(const AAnchor: TRect;
   const AInfo: TLspHoverInfo; const AProgress: string);
 var
   LSize: TSize;
@@ -460,18 +461,18 @@ begin
   Invalidate;
 end;
 
-procedure THoverHintWindow.HideHint;
+procedure TSymbolInsightWindow.HideHint;
 begin
   if HandleAllocated and IsWindowVisible(Handle) then
     ShowWindow(Handle, SW_HIDE);
 end;
 
-function THoverHintWindow.IsShowing: Boolean;
+function TSymbolInsightWindow.IsShowing: Boolean;
 begin
   Result := HandleAllocated and IsWindowVisible(Handle);
 end;
 
-procedure THoverHintWindow.Paint;
+procedure TSymbolInsightWindow.Paint;
 var
   LR: TRect;
   LX, LY, LCodeH: Integer;
@@ -531,7 +532,7 @@ begin
   end;
 end;
 
-procedure THoverHintWindow.MouseMove(Shift: TShiftState; X, Y: Integer);
+procedure TSymbolInsightWindow.MouseMove(Shift: TShiftState; X, Y: Integer);
 begin
   inherited;
   if FLinkRect.Contains(Point(X, Y)) then
@@ -540,7 +541,7 @@ begin
     Cursor := crDefault;
 end;
 
-procedure THoverHintWindow.MouseDown(Button: TMouseButton; Shift: TShiftState;
+procedure TSymbolInsightWindow.MouseDown(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
 begin
   inherited;
@@ -549,20 +550,20 @@ begin
     OnLinkClick(Self);
 end;
 
-{ THoverHintNotifier }
+{ TSymbolInsightNotifier }
 
-function THoverHintNotifier.AllowedEvents: TCodeEditorEvents;
+function TSymbolInsightNotifier.AllowedEvents: TCodeEditorEvents;
 begin
   Result := [cevMouseEvents];
 end;
 
-{ THoverHintController }
+{ TSymbolInsightController }
 
-constructor THoverHintController.Create(AOwner: TComponent);
+constructor TSymbolInsightController.Create(AOwner: TComponent);
 begin
   inherited;
   FNotifierIndex := -1;
-  FWindow := THoverHintWindow.Create(Self);
+  FWindow := TSymbolInsightWindow.Create(Self);
   FWindow.OnLinkClick := OnLinkClick;
   FShowTimer := TTimer.Create(Self);
   FShowTimer.Enabled := False;
@@ -577,13 +578,13 @@ begin
   FAppEvents.OnDeactivate := OnAppDeactivate;
   if Supports(BorlandIDEServices, INTACodeEditorServices, FServices) then
   begin
-    FNotifier := THoverHintNotifier.Create;
+    FNotifier := TSymbolInsightNotifier.Create;
     FNotifier.OnEditorMouseMove := DoMouseMove;
     FNotifierIndex := FServices.AddEditorEventsNotifier(FNotifier);
   end;
 end;
 
-destructor THoverHintController.Destroy;
+destructor TSymbolInsightController.Destroy;
 begin
   Shutdown;
   inherited;
@@ -591,7 +592,7 @@ end;
 
 { Everything the IDE could call into, released; and the native hint put back
   on - see the header for why at unload too. Safe twice. }
-procedure THoverHintController.Shutdown;
+procedure TSymbolInsightController.Shutdown;
 begin
   FShowTimer.Enabled := False;
   FCheckTimer.Enabled := False;
@@ -613,7 +614,7 @@ begin
   end;
 end;
 
-procedure THoverHintController.Notification(AComponent: TComponent;
+procedure TSymbolInsightController.Notification(AComponent: TComponent;
   Operation: TOperation);
 begin
   inherited;
@@ -624,7 +625,7 @@ begin
   end;
 end;
 
-procedure THoverHintController.SetEditor(AEditor: TWinControl);
+procedure TSymbolInsightController.SetEditor(AEditor: TWinControl);
 begin
   if FEditor = AEditor then
     Exit;
@@ -639,7 +640,7 @@ end;
   dialog itself writes. The marker under our key is written before the switch
   goes off and read back when it goes on: it alone says the IDE's value was
   True before we touched it. }
-procedure THoverHintController.SetNativeHint(AOn: Boolean);
+procedure TSymbolInsightController.SetNativeHint(AOn: Boolean);
 var
   LServices: IOTAServices;
   LOptions: IOTAEnvironmentOptions;
@@ -682,7 +683,7 @@ begin
       // An IDE without the option (an older version) keeps its own hint; the
       // two then show together, which is visible and harmless.
       on E: Exception do
-        LspLogToServer('hover hint: could not switch the IDE''s tooltip: '
+        LspLogToServer('tooltip symbol insight: could not switch the IDE''s tooltip: '
           + E.ClassName + ': ' + E.Message);
     end;
   finally
@@ -692,11 +693,11 @@ end;
 
 { Called on every mouse move: cheap (the setting is cached), and acts only on
   a change of our setting - see the header. }
-procedure THoverHintController.SyncNativeHint;
+procedure TSymbolInsightController.SyncNativeHint;
 var
   LWant: Boolean;
 begin
-  LWant := HoverHintsEnabled;
+  LWant := TooltipSymbolInsightEnabled;
   if FSettingsRead and (LWant = FApplied) then
     Exit;
   // Recorded before the switch, so a failed one is not retried on every
@@ -706,7 +707,7 @@ begin
   SetNativeHint(not LWant);
 end;
 
-procedure THoverHintController.DoMouseMove(const Editor: TWinControl;
+procedure TSymbolInsightController.DoMouseMove(const Editor: TWinControl;
   Shift: TShiftState; X, Y: Integer);
 var
   LScreen: TPoint;
@@ -714,7 +715,7 @@ begin
   if not GAlive then
     Exit;
   SyncNativeHint;
-  if not HoverHintsEnabled then
+  if not TooltipSymbolInsightEnabled then
   begin
     CancelHover;
     Exit;
@@ -732,7 +733,7 @@ begin
   FShowTimer.Enabled := True;
 end;
 
-procedure THoverHintController.OnShowTimer(Sender: TObject);
+procedure TSymbolInsightController.OnShowTimer(Sender: TObject);
 begin
   FShowTimer.Enabled := False;
   if GAlive then
@@ -740,7 +741,7 @@ begin
 end;
 
 { The mouse has rested: find the identifier under it, and ask. }
-procedure THoverHintController.StartHover;
+procedure TSymbolInsightController.StartHover;
 var
   LState: INTACodeEditorState;
   LLineState: INTACodeEditorLineState;
@@ -815,7 +816,7 @@ begin
     end);
 end;
 
-procedure THoverHintController.CancelHover;
+procedure TSymbolInsightController.CancelHover;
 begin
   FShowTimer.Enabled := False;
   FCheckTimer.Enabled := False;
@@ -827,7 +828,7 @@ end;
 
 { On the identifier the hint is about - judged again from the editor, so a
   scroll that moved another word under the pointer counts as leaving. }
-function THoverHintController.OverAnchor(const AScreen: TPoint): Boolean;
+function TSymbolInsightController.OverAnchor(const AScreen: TPoint): Boolean;
 var
   LState: INTACodeEditorState;
   LLineState: INTACodeEditorLineState;
@@ -849,7 +850,7 @@ end;
 { Where the pointer may be without closing the hint: the identifier, the
   hint, and the band between them over the hint's width - the way to the
   link. }
-function THoverHintController.InKeepZone(const AScreen: TPoint): Boolean;
+function TSymbolInsightController.InKeepZone(const AScreen: TPoint): Boolean;
 var
   LHint, LBand: TRect;
 begin
@@ -867,7 +868,7 @@ begin
   Result := LBand.Contains(AScreen);
 end;
 
-function THoverHintController.ProgressText: string;
+function TSymbolInsightController.ProgressText: string;
 var
   LRunningMs: UInt64;
   LDots: string;
@@ -885,7 +886,7 @@ begin
   end;
 end;
 
-procedure THoverHintController.OnCheckTimer(Sender: TObject);
+procedure TSymbolInsightController.OnCheckTimer(Sender: TObject);
 begin
   if not GAlive then
     Exit;
@@ -909,7 +910,7 @@ begin
   end;
 end;
 
-procedure THoverHintController.OnAppMessage(var Msg: TMsg;
+procedure TSymbolInsightController.OnAppMessage(var Msg: TMsg;
   var Handled: Boolean);
 begin
   if not GAlive or not (FWindow.IsShowing or FPending or FShowTimer.Enabled) then
@@ -924,13 +925,13 @@ begin
   end;
 end;
 
-procedure THoverHintController.OnAppDeactivate(Sender: TObject);
+procedure TSymbolInsightController.OnAppDeactivate(Sender: TObject);
 begin
   if GAlive then
     CancelHover;
 end;
 
-procedure THoverHintController.OnLinkClick(Sender: TObject);
+procedure TSymbolInsightController.OnLinkClick(Sender: TObject);
 var
   LInfo: TLspHoverInfo;
 begin
@@ -940,14 +941,14 @@ begin
     NavigateHistoryAware(LInfo.FilePath, Max(LInfo.Line, 1), Max(LInfo.Col, 1));
 end;
 
-procedure InitializeHoverHint;
+procedure InitializeTooltipSymbolInsight;
 begin
   GAlive := True;
   if not Assigned(GController) then
-    GController := THoverHintController.Create(nil);
+    GController := TSymbolInsightController.Create(nil);
 end;
 
-procedure FinalizeHoverHint;
+procedure FinalizeTooltipSymbolInsight;
 begin
   GAlive := False;
   if Assigned(GController) then
@@ -960,6 +961,6 @@ end;
 initialization
 
 finalization
-  FinalizeHoverHint;
+  FinalizeTooltipSymbolInsight;
 
 end.

@@ -655,7 +655,7 @@ type
 
   /// <summary>
   /// The hover card as fields - the server's `pastreeHover` - for the hover
-  /// window that paints it itself (PasTreeIdePlugin.HoverHint). Code is the
+  /// window that paints it itself (PasTreeIdePlugin.TooltipSymbolInsight). Code is the
   /// declaration line without its indentation, TypeSpans its type names as
   /// 1-based (column, length) pairs over Code; FilePath/Line/Col (1-based)
   /// the declaration, '' / 0 when it has none (a builtin, a define nobody
@@ -3745,7 +3745,7 @@ end;
 /// its blocks arrived as ONE paragraph, the declaration line running straight
 /// into the documentation, because an HTML renderer collapses newlines.
 /// </summary>
-function HoverHintText(AResult: TJSONValue): string;
+function TooltipSymbolInsightText(AResult: TJSONValue): string;
 begin
   { MEASURED 2026-08-23, and the measurement decides this: the hint the IDE
     shows for AsyncGetHintText is a PLAIN window - fed HTML, it displayed the
@@ -3795,7 +3795,7 @@ begin
       if FPendingHover = LIssuedId then
         FPendingHover := 0;
       if ASuccess then
-        AOnDone(True, HoverHintText(AResult), '')
+        AOnDone(True, TooltipSymbolInsightText(AResult), '')
       else
         AOnDone(False, '', AError);
     end);

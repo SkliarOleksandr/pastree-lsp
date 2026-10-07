@@ -438,17 +438,20 @@ Ctrl+Click hook is who does the work afterwards: here the plugin returns the
 target and the IDE navigates and keeps the history itself, which is the better
 arrangement of the two.
 
-### Hover hint
+### Tooltip symbol insight
 
 Resting the mouse on an identifier opens PasTree's own hint, under every
 Insight Provider: the declaration line in the editor's syntax colours (type
 names in the Highlighting tab's colour), a `Unit.pas (302)` link that jumps to
-the declaration with an Alt+Left entry, and the declaration's XMLDoc. While the
+the declaration with an Alt+Left entry, and the declaration's XMLDoc. A
+compiler-intrinsic type reads as the native hint has it - `type
+System.Integer = -2147483648..2147483647`, the range for every integer type -
+and links to `System.pas`, where the compiler treats them as declared. While the
 analysis is still running the hint says so ("PasTree: analyzing...") and fills
 in when the answer comes. The IDE's own tooltip is switched off while this is
 on - it is the Tools > Options "Tooltip symbol insight" box, which is unticked
-for the time being and put back when the setting (Settings > Code Insight > Hover
-hints over identifiers) is turned off. The hint stays up over the identifier
+for the time being and put back when the setting of the same name (Settings >
+Code Insight > Tooltip symbol insight) is turned off. The hint stays up over the identifier
 and over itself, so the link can be clicked, and closes on any key, wheel or
 click elsewhere. It is not shown while a debugged process is stopped, where the
 IDE's evaluation tooltips own the hover.

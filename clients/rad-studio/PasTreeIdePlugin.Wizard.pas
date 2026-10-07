@@ -91,7 +91,7 @@ uses
   PasTreeIdePlugin.UnitPicker,
   PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.CrashLog,
-  PasTreeIdePlugin.HoverHint,
+  PasTreeIdePlugin.TooltipSymbolInsight,
   PasTreeIdePlugin.LspSession;
 
 const
@@ -903,8 +903,8 @@ begin
   // startup, they are read at the point of use.
   InitializeSettings;
   // The editor's hover hint, ours under every Insight Provider - the IDE's
-  // own is switched off while it is on. See PasTreeIdePlugin.HoverHint.
-  InitializeHoverHint;
+  // own is switched off while it is on. See PasTreeIdePlugin.TooltipSymbolInsight.
+  InitializeTooltipSymbolInsight;
 
   FNotifierIndex := -1;
   if Supports(BorlandIDEServices, IOTAServices, FServices) then
@@ -939,7 +939,7 @@ begin
   FinalizeKeyBindings;
   // With the bindings: a mouse-move notifier and a timer that call into this
   // BPL, and the IDE's own hint switched back on.
-  FinalizeHoverHint;
+  FinalizeTooltipSymbolInsight;
   // Early, with the other things the IDE can dispatch into: a Tools menu
   // item whose OnClick points into an unloaded BPL is the same crash as a
   // keystroke or a notification arriving late.

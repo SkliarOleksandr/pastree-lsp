@@ -87,8 +87,8 @@ type
     lblRenameHint: TLabel;
     chkBlockCompletion: TCheckBox;
     lblBlockCompletionHint: TLabel;
-    chkHoverHints: TCheckBox;
-    lblHoverHintsHint: TLabel;
+    chkTooltipSymbolInsight: TCheckBox;
+    lblTooltipSymbolInsightHint: TLabel;
     chkClassComplete: TCheckBox;
     lblClassCompleteHint: TLabel;
     lblClassCompleteOrder: TLabel;
@@ -332,7 +332,7 @@ begin
     LForm.chkFindRefsImplHeaders.Checked := LSettings.FindRefsImplHeaders;
     LForm.chkRename.Checked := LSettings.EnableRename;
     LForm.chkBlockCompletion.Checked := LSettings.EnableBlockCompletion;
-    LForm.chkHoverHints.Checked := LSettings.EnableHoverHints;
+    LForm.chkTooltipSymbolInsight.Checked := LSettings.EnableTooltipSymbolInsight;
     LForm.chkClassComplete.Checked := LSettings.EnableClassComplete;
     LForm.cbxClassCompleteOrder.ItemIndex :=
       Ord(LSettings.ClassCompleteDeclOrder);
@@ -366,7 +366,7 @@ begin
     LSettings.FindRefsImplHeaders := LForm.chkFindRefsImplHeaders.Checked;
     LSettings.EnableRename := LForm.chkRename.Checked;
     LSettings.EnableBlockCompletion := LForm.chkBlockCompletion.Checked;
-    LSettings.EnableHoverHints := LForm.chkHoverHints.Checked;
+    LSettings.EnableTooltipSymbolInsight := LForm.chkTooltipSymbolInsight.Checked;
     LSettings.EnableClassComplete := LForm.chkClassComplete.Checked;
     LSettings.ClassCompleteDeclOrder :=
       LForm.cbxClassCompleteOrder.ItemIndex = 1;

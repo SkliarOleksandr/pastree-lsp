@@ -1872,6 +1872,24 @@ begin
   Check(GOk and GResultJson.Contains('"code":"' + LCode + '"') and
     GResultJson.Contains(Format('[%d,10]', [Pos('TDemoColor', LCode)])),
     'and marks TDemoColor in it as a type, the unit qualifier not');
+  // A compiler-intrinsic type reads as the native hint has it, an integer
+  // with its range (Alex, 2026-10-07).
+  FindPos(LFile, 'TInferWhole =', 'Integer', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on Integer answered');
+  LCode := 'type System.Integer = -2147483648..2147483647';
+  Check(GOk and GResultJson.Contains('"code":"' + LCode + '"') and
+    GResultJson.Contains('"headLen":4') and
+    GResultJson.Contains(Format('[%d,7]', [Pos('Integer', LCode)])),
+    'Integer reads "' + LCode + '", the name a type');
+  FindPos(LFile, 'TInferCount =', 'Cardinal', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+    GOk and GResultJson.Contains('"code":"type System.Cardinal = 0..4294967295"'),
+    'Cardinal reads its unsigned range');
+  FindPos(LFile, 'TInferReal =', 'Double', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+    GOk and GResultJson.Contains('"code":"type System.Double"'),
+    'Double reads "type System.Double", no range');
 end;
 
 { 5c. Hover: the shape Tooltip Insight parses.

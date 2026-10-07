@@ -141,7 +141,7 @@ contains
   { Every AV in the IDE, with a stack, beside the server log - see the unit. }
   PasTreeIdePlugin.CrashLog in 'PasTreeIdePlugin.CrashLog.pas',
   { The editor's hover hint - see the unit. }
-  PasTreeIdePlugin.HoverHint in 'PasTreeIdePlugin.HoverHint.pas',
+  PasTreeIdePlugin.TooltipSymbolInsight in 'PasTreeIdePlugin.TooltipSymbolInsight.pas',
   { The startup splash line. Nothing uses this unit - it acts from its own
     initialization section - so it is here purely to be linked. }
   PasTreeIdePlugin.Splash in 'PasTreeIdePlugin.Splash.pas';

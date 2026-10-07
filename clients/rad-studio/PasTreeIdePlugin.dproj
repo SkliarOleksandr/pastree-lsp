@@ -154,7 +154,7 @@
         <DCCReference Include="PasTreeIdePlugin.DfmStyleElementsFix.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CodePatch.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CrashLog.pas"/>
-        <DCCReference Include="PasTreeIdePlugin.HoverHint.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.TooltipSymbolInsight.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Splash.pas"/>
         <RcCompile Include="PasTreeIdePlugin.Logo.rc"/>
         <BuildConfiguration Include="Base">

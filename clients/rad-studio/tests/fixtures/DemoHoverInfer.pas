@@ -17,6 +17,11 @@ type
     Name: string;
   end;
 
+  // Compiler-intrinsic types, hovered for their range.
+  TInferWhole = Integer;
+  TInferCount = Cardinal;
+  TInferReal = Double;
+
 const
   // A constant whose value names its own type in a qualified spelling.
   CInferBlue = DemoAnnotateLib.TDemoColor.dcBlue;

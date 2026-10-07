@@ -186,12 +186,13 @@ function SettingsRegistryKey: string;
 function BlockCompletionEnabled: Boolean;
 
 /// <summary>
-/// Whether the editor's hover hint is ours (PasTreeIdePlugin.HoverHint) - the
-/// declaration in the editor's colours with its documentation and a link.
-/// While True the IDE's own tooltip (Tooltip symbol insight) is switched off
-/// and put back when this goes False or the package unloads.
+/// Whether Tooltip symbol insight - the editor's hover hint - is ours
+/// (PasTreeIdePlugin.TooltipSymbolInsight): the declaration in the editor's
+/// colours with its documentation and a link. Named after the IDE's own
+/// option it replaces, which is switched off while this is True and put
+/// back when this goes False or the package unloads.
 /// </summary>
-function HoverHintsEnabled: Boolean;
+function TooltipSymbolInsightEnabled: Boolean;
 
 /// <summary>
 /// Whether the server writes pastree-lsp.log beside the project at all.
@@ -344,7 +345,7 @@ type
     // FindReferencesImplHeaders. Default False.
     FindRefsImplHeaders: Boolean;
     EnableBlockCompletion: Boolean;
-    EnableHoverHints: Boolean;
+    EnableTooltipSymbolInsight: Boolean;
     EnableClassComplete: Boolean;
     // Where Ctrl+Shift+C puts a new body among its type's existing ones:
     // False = alphabetically (the native command's order, the default),
@@ -415,7 +416,7 @@ const
   cValueFindAll = 'EnableFindAll';
   cValueFindRefsImplHeaders = 'FindReferencesImplHeaders';
   cValueBlockCompletion = 'EnableBlockCompletion';
-  cValueHoverHints = 'EnableHoverHints';
+  cValueTooltipSymbolInsight = 'EnableTooltipSymbolInsight';
   cValueClassComplete = 'EnableClassComplete';
   cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
   cValueGoTo = 'EnableGoTo';
@@ -576,7 +577,7 @@ begin
   Result.EnableFindAll := True;
   Result.FindRefsImplHeaders := False;
   Result.EnableBlockCompletion := True;
-  Result.EnableHoverHints := True;
+  Result.EnableTooltipSymbolInsight := True;
   Result.EnableClassComplete := True;
   Result.ClassCompleteDeclOrder := False;
   Result.EnableGoTo := True;
@@ -622,8 +623,8 @@ begin
         Result.FindRefsImplHeaders);
       Result.EnableBlockCompletion :=
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
-      Result.EnableHoverHints :=
-        ReadFlag(LReg, cValueHoverHints, Result.EnableHoverHints);
+      Result.EnableTooltipSymbolInsight :=
+        ReadFlag(LReg, cValueTooltipSymbolInsight, Result.EnableTooltipSymbolInsight);
       Result.EnableClassComplete :=
         ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
       Result.ClassCompleteDeclOrder := ReadFlag(LReg,
@@ -686,7 +687,7 @@ begin
           Ord(ASettings.FindRefsImplHeaders));
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
-        LReg.WriteInteger(cValueHoverHints, Ord(ASettings.EnableHoverHints));
+        LReg.WriteInteger(cValueTooltipSymbolInsight, Ord(ASettings.EnableTooltipSymbolInsight));
         LReg.WriteInteger(cValueClassComplete,
           Ord(ASettings.EnableClassComplete));
         LReg.WriteInteger(cValueClassCompleteOrder,
@@ -775,9 +776,9 @@ begin
   Result := CurrentSettings.EnableBlockCompletion;
 end;
 
-function HoverHintsEnabled: Boolean;
+function TooltipSymbolInsightEnabled: Boolean;
 begin
-  Result := CurrentSettings.EnableHoverHints;
+  Result := CurrentSettings.EnableTooltipSymbolInsight;
 end;
 
 function ClassCompleteEnabled: Boolean;
