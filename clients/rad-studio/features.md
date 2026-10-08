@@ -450,11 +450,14 @@ the declaration with an Alt+Left entry, and the declaration's XMLDoc. A
 compiler-intrinsic type reads as the native hint has it - `type
 System.Integer = -2147483648..2147483647`, the range for every integer type -
 and links to `System.pas`, where the compiler treats them as declared, with
-"System built-in" under it. A problem under the pointer heads the hint -
-`Error:` (or `Warning:`, `Hint:`) in the colour of its underline, then the
-message - taken from whichever layer draws the underlines (Errors Insight:
-PasTree's diagnostics or the IDE's Error Insight); an undeclared name, or a
-problem that is not on a name, shows the problem alone. While the
+"System built-in" under it. While PasTree draws the error underlines
+(Errors Insight), a problem under the pointer heads the hint as the IDE's
+own error hint has it - the icon and the compiler's code (`E2003`) in the
+underline's colour, then the message. An error replaces the declaration
+card - a redeclared name would show the declaration it collides with - while
+a warning or hint sits above it; an undeclared name, or a problem that is not
+on a name, shows the problem alone. With the IDE's Error Insight on,
+the IDE shows its own error hint and ours leaves the problems out. While the
 analysis is still running the hint says so ("PasTree: analyzing...") and fills
 in when the answer comes. The IDE's own tooltip is switched off while this is
 on - it is the Tools > Options "Tooltip symbol insight" box, which is unticked

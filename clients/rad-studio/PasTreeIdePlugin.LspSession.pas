@@ -618,6 +618,8 @@ type
     ColFrom: Integer;
     ColTo: Integer;
     Severity: Integer;
+    // The compiler's number for it - `E2003` - '' when the server sent none.
+    Code: string;
     Text: string;
   end;
 
@@ -2068,6 +2070,7 @@ begin
     LDiag.Severity := LValue.GetValue<Integer>('severity', 3);
     if (LDiag.Severity < 1) or (LDiag.Severity > 3) then
       LDiag.Severity := 3;
+    LDiag.Code := LValue.GetValue<string>('code', '');
     LDiag.Text := LValue.GetValue<string>('message', '');
     LDiags[LCount] := LDiag;
     Inc(LCount);

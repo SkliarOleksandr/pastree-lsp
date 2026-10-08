@@ -36,14 +36,16 @@ unit PasTreeIdePlugin.TooltipSymbolInsight;
   Options while ours is on is not fought: the switch acts on transitions of
   our setting only.
 
-  PROBLEMS UNDER THE POINTER come first in the hint, one line each - "Error:"
-  (or "Warning:", "Hint:") in the colour of its underline, then the message
-  (Alex, 2026-10-08). They are read from whichever layer draws the
-  underlines (the settings' Errors Insight): our publishDiagnostics cache,
-  or the IDE's own Error Insight through the module's IOTAModuleErrors - so
-  the hint explains the underline on screen, not another analysis's. A
-  name with no card (an undeclared identifier) shows its problems alone,
-  and so does a problem that is not on a name at all (a missing `;`).
+  PROBLEMS UNDER THE POINTER come first in the hint, one line each, drawn as
+  the IDE's own error hint draws them (Alex, 2026-10-08): a disc with a `!`
+  in the colour of the underline, the compiler's code (`E2003`) in that
+  colour, then the message. Only while PasTree draws the underlines (the
+  settings' Errors Insight) - with the IDE's Error Insight on, the IDE shows
+  its own error hint, Tooltip symbol insight or not (ProblemsOnRow). A name
+  with an ERROR shows the problems alone - no card, not even asked for (a
+  redeclared name's card is the declaration it collides with); so does a
+  name with no card (an undeclared identifier) and a problem that is not on
+  a name at all (a missing `;`). A warning or hint keeps the card.
 
   WHILE THE ANALYSIS IS NOT READY the hover request waits in the server
   (WaitAnalyzed). Instead of the native "Calculating..." window, ours shows
@@ -71,7 +73,7 @@ implementation
 
 uses
   System.SysUtils, System.Classes, System.Types, System.UITypes,
-  System.Variants, System.Math, System.Win.Registry,
+  System.Variants, System.Math, System.StrUtils, System.Win.Registry,
   Winapi.Windows, Winapi.Messages,
   Vcl.Controls, Vcl.Graphics, Vcl.Forms, Vcl.ExtCtrls, Vcl.AppEvnts,
   ToolsAPI, ToolsAPI.Editor, ToolsAPI.UI,
@@ -82,8 +84,9 @@ uses
 
 const
   // The native hint's measured timing (2026-10-07): its first window comes
-  // 150-500 ms after the mouse stops.
-  cHoverDelayMs = 450;
+  // 150-500 ms after the mouse stops. 450 felt slow; 300 since 0.63.8
+  // (Alex, 2026-10-08).
+  cHoverDelayMs = 300;
   // A hover answered within this is shown straight away; a later one gets the
   // progress line first.
   cProgressAfterMs = 300;
@@ -232,14 +235,114 @@ begin
   Result := Assigned(LProcess) and (LProcess.ProcessState = psStopped);
 end;
 
-{ The word a problem line starts with, as the IDE's own messages name them. }
-function SeverityPrefix(ASeverity: Integer): string;
+{ What a problem line names its problem by, after the icon: the compiler's
+  number, as the IDE's own error hint does (`E2003`) - or the severity's
+  word when the server sent none. }
+function ProblemLabel(const AProblem: TLspDiagnostic): string;
 begin
-  case ASeverity of
-    1: Result := 'Error: ';
-    2: Result := 'Warning: ';
-  else
-    Result := 'Hint: ';
+  Result := AProblem.Code;
+  if Result = '' then
+    case AProblem.Severity of
+      1: Result := 'Error';
+      2: Result := 'Warning';
+    else
+      Result := 'Hint';
+    end;
+end;
+
+{ The IDE error hint's icon: a disc in the severity's colour with a white
+  `!` cut into it, ASize pixels square at (AX, AY). Anti-aliased the way
+  ErrorPaint draws the underlines - coverage per pixel (here from 4x4
+  samples) into a premultiplied DIB, AlphaBlend-ed onto the hint - since a
+  GDI Ellipse at this size is a jagged blob. }
+procedure DrawProblemIcon(ACanvas: TCanvas; AX, AY, ASize: Integer;
+  AColor: TColor);
+const
+  cSub = 4;
+var
+  LInfo: TBitmapInfo;
+  LBits: Pointer;
+  LDib, LOld: HBITMAP;
+  LMemDC: HDC;
+  LPx: PCardinal;
+  LRgb, LR, LG, LB, LA, LW: Cardinal;
+  LX, LY, LSX, LSY, LDisc, LMark: Integer;
+  LR0, LPx0, LPy0, LDx, LDy: Single;
+  LBlend: TBlendFunction;
+begin
+  if ASize <= 2 then
+    Exit;
+  FillChar(LInfo, SizeOf(LInfo), 0);
+  LInfo.bmiHeader.biSize := SizeOf(LInfo.bmiHeader);
+  LInfo.bmiHeader.biWidth := ASize;
+  LInfo.bmiHeader.biHeight := -ASize;
+  LInfo.bmiHeader.biPlanes := 1;
+  LInfo.bmiHeader.biBitCount := 32;
+  LInfo.bmiHeader.biCompression := BI_RGB;
+  LMemDC := CreateCompatibleDC(ACanvas.Handle);
+  if LMemDC = 0 then
+    Exit;
+  try
+    LDib := CreateDIBSection(LMemDC, LInfo, DIB_RGB_COLORS, LBits, 0, 0);
+    if (LDib = 0) or (LBits = nil) then
+      Exit;
+    try
+      LRgb := ColorToRGB(AColor);
+      LR := LRgb and $FF;
+      LG := (LRgb shr 8) and $FF;
+      LB := (LRgb shr 16) and $FF;
+      LR0 := ASize / 2;
+      LPx := LBits;
+      for LY := 0 to ASize - 1 do
+        for LX := 0 to ASize - 1 do
+        begin
+          LDisc := 0;
+          LMark := 0;
+          for LSY := 0 to cSub - 1 do
+            for LSX := 0 to cSub - 1 do
+            begin
+              // The sample, relative to the centre, in radii.
+              LPx0 := (LX + (LSX + 0.5) / cSub - LR0) / LR0;
+              LPy0 := (LY + (LSY + 0.5) / cSub - LR0) / LR0;
+              if LPx0 * LPx0 + LPy0 * LPy0 > 0.92 * 0.92 then
+                Continue;
+              Inc(LDisc);
+              // The `!`: a bar from -0.55 to 0.14 with round ends, and a dot.
+              LDx := Abs(LPx0);
+              LDy := 0;
+              if LPy0 < -0.45 then
+                LDy := LPy0 + 0.45
+              else if LPy0 > 0.06 then
+                LDy := LPy0 - 0.06;
+              if (LDx * LDx + LDy * LDy <= 0.12 * 0.12) or
+                 (Sqr(LPx0) + Sqr(LPy0 - 0.42) <= 0.13 * 0.13) then
+                Inc(LMark);
+            end;
+          // Premultiplied BGRA: the white of the mark over the disc's colour.
+          LA := LDisc * 255 div (cSub * cSub);
+          LW := LMark * 255 div (cSub * cSub);
+          LPx^ := (LA shl 24)
+            or (((LR * (LA - LW) + 255 * LW) div 255) shl 16)
+            or (((LG * (LA - LW) + 255 * LW) div 255) shl 8)
+            or ((LB * (LA - LW) + 255 * LW) div 255);
+          Inc(LPx);
+        end;
+      LOld := SelectObject(LMemDC, LDib);
+      try
+        LBlend.BlendOp := AC_SRC_OVER;
+        LBlend.BlendFlags := 0;
+        LBlend.SourceConstantAlpha := 255;
+        LBlend.AlphaFormat := AC_SRC_ALPHA;
+        Winapi.Windows.AlphaBlend(ACanvas.Handle, AX, AY, ASize, ASize,
+          LMemDC, 0, 0, ASize, ASize, LBlend);
+      finally
+        SelectObject(LMemDC, LOld);
+      end;
+    finally
+      DeleteObject(LDib);
+    end;
+  finally
+    DeleteDC(LMemDC);
   end;
 end;
 
@@ -313,7 +416,10 @@ end;
 procedure TSymbolInsightWindow.UseUiFont;
 begin
   Canvas.Font.Name := Screen.MessageFont.Name;
-  Canvas.Font.Height := -MulDiv(9, FPpi, 72);
+  // The editor's size, not a fixed 9 pt: the hint sits over the code and
+  // read small beside it (Alex, 2026-10-08), and follows the editor's zoom
+  // setting the way the declaration line already does.
+  Canvas.Font.Height := -MulDiv(FCodeFontSize, FPpi, 72);
   Canvas.Font.Style := [];
   Canvas.Font.Color := FText;
 end;
@@ -443,9 +549,9 @@ begin
   begin
     if LIdx > 0 then
       Inc(LY, S(2));
-    Canvas.Font.Style := [fsBold];
-    LPrefixW := Canvas.TextWidth(SeverityPrefix(FErrors[LIdx].Severity));
-    Canvas.Font.Style := [];
+    // Icon, gap, the code, a blank: the message wraps beside them.
+    LPrefixW := LUiH + S(4)
+      + Canvas.TextWidth(ProblemLabel(FErrors[LIdx]) + ' ');
     LRect := Rect(0, 0, Max(LTextW - LPrefixW, S(120)), 0);
     DrawText(Canvas.Handle, PChar(FErrors[LIdx].Text), -1, LRect,
       DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
@@ -575,16 +681,19 @@ begin
   Canvas.Brush.Style := bsClear;
   Canvas.Rectangle(LR);
 
-  // The problems: the prefix in its severity's colour, the message in the
-  // hint's text colour beside it.
+  // The problems as the IDE's own error hint draws them: the icon, the code
+  // in the severity's colour, the message in the hint's text colour.
   UseUiFont;
+  LCodeH := Canvas.TextHeight('Wg');
   for LIdx := 0 to Min(High(FErrors), High(FErrorRects)) do
   begin
-    LPrefix := SeverityPrefix(FErrors[LIdx].Severity);
-    Canvas.Font.Style := [fsBold];
+    LY := FErrorRects[LIdx].Top;
+    DrawProblemIcon(Canvas, S(cPad) + S(1), LY + S(1), LCodeH - S(2),
+      SeverityColor(FErrors[LIdx].Severity));
+    Canvas.Brush.Style := bsClear;
+    LPrefix := ProblemLabel(FErrors[LIdx]);
     Canvas.Font.Color := SeverityColor(FErrors[LIdx].Severity);
-    Canvas.TextOut(S(cPad), FErrorRects[LIdx].Top, LPrefix);
-    Canvas.Font.Style := [];
+    Canvas.TextOut(S(cPad) + LCodeH + S(4), LY, LPrefix);
     Canvas.Font.Color := FText;
     LR := FErrorRects[LIdx];
     DrawText(Canvas.Handle, PChar(FErrors[LIdx].Text), -1, LR,
@@ -896,7 +1005,14 @@ begin
   LAsk := IdentRunAt(LText, LColumn, LFrom, LTo) or
     DirectiveNameAt(LText, LColumn, LFrom, LTo);
   if LAsk then
-    FErrors := ProblemsOver(LProblems, LFrom, LTo)
+  begin
+    FErrors := ProblemsOver(LProblems, LFrom, LTo);
+    // An ERROR here makes the card beside the point - a redeclared `X`
+    // would show the declaration it collides with (Alex, 2026-10-08): the
+    // error alone, and no request. A warning or hint keeps the card.
+    if (Length(FErrors) > 0) and (FErrors[0].Severity = 1) then
+      LAsk := False;
+  end
   else
   begin
     // Not on a name, but on a problem - a missing `;`, a stray `end`: the
@@ -951,71 +1067,25 @@ begin
     end);
 end;
 
-{ The problems on ARow, from whichever layer underlines them - ours
-  (publishDiagnostics) when the settings choose PasTree, otherwise the IDE's
-  own Error Insight, which the module answers through IOTAModuleErrors -
-  so the hint explains the underline that is actually on screen. Errors
-  first, then warnings, then hints; a message twice over the same span once. }
+{ The problems on ARow - ours (publishDiagnostics), and only while the
+  settings' Errors Insight has PasTree draw the underlines. With the IDE's
+  Error Insight on, the IDE shows its own error hint over an underline even
+  with Tooltip symbol insight switched off, so ours would be a second copy
+  of it (Alex, 2026-10-08; 0.63.6 read them through IOTAModuleErrors, which
+  does answer DelphiLSP's errors). Errors first, then warnings, then hints;
+  a message twice over the same span once. }
 function TSymbolInsightController.ProblemsOnRow(
   ARow: Integer): TArray<TLspDiagnostic>;
 var
   LAll: TArray<TLspDiagnostic>;
   LDiag: TLspDiagnostic;
-  LModules: IOTAModuleServices;
-  LModule: IOTAModule;
-  LModuleErrors: IOTAModuleErrors;
-  LErrors: TOTAErrors;
-  LIdx, LCount, LSev, LKept: Integer;
+  LIdx, LSev, LKept: Integer;
   LDup: Boolean;
 begin
   Result := nil;
-  LAll := nil;
-  if PasTreeErrorSquigglesEnabled then
-  begin
-    if not LspTryGetDiagnostics(FFileName, LAll) then
-      LAll := nil;
-  end
-  else
-  try
-    if Supports(BorlandIDEServices, IOTAModuleServices, LModules) then
-    begin
-      LModule := LModules.FindModule(FFileName);
-      if Assigned(LModule) and
-         Supports(LModule, IOTAModuleErrors, LModuleErrors) then
-      begin
-        LErrors := LModuleErrors.GetErrors(FFileName);
-        SetLength(LAll, Length(LErrors));
-        LCount := 0;
-        for LIdx := 0 to High(LErrors) do
-        begin
-          if (ARow < LErrors[LIdx].Start.Line) or
-             (ARow > LErrors[LIdx].Stop.Line) then
-            Continue;
-          // CharIndex is 0-based; Stop is the error's last character, and
-          // Start = Stop is one character. A span over several lines covers
-          // the whole of its inner lines.
-          LDiag.Row := ARow;
-          if LErrors[LIdx].Start.Line < ARow then
-            LDiag.ColFrom := 1
-          else
-            LDiag.ColFrom := LErrors[LIdx].Start.CharIndex + 1;
-          if LErrors[LIdx].Stop.Line > ARow then
-            LDiag.ColTo := MaxInt
-          else
-            LDiag.ColTo := LErrors[LIdx].Stop.CharIndex + 2;
-          LDiag.Severity := LErrors[LIdx].Severity;
-          LDiag.Text := LErrors[LIdx].Text;
-          LAll[LCount] := LDiag;
-          Inc(LCount);
-        end;
-        SetLength(LAll, LCount);
-      end;
-    end;
-  except
-    // An IDE without the interface on its module: no problems in the hint,
-    // which is what it showed before.
-    LAll := nil;
-  end;
+  if not PasTreeErrorSquigglesEnabled or
+     not LspTryGetDiagnostics(FFileName, LAll) then
+    Exit;
 
   for LSev := 1 to 3 do
     for LIdx := 0 to High(LAll) do
@@ -1026,13 +1096,20 @@ begin
         Continue;
       if (LSev = 3) and (LAll[LIdx].Severity < 3) then
         Continue;
+      LDiag := LAll[LIdx];
+      // PasTree's messages start with their code (`E2003 Undeclared
+      // identifier: 'Y'`), which the line shows on its own before them.
+      if (LDiag.Code <> '') and StartsText(LDiag.Code + ' ', LDiag.Text) then
+        LDiag.Text := Trim(Copy(LDiag.Text, Length(LDiag.Code) + 2, MaxInt));
+      if Trim(LDiag.Text) = '' then
+        Continue;
       LDup := False;
       for LKept := 0 to High(Result) do
-        if (Result[LKept].ColFrom = LAll[LIdx].ColFrom) and
-           (Result[LKept].Text = LAll[LIdx].Text) then
+        if (Result[LKept].ColFrom = LDiag.ColFrom) and
+           (Result[LKept].Text = LDiag.Text) then
           LDup := True;
-      if not LDup and (Trim(LAll[LIdx].Text) <> '') then
-        Result := Result + [LAll[LIdx]];
+      if not LDup then
+        Result := Result + [LDiag];
     end;
 end;
 
