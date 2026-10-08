@@ -1910,6 +1910,10 @@ begin
     GResultJson.Contains('"headLen":4') and
     GResultJson.Contains(Format('[%d,7]', [Pos('Integer', LCode)])),
     'Integer reads "' + LCode + '", the name a type');
+  // Its card has a link like any declaration's, so the hint says on a line of
+  // its own that it is a built-in (Alex, 2026-10-08).
+  Check(GOk and GResultJson.Contains('"note":"System built-in","builtin":true'),
+    'and is marked a System built-in');
   FindPos(LFile, 'TInferCount =', 'Cardinal', LLine, LChar);
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"code":"type System.Cardinal = 0..4294967295"'),
@@ -1973,7 +1977,12 @@ begin
   Writeln;
   Writeln('=== 5c. hover carries the declaration line and a kind note ===');
   LUnitFile := TPath.Combine(GFixtureDir, 'DemoUnit.pas');
+  // The implicit Result has no declaration of its own: the note says what it
+  // is, in words (Alex, 2026-10-08).
   FindPos(LUnitFile, 'Result := ''Hello', 'Result', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)) and
+    GOk and GResultJson.Contains('"note":"function result variable","builtin":false'),
+    'hover on Result says "function result variable"');
   // Hover over Greet's call-site-free body is dull; ask about Greet itself
   // at its implementation header instead.
   FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);

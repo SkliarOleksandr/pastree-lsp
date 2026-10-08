@@ -388,10 +388,12 @@ begin
   Result.cy := S(cPad) + FLineHeight;
 
   // The note says what the link cannot: where a define comes from, that a
-  // builtin has no source.
+  // name is the function's result or a System built-in - whose card
+  // otherwise reads like any declaration with a link.
   FNoteRect := TRect.Empty;
   LNote := '';
-  if (FInfo.FilePath = '') or SameText(FInfo.Kind, 'conditional symbol') then
+  if (FInfo.FilePath = '') or FInfo.Builtin
+    or SameText(FInfo.Kind, 'conditional symbol') then
     LNote := FInfo.Note;
   if LNote <> '' then
   begin

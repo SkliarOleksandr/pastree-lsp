@@ -6313,11 +6313,13 @@ var
   LIndent, LSpanIdx, LHeadLen, LSysMid: Integer;
   LSigSpans: TArray<Integer>;
   LBuiltinCode, LBuiltinKind: string;
-  LIsIfName: Boolean;
+  LIsIfName, LIsBuiltin: Boolean;
+  LHoverNote: string;
   LIfStart, LIfLen, LIfMid, LIfSym, LBuiltinMid, LBuiltinSym: Integer;
 begin
   LBuiltinCode := '';
   LIsIfName := False;
+  LIsBuiltin := False;
   LHeadLen := 0;
   LSigSpans := nil;
   LPath := DocPathOf(AMsg.Params);
@@ -6468,9 +6470,14 @@ begin
       LDeclLine := LHit.Line;
       LDeclCol := LHit.Col;
     end
+    // A symbol with no declaration node of its own: the implicit Result
+    // (PasTree adds it as a `Result` variable with no node). Still worth a
+    // card saying what it is - in words, since the plain kind word read as
+    // an ordinary local (Alex, 2026-10-08).
+    else if (FProject.Model(LTMid).Symbols[LSymIdx].Kind = skVar) and
+      SameText(LName, 'Result') then
+      LNote := 'function result variable'
     else
-      // A symbol with no declaration node of its own: the implicit Result,
-      // for instance. Still worth a card saying what it is.
       LNote := Format('%s %s',
         [KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind), LName]);
   end
@@ -6480,6 +6487,7 @@ begin
     LCode := LName;
     LNote := 'compiler builtin - no source declaration';
     LKind := 'compiler builtin';
+    LIsBuiltin := True;
     // An intrinsic reads as a declaration would - `type System.Integer =
     // -2147483648..2147483647`, `function System.Length(...): Integer` -
     // and links to System.pas's unit header, where the native hint goes
@@ -6538,7 +6546,7 @@ begin
     editor paints them; `headLen` is the length of its lead (`var`,
     `param [in/out]`), painted as a keyword; `file`/`line`/`col`
     (1-based) is where the link in the hint goes; `kind` and `note` say what
-    it is. }
+    it is, `builtin` that it is a compiler intrinsic. }
   if LBuiltinCode <> '' then
     LHoverCode := LBuiltinCode
   else
@@ -6572,11 +6580,18 @@ begin
     LTypeSpans := '[]';
     LHoverCode := LCode;
   end;
+  // `builtin` marks a compiler intrinsic, whose card otherwise reads like an
+  // ordinary declaration with a link (`function System.Length(...)` - System.
+  // pas's header): the hint says so on a line of its own, and the note is the
+  // short form it shows (Alex, 2026-10-08).
+  LHoverNote := LNote;
+  if LIsBuiltin then
+    LHoverNote := 'System built-in';
   LHoverJson := Format('{"code":%s,"typeSpans":%s,"headLen":%d,"doc":%s,' +
-    '"kind":%s,"note":%s,"file":%s,"line":%d,"col":%d}',
+    '"kind":%s,"note":%s,"builtin":%s,"file":%s,"line":%d,"col":%d}',
     [JsonQuote(LHoverCode), LTypeSpans, LHeadLen, JsonQuote(LDoc),
-     JsonQuote(LKind), JsonQuote(LNote), JsonQuote(LDeclFile), LDeclLine,
-     LDeclCol]);
+     JsonQuote(LKind), JsonQuote(LHoverNote), BoolToStr(LIsBuiltin, True).ToLower,
+     JsonQuote(LDeclFile), LDeclLine, LDeclCol]);
   { `pastreeHtml` is OURS, alongside the standard contents: the same card as a
     Help Insight page, in the shape the IDE's own HelpInsight.xsl emits (see
     PasLsp.XmlDoc). The RAD client hands it to the IDE where an HTML surface

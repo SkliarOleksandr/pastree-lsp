@@ -670,6 +670,9 @@ type
     Doc: string;
     Kind: string;
     Note: string;
+    // A compiler intrinsic - its Note ("System built-in") is shown even
+    // though the card has a link (System.pas's header).
+    Builtin: Boolean;
     FilePath: string;
     Line: Integer;
     Col: Integer;
@@ -3822,6 +3825,7 @@ begin
   AInfo.Doc := LCard.GetValue<string>('doc', '');
   AInfo.Kind := LCard.GetValue<string>('kind', '');
   AInfo.Note := LCard.GetValue<string>('note', '');
+  AInfo.Builtin := LCard.GetValue<Boolean>('builtin', False);
   AInfo.FilePath := LCard.GetValue<string>('file', '');
   AInfo.Line := LCard.GetValue<Integer>('line', 0);
   AInfo.Col := LCard.GetValue<Integer>('col', 0);
