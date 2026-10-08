@@ -20,7 +20,10 @@ unit PasTreeIdePlugin.SettingsForm;
   in two group boxes had become a column that no longer fit the screen at the
   IDE's default DPI. A switch goes on the tab that answers "what does this
   turn off": a feature that EDITS the user's code is Editing regardless of
-  how it is triggered. Highlighting came later, and IDE Fixes (0.59.0) holds
+  how it is triggered. Code Insight holds what replaces one of the IDE's own
+  insight features - Tooltip symbol insight and, since 0.63.4, Errors Insight
+  (moved there from Highlighting: it is a choice between the IDE's Error
+  Insight and ours, not a colour). Highlighting came later, and IDE Fixes (0.59.0) holds
   what corrects the IDE's own behaviour rather than adding a feature - first
   the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix),
   then the unchanged StyleElements of inherited forms (0.60.0,
@@ -89,6 +92,9 @@ type
     lblBlockCompletionHint: TLabel;
     chkTooltipSymbolInsight: TCheckBox;
     lblTooltipSymbolInsightHint: TLabel;
+    lblErrorSquiggles: TLabel;
+    cbxErrorSquiggles: TComboBox;
+    lblErrorSquigglesHint: TLabel;
     chkClassComplete: TCheckBox;
     lblClassCompleteHint: TLabel;
     lblClassCompleteOrder: TLabel;
@@ -110,9 +116,6 @@ type
     chkTypeUnderline: TCheckBox;
     lblPreview: TLabel;
     pbxPreview: TPaintBox;
-    lblErrorSquiggles: TLabel;
-    cbxErrorSquiggles: TComboBox;
-    lblErrorSquigglesHint: TLabel;
     tsIdeFixes: TTabSheet;
     chkNoExplicitProps: TCheckBox;
     lblNoExplicitPropsHint: TLabel;

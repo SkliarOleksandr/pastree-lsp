@@ -320,6 +320,37 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 0
       end
+      object lblErrorSquiggles: TLabel
+        Left = 16
+        Top = 104
+        Width = 74
+        Height = 15
+        Caption = 'Errors Insight'
+        FocusControl = cbxErrorSquiggles
+      end
+      object lblErrorSquigglesHint: TLabel
+        Left = 35
+        Top = 130
+        Width = 405
+        Height = 45
+        Caption =
+          'Who underlines the errors and warnings in the editor. PasTree dra' +
+          'ws the analysis'#39's own and switches the IDE'#39's Error Insight to No' +
+          'ne, so they are not drawn twice; switching back restores the lev' +
+          'el it replaced.'
+        WordWrap = True
+      end
+      object cbxErrorSquiggles: TComboBox
+        Left = 170
+        Top = 100
+        Width = 270
+        Height = 23
+        Style = csDropDownList
+        TabOrder = 1
+        Items.Strings = (
+          'RAD Studio (Error Insight)'
+          'PasTree (experimental)')
+      end
     end
     object tsDiagnostics: TTabSheet
       Caption = 'Diagnostics'
@@ -429,26 +460,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Height = 40
         OnPaint = pbxPreviewPaint
       end
-      object lblErrorSquiggles: TLabel
-        Left = 16
-        Top = 190
-        Width = 135
-        Height = 15
-        Caption = 'Error underlines drawn by'
-        FocusControl = cbxErrorSquiggles
-      end
-      object lblErrorSquigglesHint: TLabel
-        Left = 35
-        Top = 216
-        Width = 403
-        Height = 45
-        Caption = 
-          'PasTree draws the analysis'#39's errors and warnings itself and sets' +
-          ' the IDE'#39's Error Insight level to None, so they are not drawn tw' +
-          'ice. Switching back restores the level it replaced. The IDE may ' +
-          'need a restart to pick up its own level.'
-        WordWrap = True
-      end
       object chkHighlightTypes: TCheckBox
         Left = 16
         Top = 20
@@ -495,17 +506,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Caption = 'Underline'
         TabOrder = 4
         OnClick = TypeStyleChanged
-      end
-      object cbxErrorSquiggles: TComboBox
-        Left = 170
-        Top = 186
-        Width = 270
-        Height = 23
-        Style = csDropDownList
-        TabOrder = 5
-        Items.Strings = (
-          'RAD Studio (Error Insight)'
-          'PasTree (experimental)')
       end
     end
     object tsIdeFixes: TTabSheet

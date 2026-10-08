@@ -59,7 +59,7 @@ const
   /// this unit's 0.22.9, about forty commits behind, silently. Bump it in the
   /// same edit as this line.
   /// </summary>
-  PasTreeLspVersion = '0.63.3';
+  PasTreeLspVersion = '0.63.4';
 
 /// <summary>
 /// Compares two dotted version strings NUMERICALLY: negative if A is older than

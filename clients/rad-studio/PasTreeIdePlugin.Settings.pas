@@ -23,9 +23,10 @@ unit PasTreeIdePlugin.Settings;
   default (Alex, 2026-09-29), because a fix nobody enables fixes nothing.
   Written only by the dialog:
   nothing else in the package writes to the registry - except the Go To
-  picker's own sizes (WritePickerValue) and the IDE's Error Insight level,
-  which the error underline choice has to move with it
-  (ApplyErrorInsightChoice).
+  picker's own sizes (WritePickerValue) and the marker that remembers the
+  IDE's Error Insight level the error underline choice replaced
+  (ApplyErrorInsightChoice; the level itself goes through the IDE's
+  environment options).
 
   READ AT THE POINT OF USE, NOT CACHED AT STARTUP. Every switch is read on
   each gesture (an editor tab activating, a key being pressed), which is what
@@ -280,15 +281,16 @@ type
 
 /// <summary>
 /// The IDE's own choice of underline shape, so ours draw the one the user
-/// picked for Error Insight rather than a second setting of our own. Stored as
-/// the string value "ErrorInsight Marks" under Editor\Source Options\
-/// Borland.EditOptions.Pascal ("0".."3"; found in coreide370.bpl's
-/// TPropComboBox ValueNames, 2026-09-24, and present under 22.0 and 23.0
-/// too). No ToolsAPI exposes it. Asked per paint run, so the read is
-/// THROTTLED rather than cached for the session: at most one registry read a
-/// second, which is what lets a change in Tools > Options show on the next
-/// repaint instead of at the next IDE start. Absent or unreadable is Classic,
-/// the IDE's own default.
+/// picked for Error Insight rather than a second setting of our own. Read from
+/// the IDE's live environment option ErrorInsightMarks (IOTAEnvironment-
+/// Options.Values), which answers what Tools > Options holds now - the
+/// registry ("ErrorInsight Marks" under Editor\Source Options\
+/// Borland.EditOptions.Pascal) is written only when the IDE saves, and holds
+/// the NAME ("Dots"), which the registry read before 0.63.4 took for Classic.
+/// Asked per paint run, so the read is THROTTLED rather than cached for the
+/// session: at most one read a second, which is what lets a change in Tools >
+/// Options show on the next repaint. Unreadable is Classic, the IDE's own
+/// default.
 /// </summary>
 function IdeErrorMarkStyle: TErrorMarkStyle;
 
@@ -301,14 +303,17 @@ function IdeErrorMarkStyle: TErrorMarkStyle;
 /// once at package load (a level changed in Tools > Options while ours is
 /// selected is remembered and switched off again at the next start).
 ///
-/// THE ONE WRITE INTO THE IDE'S OWN SETTINGS. There is no ToolsAPI for the
-/// level - IOTACodeInsightManagerEnvOptions can only hide the combobox - so it
-/// is the registry value Tools > Options writes: ErrorInsightLevel under
-/// Editor\Source Options\Borland.EditOptions.Pascal, holding a ValueNames
-/// entry ("None", "Errors", "Errors and Warnings", "Errors, Warnings and
-/// Hints", "Everything"; found by diffing the registry around a change in the
-/// dialog, 2026-09-24). The IDE reads it into its options object, so a change
-/// made here may take effect only after a restart.
+/// THROUGH THE IDE'S LIVE OPTIONS, NOT THE REGISTRY (since 0.63.4): the
+/// environment option ErrorInsightLevel (IOTAEnvironmentOptions.Values), the
+/// in-memory value the Options dialog itself edits - the same switch Tooltip
+/// symbol insight uses for DeclarationInformation, measured there to act at
+/// once where a registry write did nothing to a running IDE. The IDE persists
+/// it on exit as it does its own. Before 0.63.4 this wrote the registry value
+/// ErrorInsightLevel under Editor\Source Options\Borland.EditOptions.Pascal,
+/// which took effect only after a restart. The only registry value left is
+/// our own marker, SavedErrorInsightLevel, holding the replaced level's name
+/// ("None", "Errors", "Errors and Warnings", "Errors, Warnings and Hints",
+/// "Everything") - or "<absent>" from an older version, put back as Errors.
 /// </summary>
 procedure ApplyErrorInsightChoice;
 
@@ -394,6 +399,7 @@ implementation
 
 uses
   System.Classes,
+  System.Variants,
   System.Win.Registry,
   Winapi.Windows,
   Vcl.Menus,
@@ -431,17 +437,20 @@ const
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
-  // The IDE level ApplyErrorInsightChoice replaced with None, to put back.
-  // cLevelAbsent stands for "the IDE had no value at all", put back by
-  // deleting ours rather than by guessing the IDE's default.
+  // The IDE level ApplyErrorInsightChoice replaced with None, to put back -
+  // by name, one of cErrorInsightLevelNames.
   cValueSavedErrorInsightLevel = 'SavedErrorInsightLevel';
-  cLevelAbsent = '<absent>';
-  // Relative to IOTAServices.GetBaseRegistryKey, as written by Tools >
-  // Options > Language > Delphi > Error Insight.
-  cIdePascalEditOptionsKey = 'Editor\Source Options\Borland.EditOptions.Pascal';
-  cValueErrorInsightLevel = 'ErrorInsightLevel';
-  cLevelNone = 'None';
-  cValueErrorInsightMarks = 'ErrorInsight Marks';
+  // Tools > Options > Language > Delphi > Error Insight, as IOTAEnvironment-
+  // Options names them; the ValueNames of the two comboboxes, in index order
+  // (coreide370.bpl, 2026-09-24). The registry keeps the NAME ("Dots").
+  cEnvErrorInsightLevel = 'ErrorInsightLevel';
+  cEnvErrorInsightMarks = 'ErrorInsightMarks';
+  cErrorInsightLevelNames: array[0..4] of string = ('None', 'Errors',
+    'Errors and Warnings', 'Errors, Warnings and Hints', 'Everything');
+  cLevelNone = 0;
+  cLevelErrors = 1;
+  cMarkStyleNames: array[0..3] of string = ('Classic', 'Smooth Wave',
+    'Solid Line', 'Dots');
   // See IdeErrorMarkStyle.
   cMarkStyleRereadMs = 1000;
   // Teal, BGR - the PasTree demo's default, readable on both IDE themes.
@@ -887,39 +896,66 @@ begin
   Result := CurrentSettings.DfmNoDefaultStyleElems;
 end;
 
-function ReadIdeErrorMarkStyle: TErrorMarkStyle;
+{ The IDE's live options object - nil without IOTAServices. }
+function IdeEnvironmentOptions: IOTAEnvironmentOptions;
 var
   LServices: IOTAServices;
-  LReg: TRegistry;
+begin
+  Result := nil;
+  if Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Result := LServices.GetEnvironmentOptions;
+end;
+
+{ An environment option that is a ValueNames combobox, as its index: the
+  option may answer the index itself or the name ("Dots", which is what the
+  registry holds for it). -1 for anything else. }
+function ValueNameIndex(const AValue: Variant;
+  const ANames: array of string): Integer;
+var
+  LText: string;
+  I: Integer;
+begin
+  LText := Trim(VarToStrDef(AValue, ''));
+  Result := StrToIntDef(LText, -1);
+  if Result >= 0 then
+  begin
+    if Result > High(ANames) then
+      Result := -1;
+    Exit;
+  end;
+  for I := 0 to High(ANames) do
+    if SameText(LText, ANames[I]) then
+      Exit(I);
+end;
+
+{ The index AIndex in the form the option currently answers in - a number if
+  it gave a number, the name otherwise - so a write never hands the IDE a
+  kind of value it did not give us. }
+function ValueNameLike(const ACurrent: Variant; AIndex: Integer;
+  const ANames: array of string): Variant;
+begin
+  if StrToIntDef(Trim(VarToStrDef(ACurrent, '')), -1) >= 0 then
+    Result := AIndex
+  else
+    Result := ANames[AIndex];
+end;
+
+function ReadIdeErrorMarkStyle: TErrorMarkStyle;
+var
+  LOptions: IOTAEnvironmentOptions;
   LIndex: Integer;
 begin
   Result := emsClassic;
-  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
-    Exit;
-  LReg := TRegistry.Create(KEY_READ);
   try
-    try
-      LReg.RootKey := HKEY_CURRENT_USER;
-      if not LReg.OpenKeyReadOnly(
-        IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
-        + cIdePascalEditOptionsKey) then
-        Exit;
-      if not LReg.ValueExists(cValueErrorInsightMarks) then
-        Exit;
-      // The dialog writes the index as a string; an integer is accepted too.
-      if LReg.GetDataType(cValueErrorInsightMarks) = rdInteger then
-        LIndex := LReg.ReadInteger(cValueErrorInsightMarks)
-      else
-        LIndex := StrToIntDef(Trim(LReg.ReadString(cValueErrorInsightMarks)),
-          Ord(emsClassic));
-      if (LIndex >= Ord(Low(TErrorMarkStyle)))
-        and (LIndex <= Ord(High(TErrorMarkStyle))) then
-        Result := TErrorMarkStyle(LIndex);
-    except
-      Result := emsClassic;
-    end;
-  finally
-    LReg.Free;
+    LOptions := IdeEnvironmentOptions;
+    if not Assigned(LOptions) then
+      Exit;
+    LIndex := ValueNameIndex(LOptions.Values[cEnvErrorInsightMarks],
+      cMarkStyleNames);
+    if LIndex >= 0 then
+      Result := TErrorMarkStyle(LIndex);
+  except
+    Result := emsClassic;
   end;
 end;
 
@@ -937,72 +973,60 @@ begin
   Result := GMarkStyle;
 end;
 
-{ The IDE's level as a string, cLevelAbsent when it has none. The dialog
-  writes a name; an integer (never seen) reads as its ValueNames index. }
-function ReadIdeLevel(AReg: TRegistry): string;
-begin
-  if not AReg.ValueExists(cValueErrorInsightLevel) then
-    Exit(cLevelAbsent);
-  if AReg.GetDataType(cValueErrorInsightLevel) = rdInteger then
-    Result := IntToStr(AReg.ReadInteger(cValueErrorInsightLevel))
-  else
-    Result := AReg.ReadString(cValueErrorInsightLevel);
-end;
-
-function IsNoneLevel(const ALevel: string): Boolean;
-begin
-  // "None=0" in the dialog's ValueNames: either spelling is off.
-  Result := SameText(Trim(ALevel), cLevelNone) or (Trim(ALevel) = '0');
-end;
-
 procedure ApplyErrorInsightChoice;
 var
-  LServices: IOTAServices;
-  LIde, LOurs: TRegistry;
-  LIdeKey, LOursKey, LLevel: string;
+  LOptions: IOTAEnvironmentOptions;
+  LOurs: TRegistry;
+  LCurrent: Variant;
+  LLevel, LSaved: Integer;
 begin
-  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+  LOptions := IdeEnvironmentOptions;
+  if not Assigned(LOptions) then
     Exit;
-  LIdeKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey)
-    + cIdePascalEditOptionsKey;
-  LOursKey := SettingsRegistryKey;
-  LIde := TRegistry.Create(KEY_READ or KEY_WRITE);
   LOurs := TRegistry.Create(KEY_READ or KEY_WRITE);
   try
     try
-      LIde.RootKey := HKEY_CURRENT_USER;
       LOurs.RootKey := HKEY_CURRENT_USER;
-      if not LOurs.OpenKey(LOursKey, True) then
+      if not LOurs.OpenKey(SettingsRegistryKey, True) then
         Exit;
+      LCurrent := LOptions.Values[cEnvErrorInsightLevel];
+      LLevel := ValueNameIndex(LCurrent, cErrorInsightLevelNames);
+      if LLevel < 0 then
+      begin
+        // A value we cannot read is one we cannot put back either: leave the
+        // IDE's level alone and say so.
+        LogDiagnostic('the IDE''s Error Insight level reads as "'
+          + VarToStrDef(LCurrent, '') + '" - left as it is.');
+        Exit;
+      end;
       if CurrentSettings.PasTreeErrorSquiggles then
       begin
-        if not LIde.OpenKey(LIdeKey, True) then
-          Exit;
-        LLevel := ReadIdeLevel(LIde);
         // Already off: nothing to remember, and a level remembered earlier
         // must survive rather than be overwritten with None.
-        if IsNoneLevel(LLevel) then
+        if LLevel = cLevelNone then
           Exit;
         // Remembered BEFORE it is switched off: the other order, interrupted,
         // loses the user's level for good.
-        LOurs.WriteString(cValueSavedErrorInsightLevel, LLevel);
-        LIde.WriteString(cValueErrorInsightLevel, cLevelNone);
+        LOurs.WriteString(cValueSavedErrorInsightLevel,
+          cErrorInsightLevelNames[LLevel]);
+        LOptions.Values[cEnvErrorInsightLevel] :=
+          ValueNameLike(LCurrent, cLevelNone, cErrorInsightLevelNames);
       end
       else
       begin
         if not LOurs.ValueExists(cValueSavedErrorInsightLevel) then
           Exit;   // nothing of ours to undo
-        LLevel := LOurs.ReadString(cValueSavedErrorInsightLevel);
-        if LIde.OpenKey(LIdeKey, LLevel <> cLevelAbsent) then
-          // Only over OUR None: a level the user has set since in Tools >
-          // Options is theirs, and wins.
-          if IsNoneLevel(ReadIdeLevel(LIde)) then
-          begin
-            if LLevel = cLevelAbsent then
-              LIde.DeleteValue(cValueErrorInsightLevel)
-            else
-              LIde.WriteString(cValueErrorInsightLevel, LLevel);
-          end;
+        LSaved := ValueNameIndex(LOurs.ReadString(cValueSavedErrorInsightLevel),
+          cErrorInsightLevelNames);
+        // "<absent>", from a version that wrote the registry: the IDE had no
+        // value then, and a fresh IDE's default is Errors.
+        if LSaved < 0 then
+          LSaved := cLevelErrors;
+        // Only over OUR None: a level the user has set since in Tools >
+        // Options is theirs, and wins.
+        if LLevel = cLevelNone then
+          LOptions.Values[cEnvErrorInsightLevel] :=
+            ValueNameLike(LCurrent, LSaved, cErrorInsightLevelNames);
         LOurs.DeleteValue(cValueSavedErrorInsightLevel);
       end;
     except
@@ -1014,7 +1038,6 @@ begin
     end;
   finally
     LOurs.Free;
-    LIde.Free;
   end;
 end;
 
