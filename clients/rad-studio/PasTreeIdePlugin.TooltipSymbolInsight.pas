@@ -36,6 +36,15 @@ unit PasTreeIdePlugin.TooltipSymbolInsight;
   Options while ours is on is not fought: the switch acts on transitions of
   our setting only.
 
+  PROBLEMS UNDER THE POINTER come first in the hint, one line each - "Error:"
+  (or "Warning:", "Hint:") in the colour of its underline, then the message
+  (Alex, 2026-10-08). They are read from whichever layer draws the
+  underlines (the settings' Errors Insight): our publishDiagnostics cache,
+  or the IDE's own Error Insight through the module's IOTAModuleErrors - so
+  the hint explains the underline on screen, not another analysis's. A
+  name with no card (an undeclared identifier) shows its problems alone,
+  and so does a problem that is not on a name at all (a missing `;`).
+
   WHILE THE ANALYSIS IS NOT READY the hover request waits in the server
   (WaitAnalyzed). Instead of the native "Calculating..." window, ours shows
   the status line ("PasTree: analyzing...") in the hint itself once the
@@ -68,7 +77,8 @@ uses
   ToolsAPI, ToolsAPI.Editor, ToolsAPI.UI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.DirectiveText,
-  PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings;
+  PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.ErrorPaint;
 
 const
   // The native hint's measured timing (2026-10-07): its first window comes
@@ -90,6 +100,12 @@ type
   TSymbolInsightWindow = class(TCustomControl)
   private
     FInfo: TLspHoverInfo;
+    // The problems under the pointer, shown above the card, and where each
+    // message goes (its prefix sits left of the rect).
+    FErrors: TArray<TLspDiagnostic>;
+    FErrorRects: TArray<TRect>;
+    // Line one's top, -1 when there is no line one (problems only).
+    FCodeTop: Integer;
     FProgress: string;
     FPpi: Integer;
     FBack, FText, FDim, FBorder, FLink, FTypeColor: TColor;
@@ -120,7 +136,7 @@ type
     OnLinkClick: TNotifyEvent;
     constructor Create(AOwner: TComponent); override;
     procedure ShowAt(const AAnchor: TRect; const AInfo: TLspHoverInfo;
-      const AProgress: string);
+      const AErrors: TArray<TLspDiagnostic>; const AProgress: string);
     procedure HideHint;
     function IsShowing: Boolean;
     property Info: TLspHoverInfo read FInfo;
@@ -148,6 +164,9 @@ type
     FRow, FColFrom, FColTo, FVisibleLine: Integer;
     FAnchor: TRect;
     FFileName: string;
+    // The problems over [FColFrom, FColTo) on FRow, taken when the hover
+    // starts - shown with the card, or alone when there is none.
+    FErrors: TArray<TLspDiagnostic>;
     FGeneration: Integer;
     FPending: Boolean;
     FPendingSince: Cardinal;
@@ -166,6 +185,7 @@ type
     procedure OnLinkClick(Sender: TObject);
     procedure StartHover;
     procedure CancelHover;
+    function ProblemsOnRow(ARow: Integer): TArray<TLspDiagnostic>;
     function OverAnchor(const AScreen: TPoint): Boolean;
     function InKeepZone(const AScreen: TPoint): Boolean;
     function ProgressText: string;
@@ -210,6 +230,31 @@ begin
     Exit;
   LProcess := LDebugger.CurrentProcess;
   Result := Assigned(LProcess) and (LProcess.ProcessState = psStopped);
+end;
+
+{ The word a problem line starts with, as the IDE's own messages name them. }
+function SeverityPrefix(ASeverity: Integer): string;
+begin
+  case ASeverity of
+    1: Result := 'Error: ';
+    2: Result := 'Warning: ';
+  else
+    Result := 'Hint: ';
+  end;
+end;
+
+{ The problems of one row's list that touch columns [AFrom, ATo) - a
+  zero-width one counts as its one character. }
+function ProblemsOver(const AProblems: TArray<TLspDiagnostic>;
+  AFrom, ATo: Integer): TArray<TLspDiagnostic>;
+var
+  LDiag: TLspDiagnostic;
+begin
+  Result := nil;
+  for LDiag in AProblems do
+    if (LDiag.ColFrom < ATo) and
+       (Max(LDiag.ColTo, LDiag.ColFrom + 1) > AFrom) then
+      Result := Result + [LDiag];
 end;
 
 function ThemedColor(AColor: TColor): TColor;
@@ -331,14 +376,18 @@ begin
     FTypeStyle, ADoDraw);
 end;
 
-{ The card's size, and the rects the paint and the mouse use. Line one is the
-  declaration in the editor font, then " - " and the link in the UI font; the
-  note (only where it says more than the link would) and the documentation go
-  under it, wrapped to a width between cDocMinWidth and cDocMaxWidth - or to
-  the declaration line, when that is wider. }
+{ The card's size, and the rects the paint and the mouse use. First the
+  problems under the pointer, one per line: "Error: " in the severity's
+  colour, the message wrapped beside it. Then line one - the declaration in
+  the editor font, " - " and the link in the UI font, or the progress line
+  while the answer waits; then the note (only where it says more than the
+  link would) and the documentation, wrapped to a width between
+  cDocMinWidth and cDocMaxWidth - or to the declaration line, when that is
+  wider. Any part may be absent: an undeclared name has problems and no
+  card. }
 function TSymbolInsightWindow.Measure: TSize;
 var
-  LX, LCodeH, LUiH, LWidth, LTextW: Integer;
+  LX, LY, LCodeH, LUiH, LWidth, LTextW, LIdx, LPrefixW: Integer;
   LRect: TRect;
   LNote: string;
 begin
@@ -350,50 +399,86 @@ begin
   LUiH := Canvas.TextHeight('Wg');
   FLineHeight := Max(LCodeH, LUiH);
 
+  // Line one's width: the progress line, or the declaration and its link.
+  FCodeWidth := 0;
+  FLinkText := '';
+  FLinkRect := TRect.Empty;
+  LWidth := 0;
   if FProgress <> '' then
   begin
     Canvas.Font.Style := [fsItalic];
     FCodeWidth := Canvas.TextWidth(FProgress);
-    FLinkRect := TRect.Empty;
-    FDocRect := TRect.Empty;
-    FNoteRect := TRect.Empty;
-    Exit(TSize.Create(FCodeWidth + 2 * S(cPad),
-      FLineHeight + 2 * S(cPad)));
-  end;
-
-  UseCodeFont;
-  LX := 0;
-  PaintCode(LX, 0, False);
-  FCodeWidth := LX;
-  LWidth := FCodeWidth;
-
-  UseUiFont;
-  FLinkText := '';
-  FLinkRect := TRect.Empty;
-  if FInfo.FilePath <> '' then
-  begin
-    FLinkText := ExtractFileName(FInfo.FilePath);
-    if FInfo.Line > 0 then
-      FLinkText := Format('%s (%d)', [FLinkText, FInfo.Line]);
-    LX := S(cPad) + FCodeWidth + Canvas.TextWidth(' - ');
-    Canvas.Font.Style := [fsUnderline];
-    LTextW := Canvas.TextWidth(FLinkText);
-    FLinkRect := Rect(LX, S(cPad), LX + LTextW, S(cPad) + FLineHeight);
-    LWidth := FLinkRect.Right - S(cPad);
     Canvas.Font.Style := [];
+    LWidth := FCodeWidth;
+  end
+  else if FInfo.Code <> '' then
+  begin
+    UseCodeFont;
+    LX := 0;
+    PaintCode(LX, 0, False);
+    FCodeWidth := LX;
+    LWidth := FCodeWidth;
+    UseUiFont;
+    if FInfo.FilePath <> '' then
+    begin
+      FLinkText := ExtractFileName(FInfo.FilePath);
+      if FInfo.Line > 0 then
+        FLinkText := Format('%s (%d)', [FLinkText, FInfo.Line]);
+      Canvas.Font.Style := [fsUnderline];
+      LWidth := FCodeWidth + Canvas.TextWidth(' - ')
+        + Canvas.TextWidth(FLinkText);
+      Canvas.Font.Style := [];
+    end;
   end;
 
   LTextW := Max(S(cDocMinWidth), LWidth);
   LTextW := Min(LTextW, Max(S(cDocMaxWidth), FCodeWidth));
-  Result.cy := S(cPad) + FLineHeight;
+  LY := S(cPad);
+
+  // The problems, on top: what is wrong here is what the pointer is most
+  // likely asking about.
+  UseUiFont;
+  SetLength(FErrorRects, Length(FErrors));
+  for LIdx := 0 to High(FErrors) do
+  begin
+    if LIdx > 0 then
+      Inc(LY, S(2));
+    Canvas.Font.Style := [fsBold];
+    LPrefixW := Canvas.TextWidth(SeverityPrefix(FErrors[LIdx].Severity));
+    Canvas.Font.Style := [];
+    LRect := Rect(0, 0, Max(LTextW - LPrefixW, S(120)), 0);
+    DrawText(Canvas.Handle, PChar(FErrors[LIdx].Text), -1, LRect,
+      DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
+    FErrorRects[LIdx] := Rect(S(cPad) + LPrefixW, LY,
+      S(cPad) + LPrefixW + LRect.Width, LY + Max(LRect.Height, LUiH));
+    LWidth := Max(LWidth, LPrefixW + LRect.Width);
+    LY := FErrorRects[LIdx].Bottom;
+  end;
+
+  FCodeTop := -1;
+  if (FProgress <> '') or (FInfo.Code <> '') then
+  begin
+    if Length(FErrors) > 0 then
+      Inc(LY, S(cDocGap));
+    FCodeTop := LY;
+    if FLinkText <> '' then
+    begin
+      LX := S(cPad) + FCodeWidth + Canvas.TextWidth(' - ');
+      Canvas.Font.Style := [fsUnderline];
+      FLinkRect := Rect(LX, LY, LX + Canvas.TextWidth(FLinkText),
+        LY + FLineHeight);
+      Canvas.Font.Style := [];
+    end;
+    Inc(LY, FLineHeight);
+  end;
 
   // The note says what the link cannot: where a define comes from, that a
   // name is the function's result or a System built-in - whose card
   // otherwise reads like any declaration with a link.
   FNoteRect := TRect.Empty;
   LNote := '';
-  if (FInfo.FilePath = '') or FInfo.Builtin
-    or SameText(FInfo.Kind, 'conditional symbol') then
+  if (FProgress = '') and (FInfo.Code <> '') and ((FInfo.FilePath = '')
+    or FInfo.Builtin or SameText(FInfo.Kind, 'conditional symbol')) then
     LNote := FInfo.Note;
   if LNote <> '' then
   begin
@@ -401,31 +486,32 @@ begin
     LRect := Rect(0, 0, LTextW, 0);
     DrawText(Canvas.Handle, PChar(LNote), -1, LRect,
       DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
-    FNoteRect := Rect(S(cPad), Result.cy + S(cDocGap),
-      S(cPad) + LRect.Width, Result.cy + S(cDocGap) + LRect.Height);
+    FNoteRect := Rect(S(cPad), LY + S(cDocGap),
+      S(cPad) + LRect.Width, LY + S(cDocGap) + LRect.Height);
     LWidth := Max(LWidth, LRect.Width);
-    Result.cy := FNoteRect.Bottom;
+    LY := FNoteRect.Bottom;
     Canvas.Font.Style := [];
   end;
 
   FDocRect := TRect.Empty;
-  if FInfo.Doc <> '' then
+  if (FProgress = '') and (FInfo.Doc <> '') then
   begin
     LRect := Rect(0, 0, LTextW, 0);
     DrawText(Canvas.Handle, PChar(FInfo.Doc), -1, LRect,
       DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
-    FDocRect := Rect(S(cPad), Result.cy + S(cDocGap),
-      S(cPad) + LRect.Width, Result.cy + S(cDocGap) + LRect.Height);
+    FDocRect := Rect(S(cPad), LY + S(cDocGap),
+      S(cPad) + LRect.Width, LY + S(cDocGap) + LRect.Height);
     LWidth := Max(LWidth, LRect.Width);
-    Result.cy := FDocRect.Bottom;
+    LY := FDocRect.Bottom;
   end;
 
   Result.cx := LWidth + 2 * S(cPad);
-  Inc(Result.cy, S(cPad));
+  Result.cy := LY + S(cPad);
 end;
 
 procedure TSymbolInsightWindow.ShowAt(const AAnchor: TRect;
-  const AInfo: TLspHoverInfo; const AProgress: string);
+  const AInfo: TLspHoverInfo; const AErrors: TArray<TLspDiagnostic>;
+  const AProgress: string);
 var
   LSize: TSize;
   LMonitor: TMonitor;
@@ -433,6 +519,7 @@ var
   LLeft, LTop: Integer;
 begin
   FInfo := AInfo;
+  FErrors := AErrors;
   FProgress := AProgress;
   LMonitor := Screen.MonitorFromPoint(AAnchor.TopLeft);
   if Assigned(LMonitor) then
@@ -477,7 +564,8 @@ end;
 procedure TSymbolInsightWindow.Paint;
 var
   LR: TRect;
-  LX, LY, LCodeH: Integer;
+  LX, LY, LCodeH, LIdx: Integer;
+  LPrefix: string;
 begin
   LR := ClientRect;
   Canvas.Brush.Style := bsSolid;
@@ -487,33 +575,52 @@ begin
   Canvas.Brush.Style := bsClear;
   Canvas.Rectangle(LR);
 
-  if FProgress <> '' then
+  // The problems: the prefix in its severity's colour, the message in the
+  // hint's text colour beside it.
+  UseUiFont;
+  for LIdx := 0 to Min(High(FErrors), High(FErrorRects)) do
   begin
-    UseUiFont;
-    Canvas.Font.Style := [fsItalic];
-    Canvas.Font.Color := FDim;
-    Canvas.TextOut(S(cPad), S(cPad), FProgress);
-    Exit;
+    LPrefix := SeverityPrefix(FErrors[LIdx].Severity);
+    Canvas.Font.Style := [fsBold];
+    Canvas.Font.Color := SeverityColor(FErrors[LIdx].Severity);
+    Canvas.TextOut(S(cPad), FErrorRects[LIdx].Top, LPrefix);
+    Canvas.Font.Style := [];
+    Canvas.Font.Color := FText;
+    LR := FErrorRects[LIdx];
+    DrawText(Canvas.Handle, PChar(FErrors[LIdx].Text), -1, LR,
+      DT_WORDBREAK or DT_NOPREFIX);
   end;
 
-  // Line one: the declaration, then the link - each font centred on the
-  // shared line height, so the two read as one line.
-  UseCodeFont;
-  LCodeH := Canvas.TextHeight('Wg');
-  LX := S(cPad);
-  LY := S(cPad) + (FLineHeight - LCodeH) div 2;
-  PaintCode(LX, LY, True);
-  UseUiFont;
-  if FLinkText <> '' then
-  begin
-    LY := S(cPad) + (FLineHeight - Canvas.TextHeight('Wg')) div 2;
-    Canvas.Font.Color := FDim;
-    Canvas.TextOut(LX, LY, ' - ');
-    Canvas.Font.Color := FLink;
-    Canvas.Font.Style := [fsUnderline];
-    Canvas.TextOut(FLinkRect.Left, LY, FLinkText);
-    Canvas.Font.Style := [];
-  end;
+  if FCodeTop >= 0 then
+    if FProgress <> '' then
+    begin
+      UseUiFont;
+      Canvas.Font.Style := [fsItalic];
+      Canvas.Font.Color := FDim;
+      Canvas.TextOut(S(cPad), FCodeTop, FProgress);
+      Canvas.Font.Style := [];
+    end
+    else
+    begin
+      // Line one: the declaration, then the link - each font centred on the
+      // shared line height, so the two read as one line.
+      UseCodeFont;
+      LCodeH := Canvas.TextHeight('Wg');
+      LX := S(cPad);
+      LY := FCodeTop + (FLineHeight - LCodeH) div 2;
+      PaintCode(LX, LY, True);
+      UseUiFont;
+      if FLinkText <> '' then
+      begin
+        LY := FCodeTop + (FLineHeight - Canvas.TextHeight('Wg')) div 2;
+        Canvas.Font.Color := FDim;
+        Canvas.TextOut(LX, LY, ' - ');
+        Canvas.Font.Color := FLink;
+        Canvas.Font.Style := [fsUnderline];
+        Canvas.TextOut(FLinkRect.Left, LY, FLinkText);
+        Canvas.Font.Style := [];
+      end;
+    end;
 
   if not FNoteRect.IsEmpty then
   begin
@@ -751,6 +858,8 @@ var
   LColumn, LVisibleLine, LFrom, LTo, LGen: Integer;
   LText: string;
   LCellFrom, LCellTo: TRect;
+  LProblems: TArray<TLspDiagnostic>;
+  LAsk: Boolean;
 begin
   if not Assigned(FEditor) or not Assigned(FServices) then
     Exit;
@@ -783,9 +892,23 @@ begin
   // answer can come from. Asking about blank space or punctuation would show
   // "analyzing..." over nothing while the server is busy.
   LText := LLineState.Text;
-  if not IdentRunAt(LText, LColumn, LFrom, LTo) and
-     not DirectiveNameAt(LText, LColumn, LFrom, LTo) then
-    Exit;
+  LProblems := ProblemsOnRow(LLineState.LogicalLineNum);
+  LAsk := IdentRunAt(LText, LColumn, LFrom, LTo) or
+    DirectiveNameAt(LText, LColumn, LFrom, LTo);
+  if LAsk then
+    FErrors := ProblemsOver(LProblems, LFrom, LTo)
+  else
+  begin
+    // Not on a name, but on a problem - a missing `;`, a stray `end`: the
+    // hint explains it all the same, anchored on the problem's own span.
+    FErrors := ProblemsOver(LProblems, LColumn, LColumn + 1);
+    if Length(FErrors) = 0 then
+      Exit;
+    LFrom := Max(FErrors[0].ColFrom, 1);
+    LTo := Min(Max(FErrors[0].ColTo, LFrom + 1), Length(LText) + 1);
+    if LTo <= LFrom then
+      LTo := LFrom + 1;
+  end;
 
   FRow := LLineState.LogicalLineNum;
   FColFrom := LFrom;
@@ -797,6 +920,14 @@ begin
     FEditor.ClientToScreen(LCellTo.BottomRight));
 
   Inc(FGeneration);
+  if not LAsk then
+  begin
+    // Nothing to ask the server: the problems are the whole hint.
+    FPending := False;
+    FCheckTimer.Enabled := True;
+    FWindow.ShowAt(FAnchor, Default(TLspHoverInfo), FErrors, '');
+    Exit;
+  end;
   LGen := FGeneration;
   FPending := True;
   FPendingSince := GetTickCount;
@@ -811,10 +942,98 @@ begin
         Exit;   // superseded, or the pointer moved away meanwhile
       FPending := False;
       if ASuccess and AFound then
-        FWindow.ShowAt(FAnchor, AInfo, '')
+        FWindow.ShowAt(FAnchor, AInfo, FErrors, '')
+      // No card - an undeclared name has none - but a problem to explain.
+      else if Length(FErrors) > 0 then
+        FWindow.ShowAt(FAnchor, Default(TLspHoverInfo), FErrors, '')
       else
         CancelHover;
     end);
+end;
+
+{ The problems on ARow, from whichever layer underlines them - ours
+  (publishDiagnostics) when the settings choose PasTree, otherwise the IDE's
+  own Error Insight, which the module answers through IOTAModuleErrors -
+  so the hint explains the underline that is actually on screen. Errors
+  first, then warnings, then hints; a message twice over the same span once. }
+function TSymbolInsightController.ProblemsOnRow(
+  ARow: Integer): TArray<TLspDiagnostic>;
+var
+  LAll: TArray<TLspDiagnostic>;
+  LDiag: TLspDiagnostic;
+  LModules: IOTAModuleServices;
+  LModule: IOTAModule;
+  LModuleErrors: IOTAModuleErrors;
+  LErrors: TOTAErrors;
+  LIdx, LCount, LSev, LKept: Integer;
+  LDup: Boolean;
+begin
+  Result := nil;
+  LAll := nil;
+  if PasTreeErrorSquigglesEnabled then
+  begin
+    if not LspTryGetDiagnostics(FFileName, LAll) then
+      LAll := nil;
+  end
+  else
+  try
+    if Supports(BorlandIDEServices, IOTAModuleServices, LModules) then
+    begin
+      LModule := LModules.FindModule(FFileName);
+      if Assigned(LModule) and
+         Supports(LModule, IOTAModuleErrors, LModuleErrors) then
+      begin
+        LErrors := LModuleErrors.GetErrors(FFileName);
+        SetLength(LAll, Length(LErrors));
+        LCount := 0;
+        for LIdx := 0 to High(LErrors) do
+        begin
+          if (ARow < LErrors[LIdx].Start.Line) or
+             (ARow > LErrors[LIdx].Stop.Line) then
+            Continue;
+          // CharIndex is 0-based; Stop is the error's last character, and
+          // Start = Stop is one character. A span over several lines covers
+          // the whole of its inner lines.
+          LDiag.Row := ARow;
+          if LErrors[LIdx].Start.Line < ARow then
+            LDiag.ColFrom := 1
+          else
+            LDiag.ColFrom := LErrors[LIdx].Start.CharIndex + 1;
+          if LErrors[LIdx].Stop.Line > ARow then
+            LDiag.ColTo := MaxInt
+          else
+            LDiag.ColTo := LErrors[LIdx].Stop.CharIndex + 2;
+          LDiag.Severity := LErrors[LIdx].Severity;
+          LDiag.Text := LErrors[LIdx].Text;
+          LAll[LCount] := LDiag;
+          Inc(LCount);
+        end;
+        SetLength(LAll, LCount);
+      end;
+    end;
+  except
+    // An IDE without the interface on its module: no problems in the hint,
+    // which is what it showed before.
+    LAll := nil;
+  end;
+
+  for LSev := 1 to 3 do
+    for LIdx := 0 to High(LAll) do
+    begin
+      if LAll[LIdx].Row <> ARow then
+        Continue;
+      if (LSev < 3) and (LAll[LIdx].Severity <> LSev) then
+        Continue;
+      if (LSev = 3) and (LAll[LIdx].Severity < 3) then
+        Continue;
+      LDup := False;
+      for LKept := 0 to High(Result) do
+        if (Result[LKept].ColFrom = LAll[LIdx].ColFrom) and
+           (Result[LKept].Text = LAll[LIdx].Text) then
+          LDup := True;
+      if not LDup and (Trim(LAll[LIdx].Text) <> '') then
+        Result := Result + [LAll[LIdx]];
+    end;
 end;
 
 procedure TSymbolInsightController.CancelHover;
@@ -907,7 +1126,7 @@ begin
   if FPending and (GetTickCount - FPendingSince >= cProgressAfterMs) then
   begin
     FDots := (FDots + 1) mod 3;
-    FWindow.ShowAt(FAnchor, Default(TLspHoverInfo), ProgressText);
+    FWindow.ShowAt(FAnchor, Default(TLspHoverInfo), FErrors, ProgressText);
   end;
 end;
 

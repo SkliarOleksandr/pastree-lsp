@@ -449,7 +449,12 @@ names in the Highlighting tab's colour), a `Unit.pas (302)` link that jumps to
 the declaration with an Alt+Left entry, and the declaration's XMLDoc. A
 compiler-intrinsic type reads as the native hint has it - `type
 System.Integer = -2147483648..2147483647`, the range for every integer type -
-and links to `System.pas`, where the compiler treats them as declared. While the
+and links to `System.pas`, where the compiler treats them as declared, with
+"System built-in" under it. A problem under the pointer heads the hint -
+`Error:` (or `Warning:`, `Hint:`) in the colour of its underline, then the
+message - taken from whichever layer draws the underlines (Errors Insight:
+PasTree's diagnostics or the IDE's Error Insight); an undeclared name, or a
+problem that is not on a name, shows the problem alone. While the
 analysis is still running the hint says so ("PasTree: analyzing...") and fills
 in when the answer comes. The IDE's own tooltip is switched off while this is
 on - it is the Tools > Options "Tooltip symbol insight" box, which is unticked

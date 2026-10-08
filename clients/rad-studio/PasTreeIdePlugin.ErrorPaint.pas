@@ -23,8 +23,18 @@ unit PasTreeIdePlugin.ErrorPaint;
 
 interface
 
+uses
+  System.UITypes;
+
 procedure InitializeErrorPaint;
 procedure FinalizeErrorPaint;
+
+/// <summary>
+/// A severity's underline colour (LSP 1 error, 2 warning, 3+ hint) - also
+/// the colour of the "Error:" prefix in Tooltip symbol insight, so the hint
+/// names a problem in the colour it is underlined in.
+/// </summary>
+function SeverityColor(ASeverity: Integer): TColor;
 
 implementation
 
