@@ -1922,6 +1922,13 @@ begin
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"code":"type System.Double"'),
     'Double reads "type System.Double", no range');
+  // A declaration over two lines reads as one, without the line break and
+  // the next line's indentation (Alex, 2026-10-08).
+  FindPos(LFile, 'TInferWrapped =', 'TInferWrapped', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+    GOk and GResultJson.Contains(
+      '"code":"type TInferWrapped = (iwOne, iwTwo, iwThree, iwFour)"'),
+    'a two-line enum reads as one line');
   // A nested generic ancestor: both TInferBox and TNested are type spans.
   FindPos(LFile, 'TInferNest<TNested> =', 'TInferNest', LLine, LChar);
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),

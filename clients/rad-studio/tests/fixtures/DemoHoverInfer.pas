@@ -22,6 +22,10 @@ type
   TInferCount = Cardinal;
   TInferReal = Double;
 
+  // A type written over two lines, hovered as one.
+  TInferWrapped = (iwOne, iwTwo,
+    iwThree, iwFour);
+
   // Generic parameters, hovered for themselves rather than their owner.
   TInferBox<TBoxed> = class
     Boxed: TBoxed;

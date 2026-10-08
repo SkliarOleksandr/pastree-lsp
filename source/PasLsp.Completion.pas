@@ -246,13 +246,66 @@ begin
   Result := Format('%.2d%s', [Ord(ABucket), LowerCase(AName)]);
 end;
 
+{ A declaration written over several lines, as one: every line break with the
+  indentation around it becomes one blank - none at all next to a bracket or
+  before a separator, so `(a,`#13#10`    b)` reads `(a, b)` - while the blanks
+  within a line, a string literal's included, stay as written. The hint
+  showed the break and the next line's indentation as a gap in the middle of
+  an enum's values (Alex, 2026-10-08). }
+function JoinLines(const AText: string): string;
+var
+  LIdx, LEnd: Integer;
+  LBreak: Boolean;
+  LPrev, LNext: Char;
+  LSb: TStringBuilder;
+begin
+  if (Pos(#10, AText) = 0) and (Pos(#13, AText) = 0) then
+    Exit(AText);
+  LSb := TStringBuilder.Create(Length(AText));
+  try
+    LIdx := 1;
+    while LIdx <= Length(AText) do
+    begin
+      if not CharInSet(AText[LIdx], [' ', #9, #10, #13]) then
+      begin
+        LSb.Append(AText[LIdx]);
+        Inc(LIdx);
+        Continue;
+      end;
+      LEnd := LIdx;
+      LBreak := False;
+      while (LEnd <= Length(AText)) and
+            CharInSet(AText[LEnd], [' ', #9, #10, #13]) do
+      begin
+        LBreak := LBreak or CharInSet(AText[LEnd], [#10, #13]);
+        Inc(LEnd);
+      end;
+      if not LBreak then
+        LSb.Append(Copy(AText, LIdx, LEnd - LIdx))
+      else if (LSb.Length > 0) and (LEnd <= Length(AText)) then
+      begin
+        LPrev := LSb.Chars[LSb.Length - 1];
+        LNext := AText[LEnd];
+        if not CharInSet(LPrev, ['(', '[']) and
+           not CharInSet(LNext, [')', ']', ',', ';']) then
+          LSb.Append(' ');
+      end;
+      LIdx := LEnd;
+    end;
+    Result := LSb.ToString;
+  finally
+    LSb.Free;
+  end;
+end;
+
 { Display cap for a Detail column - the engine hands back the declaration's
-  full one-line span and leaves any length cap to the host (its words). }
+  full span and leaves any length cap to the host (its words). One line
+  (JoinLines) before it is capped, so the cap counts what is shown. }
 function CapDisplay(const AText: string): string;
 const
   cCap = 100;
 begin
-  Result := AText;
+  Result := JoinLines(AText);
   if Length(Result) > cCap then
     Result := Copy(Result, 1, cCap - 3) + '...';
 end;
@@ -1132,7 +1185,10 @@ begin
     else
       Exit;   // the caller keeps the declaration line
     end;
-    LDetail := ItemDetailText(LCompletion, AProject, LModel, LItem, True);
+    // One line whatever path composed it - a routine's parameters come from
+    // the engine, written over as many lines as the source has them.
+    LDetail := JoinLines(ItemDetailText(LCompletion, AProject, LModel, LItem,
+      True));
   finally
     LCompletion.Free;
   end;
