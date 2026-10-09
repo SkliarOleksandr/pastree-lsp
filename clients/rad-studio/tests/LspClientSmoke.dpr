@@ -1914,6 +1914,8 @@ begin
   // its own that it is a built-in (Alex, 2026-10-08).
   Check(GOk and GResultJson.Contains('"note":"System built-in","builtin":true'),
     'and is marked a System built-in');
+  // A type's SizeOf on the analyzed platform rides with it (Alex, 2026-10-09).
+  Check(GOk and GResultJson.Contains('"sizeOf":4,'), 'and its SizeOf is 4');
   FindPos(LFile, 'TInferCount =', 'Cardinal', LLine, LChar);
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"code":"type System.Cardinal = 0..4294967295"'),
@@ -1922,6 +1924,8 @@ begin
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"code":"type System.Double"'),
     'Double reads "type System.Double", no range');
+  Check(GOk and GResultJson.Contains('"sizeOf":8,') and
+    GResultJson.Contains('_SizeOf: 8_'), 'Double''s SizeOf is 8, in the markdown too');
   // A declaration over two lines reads as one, without the line break and
   // the next line's indentation (Alex, 2026-10-08).
   FindPos(LFile, 'TInferWrapped =', 'TInferWrapped', LLine, LChar);
@@ -1929,6 +1933,30 @@ begin
     GOk and GResultJson.Contains(
       '"code":"type TInferWrapped = (iwOne, iwTwo, iwThree, iwFour)"'),
     'a two-line enum reads as one line');
+  Check(GOk and GResultJson.Contains(
+    '"sizeOf":1,"sizeOfMin":false,"instanceSize":-1,'),
+    'and its SizeOf is 1, no InstanceSize');
+  // A class has both, as dcc prints them: Win32 20, Win64 32 (Alex,
+  // 2026-10-09).
+  FindPos(LFile, 'TInferSized =', 'TInferSized', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+    GOk and (GResultJson.Contains(
+      '"sizeOf":4,"sizeOfMin":false,"instanceSize":20,"instanceSizeMin":false') or
+      GResultJson.Contains(
+      '"sizeOf":8,"sizeOfMin":false,"instanceSize":32,"instanceSizeMin":false')) and
+    GResultJson.Contains('InstanceSize: '),
+    'a class shows its SizeOf and its InstanceSize');
+  // A generic class: its InstanceSize with T unknown is a minimum, `12+` /
+  // `24+` - what an empty record for T gives (dcc-measured).
+  FindPos(LFile, 'TInferGen<T> =', 'TInferGen', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)) and
+    GOk and (GResultJson.Contains(
+      '"sizeOf":4,"sizeOfMin":false,"instanceSize":12,"instanceSizeMin":true') or
+      GResultJson.Contains(
+      '"sizeOf":8,"sizeOfMin":false,"instanceSize":24,"instanceSizeMin":true')) and
+    (GResultJson.Contains('InstanceSize: 12+') or
+      GResultJson.Contains('InstanceSize: 24+')),
+    'a generic class shows its InstanceSize as a minimum');
   // A nested generic ancestor: both TInferBox and TNested are type spans.
   FindPos(LFile, 'TInferNest<TNested> =', 'TInferNest', LLine, LChar);
   Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
@@ -1990,6 +2018,8 @@ begin
   Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)) and
     GOk and GResultJson.Contains('"note":"function result variable","builtin":false'),
     'hover on Result says "function result variable"');
+  Check(GOk and GResultJson.Contains('"sizeOf":-1,'),
+    'and a variable has no SizeOf line');
   // Hover over Greet's call-site-free body is dull; ask about Greet itself
   // at its implementation header instead.
   FindPos(LUnitFile, 'function Greet', 'Greet', LLine, LChar);

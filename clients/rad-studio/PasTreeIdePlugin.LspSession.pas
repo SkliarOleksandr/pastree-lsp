@@ -675,6 +675,13 @@ type
     // A compiler intrinsic - its Note ("System built-in") is shown even
     // though the card has a link (System.pas's header).
     Builtin: Boolean;
+    // A type's SizeOf on the analyzed platform, -1 for anything else.
+    TypeSize: Int64;
+    // A class's InstanceSize on the analyzed platform, -1 for anything else.
+    InstanceSize: Int64;
+    // TypeSize / InstanceSize are a generic declaration's minimum (shown `56+`).
+    TypeSizeMin: Boolean;
+    InstanceSizeMin: Boolean;
     FilePath: string;
     Line: Integer;
     Col: Integer;
@@ -2119,8 +2126,10 @@ procedure TLspSession.RefreshSemanticTokens(const APath: string);
 var
   LKey: string;
   LParams, LDoc: TJSONObject;
-  LIssuedId: Int64;   // captured by the closure - same rule as in Ask
-  LBaseText: string;  // captured too: what the answer will describe
+  // Not captured: the closure clears the pending slot by KEY (a newer request
+  // for the file is refused while one is out), so this only records the id.
+  LIssuedId: Int64;
+  LBaseText: string;  // captured by the closure: what the answer will describe
   LHaveBase: Boolean;
 begin
   if FDestroying or not Assigned(FClient) or (FClient.State <> lcsReady) then
@@ -2142,7 +2151,6 @@ begin
   LParams := TJSONObject.Create;
   LParams.AddPair('textDocument', LDoc);
 
-  LIssuedId := 0;
   LIssuedId := FClient.Request('textDocument/semanticTokens/full', LParams,
     procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
     var
@@ -3829,6 +3837,10 @@ begin
   AInfo.Kind := LCard.GetValue<string>('kind', '');
   AInfo.Note := LCard.GetValue<string>('note', '');
   AInfo.Builtin := LCard.GetValue<Boolean>('builtin', False);
+  AInfo.TypeSize := LCard.GetValue<Int64>('sizeOf', -1);
+  AInfo.InstanceSize := LCard.GetValue<Int64>('instanceSize', -1);
+  AInfo.TypeSizeMin := LCard.GetValue<Boolean>('sizeOfMin', False);
+  AInfo.InstanceSizeMin := LCard.GetValue<Boolean>('instanceSizeMin', False);
   AInfo.FilePath := LCard.GetValue<string>('file', '');
   AInfo.Line := LCard.GetValue<Integer>('line', 0);
   AInfo.Col := LCard.GetValue<Integer>('col', 0);

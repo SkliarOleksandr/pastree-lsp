@@ -371,6 +371,8 @@ type
     function HandleToggle(const AMsg: TLspIncoming;
       AToImpl: Boolean): string;
     function HandleDocumentSymbol(const AMsg: TLspIncoming): string;
+    procedure HoverSizes(AMid, ASym: Integer; out ASize, AInstance: Int64;
+      out ASizeMin, AInstanceMin: Boolean);
     function HandleHover(const AMsg: TLspIncoming): string;
     function HandleTypeDefinition(const AMsg: TLspIncoming): string;
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
@@ -6289,6 +6291,44 @@ begin
   end;
 end;
 
+{ The hover's size line: a type's SizeOf on the analyzed platform and, for a
+  class, its InstanceSize - each -1 for anything else and where PasTree's
+  layout walk refuses (a shape it does not model). A generic declaration is
+  measured with its parameters open: ASizeMin / AInstanceMin say the number
+  is the least any instantiation takes, shown as `56+`; a parameter
+  constrained to a class or an interface is exact (Alex, 2026-10-09). The
+  walk is the `$IF SizeOf(T)` oracle's, so the hint says what the compiler
+  would; a failure in it costs the line, never the hover. }
+procedure TLspServer.HoverSizes(AMid, ASym: Integer; out ASize,
+  AInstance: Int64; out ASizeMin, AInstanceMin: Boolean);
+begin
+  ASize := -1;
+  AInstance := -1;
+  ASizeMin := False;
+  AInstanceMin := False;
+  try
+    if not FProject.TypeSizeOf(AMid, ASym, ASize, ASizeMin) then
+      ASize := -1;
+    if not FProject.TypeInstanceSize(AMid, ASym, AInstance, AInstanceMin) then
+      AInstance := -1;
+  except
+    on E: Exception do
+    begin
+      ASize := -1;
+      AInstance := -1;
+      Log(Format('hover: SizeOf failed: %s: %s', [E.ClassName, E.Message]));
+    end;
+  end;
+end;
+
+// `56` or, for a minimum, `56+`.
+function SizeText(ABytes: Int64; AMinimum: Boolean): string;
+begin
+  Result := IntToStr(ABytes);
+  if AMinimum then
+    Result := Result + '+';
+end;
+
 { textDocument/hover - what is under the cursor, as a small markdown card:
   the DECLARATION's own source line in a Pascal code fence, plus a prose line
   naming the kind and where it lives.
@@ -6321,7 +6361,13 @@ var
   LIsIfName, LIsBuiltin: Boolean;
   LHoverNote: string;
   LIfStart, LIfLen, LIfMid, LIfSym, LBuiltinMid, LBuiltinSym: Integer;
+  LSizeOf, LInstSize: Int64;
+  LSizeMin, LInstMin: Boolean;
 begin
+  LSizeOf := -1;
+  LInstSize := -1;
+  LSizeMin := False;
+  LInstMin := False;
   LBuiltinCode := '';
   LIsIfName := False;
   LIsBuiltin := False;
@@ -6458,6 +6504,7 @@ begin
     LDoc := XmlDocDisplayText(LRawDoc);
     LKind := KindWord(FProject.Model(LTMid).Symbols[LSymIdx].Kind);
     LIsSymbol := True;
+    HoverSizes(LTMid, LSymIdx, LSizeOf, LInstSize, LSizeMin, LInstMin);
     if FNav.DeclHit(LTMid, LSymIdx, LHit) then
     begin
       LCode := Trim(LHit.Snippet);
@@ -6507,6 +6554,8 @@ begin
     end;
     LBuiltinCode := BuiltinSignatureText(FProject, LBuiltinMid, LBuiltinSym,
       LSigSpans, LHeadLen, LBuiltinKind);
+    HoverSizes(LBuiltinMid, LBuiltinSym, LSizeOf, LInstSize, LSizeMin,
+      LInstMin);
     if LBuiltinCode <> '' then
     begin
       LCode := LBuiltinCode;
@@ -6533,6 +6582,15 @@ begin
   LMd := '';
   if LCode <> '' then
     LMd := '```pascal'#10 + LCode + #10'```'#10#10;
+  // A type's size on the analyzed platform, right under the declaration as
+  // the RAD hint shows it (Alex, 2026-10-09).
+  if LSizeOf >= 0 then
+    if LInstSize >= 0 then
+      LMd := LMd + Format('_SizeOf: %s, InstanceSize: %s_'#10#10,
+        [SizeText(LSizeOf, LSizeMin), SizeText(LInstSize, LInstMin)])
+    else
+      LMd := LMd + Format('_SizeOf: %s_'#10#10,
+        [SizeText(LSizeOf, LSizeMin)]);
   if LDoc <> '' then
     LMd := LMd + LDoc + #10#10;
   LMd := LMd + '_' + LNote + '_';
@@ -6592,10 +6650,21 @@ begin
   LHoverNote := LNote;
   if LIsBuiltin then
     LHoverNote := 'System built-in';
+  // A unit's card is `unit Foo;` - a note saying "unit" again under it (a
+  // unit with no source to link to) only repeated it (Alex, 2026-10-09).
+  if LKind = 'unit' then
+    LHoverNote := '';
+  // `sizeOf` is a type's SizeOf on the analyzed platform, `instanceSize` a
+  // class's InstanceSize; -1 for anything else and where the layout walk
+  // refuses (HoverSizes). `sizeOfMin` / `instanceSizeMin`: the number is a
+  // generic declaration's minimum.
   LHoverJson := Format('{"code":%s,"typeSpans":%s,"headLen":%d,"doc":%s,' +
-    '"kind":%s,"note":%s,"builtin":%s,"file":%s,"line":%d,"col":%d}',
+    '"kind":%s,"note":%s,"builtin":%s,"sizeOf":%d,"sizeOfMin":%s,' +
+    '"instanceSize":%d,"instanceSizeMin":%s,"file":%s,"line":%d,"col":%d}',
     [JsonQuote(LHoverCode), LTypeSpans, LHeadLen, JsonQuote(LDoc),
      JsonQuote(LKind), JsonQuote(LHoverNote), BoolToStr(LIsBuiltin, True).ToLower,
+     LSizeOf, BoolToStr(LSizeMin, True).ToLower,
+     LInstSize, BoolToStr(LInstMin, True).ToLower,
      JsonQuote(LDeclFile), LDeclLine, LDeclCol]);
   { `pastreeHtml` is OURS, alongside the standard contents: the same card as a
     Help Insight page, in the shape the IDE's own HelpInsight.xsl emits (see

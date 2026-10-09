@@ -59,6 +59,11 @@ const CInferHigh = 1;
 type
   // A unit-qualified intrinsic type.
   TInferQual = System.Byte;
+  // A class: its SizeOf is the reference, its InstanceSize the VMT, a Byte,
+  // an Int64 aligned to 8 and the monitor slot.
+  TInferSized = class B: Byte; Q: Int64; end;
+  // A generic one: T's share unknown, its InstanceSize a minimum.
+  TInferGen<T> = class B: Byte; F: T; C: Byte; end;
 
 function MakeInferItem: TInferItem;
 

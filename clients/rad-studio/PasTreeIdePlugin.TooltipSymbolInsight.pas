@@ -119,6 +119,8 @@ type
     FLinkRect: TRect;
     FDocRect: TRect;
     FNoteRect: TRect;
+    // The grey lines under line one: a type's SizeOf, then the note.
+    FNoteText: string;
     FLineHeight: Integer;
     FCodeWidth: Integer;
     function S(AValue: Integer): Integer;
@@ -578,14 +580,31 @@ begin
     Inc(LY, FLineHeight);
   end;
 
-  // The note says what the link cannot: where a define comes from, that a
-  // name is the function's result or a System built-in - whose card
-  // otherwise reads like any declaration with a link.
+  // A type's size first, on the line under the declaration (Alex,
+  // 2026-10-09). Then the note, which says what the link cannot: where a
+  // define comes from, that a name is the function's result or a System
+  // built-in - whose card otherwise reads like any declaration with a link.
   FNoteRect := TRect.Empty;
   LNote := '';
-  if (FProgress = '') and (FInfo.Code <> '') and ((FInfo.FilePath = '')
-    or FInfo.Builtin or SameText(FInfo.Kind, 'conditional symbol')) then
-    LNote := FInfo.Note;
+  if (FProgress = '') and (FInfo.Code <> '') then
+  begin
+    // `+`: a generic declaration's minimum, its parameters' share unknown.
+    if FInfo.TypeSize >= 0 then
+      LNote := Format('SizeOf: %d%s', [FInfo.TypeSize,
+        IfThen(FInfo.TypeSizeMin, '+', '')]);
+    // A class: its SizeOf is the reference, so the instance's size beside it.
+    if (FInfo.TypeSize >= 0) and (FInfo.InstanceSize >= 0) then
+      LNote := LNote + Format(', InstanceSize: %d%s', [FInfo.InstanceSize,
+        IfThen(FInfo.InstanceSizeMin, '+', '')]);
+    if (FInfo.Note <> '') and ((FInfo.FilePath = '') or FInfo.Builtin
+      or SameText(FInfo.Kind, 'conditional symbol')) then
+    begin
+      if LNote <> '' then
+        LNote := LNote + sLineBreak;
+      LNote := LNote + FInfo.Note;
+    end;
+  end;
+  FNoteText := LNote;
   if LNote <> '' then
   begin
     Canvas.Font.Style := [fsItalic];
@@ -736,7 +755,7 @@ begin
     Canvas.Font.Color := FDim;
     Canvas.Font.Style := [fsItalic];
     LR := FNoteRect;
-    DrawText(Canvas.Handle, PChar(FInfo.Note), -1, LR,
+    DrawText(Canvas.Handle, PChar(FNoteText), -1, LR,
       DT_WORDBREAK or DT_NOPREFIX);
     Canvas.Font.Style := [];
   end;

@@ -294,7 +294,11 @@ const
   /// expression overflowed the stack and was
   /// dropped - its importers showed F1027 - and a second overflow on a pool
   /// thread ended the server with nothing in the log.
-  cMinPasTreeVersion = '0.93.38';
+  /// 0.94.0 (2026-10-09): TypeSizeOf / TypeInstanceSize with AMinimum, the
+  /// hover's size line (an older library does not compile), and the layout
+  /// walk fixes behind it - an older one with the calls would answer no
+  /// InstanceSize for any form, silently.
+  cMinPasTreeVersion = '0.94.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
