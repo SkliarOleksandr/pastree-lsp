@@ -6358,7 +6358,7 @@ var
   LIndent, LSpanIdx, LHeadLen, LSysMid: Integer;
   LSigSpans: TArray<Integer>;
   LBuiltinCode, LBuiltinKind: string;
-  LIsIfName, LIsBuiltin: Boolean;
+  LIsIfName, LIsBuiltin, LDirFunc: Boolean;
   LHoverNote: string;
   LIfStart, LIfLen, LIfMid, LIfSym, LBuiltinMid, LBuiltinSym: Integer;
   LSizeOf, LInstSize: Int64;
@@ -6371,6 +6371,7 @@ begin
   LBuiltinCode := '';
   LIsIfName := False;
   LIsBuiltin := False;
+  LDirFunc := False;
   LHeadLen := 0;
   LSigSpans := nil;
   LPath := DocPathOf(AMsg.Params);
@@ -6423,9 +6424,14 @@ begin
   else if FNav.IfNameAt(LMid, LPasLine, LPasCol, LName, LIfStart, LIfLen,
     LIfMid, LIfSym) then
   begin
-    if LIfSym = NIL_SYM then
+    // `Defined` and `Declared` are the directive's own functions - no
+    // declaration anywhere, System's seed included - described in words
+    // (Alex, 2026-10-09: no hint on the callee of `{$IF Defined(X)}`).
+    LDirFunc := (LIfSym = NIL_SYM) and
+      (SameText(LName, 'Defined') or SameText(LName, 'Declared'));
+    if (LIfSym = NIL_SYM) and not LDirFunc then
       Exit(BuildResponse(AMsg.IdJson, 'null'));
-    LIsIfName := True;
+    LIsIfName := not LDirFunc;
     // A declaration's name: the symbol branch below reads these.
     LTMid := LIfMid;
     LSymIdx := LIfSym;
@@ -6475,6 +6481,25 @@ begin
       LNote := 'conditional symbol - defined by the project or platform'
     else
       LNote := 'conditional symbol - not defined here';
+  end
+  else if LDirFunc then
+  begin
+    if SameText(LName, 'Defined') then
+    begin
+      LCode := 'function Defined(Symbol): Boolean';
+      LDoc := 'True when the conditional symbol is defined at this point.';
+    end
+    else
+    begin
+      LCode := 'function Declared(Identifier): Boolean';
+      LDoc := 'True when the identifier is declared at this point.';
+    end;
+    // Through LBuiltinCode so pastreeHover keeps headLen (the `function`
+    // lead painted as a keyword).
+    LBuiltinCode := LCode;
+    LHeadLen := Length('function');
+    LKind := 'compiler directive function';
+    LNote := 'conditional expression function';
   end
   else if not LIsIfName and
     FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then

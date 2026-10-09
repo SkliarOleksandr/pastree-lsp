@@ -1838,10 +1838,16 @@ const
     ('IItem', 'for var IItem', 'var IItem: TInferItem', 'gap'));
   // line hint, name, expected signature
   // and generic parameters, which read as themselves, not as their owner
-  cIntrinsics: array[0..14] of array[0..2] of string = (
+  cIntrinsics: array[0..18] of array[0..2] of string = (
     // a name of a $IF expression, resolved as the unit sees it
     ('{$IF CompilerVersion', 'CompilerVersion', 'const System.CompilerVersion = '),
     ('{$IF CInferLevel', 'CInferLevel', 'const CInferLevel = 3'),
+    // its callees, System's and the directive's own (Alex, 2026-10-09)
+    ('{$IF SizeOf', 'SizeOf', 'function System.SizeOf(const X): Integer'),
+    ('{$ELSEIF Defined', 'Defined', 'function Defined(Symbol): Boolean'),
+    // a $ELSEIF after a taken branch, never evaluated (Alex, 2026-10-09)
+    ('(CInferLevel > 9)', 'CInferLevel', 'const CInferLevel = 3'),
+    ('{$ELSEIF Defined', 'INFERNEVER', '{$DEFINE INFERNEVER}'),
     // a unit-qualified intrinsic type, on its name
     ('TInferQual = System.Byte', 'Byte', 'type System.Byte = 0..255'),
     // the words a type's head keeps as flags, not text

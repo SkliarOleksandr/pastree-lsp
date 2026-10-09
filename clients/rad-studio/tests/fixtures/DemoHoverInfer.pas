@@ -55,6 +55,12 @@ const CInferModern = 1;
 {$IF CInferLevel > 2}
 const CInferHigh = 1;
 {$IFEND}
+// A callee is a name too, and a branch after a taken one is never evaluated.
+{$IF SizeOf(Pointer) > 0}
+const CInferWide = 1;
+{$ELSEIF Defined(INFERNEVER) or (CInferLevel > 9)}
+const CInferNarrow = 1;
+{$IFEND}
 
 type
   // A unit-qualified intrinsic type.

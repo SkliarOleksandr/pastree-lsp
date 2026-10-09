@@ -298,7 +298,10 @@ const
   /// hover's size line (an older library does not compile), and the layout
   /// walk fixes behind it - an older one with the calls would answer no
   /// InstanceSize for any form, silently.
-  cMinPasTreeVersion = '0.94.0';
+  /// 0.94.1 (2026-10-09): a `$ELSEIF` after a taken branch and a `$IF` in a
+  /// skipped region record their names, and a callee (`SizeOf`, `Defined`)
+  /// is a name. Against 0.94.0 the hover is silently absent on them.
+  cMinPasTreeVersion = '0.94.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
