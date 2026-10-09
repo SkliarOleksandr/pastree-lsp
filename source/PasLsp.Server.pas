@@ -6950,6 +6950,49 @@ end;
   Columns: token offsets are UTF-16 code units in PasTree (Start/Len into a
   Delphi string), which is exactly LSP's utf-16 positionEncoding, so no
   conversion beyond 1-based -> 0-based. }
+{ Everything dcc ignores in file AFileId: PasTree's Skipped regions and its
+  DeadDirectives (0.95.0), sorted and merged where they touch or overlap, so
+  a dead branch with directives inside it is one region. }
+function InactiveRegions(const ASource: TPasPreprocessed;
+  AFileId: Integer): TArray<TPasSkippedRegion>;
+var
+  LAll: TList<TPasSkippedRegion>;
+  LIdx, LCount: Integer;
+begin
+  Result := nil;
+  LAll := TList<TPasSkippedRegion>.Create;
+  try
+    if AFileId <= High(ASource.Skipped) then
+      LAll.AddRange(ASource.Skipped[AFileId]);
+    if AFileId <= High(ASource.DeadDirectives) then
+      LAll.AddRange(ASource.DeadDirectives[AFileId]);
+    if LAll.Count = 0 then
+      Exit;
+    LAll.Sort(TComparer<TPasSkippedRegion>.Construct(
+      function(const A, B: TPasSkippedRegion): Integer
+      begin
+        Result := A.Start - B.Start;
+      end));
+    SetLength(Result, LAll.Count);
+    Result[0] := LAll[0];
+    LCount := 1;
+    for LIdx := 1 to LAll.Count - 1 do
+      if LAll[LIdx].Start <= Result[LCount - 1].EndPos then
+      begin
+        if LAll[LIdx].EndPos > Result[LCount - 1].EndPos then
+          Result[LCount - 1].EndPos := LAll[LIdx].EndPos;
+      end
+      else
+      begin
+        Result[LCount] := LAll[LIdx];
+        Inc(LCount);
+      end;
+    SetLength(Result, LCount);
+  finally
+    LAll.Free;
+  end;
+end;
+
 { Every semantic token of one document, sorted by position and deduplicated
   (a declaring nkIdent is hit by both passes; the declaration wins). Empty
   when the file is not in the closure or has no token layer. AInactive adds
@@ -6965,6 +7008,7 @@ var
   LExt: TPasExtRef;
   LTokens: TList<TSemanticToken>;
   LTok: TSemanticToken;
+  LRegion: TPasSkippedRegion;
 
   // The model's stream for the document's own file - the node token
   // positions are offsets into THIS text.
@@ -7139,10 +7183,13 @@ begin
       else if NavResolve(LNode, LResMid, LResSym) then
         AddIdent(LNode, LResMid, LResSym, False);
     end;
-    // 3. inactive code
-    if AInactive and (LFileId <= High(LModel.Tree.Source.Skipped)) then
-      for LIdx := 0 to High(LModel.Tree.Source.Skipped[LFileId]) do
-        AddInactive(LModel.Tree.Source.Skipped[LFileId][LIdx]);
+    // 3. inactive code: the skipped regions and the dead directives between
+    // them, merged where they touch - Skipped never holds a directive, so
+    // a `{$DEFINE}` inside a dead branch was a coloured hole in the grey
+    // (Alex, 2026-10-09, System.SysUtils' X86ASM on Win64).
+    if AInactive then
+      for LRegion in InactiveRegions(LModel.Tree.Source, LFileId) do
+        AddInactive(LRegion);
 
     // Source order; the declaration pass is symbol order and the skipped
     // regions come last, so sort - declarations first at a shared position,

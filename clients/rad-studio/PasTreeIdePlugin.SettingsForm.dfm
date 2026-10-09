@@ -507,6 +507,28 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 4
         OnClick = TypeStyleChanged
       end
+      object lblHighlightInactiveHint: TLabel
+        Left = 35
+        Top = 199
+        Width = 392
+        Height = 45
+        Caption =
+          'Lines an {$IFDEF}, {$IF} or {$ELSE} branch leaves out are painte' +
+          'd one flat gray, by the conditions as the analysis evaluated the' +
+          'm - the project''s defines, platform and compiler version include' +
+          'd.'
+        WordWrap = True
+      end
+      object chkHighlightInactive: TCheckBox
+        Left = 16
+        Top = 178
+        Width = 430
+        Height = 17
+        Caption = 'Gray out inactive code'
+        Checked = True
+        State = cbChecked
+        TabOrder = 5
+      end
     end
     object tsIdeFixes: TTabSheet
       Caption = 'IDE Fixes'

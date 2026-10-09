@@ -301,7 +301,10 @@ const
   /// 0.94.1 (2026-10-09): a `$ELSEIF` after a taken branch and a `$IF` in a
   /// skipped region record their names, and a callee (`SizeOf`, `Defined`)
   /// is a name. Against 0.94.0 the hover is silently absent on them.
-  cMinPasTreeVersion = '0.94.1';
+  /// 0.95.0 (2026-10-09): TPasPreprocessed.DeadDirectives, the directives
+  /// inside a dead branch that Skipped leaves out - the inactive-code grey
+  /// has a hole at each without it (an older library does not compile).
+  cMinPasTreeVersion = '0.95.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

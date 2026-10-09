@@ -309,6 +309,23 @@ Rename, whose every hit carries its line's type names from the server. The
 Highlighting tab of the settings holds the switch, the colour, bold, italic
 and underline, with a preview; a change applies to every open editor on OK.
 
+### Inactive code in grey
+
+The lines an `{$IFDEF}`, `{$IF}` or `{$ELSE}` branch leaves out are painted
+one flat grey - keywords, strings and comments alike, as the PasTree demo
+does - by the conditions as the analysis evaluated them: the project's
+defines, the target platform and the compiler version, `{$DEFINE}`s and
+included files along the way. A directive inside a dead branch - a
+`{$DEFINE}`, a whole nested `{$IFDEF}` chain - is dead code and goes grey
+with it; the markers of a chain in live code keep their colour, whichever
+branch was taken.
+The grey is the line's own background moved halfway toward black (or toward
+white on a dark background), so it reads on both themes, the current-line
+band and a breakpoint line. It rides the same semantic tokens as the type
+colouring - the server sends a skipped region as `comment` tokens - so it
+arrives and refreshes with them; typing inside a dead line keeps it grey
+until the next answer. A checkbox on the Highlighting tab, on by default.
+
 ### Live error squiggles
 
 Errors and warnings from the analysis are painted as wavy underlines directly in

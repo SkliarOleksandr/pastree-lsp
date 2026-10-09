@@ -20,6 +20,10 @@ function PlatformName: string;
 
 {$DEFINE DEMO_FEATURE}
 
+{$IFDEF DEMO_NEVER} // a directive in a dead branch is inactive code too
+  {$DEFINE DEMO_DEAD}
+{$ENDIF}
+
 implementation
 
 function FeatureName: string;

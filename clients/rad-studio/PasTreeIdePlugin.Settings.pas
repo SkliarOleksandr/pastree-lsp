@@ -368,6 +368,9 @@ type
     HighlightTypes: Boolean;
     TypeColor: TColor;
     TypeFontStyle: TFontStyles;
+    // Highlighting tab: the lines an $IFDEF leaves out, as the analysis
+    // evaluated the conditions, painted one flat grey. Default True.
+    HighlightInactive: Boolean;
     // False = the IDE's Error Insight draws the error underlines, True = we
     // do (and the IDE's level is set to None) - see ApplyErrorInsightChoice.
     PasTreeErrorSquiggles: Boolean;
@@ -382,11 +385,12 @@ procedure SaveSettings(const ASettings: TPasTreeSettings);
 
 /// <summary>
 /// The Highlighting tab as the paint path reads it - per syntax run per
-/// repaint, so all three come from the cached record, no registry read.
+/// repaint, so all four come from the cached record, no registry read.
 /// </summary>
 function TypeHighlightEnabled: Boolean;
 function TypeHighlightColor: TColor;
 function TypeHighlightStyle: TFontStyles;
+function InactiveHighlightEnabled: Boolean;
 
 /// <summary>
 /// Registers the ONE listener called (main thread) after the dialog saved -
@@ -434,6 +438,7 @@ const
   cValueHighlightTypes = 'HighlightTypes';
   cValueTypeColor = 'TypeColor';
   cValueTypeFontStyle = 'TypeFontStyle';
+  cValueHighlightInactive = 'HighlightInactiveCode';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
@@ -599,6 +604,7 @@ begin
   Result.HighlightTypes := True;
   Result.TypeColor := cDefaultTypeColor;
   Result.TypeFontStyle := [];
+  Result.HighlightInactive := True;
   Result.PasTreeErrorSquiggles := False;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
@@ -618,6 +624,8 @@ begin
       Result.TypeColor :=
         TColor(ReadInt(LReg, cValueTypeColor, Integer(Result.TypeColor)));
       Result.TypeFontStyle := StylesOf(ReadInt(LReg, cValueTypeFontStyle, 0));
+      Result.HighlightInactive :=
+        ReadFlag(LReg, cValueHighlightInactive, Result.HighlightInactive);
       Result.OverrideStructureView :=
         ReadFlag(LReg, cValueStructureView, Result.OverrideStructureView);
       Result.CtrlClickNavigation :=
@@ -714,6 +722,8 @@ begin
         LReg.WriteInteger(cValueTypeColor, Integer(ASettings.TypeColor));
         LReg.WriteInteger(cValueTypeFontStyle,
           StyleBits(ASettings.TypeFontStyle));
+        LReg.WriteInteger(cValueHighlightInactive,
+          Ord(ASettings.HighlightInactive));
         LReg.WriteInteger(cValueErrorSquiggles,
           Ord(ASettings.PasTreeErrorSquiggles));
         LReg.WriteInteger(cValueDfmNoExplicit,
@@ -1054,6 +1064,11 @@ end;
 function TypeHighlightStyle: TFontStyles;
 begin
   Result := CurrentSettings.TypeFontStyle;
+end;
+
+function InactiveHighlightEnabled: Boolean;
+begin
+  Result := CurrentSettings.HighlightInactive;
 end;
 
 procedure SetSettingsSavedListener(const AListener: TProc);

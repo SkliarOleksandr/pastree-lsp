@@ -8,6 +8,13 @@ unit PasTreeIdePlugin.SemanticPaint;
   textDocument/semanticTokens/full (what Ctrl+Click would take to a type
   declaration), cached per file by the session; this unit only paints.
 
+  INACTIVE CODE rides the same answer: the server sends each line of a
+  skipped $IFDEF region as a `comment` token (nothing else it sends is one),
+  and every run under such a token - whatever its syntax code - is repainted
+  in one flat, unstyled grey derived from the run's background
+  (InactiveColorOn), the PasTree demo's rendering. Its own switch on the
+  Highlighting tab.
+
   THE HOOK, and what the spike of 2026-09-22 (0.47.24-0.47.28) established
   about it. INTACodeEditorEvents.PaintText fires per RUN, and a run is NOT
   a token: the IDE coalesces adjacent cells that share a paint attribute, so
@@ -92,6 +99,12 @@ const
   ST_INTERFACE = 4;
   ST_STRUCT = 5;
   ST_TYPE_PARAMETER = 6;
+  // The server sends a skipped $IFDEF region as `comment` tokens, one per
+  // line it covers - nothing else in the answer is a comment.
+  ST_COMMENT = 13;
+  // How far an inactive line's grey sits from its background toward the
+  // opposite end, in percent: mid grey on white and on the dark theme alike.
+  cInactiveContrast = 50;
 
 var
   // Interface-typed on purpose: TNotifierObject is refcounted, and an object
@@ -118,6 +131,31 @@ begin
   else
     Result := False;
   end;
+end;
+
+{ The grey of inactive code on ABack - the run's own background, so the
+  current-line band, a breakpoint line and both themes each get a grey that
+  reads on them: ABack moved cInactiveContrast percent toward black on a light
+  background, toward white on a dark one. One flat shade whatever the run
+  was, as the PasTree demo paints it: a keyword or a string in dead code is
+  still dead code. }
+function InactiveColorOn(ABack: TColor): TColor;
+var
+  LRgb: Integer;
+  LR, LG, LB, LTarget: Integer;
+begin
+  LRgb := ColorToRGB(ABack);
+  LR := GetRValue(LRgb);
+  LG := GetGValue(LRgb);
+  LB := GetBValue(LRgb);
+  if LR * 299 + LG * 587 + LB * 114 >= 128000 then
+    LTarget := 0
+  else
+    LTarget := 255;
+  Result := TColor(RGB(
+    LR + (LTarget - LR) * cInactiveContrast div 100,
+    LG + (LTarget - LG) * cInactiveContrast div 100,
+    LB + (LTarget - LB) * cInactiveContrast div 100));
 end;
 
 { The first token of ARow in a position-sorted array, or Length(ATokens)
@@ -228,22 +266,49 @@ var
   LLineText: string;
   LIdx, LRow, LFrom, LTo, LRunEnd, LTokFrom, LTokTo: Integer;
   LCanvas: TCanvas;
-  LPiece: TRect;
-  LOldColor, LColor: TColor;
+  LOldColor, LColor, LInactiveColor: TColor;
   LOldStyle, LStyle: TFontStyles;
+  LTypes, LInactive: Boolean;
+
+  // Repaint columns [AFrom, ATo) of the run - already intersected with it.
+  procedure PaintPiece(AFrom, ATo: Integer; AColor: TColor;
+    const AStyle: TFontStyles);
+  var
+    LPiece: TRect;
+  begin
+    // Columns -> pixels PROPORTIONALLY within the run's own rect (the
+    // squiggle's rule, PasTreeIdePlugin.ErrorPaint). The brush is what the
+    // IDE painted the run's background with, current-line band included;
+    // the font is the run's, only the colour and style are ours.
+    LPiece := Rect(
+      ARect.Left + MulDiv(AFrom - AColNum, ARect.Width, Length(AText)),
+      ARect.Top,
+      ARect.Left + MulDiv(ATo - AColNum, ARect.Width, Length(AText)),
+      ARect.Bottom);
+    LCanvas.Font.Color := AColor;
+    LCanvas.Font.Style := AStyle;
+    LCanvas.FillRect(LPiece);
+    LCanvas.TextRect(LPiece, LPiece.Left, LPiece.Top,
+      Copy(AText, AFrom - AColNum + 1, ATo - AFrom));
+  end;
+
 begin
   // AFTER the IDE painted the run. A selected run keeps the selection's own
   // text colour - the one colour guaranteed readable on that background.
+  if ABeforeEvent or AHilight or (AContext = nil) or (AText = '') then
+    Exit;
   // The run's code is the code of its FIRST non-blank cell, not of every
   // cell in it: `(TWinControl);` after the `class` keyword arrives as ONE
   // atSymbol run with the type name inside (second live run, 2026-09-22 -
   // every ancestor in a class header stayed black), so symbol runs are
   // looked into as well. Comments, strings, numbers, keywords and
   // directives never contain a type token and are skipped on their code.
-  if ABeforeEvent or AHilight or (AContext = nil) or (AText = '') or
-     not (ASyntaxCode in [atIdentifier, atSymbol, atWhiteSpace]) then
-    Exit;
-  if not TypeHighlightEnabled then
+  // Inactive code is every run whatever its code - a keyword or a string in
+  // a dead branch goes grey with the rest.
+  LTypes := TypeHighlightEnabled and
+    (ASyntaxCode in [atIdentifier, atSymbol, atWhiteSpace]);
+  LInactive := InactiveHighlightEnabled;
+  if not (LTypes or LInactive) then
     Exit;
   if not IsPascalSourceFile(AContext.FileName) then
     Exit;
@@ -270,33 +335,31 @@ begin
   // The user's style ADDED to the run's own (the editor may already paint
   // identifiers bold): a style is a mark, not a replacement.
   LStyle := LOldStyle + TypeHighlightStyle;
+  LInactiveColor := InactiveColorOn(LCanvas.Brush.Color);
   LIdx := FirstTokenOfRow(LTokens, LShift.BaseRow);
   while (LIdx < Length(LTokens)) and (LTokens[LIdx].Row = LShift.BaseRow) do
   begin
-    if IsTypeToken(LTokens[LIdx]) and
+    // Intersect the token's columns with this run's [AColNum, LRunEnd).
+    if LInactive and (LTokens[LIdx].TokenType = ST_COMMENT) then
+    begin
+      if ShiftSpan(LShift, LLineText, LTokens[LIdx].ColFrom,
+           LTokens[LIdx].ColTo, LTokFrom, LTokTo) then
+      begin
+        LFrom := Max(LTokFrom, AColNum);
+        LTo := Min(LTokTo, LRunEnd);
+        // Unstyled: the IDE's italic comment or bold keyword is not kept.
+        if LTo > LFrom then
+          PaintPiece(LFrom, LTo, LInactiveColor, []);
+      end;
+    end
+    else if LTypes and IsTypeToken(LTokens[LIdx]) and
        ShiftToken(LShift, LLineText, LTokens[LIdx].ColFrom,
          LTokens[LIdx].ColTo, LTokFrom, LTokTo) then
     begin
-      // Intersect the token's columns with this run's [AColNum, LRunEnd).
       LFrom := Max(LTokFrom, AColNum);
       LTo := Min(LTokTo, LRunEnd);
       if LTo > LFrom then
-      begin
-        // Columns -> pixels PROPORTIONALLY within the run's own rect (the
-        // squiggle's rule, PasTreeIdePlugin.ErrorPaint). The brush is what
-        // the IDE painted the run's background with, current-line band
-        // included; the font is the run's, only the colour is ours.
-        LPiece := Rect(
-          ARect.Left + MulDiv(LFrom - AColNum, ARect.Width, Length(AText)),
-          ARect.Top,
-          ARect.Left + MulDiv(LTo - AColNum, ARect.Width, Length(AText)),
-          ARect.Bottom);
-        LCanvas.Font.Color := LColor;
-        LCanvas.Font.Style := LStyle;
-        LCanvas.FillRect(LPiece);
-        LCanvas.TextRect(LPiece, LPiece.Left, LPiece.Top,
-          Copy(AText, LFrom - AColNum + 1, LTo - LFrom));
-      end;
+        PaintPiece(LFrom, LTo, LColor, LStyle);
     end;
     Inc(LIdx);
   end;

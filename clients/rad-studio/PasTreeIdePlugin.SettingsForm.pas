@@ -116,6 +116,8 @@ type
     chkTypeUnderline: TCheckBox;
     lblPreview: TLabel;
     pbxPreview: TPaintBox;
+    chkHighlightInactive: TCheckBox;
+    lblHighlightInactiveHint: TLabel;
     tsIdeFixes: TTabSheet;
     chkNoExplicitProps: TCheckBox;
     lblNoExplicitPropsHint: TLabel;
@@ -350,6 +352,7 @@ begin
     LForm.chkTypeBold.Checked := fsBold in LSettings.TypeFontStyle;
     LForm.chkTypeItalic.Checked := fsItalic in LSettings.TypeFontStyle;
     LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
+    LForm.chkHighlightInactive.Checked := LSettings.HighlightInactive;
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
@@ -382,6 +385,7 @@ begin
     LSettings.HighlightTypes := LForm.chkHighlightTypes.Checked;
     LSettings.TypeColor := LForm.cbxTypeColor.Selected;
     LSettings.TypeFontStyle := LForm.TypeStyles;
+    LSettings.HighlightInactive := LForm.chkHighlightInactive.Checked;
     LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;

@@ -2388,7 +2388,7 @@ procedure TestSemanticTokens;
 const
   // Legend indices, as advertised in the server's initialize answer.
   cType = 1; cClass = 2; cStruct = 5; cParameter = 7; cVariable = 8;
-  cFunction = 11;
+  cFunction = 11; cComment = 13;
   cDeclaration = 1; cReadonly = 2; cDefaultLibrary = 4;
 var
   LUnitFile: string;
@@ -2539,6 +2539,21 @@ begin
   // A LIBRARY ancestor (`class(TInterfacedObject)`) is LspProjectSmoke's
   // check: this fixture project has no RTL on its path, so System's names
   // resolve to nothing here, for definition and tokens alike.
+
+  // Inactive code is `comment` tokens, and a directive inside a dead branch
+  // is inactive too: `  {$DEFINE DEMO_DEAD}` under `{$IFDEF DEMO_NEVER}` is
+  // one 21-character token - before PasTree 0.95.0 only its two leading
+  // blanks were, the directive a hole in the grey (Alex, 2026-10-09). The
+  // chain's own markers are live code and no token.
+  LUnitFile := TPath.Combine(GFixtureDir, 'DemoDefines.pas');
+  Check(Ask('textDocument/semanticTokens/full', DocParams),
+    'semanticTokens/full answered for DemoDefines');
+  LDecoded := GOk and Decode;
+  Check(LDecoded and (LCount > 0), 'and decoded');
+  CheckToken(23, 0, 21, cComment, 0,
+    'a $DEFINE in a dead branch: its whole line is inactive');
+  Check(TokenAt(22, 0) < 0, 'the dead branch''s $IFDEF is not');
+  Check(TokenAt(24, 0) < 0, 'nor its $ENDIF');
 
   // Every result row carries the type names of ITS LINE (`typeSpans`, 1-based
   // column and length pairs), so the IDE's Messages rows paint types like

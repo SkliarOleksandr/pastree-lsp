@@ -62,6 +62,16 @@ function ShiftToken(const AShift: TLineShift; const ACurrent: string;
   AFrom, ATo: Integer; out ANewFrom, ANewTo: Integer): Boolean;
 
 /// <summary>
+/// A SPAN [AFrom, ATo) of the base line - an inactive line's stretch, not a
+/// name - on the current line. Unlike ShiftToken an edit INSIDE the span
+/// keeps it: typing in a dead branch leaves the line dead, so each end is
+/// carried on its own (before the edit where it was, after it by Delta).
+/// False only when an end falls inside the edit.
+/// </summary>
+function ShiftSpan(const AShift: TLineShift; const ACurrent: string;
+  AFrom, ATo: Integer; out ANewFrom, ANewTo: Integer): Boolean;
+
+/// <summary>
 /// AText split into lines, a CR before each LF dropped - the shape ABase
 /// takes.
 /// </summary>
@@ -197,6 +207,40 @@ begin
     (Copy(ACurrent, ANewFrom, LLen) = Copy(AShift.BaseLine, AFrom, LLen)) and
     ((ANewFrom = 1) or not IsIdentChar(ACurrent[ANewFrom - 1])) and
     ((ANewTo > Length(ACurrent)) or not IsIdentChar(ACurrent[ANewTo]));
+end;
+
+function ShiftSpan(const AShift: TLineShift; const ACurrent: string;
+  AFrom, ATo: Integer; out ANewFrom, ANewTo: Integer): Boolean;
+var
+  LEditEnd: Integer;
+begin
+  ANewFrom := AFrom;
+  ANewTo := ATo;
+  Result := False;
+  if AShift.BaseRow = 0 then
+    Exit;
+  if AShift.Same then
+    Exit(True);
+  if (ATo <= AFrom) or (AFrom < 1) then
+    Exit;
+  // 0-based: the span is [AFrom - 1, ATo - 1), the edit replaced
+  // [Prefix, LEditEnd) of the base line.
+  LEditEnd := Length(AShift.BaseLine) - AShift.Suffix;
+  if AFrom - 1 <= AShift.Prefix then
+    // starts before the edit (or at it): where it was
+  else if AFrom - 1 >= LEditEnd then
+    ANewFrom := AFrom + AShift.Delta
+  else
+    Exit;
+  if ATo - 1 >= LEditEnd then
+    ANewTo := ATo + AShift.Delta
+  else if ATo - 1 <= AShift.Prefix then
+    // ends before the edit: where it was
+  else
+    Exit;
+  if ANewTo > Length(ACurrent) + 1 then
+    ANewTo := Length(ACurrent) + 1;
+  Result := (ANewFrom >= 1) and (ANewTo > ANewFrom);
 end;
 
 end.

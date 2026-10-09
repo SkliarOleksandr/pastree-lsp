@@ -325,6 +325,32 @@ begin
     'aa -> aaa is one insertion after the common prefix');
   Check(not ShiftToken(LShift, 'aaa', 1, 3, LFrom, LTo),
     'and a token the insertion extends is left out');
+
+  // ShiftSpan: an inactive line's stretch survives an edit inside it.
+  LHint := 0;
+  LShift := ShiftForLine(['  Log(''dead'');'], 1, '  Log(''dead'');', LHint);
+  Check(ShiftSpan(LShift, '  Log(''dead'');', 1, 15, LFrom, LTo) and
+    (LFrom = 1) and (LTo = 15), 'ShiftSpan: an unchanged line keeps its span');
+  LHint := 0;
+  LShift := ShiftForLine(['  Log(''dead'');'], 1, '  Log(''dead!'');', LHint);
+  Check(ShiftSpan(LShift, '  Log(''dead!'');', 1, 15, LFrom, LTo) and
+    (LFrom = 1) and (LTo = 16),
+    'ShiftSpan: typing inside a dead line stretches its span over the edit');
+  LHint := 0;
+  LShift := ShiftForLine(['  X := 1; {$ENDIF}'], 1,
+    '  X := 1; {$ENDIF} // n', LHint);
+  Check(ShiftSpan(LShift, '  X := 1; {$ENDIF} // n', 1, 11, LFrom, LTo) and
+    (LFrom = 1) and (LTo = 11),
+    'ShiftSpan: typing after a span that ends mid-line leaves it in place');
+  LHint := 0;
+  LShift := ShiftForLine(['{$ELSE} Y := 2;'], 1, '{$ELSE}  Y := 2;', LHint);
+  Check(ShiftSpan(LShift, '{$ELSE}  Y := 2;', 9, 16, LFrom, LTo) and
+    (LFrom = 9) and (LTo = 17),
+    'ShiftSpan: an insertion at a span''s start goes into the span');
+  LHint := 0;
+  LShift := ShiftForLine(['abcdef'], 1, 'abXYZef', LHint);
+  Check(not ShiftSpan(LShift, 'abXYZef', 4, 6, LFrom, LTo),
+    'ShiftSpan: a span whose start the edit replaced is left out');
 end;
 
 begin
