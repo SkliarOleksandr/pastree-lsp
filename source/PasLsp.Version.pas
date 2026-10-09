@@ -287,7 +287,14 @@ const
   /// 0.93.14 (2026-10-07): the names of a $IF expression are recorded
   /// (TPasIfNameRef) and TPasNavigator.IfNameAt resolves them - the hover
   /// and Ctrl+Click on `CompilerVersion`. An older library does not compile.
-  cMinPasTreeVersion = '0.93.14';
+  /// 0.93.38 (2026-10-09): operator chains and `else if` chains of any
+  /// length (generated string tables, dispatchers), and
+  /// PasRecoverStackOverflow, which the server calls (an older library does
+  /// not compile). Against 0.93.37 a unit with ~1,900 terms in one
+  /// expression overflowed the stack and was
+  /// dropped - its importers showed F1027 - and a second overflow on a pool
+  /// thread ended the server with nothing in the log.
+  cMinPasTreeVersion = '0.93.38';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

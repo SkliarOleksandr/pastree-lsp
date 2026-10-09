@@ -9,6 +9,9 @@
 }
 
 {$APPTYPE CONSOLE}
+// 16 MB of stack per thread, PasTree's pool workers included: only the
+// program can set it (PasTree README, "The stack every host should reserve").
+{$MAXSTACKSIZE $01000000}
 
 uses
   System.SysUtils,

@@ -2269,8 +2269,13 @@ begin
     FinalizeAnalysisIfDone;
   except
     on E: Exception do
+    begin
+      // The main thread goes on serving: after a stack overflow it needs its
+      // guard page back, or the next one ends the process silently.
+      PasRecoverStackOverflow;
       NoteIdleFault('EXCEPTION in idle finalize: ' + E.ClassName + ': '
         + E.Message + ' [' + StateLine + ']');
+    end;
   end;
 end;
 
@@ -7540,6 +7545,8 @@ begin
     except
       on E: Exception do
       begin
+        // The main thread goes on serving (see the idle finalize).
+        PasRecoverStackOverflow;
         // The pending idle-fault count first, so the two are not interleaved
         // out of order - a request fault arriving mid-flood is a different
         // event from the flood, and the log has to keep them apart.
