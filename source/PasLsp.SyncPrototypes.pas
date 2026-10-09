@@ -283,10 +283,12 @@ end;
   generic parameters ignored on the chain - `TStack<T>` in the class is
   `TStack<T>` on the implementation but the two spellings need not match
   character for character. Parameters are deliberately NOT part of this: they
-  are the thing that just changed. }
+  are the thing that just changed. A generic method's NAME is compared
+  through NameKey: its declaration writes the constraints (`Get<T: TObject>`)
+  and its body usually does not. }
 function SameRoutineIdentity(const A, B: TRoutineSide): Boolean;
 begin
-  Result := SameText(A.Name, B.Name) and SameText(A.Chain, B.Chain);
+  Result := (NameKey(A.Name) = NameKey(B.Name)) and SameText(A.Chain, B.Chain);
 end;
 
 { The header text the TARGET should now read, built from the SOURCE's tail and

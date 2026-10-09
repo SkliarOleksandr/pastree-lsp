@@ -3222,6 +3222,31 @@ begin
     'and the caret on its NAME, the line below FA - not the unit''s start');
 end;
 
+{ 5s. Generic methods and bracketed defaults. A declaration writes its type
+  parameters' constraints and its body does not, so keying the name as
+  written made both halves look missing; and a `= []` default lost only its
+  `= [`. One press in AVImark's TStripeService added two declarations, two
+  bodies and two uncompilable headers (2026-10-09). }
+procedure TestClassCompleteGeneric;
+begin
+  Writeln;
+  Writeln('=== 5s. classComplete pairs generic methods, strips bracketed '
+    + 'defaults ===');
+  Check(AskClassComplete('DemoClassCompleteGeneric.pas', ''),
+    'classComplete answered');
+  Check(GOk and not GResultJson.Contains('Fetch')
+    and not GResultJson.Contains('ListOf'),
+    'a constrained generic method implemented without its constraints is '
+    + 'neither declared again nor implemented again');
+  Check(GOk and GResultJson.Contains('procedure TGenHost.Added;'),
+    'the plain missing method is generated');
+  Check(GOk and GResultJson.Contains(
+    'procedure TGenHost.Sets(const A: TArray<Integer>; B: Integer);'),
+    'an open-array default with a comma in it goes whole, brackets and all');
+  Check(GOk and GResultJson.Contains('procedure TBox<T>.Put(const AItem: T);'),
+    'a constrained generic type is qualified without its constraint');
+end;
+
 { 5i. classComplete when the ONLY thing to do is write an orphan's
   declaration back - no missing body anywhere in the unit. Isolated on
   purpose: DemoClassComplete.pas above always has bodies to generate too, so
@@ -4591,6 +4616,7 @@ begin
       TestClassCompleteFields;
       TestClassCompleteForeign;
       TestClassCompleteFieldOnlyCaret;
+      TestClassCompleteGeneric;
       TestClassCompleteOrphanCaret;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;

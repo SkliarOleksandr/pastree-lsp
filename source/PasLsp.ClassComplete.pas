@@ -176,6 +176,13 @@ function Flatten(const AText: string): string;
 function StripDefaults(const AText: string): string;
 
 /// <summary>
+/// A routine's own name as an identity: lowercase, no blanks, and its type
+/// parameters without their constraints - `Get&lt;T: TObject&gt;` declared is
+/// `Get&lt;T&gt;` implemented.
+/// </summary>
+function NameKey(const AName: string): string;
+
+/// <summary>
 /// The routine's name as the parser builds it - a chain of segments
 /// (`TFoo` `.` `Bar`), generic parameters included. AFirstVis/ALastVis span
 /// the whole name, so a caller can slice both it and everything after it.
@@ -446,6 +453,70 @@ begin
       Result := Result + AText[LIdx];
 end;
 
+{ `Get<T: TStripeObject; U>` -> `Get<T, U>`: type parameters without their
+  constraints. A generic METHOD's declaration carries them and its body
+  usually does not (`function TStripeService.RetrieveStripeObject<T>(...)`),
+  so a key built from the text as written made every such method look
+  unimplemented AND its body look undeclared - one press added a second
+  declaration and a second body (AVImark, 2026-10-09). Constraints are not
+  part of the identity, and they are not written in an implementation's
+  header, so a generated one drops them too. The parameters themselves stay:
+  `Foo<T>` and `Foo<T, U>` are different overloads.
+
+  Inside the brackets a `:` starts a constraint, which runs to the `;` that
+  separates the next parameter group or to the closing `>` - its own commas
+  (`class, constructor`) and nested brackets (`IComparer<T>`) included. }
+function StripConstraints(const AText: string): string;
+var
+  LIdx, LDepth: Integer;
+  LSkip: Boolean;
+begin
+  Result := '';
+  LDepth := 0;
+  LSkip := False;
+  for LIdx := 1 to Length(AText) do
+  begin
+    case AText[LIdx] of
+      '<':
+        begin
+          Inc(LDepth);
+          if LSkip then
+            Continue;
+        end;
+      '>':
+        begin
+          Dec(LDepth);
+          if LSkip and (LDepth >= 1) then
+            Continue;
+          if LSkip then
+            Result := Result.TrimRight;
+          LSkip := False;
+        end;
+      ':':
+        if LDepth = 1 then
+        begin
+          LSkip := True;
+          Continue;
+        end;
+      ';':
+        if LDepth = 1 then
+        begin
+          LSkip := False;
+          Result := Result.TrimRight + ', ';
+          Continue;
+        end;
+    end;
+    if not LSkip then
+      Result := Result + AText[LIdx];
+  end;
+end;
+
+{ A routine's own name as a key: no constraints, no case, no blanks. }
+function NameKey(const AName: string): string;
+begin
+  Result := LowerCase(StripConstraints(AName)).Replace(' ', '', [rfReplaceAll]);
+end;
+
 { The parameter list as an IDENTITY: one entry per declared argument (a
   `const A, B: string` is two), each the argument's TYPE text, lowercased and
   space-free. Names are deliberately NOT in the key - a user mid-edit may have
@@ -530,15 +601,21 @@ end;
 { The parameter list as the IMPLEMENTATION must write it: the declaration's
   own text with every default value removed. Delphi requires the defaults to
   appear in the interface ONLY (E2226), so copying the declaration verbatim -
-  as the first version did - produces a header that does not compile. }
+  as the first version did - produces a header that does not compile.
+
+  A default ends only at the depth it started at. A set or open-array default
+  has brackets and commas of its own - `const A: TArray<string> = []` - and
+  ending the skip at ANY `]` wrote `const A: TArray<string>]` (AVImark's
+  TStripeService, 2026-10-09); `= [1, 2]` would have resumed at its comma. }
 function StripDefaults(const AText: string): string;
 var
-  LIdx, LDepth: Integer;
+  LIdx, LDepth, LSkipDepth: Integer;
   LSkipping: Boolean;
   LQuote: Boolean;
 begin
   Result := '';
   LDepth := 0;
+  LSkipDepth := 0;
   LSkipping := False;
   LQuote := False;
   for LIdx := 1 to Length(AText) do
@@ -566,14 +643,19 @@ begin
       ')', ']':
         begin
           Dec(LDepth);
-          LSkipping := False;   // the parameter ended with its list
+          // The parameter ended with its list - a bracket of the default's
+          // own closes deeper and is skipped with the rest of it.
+          if LSkipping and (LDepth < LSkipDepth) then
+            LSkipping := False;
         end;
       ';', ',':
-        LSkipping := False;     // the next parameter starts
+        if LSkipping and (LDepth = LSkipDepth) then
+          LSkipping := False;   // the next parameter starts
       '=':
-        if LDepth > 0 then
+        if (LDepth > 0) and not LSkipping then
         begin
           LSkipping := True;
+          LSkipDepth := LDepth;
           Continue;
         end;
     end;
@@ -592,7 +674,7 @@ end;
 
 function MakeKey(const AChain, AName, AParams: string): string;
 begin
-  Result := LowerCase(StripGenerics(AChain)) + '.' + LowerCase(AName) +
+  Result := LowerCase(StripGenerics(AChain)) + '.' + NameKey(AName) +
     '(' + AParams + ')';
 end;
 
@@ -636,7 +718,8 @@ begin
               LSegment := ATree.NodeSpanText(LName);
               LGeneric := ChildOfKind(ATree, LDecl, nkGenericParams);
               if LGeneric <> NIL_NODE then
-                LSegment := LSegment + Flatten(ATree.NodeSpanText(LGeneric));
+                LSegment := LSegment +
+                  Flatten(StripConstraints(ATree.NodeSpanText(LGeneric)));
               // PREPENDED, so a method of a nested type comes out as the
               // implementation must write it: TOuter.TInner.Method.
               if Result = '' then
@@ -751,6 +834,9 @@ begin
   LNameText := AOwnName;
   if LNameText = '' then
     LNameText := Flatten(RawSpan(ATree, ANameFirst, ANameLast));
+  // A body's header names its type parameters without their constraints.
+  if not AKeepDirectives then
+    LNameText := Flatten(StripConstraints(LNameText));
   // Where the NAME starts in the result, 0-based - the column a caret wants,
   // the same one Go To Definition lands on (the identifier, not the keyword
   // in front of it). Past the chain too: `TFoo.Bar` is the implementation's
@@ -788,7 +874,8 @@ begin
   Result := ATree.NodeSpanText(LName);
   LGeneric := ChildOfKind(ATree, LDecl, nkGenericParams);
   if LGeneric <> NIL_NODE then
-    Result := Result + Flatten(ATree.NodeSpanText(LGeneric));
+    Result := Result +
+      Flatten(StripConstraints(ATree.NodeSpanText(LGeneric)));
 end;
 
 { Every name the type declares itself: fields, methods, properties, nested
@@ -2106,7 +2193,7 @@ begin
         begin
           LSite.Key := LKey;
           LSite.TypeKey := LowerCase(StripGenerics(LChain));
-          LSite.NameLower := LowerCase(LSegments[LDots - 1]);
+          LSite.NameLower := LowerCase(StripGenerics(LSegments[LDots - 1]));
           if not LSiteByKey.ContainsKey(LKey) then
             LSiteByKey.Add(LKey, LSites.Count);
           LSites.Add(LSite);
@@ -2146,7 +2233,7 @@ begin
       if LChain <> '' then
         LCand.Name := LChain + '.' + LName;
       LCand.Chain := LChain;
-      LCand.NameLower := LowerCase(LName);
+      LCand.NameLower := LowerCase(StripGenerics(LName));
       LCand.OrderTok := ATree.NodeLeftmostVis(LIdx);
       LCand.Seq := LDecls.Count;
       if LChain = '' then
