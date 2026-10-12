@@ -36,6 +36,17 @@ unit PasTreeIdePlugin.TooltipSymbolInsight;
   Options while ours is on is not fought: the switch acts on transitions of
   our setting only.
 
+  AN OPTION THAT DOES NOT READ AS A BOOLEAN IS RETRIED, NOT TAKEN FOR OFF.
+  Until 0.66.1 the first mouse move compared the value's text with 'True',
+  recorded the setting as applied whatever came back, and so a value that
+  read otherwise (empty, -1, not loaded yet) left the native hint on for the
+  whole session - two hints after a fresh install, gone once our setting was
+  toggled (Alex, 2026-10-12). Now TryOptionBool takes varBoolean, True/False
+  and -1/1/0, and anything else is asked again at most once a second. What
+  was read and done goes to the LSP log once (NoteToLog), and so does the
+  option turning True again while we hold it off - the IDE, or the user,
+  having put it back.
+
   PROBLEMS UNDER THE POINTER come first in the hint, one line each, drawn as
   the IDE's own error hint draws them (Alex, 2026-10-08): a disc with a `!`
   in the colour of the underline, the compiler's code (`E2003`) in that
@@ -98,6 +109,8 @@ const
   cDocMaxWidth = 640;
   cEnvDeclInfo = 'DeclarationInformation';
   cValueSavedDeclInfo = 'SavedDeclarationInformation';
+  // How soon an option that did not read as a Boolean is asked again.
+  cOptionRetryMs = 1000;
 
 type
   TSymbolInsightWindow = class(TCustomControl)
@@ -181,6 +194,16 @@ type
     // Our setting as last acted on, and whether it has been at all.
     FApplied: Boolean;
     FSettingsRead: Boolean;
+    // Set while the option has not read as a Boolean: no new try before it.
+    FRetryAt: UInt64;
+    // Each said once per session - see NoteToLog.
+    FUnreadableNoted: Boolean;
+    FRevertNoted: Boolean;
+    // A line for the LSP log, kept until a session takes it.
+    FLogLine: string;
+    procedure NoteToLog(const AText: string);
+    procedure FlushLog;
+    procedure CheckStillQuenched;
     procedure DoMouseMove(const Editor: TWinControl; Shift: TShiftState;
       X, Y: Integer);
     procedure OnShowTimer(Sender: TObject);
@@ -195,7 +218,7 @@ type
     function InKeepZone(const AScreen: TPoint): Boolean;
     function ProgressText: string;
     procedure SyncNativeHint;
-    procedure SetNativeHint(AOn: Boolean);
+    function SetNativeHint(AOn: Boolean): Boolean;
     procedure SetEditor(AEditor: TWinControl);
   protected
     procedure Notification(AComponent: TComponent;
@@ -235,6 +258,34 @@ begin
     Exit;
   LProcess := LDebugger.CurrentProcess;
   Result := Assigned(LProcess) and (LProcess.ProcessState = psStopped);
+end;
+
+{ An environment option as a Boolean: a varBoolean, or text True/False or
+  -1/1/0. False for anything else - an empty or not yet loaded value, which
+  is not the same as off. }
+function TryOptionBool(const AValue: Variant; out AOn: Boolean): Boolean;
+var
+  LText: string;
+begin
+  Result := True;
+  AOn := False;
+  if VarIsType(AValue, varBoolean) then
+  begin
+    AOn := AValue;
+    Exit;
+  end;
+  LText := Trim(VarToStrDef(AValue, ''));
+  if SameText(LText, 'True') or (LText = '-1') or (LText = '1') then
+    AOn := True
+  else if not (SameText(LText, 'False') or (LText = '0')) then
+    Result := False;
+end;
+
+{ The value and its variant type, for a log line. }
+function OptionText(const AValue: Variant): string;
+begin
+  Result := '"' + VarToStrDef(AValue, '') + '" (' +
+    VarTypeAsText(VarType(AValue)) + ')';
 end;
 
 { What a problem line names its problem by, after the icon: the compiler's
@@ -876,15 +927,19 @@ end;
 { The IDE's own hint on or off, through the environment option the Options
   dialog itself writes. The marker under our key is written before the switch
   goes off and read back when it goes on: it alone says the IDE's value was
-  True before we touched it. }
-procedure TSymbolInsightController.SetNativeHint(AOn: Boolean);
+  True before we touched it.
+  False only when the option did not read as a Boolean - nothing was done and
+  the caller tries again; a failure that raised is not retried. }
+function TSymbolInsightController.SetNativeHint(AOn: Boolean): Boolean;
 var
   LServices: IOTAServices;
   LOptions: IOTAEnvironmentOptions;
   LReg: TRegistry;
   LKey: string;
+  LValue: Variant;
   LWasOn, LMarked: Boolean;
 begin
+  Result := True;
   if not Supports(BorlandIDEServices, IOTAServices, LServices) then
     Exit;
   LKey := SettingsKey;
@@ -892,13 +947,24 @@ begin
   try
     try
       LOptions := LServices.GetEnvironmentOptions;
+      if not Assigned(LOptions) then
+        Exit(False);
       LReg.RootKey := HKEY_CURRENT_USER;
       if not LReg.OpenKey(LKey, True) then
         Exit;
       LMarked := LReg.ValueExists(cValueSavedDeclInfo);
       if not AOn then
       begin
-        LWasOn := VarToStrDef(LOptions.Values[cEnvDeclInfo], '') = 'True';
+        LValue := LOptions.Values[cEnvDeclInfo];
+        if not TryOptionBool(LValue, LWasOn) then
+        begin
+          if not FUnreadableNoted then
+            NoteToLog('tooltip symbol insight: the IDE''s ' + cEnvDeclInfo
+              + ' reads as ' + OptionText(LValue)
+              + ' - the IDE''s tooltip not switched off yet, asked again');
+          FUnreadableNoted := True;
+          Exit(False);
+        end;
         if LWasOn then
         begin
           if not LMarked then
@@ -906,6 +972,11 @@ begin
           LOptions.Values[cEnvDeclInfo] := False;
         end;
         FQuenched := LWasOn or LMarked;
+        NoteToLog('tooltip symbol insight: the IDE''s ' + cEnvDeclInfo
+          + ' read as ' + OptionText(LValue) + IfThen(LWasOn,
+            ' - switched off, reads now as '
+            + OptionText(LOptions.Values[cEnvDeclInfo]),
+            ' - already off, left'));
       end
       else
       begin
@@ -915,6 +986,8 @@ begin
           LReg.DeleteValue(cValueSavedDeclInfo);
         end;
         FQuenched := False;
+        NoteToLog('tooltip symbol insight: off - the IDE''s tooltip '
+          + IfThen(LMarked, 'put back on', 'left as it is'));
       end;
     except
       // An IDE without the option (an older version) keeps its own hint; the
@@ -928,20 +1001,69 @@ begin
   end;
 end;
 
+{ A line for the LSP log - which may have no session yet (the first mouse
+  move can come before the server is up), so it waits for FlushLog. }
+procedure TSymbolInsightController.NoteToLog(const AText: string);
+begin
+  FLogLine := AText;
+  FlushLog;
+end;
+
+procedure TSymbolInsightController.FlushLog;
+begin
+  if (FLogLine <> '') and LspLogToServer(FLogLine) then
+    FLogLine := '';
+end;
+
+{ Once per session, at a hover: the option we switched off reads True again -
+  the IDE reloaded it or the user ticked the box. Logged, not fought (see the
+  header). }
+procedure TSymbolInsightController.CheckStillQuenched;
+var
+  LServices: IOTAServices;
+  LValue: Variant;
+  LOn: Boolean;
+begin
+  if not FQuenched or FRevertNoted then
+    Exit;
+  try
+    if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+      Exit;
+    LValue := LServices.GetEnvironmentOptions.Values[cEnvDeclInfo];
+    if TryOptionBool(LValue, LOn) and LOn then
+    begin
+      FRevertNoted := True;
+      NoteToLog('tooltip symbol insight: the IDE''s ' + cEnvDeclInfo
+        + ' reads ' + OptionText(LValue)
+        + ' again after we switched it off - two tooltips now');
+    end;
+  except
+  end;
+end;
+
 { Called on every mouse move: cheap (the setting is cached), and acts only on
-  a change of our setting - see the header. }
+  a change of our setting - see the header - or, while the option has not
+  read as a Boolean, once a second until it does. }
 procedure TSymbolInsightController.SyncNativeHint;
 var
   LWant: Boolean;
 begin
+  FlushLog;
   LWant := TooltipSymbolInsightEnabled;
   if FSettingsRead and (LWant = FApplied) then
     Exit;
-  // Recorded before the switch, so a failed one is not retried on every
-  // move; the next change of the setting tries again.
+  if (FRetryAt <> 0) and (GetTickCount64 < FRetryAt) then
+    Exit;
+  // Recorded before the switch, so a switch that raised is not retried on
+  // every move; the next change of the setting tries again.
   FSettingsRead := True;
   FApplied := LWant;
-  SetNativeHint(not LWant);
+  FRetryAt := 0;
+  if not SetNativeHint(not LWant) then
+  begin
+    FSettingsRead := False;
+    FRetryAt := GetTickCount64 + cOptionRetryMs;
+  end;
 end;
 
 procedure TSymbolInsightController.DoMouseMove(const Editor: TWinControl;
@@ -952,6 +1074,10 @@ begin
   if not GAlive then
     Exit;
   SyncNativeHint;
+  // Not ours, but this is the package's one cheap, late, always-on editor
+  // event: the Error Insight level that could not be read at package load is
+  // retried here - see PasTreeIdePlugin.Settings.
+  SyncErrorInsightChoice;
   if not TooltipSymbolInsightEnabled then
   begin
     CancelHover;
@@ -1001,6 +1127,7 @@ begin
     Exit;
   if DebuggerStopped then
     Exit;
+  CheckStillQuenched;
 
   LView := FServices.GetViewForEditor(FEditor);
   if not Assigned(LView) or not Assigned(LView.Buffer) then

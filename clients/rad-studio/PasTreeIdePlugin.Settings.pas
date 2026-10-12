@@ -314,8 +314,22 @@ function IdeErrorMarkStyle: TErrorMarkStyle;
 /// our own marker, SavedErrorInsightLevel, holding the replaced level's name
 /// ("None", "Errors", "Errors and Warnings", "Errors, Warnings and Hints",
 /// "Everything") - or "<absent>" from an older version, put back as Errors.
+///
+/// A LEVEL THAT DOES NOT READ IS RETRIED (since 0.66.1). The call at package
+/// load is early, and an option that is not loaded yet used to be logged and
+/// given up on for the session. Now it stays pending, and
+/// SyncErrorInsightChoice asks again, at most once a second. What was read
+/// and done goes to the LSP log.
 /// </summary>
 procedure ApplyErrorInsightChoice;
+
+/// <summary>
+/// Retries an ApplyErrorInsightChoice whose level did not read, and hands
+/// its log line to the LSP log once a session can take it. Cheap when there
+/// is nothing to do; called on every editor mouse move (from
+/// PasTreeIdePlugin.TooltipSymbolInsight).
+/// </summary>
+procedure SyncErrorInsightChoice;
 
 /// <summary>Registers Tools > PasTree > Settings.</summary>
 procedure InitializeSettings;
@@ -415,7 +429,9 @@ uses
   PasTreeIdePlugin.SettingsForm,
   PasTreeIdePlugin.DfmExplicitFix,
   PasTreeIdePlugin.DfmStyleElementsFix,
-  PasTreeIdePlugin.CrashLog;
+  PasTreeIdePlugin.CrashLog,
+  // LspLogToServer only, for SyncErrorInsightChoice's line.
+  PasTreeIdePlugin.LspSession;
 
 const
   cSettingsKey = 'PasTree';
@@ -458,6 +474,8 @@ const
     'Solid Line', 'Dots');
   // See IdeErrorMarkStyle.
   cMarkStyleRereadMs = 1000;
+  // See SyncErrorInsightChoice.
+  cErrorInsightRetryMs = 1000;
   // Teal, BGR - the PasTree demo's default, readable on both IDE themes.
   cDefaultTypeColor = TColor($00808000);
 
@@ -473,6 +491,13 @@ var
   GMarkStyle: TErrorMarkStyle = emsClassic;
   GMarkStyleReadAt: UInt64 = 0;
   GMarkStyleRead: Boolean = False;
+  // ApplyErrorInsightChoice's level did not read: retried no sooner than
+  // GErrorInsightRetryAt. The unreadable value is reported once.
+  GErrorInsightPending: Boolean = False;
+  GErrorInsightRetryAt: UInt64 = 0;
+  GErrorInsightUnreadableNoted: Boolean = False;
+  // The last line for the LSP log, until a session takes it.
+  GErrorInsightLogLine: string = '';
   // The two menu items we own: the "PasTree" submenu parent and its one
   // child. Held so FinalizeSettings can take them back out of the IDE's menu
   // - freeing the parent frees the child with it.
@@ -983,16 +1008,29 @@ begin
   Result := GMarkStyle;
 end;
 
+procedure ErrorInsightLog(const AText: string);
+begin
+  GErrorInsightLogLine := 'error insight: ' + AText;
+  if LspLogToServer(GErrorInsightLogLine) then
+    GErrorInsightLogLine := '';
+end;
+
 procedure ApplyErrorInsightChoice;
 var
   LOptions: IOTAEnvironmentOptions;
   LOurs: TRegistry;
   LCurrent: Variant;
   LLevel, LSaved: Integer;
+  LRead: string;
 begin
+  GErrorInsightPending := False;
   LOptions := IdeEnvironmentOptions;
   if not Assigned(LOptions) then
+  begin
+    GErrorInsightPending := True;
+    GErrorInsightRetryAt := GetTickCount64 + cErrorInsightRetryMs;
     Exit;
+  end;
   LOurs := TRegistry.Create(KEY_READ or KEY_WRITE);
   try
     try
@@ -1001,12 +1039,19 @@ begin
         Exit;
       LCurrent := LOptions.Values[cEnvErrorInsightLevel];
       LLevel := ValueNameIndex(LCurrent, cErrorInsightLevelNames);
+      LRead := 'the IDE''s level read as "' + VarToStrDef(LCurrent, '')
+        + '" (' + VarTypeAsText(VarType(LCurrent)) + ')';
       if LLevel < 0 then
       begin
         // A value we cannot read is one we cannot put back either: leave the
-        // IDE's level alone and say so.
-        LogDiagnostic('the IDE''s Error Insight level reads as "'
-          + VarToStrDef(LCurrent, '') + '" - left as it is.');
+        // IDE's level alone for now and ask again - it may not be loaded yet.
+        GErrorInsightPending := True;
+        GErrorInsightRetryAt := GetTickCount64 + cErrorInsightRetryMs;
+        if not GErrorInsightUnreadableNoted then
+        begin
+          GErrorInsightUnreadableNoted := True;
+          ErrorInsightLog(LRead + ' - left as it is, asked again');
+        end;
         Exit;
       end;
       if CurrentSettings.PasTreeErrorSquiggles then
@@ -1014,18 +1059,28 @@ begin
         // Already off: nothing to remember, and a level remembered earlier
         // must survive rather than be overwritten with None.
         if LLevel = cLevelNone then
+        begin
+          ErrorInsightLog(LRead + ' - PasTree draws the underlines, already None');
           Exit;
+        end;
         // Remembered BEFORE it is switched off: the other order, interrupted,
         // loses the user's level for good.
         LOurs.WriteString(cValueSavedErrorInsightLevel,
           cErrorInsightLevelNames[LLevel]);
         LOptions.Values[cEnvErrorInsightLevel] :=
           ValueNameLike(LCurrent, cLevelNone, cErrorInsightLevelNames);
+        ErrorInsightLog(LRead + ' - PasTree draws the underlines, set to None,'
+          + ' reads now as "'
+          + VarToStrDef(LOptions.Values[cEnvErrorInsightLevel], '') + '"');
       end
       else
       begin
         if not LOurs.ValueExists(cValueSavedErrorInsightLevel) then
-          Exit;   // nothing of ours to undo
+        begin
+          ErrorInsightLog(LRead + ' - the IDE draws the underlines, nothing'
+            + ' of ours to undo');
+          Exit;
+        end;
         LSaved := ValueNameIndex(LOurs.ReadString(cValueSavedErrorInsightLevel),
           cErrorInsightLevelNames);
         // "<absent>", from a version that wrote the registry: the IDE had no
@@ -1035,8 +1090,15 @@ begin
         // Only over OUR None: a level the user has set since in Tools >
         // Options is theirs, and wins.
         if LLevel = cLevelNone then
+        begin
           LOptions.Values[cEnvErrorInsightLevel] :=
             ValueNameLike(LCurrent, LSaved, cErrorInsightLevelNames);
+          ErrorInsightLog(LRead + ' - the IDE draws the underlines, put back "'
+            + cErrorInsightLevelNames[LSaved] + '"');
+        end
+        else
+          ErrorInsightLog(LRead + ' - the IDE draws the underlines, the'
+            + ' user''s level kept');
         LOurs.DeleteValue(cValueSavedErrorInsightLevel);
       end;
     except
@@ -1049,6 +1111,14 @@ begin
   finally
     LOurs.Free;
   end;
+end;
+
+procedure SyncErrorInsightChoice;
+begin
+  if (GErrorInsightLogLine <> '') and LspLogToServer(GErrorInsightLogLine) then
+    GErrorInsightLogLine := '';
+  if GErrorInsightPending and (GetTickCount64 >= GErrorInsightRetryAt) then
+    ApplyErrorInsightChoice;
 end;
 
 function TypeHighlightEnabled: Boolean;
