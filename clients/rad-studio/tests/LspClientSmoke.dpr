@@ -2663,7 +2663,7 @@ end;
   user, never as a silent empty edit set. }
 procedure TestRename;
 var
-  LUnitFile, LAppFile, LFindAllFile, LHdrPos: string;
+  LUnitFile, LAppFile, LFindAllFile, LHdrPos, LDefFile, LDeadPos: string;
   LLine, LChar, LHdrLine, LHdrChar: Integer;
   LParams, LCtx: TJSONObject;
 
@@ -2834,6 +2834,52 @@ begin
     'the file a dotted unit must move to keeps the dots');
   Check(GOk and GResultJson.Contains('"newText":"Demo.Renamed"'),
     'every site is written with the full new name');
+
+  { A PROGRAM'S name ties no file (PasTree 0.96.6): its plan has no required
+    file name, and textDocument/rename is text edits alone - so this client,
+    which cannot rename files, gets it. Until 0.65.1 the server refused it
+    "renames its file to " with no name, and a client that could rename files
+    got a rename operation to an empty URI. }
+  FindPos(LAppFile, 'program DemoApp;', 'DemoApp', LLine, LChar);
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LAppFile, LLine, LChar, 'DemoAppRenamed')),
+    'renamePlan on a program header answered');
+  Check(GOk and GResultJson.Contains('"kind":"unit"') and
+    GResultJson.Contains('"oldName":"DemoApp"'),
+    'as a module plan naming the program');
+  Check(GOk and GResultJson.Contains('"requiredFileName":""') and
+    GResultJson.Contains('"newFilePath":""'),
+    'with no file to rename');
+  Check(GOk and GResultJson.Contains('"newText":"DemoAppRenamed"'),
+    'and the header edit');
+  Check(Ask('textDocument/rename',
+    RenameParams(LAppFile, LLine, LChar, 'DemoAppRenamed')),
+    'rename on a program header answered');
+  Check(GOk, 'and applied although this client cannot rename files - ' +
+    GError);
+  Check(GOk and GResultJson.Contains('"newText":"DemoAppRenamed"'),
+    'carrying the header edit');
+  Check(GOk and not GResultJson.Contains('"kind":"rename"'),
+    'and no file rename operation');
+
+  { THE OLD NAME IN DEAD CODE (PasTree 0.98.0). DemoDefines' PlatformName
+    calls FeatureName again inside an $IFDEF of a symbol nothing defines. No
+    analysis reads that line, so the plan does not edit it - it lists it under
+    "inactive", with the identifier's length read off the line, for the user
+    to judge. PasTree 0.97.0 refused the whole rename over it. }
+  LDefFile := TPath.Combine(GFixtureDir, 'DemoDefines.pas');
+  FindPos(LDefFile, 'FeatureName + ', 'FeatureName', LLine, LChar);
+  LDeadPos := Format('"line":%d,"col":%d,"len":11', [LLine + 1, LChar + 1]);
+  FindPos(LDefFile, 'function FeatureName', 'FeatureName', LLine, LChar);
+  Check(Ask('pastree/renamePlan',
+    RenameParams(LDefFile, LLine, LChar, 'FeatureTitle')),
+    'renamePlan over a name also written in dead code answered');
+  Check(GOk and GResultJson.Contains('"newText":"FeatureTitle"'),
+    'and plans the live sites');
+  Check(GOk and GResultJson.Contains(LDeadPos + ',"lineText":'),
+    'the dead line is listed as inactive, positioned - ' + LDeadPos);
+  Check(GOk and not GResultJson.Contains(LDeadPos + ',"oldText":'),
+    'and it is not one of the edits');
 end;
 
 { 5f. pastree/classComplete: the server half of Ctrl+Shift+C.

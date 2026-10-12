@@ -404,6 +404,21 @@ type
   end;
 
   /// <summary>
+  /// The old name of a rename written in code a conditional directive leaves
+  /// out ({$IFDEF} and kin, by the defines the analysis used). No analysis
+  /// reads such code, so it is not resolved - it may be a namesake - and the
+  /// plan does not edit it; the user decides (PasTree 0.98.0). Row and Col
+  /// are 1-based IDE coordinates, Len the identifier's length in LineText.
+  /// </summary>
+  TLspInactiveUse = record
+    FilePath: string;
+    Row: Integer;
+    Col: Integer;
+    Len: Integer;
+    LineText: string;
+  end;
+
+  /// <summary>
   /// A whole rename, as planned by the analysis: what is being renamed, to
   /// what, and every site. Edits arrive sorted by (file, line, column), which
   /// is what lets an applier walk each file BACKWARDS - two edits on one line
@@ -426,6 +441,9 @@ type
     // The symbol's side of form files - see TLspFormRole/TLspCarriedRename.
     FormRole: TLspFormRole;
     Carried: TArray<TLspCarriedRename>;
+    // The old name written in code a conditional directive leaves out -
+    // listed, never applied (see TLspInactiveUse).
+    Inactive: TArray<TLspInactiveUse>;
     // How far across the group the plan reached: the projects whose server
     // answered, out of the projects in the group. See LspRenamePlan.
     ProjectsAnswered, ProjectsInGroup: Integer;
@@ -3257,6 +3275,7 @@ var
   LObj: TJSONObject;
   LEdit: TLspRenameEdit;
   LCarried: TLspCarriedRename;
+  LInactive: TLspInactiveUse;
   LCount: Integer;
 begin
   Result := Default(TLspRenamePlan);
@@ -3272,6 +3291,18 @@ begin
         LCarried.Role := ParseFormRole(TJSONObject(LValue).GetValue('role'));
         if (LCarried.OldName <> '') and (LCarried.NewName <> '') then
           Result.Carried := Result.Carried + [LCarried];
+      end;
+  if AResult.TryGetValue<TJSONArray>('inactive', LCarriedArr) then
+    for LValue in LCarriedArr do
+      if LValue is TJSONObject then
+      begin
+        LInactive.FilePath := LValue.GetValue<string>('filePath', '');
+        LInactive.Row := LValue.GetValue<Integer>('line', 0);
+        LInactive.Col := LValue.GetValue<Integer>('col', 0);
+        LInactive.Len := LValue.GetValue<Integer>('len', 0);
+        LInactive.LineText := LValue.GetValue<string>('lineText', '');
+        if (LInactive.FilePath <> '') and (LInactive.Row > 0) then
+          Result.Inactive := Result.Inactive + [LInactive];
       end;
   Result.OldName := AResult.GetValue<string>('oldName', '');
   Result.NewName := AResult.GetValue<string>('newName', '');
@@ -5623,6 +5654,32 @@ begin
       Result := Result + [LSorted[LIdx]];
 end;
 
+{ AMore's inactive places joined to AHave, once each: two projects of a
+  group that share a unit list its dead lines twice, and a file whose
+  directives one project's defines leave live and another's leave dead is
+  a place for the second only. }
+function MergeInactive(const AHave,
+  AMore: TArray<TLspInactiveUse>): TArray<TLspInactiveUse>;
+var
+  LItem, LOld: TLspInactiveUse;
+  LSeen: Boolean;
+begin
+  Result := AHave;
+  for LItem in AMore do
+  begin
+    LSeen := False;
+    for LOld in Result do
+      if SameText(LOld.FilePath, LItem.FilePath) and
+         (LOld.Row = LItem.Row) and (LOld.Col = LItem.Col) then
+      begin
+        LSeen := True;
+        Break;
+      end;
+    if not LSeen then
+      Result := Result + [LItem];
+  end;
+end;
+
 { AMore's carried renames joined to AHave, once each: another project's
   closure can hold a descendant form the owner's lacks, and so carry one
   more handler. }
@@ -5680,6 +5737,7 @@ var
   LOwnerError: string;
   LCollected: TArray<TLspRenameEdit>;
   LCarried: TArray<TLspCarriedRename>;
+  LInactive: TArray<TLspInactiveUse>;
   LFinish: TProc;
 begin
   LOwner := SessionForRequest(AFileName);
@@ -5702,6 +5760,7 @@ begin
   LAnswered := 0;
   LCollected := nil;
   LCarried := nil;
+  LInactive := nil;
   LOwnerOk := False;
   LOwnerDone := False;
   LOwnerError := '';
@@ -5727,6 +5786,7 @@ begin
       begin
         LMerged.Edits := MergeRenameEdits(LCollected);
         LMerged.Carried := LCarried;
+        LMerged.Inactive := LInactive;
       end;
       LMerged.ProjectsAnswered := LAnswered;
       LMerged.ProjectsInGroup := LInGroup;
@@ -5747,6 +5807,7 @@ begin
         Inc(LAnswered);
         LCollected := LCollected + APlan.Edits;
         LCarried := MergeCarried(APlan.Carried, LCarried);
+        LInactive := MergeInactive(APlan.Inactive, LInactive);
       end;
       Dec(LOutstanding);
       LFinish();
@@ -5765,6 +5826,7 @@ begin
             Inc(LAnswered);
             LCollected := LCollected + APlan.Edits;
             LCarried := MergeCarried(LCarried, APlan.Carried);
+            LInactive := MergeInactive(LInactive, APlan.Inactive);
           end;
           Dec(LOutstanding);
           LFinish();

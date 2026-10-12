@@ -34,6 +34,9 @@ end;
 function PlatformName: string;
 begin
   Result := 'windows';
+{$IFDEF DEMO_NEVER}
+  Result := FeatureName + ' (never compiled)';
+{$ENDIF}
 end;
 
 end.

@@ -160,7 +160,7 @@ implementation
 
 uses
   System.SysUtils, System.StrUtils, System.Classes, System.Character,
-  System.Generics.Collections, System.TypInfo,
+  System.Generics.Collections, System.Generics.Defaults, System.TypInfo,
   Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Winapi.Windows,
   // DesignIntf: IDesigner, for a loaded form's handlers (RenameMethod,
   // MethodExists) - see TDesignerAction.
@@ -400,6 +400,120 @@ end;
 
 procedure RevertApplied; forward;
 
+{ The rows under the title: one group per file, the changed sites and the
+  old name in code a conditional directive leaves out (APlan.Inactive)
+  together, in line order. An inactive place is tagged "(inactive code) -
+  NOT CHANGED" and nothing else says so (Alex, 2026-10-12: no title row,
+  and in its own file's group, not a second group of the same file at the
+  end). No analysis reads dead code, so such a place is unresolved - a
+  namesake reads the same - and whether it must change too is the user's
+  call. Files come in the plan's order; a file with inactive places only
+  comes after them. }
+procedure ReportFileRows(const AMessageServices: IOTAMessageServices;
+  const AGroup: IOTAMessageGroup; const APlan: TLspRenamePlan);
+var
+  LFiles: TList<string>;
+  LEditsOf, LInactiveOf: TObjectDictionary<string, TList<Integer>>;
+  LKey, LPath: string;
+  LIdx, LE, LI: Integer;
+  LEdits, LDead: TList<Integer>;
+  LParentRef: Pointer;
+  LEdit: TLspRenameEdit;
+  LUse: TLspInactiveUse;
+  LAll: TArray<TLspInactiveUse>;   // for the comparer: a const record
+                                   // parameter cannot be captured
+
+  procedure Note(ADict: TObjectDictionary<string, TList<Integer>>;
+    const AFilePath: string; AIdx: Integer);
+  var
+    LList: TList<Integer>;
+  begin
+    LKey := LowerCase(AFilePath);
+    if not LFiles.Contains(LKey) then
+      LFiles.Add(LKey);
+    if not ADict.TryGetValue(LKey, LList) then
+    begin
+      LList := TList<Integer>.Create;
+      ADict.Add(LKey, LList);
+    end;
+    LList.Add(AIdx);
+  end;
+
+begin
+  LAll := APlan.Inactive;
+  LFiles := TList<string>.Create;
+  LEditsOf := TObjectDictionary<string, TList<Integer>>.Create([doOwnsValues]);
+  LInactiveOf := TObjectDictionary<string, TList<Integer>>.Create(
+    [doOwnsValues]);
+  try
+    for LIdx := 0 to High(APlan.Edits) do
+      Note(LEditsOf, APlan.Edits[LIdx].FilePath, LIdx);
+    for LIdx := 0 to High(APlan.Inactive) do
+      Note(LInactiveOf, APlan.Inactive[LIdx].FilePath, LIdx);
+    for LKey in LFiles do
+    begin
+      LEditsOf.TryGetValue(LKey, LEdits);
+      LInactiveOf.TryGetValue(LKey, LDead);
+      if Assigned(LDead) then
+        LDead.Sort(TComparer<Integer>.Construct(
+          function(const A, B: Integer): Integer
+          begin
+            Result := LAll[A].Row - LAll[B].Row;
+            if Result = 0 then
+              Result := LAll[A].Col - LAll[B].Col;
+          end));
+      LE := 0;
+      LI := 0;
+      if Assigned(LEdits) then
+        LPath := APlan.Edits[LEdits[0]].FilePath
+      else
+        LPath := APlan.Inactive[LDead[0]].FilePath;
+      LIdx := 0;
+      if Assigned(LEdits) then
+        Inc(LIdx, LEdits.Count);
+      if Assigned(LDead) then
+        Inc(LIdx, LDead.Count);
+      LParentRef := AMessageServices.AddCustomMessagePtr(
+        NewFileHeaderRow(LPath, LIdx), AGroup);
+      // The edits arrive sorted by (file, line, column); the two lists merge
+      // by line, an edit first on a tie.
+      while (Assigned(LEdits) and (LE < LEdits.Count)) or
+            (Assigned(LDead) and (LI < LDead.Count)) do
+        if Assigned(LEdits) and (LE < LEdits.Count) and
+           (not Assigned(LDead) or (LI >= LDead.Count) or
+            (APlan.Edits[LEdits[LE]].Row <= APlan.Inactive[LDead[LI]].Row)) then
+        begin
+          LEdit := APlan.Edits[LEdits[LE]];
+          Inc(LE);
+          // The declaration is labelled rather than shown as its own line:
+          // the snippet is worth more than the word "declaration", and losing
+          // which row it was is exactly what the demo's pinned first row
+          // avoids.
+          AMessageServices.AddCustomMessage(
+            NewSnippetRow(LEdit.FilePath, LEdit.Row, LEdit.Col,
+              TrimRight(LEdit.Snippet), LEdit.HiFrom + 1,
+              LEdit.HiTo - LEdit.HiFrom,
+              IfThen(LEdit.IsDecl, 'declaration', ''), LEdit.TypeSpans),
+            LParentRef);
+        end
+        else
+        begin
+          LUse := APlan.Inactive[LDead[LI]];
+          Inc(LI);
+          AMessageServices.AddCustomMessage(
+            NewSnippetRow(LUse.FilePath, LUse.Row, LUse.Col,
+              TrimRight(LUse.LineText), LUse.Col, LUse.Len, 'inactive code',
+              nil, ' - NOT CHANGED'),
+            LParentRef);
+        end;
+    end;
+  finally
+    LInactiveOf.Free;
+    LEditsOf.Free;
+    LFiles.Free;
+  end;
+end;
+
 { The rename's own results tab: the same owner-drawn rows Find References
   uses (PasTreeIdePlugin.ResultRows - Find in Files skeleton, editor syntax
   colors), fed the POST-rename lines, with the NEW name carrying the maroon
@@ -416,12 +530,7 @@ procedure ReportRename(const APlan: TLspRenamePlan;
 var
   LMessageServices: IOTAMessageServices;
   LGroup: IOTAMessageGroup;
-  LFileCounts: TDictionary<string, Integer>;
-  LFileHeaders: TDictionary<string, Pointer>;
-  LParentRef: Pointer;
-  LEdit: TLspRenameEdit;
-  LKey, LTitleHead, LTitleCount, LLine: string;
-  LExisting, LFileCount: Integer;
+  LTitleHead, LTitleCount, LLine: string;
   LCarried: TLspCarriedRename;
 begin
   if not Supports(BorlandIDEServices, IOTAMessageServices,
@@ -467,39 +576,7 @@ begin
     LMessageServices.AddTitleMessage('Form file ' + LLine + ' - check it.',
       LGroup);
 
-  LFileCounts := TDictionary<string, Integer>.Create;
-  LFileHeaders := TDictionary<string, Pointer>.Create;
-  try
-    for LEdit in APlan.Edits do
-    begin
-      LKey := LowerCase(LEdit.FilePath);
-      LFileCounts.TryGetValue(LKey, LExisting);
-      LFileCounts.AddOrSetValue(LKey, LExisting + 1);
-    end;
-    for LEdit in APlan.Edits do
-    begin
-      LKey := LowerCase(LEdit.FilePath);
-      if not LFileHeaders.TryGetValue(LKey, LParentRef) then
-      begin
-        LFileCounts.TryGetValue(LKey, LFileCount);
-        LParentRef := LMessageServices.AddCustomMessagePtr(
-          NewFileHeaderRow(LEdit.FilePath, LFileCount), LGroup);
-        LFileHeaders.Add(LKey, LParentRef);
-      end;
-      // The declaration is labelled rather than shown as its own line: the
-      // snippet is worth more than the word "declaration", and losing which
-      // row it was is exactly what the demo's pinned first row avoids.
-      LMessageServices.AddCustomMessage(
-        NewSnippetRow(LEdit.FilePath, LEdit.Row, LEdit.Col,
-          TrimRight(LEdit.Snippet), LEdit.HiFrom + 1,
-          LEdit.HiTo - LEdit.HiFrom,
-          IfThen(LEdit.IsDecl, 'declaration', ''), LEdit.TypeSpans),
-        LParentRef);
-    end;
-  finally
-    LFileHeaders.Free;
-    LFileCounts.Free;
-  end;
+  ReportFileRows(LMessageServices, LGroup, APlan);
   LMessageServices.ShowMessageView(LGroup);
   ResultScrollToTop;
   // AFTER ShowMessageView: the tab has to exist before a control can be put
@@ -2243,10 +2320,13 @@ begin
           LSaved, LFailed, Length(LDiskPaths), Length(LUnconfirmed)]);
         ReportRename(APlan, LDiskCount, LFileCount, LFailed, LUnconfirmed);
         LogDiagnostic(Format('rename: %s -> %s, %d site(s) in %d file(s), ' +
-          '%d of them not open in the IDE%s - Revert in the PasTree Rename tab',
+          '%d of them not open in the IDE%s%s - Revert in the PasTree Rename tab',
           [APlan.OldName, APlan.NewName, Length(APlan.Edits), LFileCount,
            LDiskCount, IfThen(LFailed > 0,
-             Format(', %d could not be saved', [LFailed]), '')]));
+             Format(', %d could not be saved', [LFailed]), ''),
+           IfThen(Length(APlan.Inactive) > 0,
+             Format(', %d place(s) in inactive code left for you to check',
+               [Length(APlan.Inactive)]), '')]));
         // Two audiences at the server: the buffers it holds overlays for (the
         // ordinary sync) and the files it reads from disk, which only this
         // notification can tell it about.

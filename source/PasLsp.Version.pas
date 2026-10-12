@@ -304,7 +304,14 @@ const
   /// 0.95.0 (2026-10-09): TPasPreprocessed.DeadDirectives, the directives
   /// inside a dead branch that Skipped leaves out - the inactive-code grey
   /// has a hole at each without it (an older library does not compile).
-  cMinPasTreeVersion = '0.95.0';
+  /// 0.97.0 (2026-10-12): TPasAsyncSession.ModuleNeedsFullRebuild (0.96.0, an
+  /// older library does not compile), and a program's rename with no file
+  /// (0.96.6) - against an older one a program rename asks for a file rename
+  /// to `<new>.pas` that the editor then performs.
+  /// 0.98.0 (2026-10-12): PlanRename / PlanUnitRename with AInactive - the old
+  /// name in dead conditional code listed, not refused (an older library does
+  /// not compile).
+  cMinPasTreeVersion = '0.98.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

@@ -110,11 +110,13 @@ function NewFileNameRow(const AFilePath: string): IOTACustomMessage;
 /// accent after the snippet - the "declaration" label. A row in a form
 /// file jumps its own way: the designer while its form is loaded, the file
 /// as text at the line while it is not (FormModules.ShowFormFileSite).
+/// ATagTail follows the closing parenthesis, in the same colour - the
+/// rename's "(inactive code) - NOT CHANGED".
 /// </summary>
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
-  const ATag: string; const ATypeSpans: TArray<Integer> = nil)
-  : IOTACustomMessage;
+  const ATag: string; const ATypeSpans: TArray<Integer> = nil;
+  const ATagTail: string = ''): IOTACustomMessage;
 
 /// <summary>
 /// A remark under a row - why an unused unit is kept, why it cannot be
@@ -1321,7 +1323,8 @@ end;
 
 function NewSnippetRow(const AFilePath: string; ALine, ACol: Integer;
   const ASnippet: string; AMatchStart, AMatchLen: Integer;
-  const ATag: string; const ATypeSpans: TArray<Integer>): IOTACustomMessage;
+  const ATag: string; const ATypeSpans: TArray<Integer>;
+  const ATagTail: string): IOTACustomMessage;
 var
   LRow: TResultRow;
 begin
@@ -1338,7 +1341,7 @@ begin
   LRow.FMatchStart := AMatchStart;
   LRow.FMatchLen := AMatchLen;
   if ATag <> '' then
-    LRow.FSuffix := '  (' + ATag + ')';
+    LRow.FSuffix := '  (' + ATag + ')' + ATagTail;
   LRow.FIsHeader := False;
   Result := LRow;
 end;

@@ -47,6 +47,7 @@ uses
   Winapi.PsAPI,
   System.SysUtils,
   System.StrUtils,
+  System.Character,
   System.Classes,
   System.Generics.Collections,
   System.Generics.Defaults,
@@ -100,7 +101,11 @@ type
     FormRole and Carried are the SYMBOL's side of form files: where the
     symbol lives in them (whose form's designer owns it) and the handlers a
     component's rename carries along (see PasTree's TPasCarriedRename) - for
-    a host that must apply the form part through a live designer. }
+    a host that must apply the form part through a live designer.
+
+    Inactive is the old name written in code a conditional directive leaves
+    out (PasTree 0.98.0): not resolved, not edited - listed so the user
+    decides. Before 0.98.0 one such place refused the whole plan. }
   TLspRenamePlanned = record
     IsUnit: Boolean;
     OldName: string;
@@ -112,6 +117,7 @@ type
     Edits: TArray<TPasRenameEdit>;
     FormRole: TPasFormRole;
     Carried: TArray<TPasCarriedRename>;
+    Inactive: TArray<TPasInactiveUse>;
   end;
 
   { The three filtered reference searches of the Find All family that share
@@ -338,6 +344,7 @@ type
     procedure ScheduleAnalysis(const APriorityFile: string);
     procedure FlushPending;
     procedure FinalizeAnalysisIfDone;
+    procedure DiscardHalfUpdatedProject;
     { The analysis state in one line, for an exception log. An
       EAccessViolation carries an address and nothing else; which phase the
       server was in when it faulted is the difference between "the analysis
@@ -1074,6 +1081,10 @@ begin
       FSession.WaitFor;
       FreeAndNil(FNav);
       FProject := FSession.TakeProject;
+      // Failed past its commit point: half-updated, never shown or donated
+      // (see FinalizeAnalysisIfDone). The rebuild below runs donor-less.
+      if FSession.ModuleNeedsFullRebuild then
+        DiscardHalfUpdatedProject;
       FOutlineCache := '';   // a new project: the outline table is stale
       FreeAndNil(FLineTokenCache);
       if FProject <> nil then
@@ -1168,7 +1179,10 @@ begin
   // the run then parses everything, which is only the old cost.
   if FProject <> nil then
     if not FSession.SetParseDonor(FProject) then
-      Log('parse donor refused: the analysis configuration changed');
+      // Since PasTree 0.96.0 also a project whose run did not complete (it
+      // raised or was cancelled - RunComplete is False).
+      Log('parse donor refused: the analysis configuration changed, or the' +
+        ' last run did not complete');
   // Document truth, stamped with the client's version - compared on
   // completion to catch a snapshot that went stale mid-build.
   for LDoc in FDocs.All do
@@ -1340,6 +1354,20 @@ end;
   its buffers - detected via the version stamps SetBuffer carried - the
   result is already stale: swap it in anyway (better navigation than none)
   but immediately start the replacement build. }
+{ Frees the project a module session handed back as moMustDiscard. FNav is
+  already gone - it was freed when the session took the project. The open
+  documents keep the diagnostics last published; the rebuild that follows
+  replaces them. }
+procedure TLspServer.DiscardHalfUpdatedProject;
+begin
+  Log(Format('incremental failed past its commit point for %s - project' +
+    ' discarded, full rebuild without a parse donor', [FModuleFile]));
+  FreeAndNil(FNav);
+  FreeAndNil(FProject);
+  FOutlineCache := '';
+  FreeAndNil(FLineTokenCache);
+end;
+
 procedure TLspServer.FinalizeAnalysisIfDone;
 var
   LDoc: TLspDocument;
@@ -1351,6 +1379,21 @@ begin
   LError := FSession.LastError;
   if LError <> '' then
     Tell(1, 'PasTree: the analysis failed - ' + LError, True);
+  // A module session that FAILED PAST ITS COMMIT POINT (PasTree 0.96.0,
+  // moMustDiscard): the project is half-updated - some models swapped, the
+  // cross passes not redone. It is not the refused case below: kept, it
+  // would answer navigation from a mixed state until the rebuild landed, and
+  // as a donor it is refused anyway (which the log used to blame on the
+  // configuration). Freed here, and the rebuild starts from nothing.
+  if FModuleMode and FSession.ModuleNeedsFullRebuild then
+  begin
+    FProject := FSession.TakeProject;
+    FreeAndNil(FSession);
+    FModuleMode := False;
+    DiscardHalfUpdatedProject;
+    StartAnalysis(FModuleFile);
+    Exit;
+  end;
   // A REFUSED module session (see TryStartModuleAnalysis): the project comes
   // back exactly as it went in, so nothing about the analyzed state changed -
   // no diagnostics to republish, no parse record to re-log, and the built
@@ -2427,6 +2470,23 @@ var
     Result := True;
   end;
 
+  { Whether the diagnostic's position is ON a name rather than just past one.
+    Since PasTree 0.95.5 IdentAt also answers for the identifier ENDING at
+    the position (a caret after `Foo|`), so at the dot of `System.Missing`
+    it handed back the name before it and the squiggle started at the dot.
+    True when the text is not there to ask (the old behaviour). }
+  function DiagOnName(AModel: TPasSemaModel; ALine, ACol: Integer): Boolean;
+  var
+    LOff: Integer;
+  begin
+    Result := True;
+    if Length(AModel.Tree.Source.Files) = 0 then
+      Exit;
+    if AModel.Tree.Source.Files[0].OffsetOf(ALine, ACol, LOff) then
+      Result := AModel.Tree.Source.Files[0].RawTokenAt(LOff) =
+        AModel.Tree.Source.Files[0].IdentTokenAt(LOff);
+  end;
+
 begin
   LMid := FNav.ModelIdOf(ADoc.Path);
   LSB := TStringBuilder.Create;
@@ -2473,6 +2533,8 @@ begin
         // range, which is also what dcc's own caret amounts to.
         LEndChar := LChar + 1;
         if LMainIsDoc and
+           DiagOnName(LModel, LModel.Diags[LIdx].Line,
+             LModel.Diags[LIdx].Col) and
            FNav.IdentAt(LMid, LModel.Diags[LIdx].Line,
              LModel.Diags[LIdx].Col, LIdent) and
            (LIdent.Line = LModel.Diags[LIdx].Line) and
@@ -3628,6 +3690,33 @@ end;
   unit lives in now. A unit rename never MOVES a file - the name decides the
   file name and nothing else. '' in, '' out, because the callers use that to
   mean "no file rename". }
+{ The length of the identifier starting at 1-based ACol of ALine; 0 when
+  none starts there. A unit's dotted name counts its dots and segments. }
+function IdentLenAt(const ALine: string; ACol: Integer): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  if (ACol < 1) or (ACol > Length(ALine)) then
+    Exit;
+  LIdx := ACol;
+  while (LIdx <= Length(ALine)) and (ALine[LIdx].IsLetterOrDigit or
+    (ALine[LIdx] = '_') or ((ALine[LIdx] = '.') and (LIdx > ACol) and
+     (LIdx < Length(ALine)) and (ALine[LIdx + 1].IsLetter or
+      (ALine[LIdx + 1] = '_')))) do
+    Inc(LIdx);
+  Result := LIdx - ACol;
+end;
+
+{ ' + N inactive' for a log line, or ''. }
+function InactiveNote(const APlan: TLspRenamePlanned): string;
+begin
+  Result := '';
+  if Length(APlan.Inactive) > 0 then
+    Result := Format(' + %d place(s) in inactive code, not edited',
+      [Length(APlan.Inactive)]);
+end;
+
 function RenamedFilePath(const AOldPath, ARequiredFileName: string): string;
 begin
   Result := '';
@@ -3661,6 +3750,7 @@ var
   LMid, LTMid, LSym, LRawTok: Integer;
   LOther: string;
   LDecl: TPasRefHit;
+  LFamily: TArray<TPasRenameFamilyMember>;
 begin
   Result := False;
   APlan := Default(TLspRenamePlanned);
@@ -3695,10 +3785,11 @@ begin
     if ANewName = '' then
       Exit(True);
     Result := FNav.PlanUnitRename(LTMid, ANewName, {out} APlan.Edits,
-      {out} APlan.RequiredFileName, {out} AError);
+      {out} APlan.RequiredFileName, {out} APlan.Inactive, {out} AError);
     if not Result then
     begin
       APlan.Edits := nil;
+      APlan.Inactive := nil;
       APlan.RequiredFileName := '';
       Exit;
     end;
@@ -3731,11 +3822,12 @@ begin
   if ANewName = '' then
     Exit(True);
   Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} APlan.Edits,
-    {out} APlan.Carried, {out} AError);
+    {out} APlan.Carried, {out} LFamily, {out} APlan.Inactive, {out} AError);
   if not Result then
   begin
     APlan.Edits := nil;
     APlan.Carried := nil;
+    APlan.Inactive := nil;
     Exit;
   end;
   APlan.FormRole := FNav.FormRoleOf(LTMid, LSym);
@@ -3850,7 +3942,9 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  if LPlan.IsUnit and not FClientRenamesFiles then
+  // A program's, library's or package's name ties no file (PasTree 0.96.6):
+  // RequiredFileName is '' and the plan is text edits alone.
+  if LPlan.IsUnit and (LPlan.NewFilePath <> '') and not FClientRenamesFiles then
   begin
     Log('rename: unit rename refused - the client advertised no rename '
       + 'resource operation');
@@ -3859,10 +3953,13 @@ begin
       'not advertise support for file renames in a workspace edit. Nothing ' +
       'was changed.', [LPlan.OldName, LPlan.RequiredFileName])));
   end;
-  Log(Format('rename: %s %s ''%s'' -> ''%s'': %d edits%s',
+  // textDocument/rename has nowhere to show the inactive places - a
+  // WorkspaceEdit is edits only - so they are in the log alone.
+  Log(Format('rename: %s %s ''%s'' -> ''%s'': %d edits%s%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName, LNewName, Length(LPlan.Edits),
-     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, '')]));
+     IfThen(LPlan.RequiredFileName <> '', ' + file -> ' +
+       LPlan.RequiredFileName, ''), InactiveNote(LPlan)]));
   LSB := TStringBuilder.Create;
   try
     if LPlan.IsUnit then
@@ -3881,11 +3978,14 @@ begin
         LIdx := AppendFileEdits(LSB, LPlan.Edits, LIdx);
         LSB.Append(']}');
       end;
-      if Length(LPlan.Edits) > 0 then
-        LSB.Append(',');
-      LSB.AppendFormat('{"kind":"rename","oldUri":%s,"newUri":%s}',
-        [JsonQuote(PathToUri(LPlan.UnitPath)),
-         JsonQuote(PathToUri(LPlan.NewFilePath))]);
+      if LPlan.NewFilePath <> '' then
+      begin
+        if Length(LPlan.Edits) > 0 then
+          LSB.Append(',');
+        LSB.AppendFormat('{"kind":"rename","oldUri":%s,"newUri":%s}',
+          [JsonQuote(PathToUri(LPlan.UnitPath)),
+           JsonQuote(PathToUri(LPlan.NewFilePath))]);
+      end;
       if LPlan.NewFormPath <> '' then
         LSB.AppendFormat(',{"kind":"rename","oldUri":%s,"newUri":%s}',
           [JsonQuote(PathToUri(LPlan.FormPath)),
@@ -3959,16 +4059,18 @@ begin
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s%s%s',
+  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s%s%s%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName, LNewName, Length(LPlan.Edits),
-     IfThen(LPlan.IsUnit, ' + file -> ' + LPlan.RequiredFileName, ''),
+     IfThen(LPlan.RequiredFileName <> '', ' + file -> ' +
+       LPlan.RequiredFileName, ''),
      IfThen(LPlan.FormRole.Kind <> fskNone, Format(' (a %s of %s, form %s)',
        [FormKindWord(LPlan.FormRole.Kind), LPlan.FormRole.OwnerClass,
         IfThen(LPlan.FormRole.FormFile = '', '-',
           ExtractFileName(LPlan.FormRole.FormFile))]), ''),
      IfThen(Length(LPlan.Carried) > 0, Format(' + %d carried handler(s)',
-       [Length(LPlan.Carried)]), '')]));
+       [Length(LPlan.Carried)]), ''),
+     InactiveNote(LPlan)]));
   LSB := TStringBuilder.Create;
   try
     LSB.AppendFormat('{"kind":%s,"oldName":%s,"newName":%s,' +
@@ -4010,6 +4112,22 @@ begin
         [JsonQuote(LPlan.Carried[LIdx].OldName),
          JsonQuote(LPlan.Carried[LIdx].NewName),
          FormRoleJson(LPlan.Carried[LIdx].Role)]);
+    end;
+    // The old name in dead conditional code: shown, never applied. len is
+    // the identifier written at col, read off the line (PasTree gives the
+    // start only); line and col are 1-based, as an edit's are.
+    LSB.Append('],"inactive":[');
+    for LIdx := 0 to High(LPlan.Inactive) do
+    begin
+      if LIdx > 0 then
+        LSB.Append(',');
+      LSB.AppendFormat('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
+        '"len":%d,"lineText":%s}',
+        [JsonQuote(PathToUri(LPlan.Inactive[LIdx].FilePath)),
+         JsonQuote(LPlan.Inactive[LIdx].FilePath),
+         LPlan.Inactive[LIdx].Line, LPlan.Inactive[LIdx].Col,
+         IdentLenAt(LPlan.Inactive[LIdx].LineText, LPlan.Inactive[LIdx].Col),
+         JsonQuote(LPlan.Inactive[LIdx].LineText)]);
     end;
     LSB.Append(']}');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
