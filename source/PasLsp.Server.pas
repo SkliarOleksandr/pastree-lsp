@@ -35,6 +35,11 @@ unit PasLsp.Server;
                   what most log-reading starts from
     "moduleRedoLimit" - the incremental fast path's blast-radius ceiling;
                   0 keeps PasTree's measured default
+    "analysisThreads" - the width of the thread pool every parallel pass
+                  runs on; 0 or absent = PasTree's default (one per logical
+                  core); 1 = PasTree's SingleThreaded mode. Fixed for the
+                  life of the process (PasTree pins the pool once), so a
+                  client changes it by restarting the server
   A .dproj brings its own MainSource/search paths/defines/namespaces/aliases
   (TPasDProj - the same MSBuild evaluation the CLI tools use). Without a
   projectFile the open documents themselves become the analysis roots.
@@ -292,6 +297,17 @@ type
     // 0 = leave PasTree's own default (128, a measured value). See the
     // "moduleRedoLimit" initialization option.
     FModuleRedoLimit: Integer;
+    // The "analysisThreads" initialization option, as asked (0 = auto), and
+    // the width the pool was pinned to - see ApplyInitOptions.
+    FAnalysisThreads: Integer;
+    FPoolWidth: Integer;
+    // pastree/benchmark in flight: the full rebuild it started reports to the
+    // client as pastree/benchmarkDone when it finalizes. The memory figures
+    // are this process's commit (private bytes), in bytes: before the run
+    // (after the old project was freed) and the highest the idle tick saw.
+    FBenchmark: Boolean;
+    FBenchCommitBefore: UInt64;
+    FBenchCommitPeak: UInt64;
     // Set for exactly the rebuild that follows a refusal: the inputs still
     // look like a one-file edit, so without it the next StartAnalysis would
     // hand the same edit to the same guards forever.
@@ -345,6 +361,8 @@ type
     procedure FlushPending;
     procedure FinalizeAnalysisIfDone;
     procedure DiscardHalfUpdatedProject;
+    procedure SampleBenchmarkMemory;
+    procedure FinishBenchmark(const AError: string);
     { The analysis state in one line, for an exception log. An
       EAccessViolation carries an address and nothing else; which phase the
       server was in when it faulted is the difference between "the analysis
@@ -424,6 +442,7 @@ type
     function HandleDefinesAt(const AMsg: TLspIncoming): string;
     function HandleDcuSource(const AMsg: TLspIncoming): string;
     function HandleProjectChanged(const AMsg: TLspIncoming): string;
+    function HandleBenchmark(const AMsg: TLspIncoming): string;
     function HandleOutline(const AMsg: TLspIncoming): string;
     function HandleOutlineTarget(const AMsg: TLspIncoming): string;
     function FindAllPreamble(const AMsg: TLspIncoming; const ATag: string;
@@ -876,7 +895,24 @@ begin
     // third of the closure wants a lower one, a small project can lift it
     // entirely with a negative value. 0 = say nothing, keep the library's.
     FModuleRedoLimit := AOptions.GetValue<Integer>('moduleRedoLimit', 0);
+    FAnalysisThreads := Max(0, AOptions.GetValue<Integer>('analysisThreads', 0));
   end;
+  // HERE, before anything creates a TPasSemaProject: its constructor pins
+  // the pool at the default width, and the pin is first-caller-wins for the
+  // process. PasTree takes a POOL below 2 as 2 - the load engine needs a
+  // thread besides the pass waiting on it - so ONE thread is not a pool
+  // width at all: it is PasTree's SingleThreaded mode, every stage on the
+  // session's own worker thread (StartAnalysis sets it on each session; an
+  // incremental run inherits it with the project). The pool is then pinned
+  // at the 2 PasTree allows, for what still runs on it - the search-path
+  // index - so it never grows to the core count behind the user's back.
+  TPasSemaProject.ConfigureThreadPool(FAnalysisThreads);
+  if FAnalysisThreads = 0 then
+    FPoolWidth := Max(2, CPUCount)
+  else if FAnalysisThreads = 1 then
+    FPoolWidth := 1
+  else
+    FPoolWidth := Max(2, FAnalysisThreads);
 
   // FIRST line of the run, before anything that could go wrong: a log whose
   // opening line does not say which build produced it is worth much less than
@@ -900,6 +936,10 @@ begin
   // client that sent initialize late (AVImark, 2026-10-01: 20 s between the
   // restart and the first line, nothing to say where they went).
   Log(ProcessStartLine);
+  Log(Format('analysis threads: %d (%s)', [FPoolWidth,
+    IfThen(FAnalysisThreads = 0, 'auto, one per logical core',
+      IfThen(FPoolWidth = 1, 'set by the client, sequential',
+        'set by the client'))]));
 
   FInitProjectFile := LProjectFile;
   FInitPlatform := LPlatformStr;
@@ -1162,6 +1202,9 @@ begin
   // Carried by the project object, so the incremental CreateForModule path
   // below inherits it.
   FSession.SetReportUnresolvedMembers(True);
+  // The "analysisThreads" 1 - see ApplyInitOptions.
+  if FPoolWidth = 1 then
+    FSession.SetSingleThreadedInner(True);
   // Before Start, like every other piece of configuration: the project's
   // directory and its own unit list outrank the search paths (FProjectFiles).
   if FProjectDir <> '' then
@@ -1433,6 +1476,9 @@ begin
     // The stream has to close here too: a client showing "analyzing" off it
     // (the IDE's status panel) would otherwise say so until the next build.
     EndProgress('no result');
+    if FBenchmark then
+      FinishBenchmark(IfThen(LError <> '', LError,
+        'the analysis returned no project'));
     Exit;
   end;
   FNav := NewNavigator;
@@ -1460,6 +1506,11 @@ begin
     [IfThen(LWasModule, 'done (incremental)', 'done'), FProject.ModelCount,
      GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings,
      MemoryLine]));
+  // A benchmark's run is the full one it started (StartAnalysis from
+  // HandleBenchmark); an incremental one cannot be in between, since the
+  // benchmark freed the project the incremental path needs.
+  if FBenchmark and not LWasModule then
+    FinishBenchmark('');
   // Every unit and every diagnostic, not just the open documents' - see
   // LogParseRecord for why that difference is the whole point.
   //
@@ -2048,6 +2099,10 @@ var
   LNow: UInt64;
   LMsg: string;
 begin
+  // Before the throttle and the token check: a peak is only as good as how
+  // often it is looked for, and the benchmark runs whether or not the client
+  // takes progress. Every 50 ms idle tick and every WaitAnalyzed turn.
+  SampleBenchmarkMemory;
   if (FProgressToken = '') or (FSession = nil) then
     Exit;
   LNow := GetTickCount64;
@@ -4707,6 +4762,113 @@ begin
       [JsonQuote(PathToUri(LPath)),
        JsonQuote(TPath.GetFileNameWithoutExtension(LPath)),
        JsonQuote(LText)]));
+end;
+
+{ This process's commit charge (private bytes) - what the benchmark reports
+  as memory. Not the working set: Windows trims that under pressure, so it
+  says what the machine allowed rather than what the analysis took. 0 when
+  the counters cannot be read. }
+function ProcessCommitBytes: UInt64;
+var
+  LCounters: TProcessMemoryCounters;
+begin
+  FillChar(LCounters, SizeOf(LCounters), 0);
+  LCounters.cb := SizeOf(LCounters);
+  if GetProcessMemoryInfo(GetCurrentProcess, @LCounters, SizeOf(LCounters)) then
+    Result := LCounters.PagefileUsage
+  else
+    Result := 0;
+end;
+
+procedure TLspServer.SampleBenchmarkMemory;
+var
+  LNow: UInt64;
+begin
+  if not FBenchmark then
+    Exit;
+  LNow := ProcessCommitBytes;
+  if LNow > FBenchCommitPeak then
+    FBenchCommitPeak := LNow;
+end;
+
+{ Ends a benchmark: one log line and pastree/benchmarkDone to the client.
+  AError empty = the run finalized with a project, which is still FProject
+  here (called from FinalizeAnalysisIfDone right after the "analysis done"
+  line, so FBuildStart is the run's start). }
+procedure TLspServer.FinishBenchmark(const AError: string);
+var
+  LAfter: UInt64;
+  LMs: UInt64;
+begin
+  FBenchmark := False;
+  LMs := GetTickCount64 - FBuildStart;
+  LAfter := ProcessCommitBytes;
+  if LAfter > FBenchCommitPeak then
+    FBenchCommitPeak := LAfter;
+  if (AError <> '') or (FProject = nil) then
+  begin
+    Log('benchmark failed: ' + AError);
+    Notify(Format('{"jsonrpc":"2.0","method":"pastree/benchmarkDone",'
+      + '"params":{"ok":false,"error":%s}}', [JsonQuote(AError)]));
+    Exit;
+  end;
+  Log(Format('benchmark: %d units in %d ms on %d threads; commit before'
+    + ' %d MB, peak %d MB, after %d MB',
+    [FProject.ModelCount, LMs, FPoolWidth, FBenchCommitBefore shr 20,
+     FBenchCommitPeak shr 20, LAfter shr 20]));
+  Notify(Format('{"jsonrpc":"2.0","method":"pastree/benchmarkDone",'
+    + '"params":{"ok":true,"units":%d,"ms":%d,"threads":%d,'
+    + '"commitBeforeMB":%d,"commitPeakMB":%d,"commitAfterMB":%d,'
+    + '"stages":%s}}',
+    [FProject.ModelCount, LMs, FPoolWidth, FBenchCommitBefore shr 20,
+     FBenchCommitPeak shr 20, LAfter shr 20,
+     JsonQuote(FProject.StageTimings)]));
+end;
+
+{ pastree/benchmark - OURS, not LSP. A full analysis from nothing, timed and
+  measured, for the IDE's Performance page: what one closure costs on this
+  machine at the thread width this server was started with.
+
+  FROM NOTHING: the last-good project is freed first, so the run has no
+  parse donor (an ordinary rebuild reuses every unchanged unit's parse, which
+  is not what a benchmark measures) and the "before" memory figure is the
+  process without an analysis. Requests meanwhile wait for the run, exactly
+  as they do at startup.
+
+  Answers AT ONCE with an object whose `started` is true; the figures come later as the
+  pastree/benchmarkDone notification - a request held for the whole run would
+  hold the dispatcher, and the progress stream with it. The run is an
+  ordinary full rebuild, so $/progress reports it as one. }
+function TLspServer.HandleBenchmark(const AMsg: TLspIncoming): string;
+begin
+  if FSession <> nil then
+  begin
+    // A module session owns the last-good project (see StartAnalysis): take
+    // it back before freeing anything, or it is freed with the session.
+    if FModuleMode then
+    begin
+      FSession.WaitFor;
+      FreeAndNil(FNav);
+      FreeAndNil(FProject);
+      FProject := FSession.TakeProject;
+    end
+    else
+      FSession.Cancel;
+    FreeAndNil(FSession);
+    FModuleMode := False;
+    FModuleFile := '';
+  end;
+  FreeAndNil(FNav);
+  FreeAndNil(FProject);
+  FOutlineCache := '';
+  FreeAndNil(FLineTokenCache);
+  FBenchmark := True;
+  FBenchCommitBefore := ProcessCommitBytes;
+  FBenchCommitPeak := FBenchCommitBefore;
+  Log(Format('benchmark requested: full analysis from nothing on %d threads,'
+    + ' commit %d MB', [FPoolWidth, FBenchCommitBefore shr 20]));
+  StartAnalysis('');
+  Result := BuildResponse(AMsg.IdJson, '{"started":true}');
 end;
 
 { pastree/projectChanged - OURS, not LSP. The client saw the .dproj saved
@@ -7754,6 +7916,8 @@ begin
         Exit(HandleDcuSource(LMsg));
       if LMsg.Method = 'pastree/projectChanged' then
         Exit(HandleProjectChanged(LMsg));
+      if LMsg.Method = 'pastree/benchmark' then
+        Exit(HandleBenchmark(LMsg));
       if LMsg.Method = 'pastree/outline' then
         Exit(HandleOutline(LMsg));
       if LMsg.Method = 'pastree/outlineTarget' then

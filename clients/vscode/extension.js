@@ -121,6 +121,7 @@ function activate(context) {
       // log-reading starts from, so it goes away only when asked.
       logDetail: cfg.get('logDetail') !== false,
       moduleRedoLimit: cfg.get('moduleRedoLimit') || 0,
+      analysisThreads: cfg.get('analysisThreads') || 0,
       // The user's own extra paths first, the IDE's after - same order the
       // RAD Studio package sends, and the same double role for the IDE's:
       // as searchPaths "look here", as libraryPaths "not the user's to

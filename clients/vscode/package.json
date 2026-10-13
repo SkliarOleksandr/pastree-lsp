@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.66.1",
+  "version": "0.67.0",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -87,6 +87,11 @@
           "type": "integer",
           "default": 0,
           "description": "Incremental analysis: how many units an interface edit may pull in before the server rebuilds the closure instead. 0 = PasTree's measured default (128); a negative value lifts the ceiling entirely."
+        },
+        "pastree.analysisThreads": {
+          "type": "integer",
+          "default": 0,
+          "description": "How many threads the analysis runs on. 0 = one per logical core (the fastest); fewer leave the machine more room; 1 runs every stage on one thread. Takes effect when the server restarts."
         },
         "pastree.searchPaths": {
           "type": "array",

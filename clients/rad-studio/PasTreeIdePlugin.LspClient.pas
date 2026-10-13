@@ -118,6 +118,11 @@ type
     /// the switch keep the full record without naming it.
     /// </summary>
     SuppressLogDetail: Boolean;
+    /// <summary>
+    /// Sent as analysisThreads when above 0: the width of the server's
+    /// analysis thread pool. 0 = the server's default, one per logical core.
+    /// </summary>
+    AnalysisThreads: Integer;
     /// <summary>Caller owns the returned object.</summary>
     function ToJson: TJSONObject;
   end;
@@ -174,6 +179,7 @@ type
     FActivityToken: string;
     FActivitySince: UInt64;
     FActivityRuns: Integer;   // `begin`s seen, for the harness
+    FActivityMessage: string; // the run's last `report`, '' before one
     FSpawnTick: UInt64;       // when Connect started this server
     procedure Log(const AText: string);
     procedure HandleProgress(AParams: TJSONValue);
@@ -319,6 +325,10 @@ type
     property Activity: TLspActivity read FActivity;
     property ActivitySince: UInt64 read FActivitySince;
     property ActivityRuns: Integer read FActivityRuns;
+    /// <summary>The server's last `report` for the run in progress - its
+    /// phase and unit counts ("parse 120/3767 units") - '' before the first
+    /// and when idle.</summary>
+    property ActivityMessage: string read FActivityMessage;
     property OnNotification: TLspNotifyProc read FOnNotification
       write FOnNotification;
 
@@ -572,6 +582,9 @@ begin
   // default would be noise in a handshake that is read by hand.
   if SuppressLogDetail then
     LResult.AddPair('logDetail', TJSONBool.Create(False));
+  // Same reasoning: 0 is the server's default.
+  if AnalysisThreads > 0 then
+    LResult.AddPair('analysisThreads', TJSONNumber.Create(AnalysisThreads));
   // Real JSON arrays: the server logs a warning and ignores any other shape,
   // which already cost this project a debugging round once.
   AddStrings('searchPaths', SearchPaths);
@@ -1451,6 +1464,7 @@ begin
   begin
     LTitle := AParams.GetValue<string>('value.title', '');
     FActivityToken := LToken;
+    FActivityMessage := '';
     FActivitySince := GetTickCount64;
     Inc(FActivityRuns);
     if Pos('incremental', LowerCase(LTitle)) > 0 then
@@ -1458,6 +1472,8 @@ begin
     else
       FActivity := laFull;
   end
+  else if (LKind = 'report') and (LToken = FActivityToken) then
+    FActivityMessage := AParams.GetValue<string>('value.message', '')
   else if (LKind = 'end') and (LToken = FActivityToken) then
     ClearActivity;
 end;
@@ -1466,6 +1482,7 @@ procedure TLspClient.ClearActivity;
 begin
   FActivity := laIdle;
   FActivityToken := '';
+  FActivityMessage := '';
   FActivitySince := 0;
 end;
 

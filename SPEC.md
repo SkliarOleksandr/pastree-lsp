@@ -223,6 +223,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `$/cancelRequest` | |
 | `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below); sent while a request waits out the analysis it started (`OnFlush`), not after its reply |
 | `pastree/projectChanged` | ours: the client saw the .dproj saved; the server re-reads it as initialize did and answers `changed` false when every part the analysis took (main source, platform, search paths, defines, .pas unit list, namespaces, aliases) is the same - the IDE re-saves the .dproj with every .dpr save, and the restart that used to follow cost a full analysis (0.61.0) |
+| `pastree/benchmark` | ours (0.67.0): a full analysis FROM NOTHING - the last-good project is freed first, so there is no parse donor and the "before" memory is the process without an analysis. Answers `{"started":true}` at once; the run reports through `$/progress` like any full rebuild, and its figures arrive as the `pastree/benchmarkDone` notification: `ok`, `units`, `ms`, `threads`, `commitBeforeMB` / `commitPeakMB` / `commitAfterMB` (private bytes; the peak sampled every idle tick, 50 ms), `stages`; or `ok` false and `error`. For the RAD Studio Performance page |
 | `pastree/unusedUses`, `pastree/unreferencedUnits` | ours (0.62.0): PasTree.Sema.Lint's unused `uses` entries (`scope` unit or project) and project units nobody uses, always with `loHideGlobalInit` - a unit whose initialization reaches outside itself (another unit's routine or variable, a class member of one; not a constructor) is not offered. Rows carry `doubts` (shown, never removed) and `refused`. unreferencedUnits rows list every `uses` entry still naming the unit (`program` for the .dpr's, which the client removes by taking the unit out of the project). The edits are NOT in these answers: see `pastree/usesRemoval` |
 | `pastree/usesRemoval` | ours (0.62.0): the edits of the client's Remove, asked for at the click - `files`, each a `uri` and the `names` to take out of its `uses`, on the text as it is then (open document or disk, parse only). ONE rewrite per clause (PasLsp.UnusedUnits keeps the layout: a removed entry takes its separator and its own line; a clause with a compiler directive inside is refused). At the click and not with the search because Removes come one unit at a time, and siblings share a clause: an edit computed before the first Remove no longer matches the clause it left. `refused` and `missing` say what no edit takes out |
 | `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
@@ -857,6 +858,19 @@ before rebuilding instead. 0 keeps the library's measured default of 128.
 It is per-project by nature: on a 3676-unit closure a COM type-library unit
 reaches 28 consumers (redone in ~2 s against a 29 s rebuild) while a core
 types unit reaches 1181, which is past break-even and correctly rebuilds.
+
+`analysisThreads` in the initializationOptions is the width of the thread
+pool every parallel pass runs on (PasTree's `ConfigureThreadPool`); 0 or
+absent keeps PasTree's default, one per logical core. The pool is pinned once
+per process, before the first project is created - ApplyInitOptions does it -
+so a different width means a restarted server, which is what the RAD Studio
+client does when its Performance setting changes. PasTree takes a pool below
+2 as 2 - the load engine needs a thread besides the pass that waits on it -
+so 1 is not a width: it switches PasTree's `SingleThreaded` mode on for every
+session (every stage on the session's worker thread; an incremental run
+inherits it with the project), and the pool stays at 2 for what still runs
+on it, the search-path index. The log's `analysis threads:` line says the
+count in effect.
 
 The log distinguishes all of it, because a fast path that quietly stops
 firing is indistinguishable from a slow analyzer: `analysis started:

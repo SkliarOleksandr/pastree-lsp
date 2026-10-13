@@ -1311,6 +1311,53 @@ function LspAnsweringProject(const AFileName: string): string;
 /// </summary>
 function LspSourceTextOf(const AFileName: string): string;
 
+type
+  /// <summary>pastree/benchmarkDone: a full analysis from nothing. Memory
+  /// is the server process's commit (private bytes), in MB.</summary>
+  TLspBenchmarkResult = record
+    Ok: Boolean;
+    Error: string;
+    Units: Integer;
+    Ms: Int64;
+    Threads: Integer;
+    CommitBeforeMB: Int64;
+    CommitPeakMB: Int64;
+    CommitAfterMB: Int64;
+    Stages: string;
+  end;
+
+  TLspBenchmarkProc = reference to procedure(const AResult: TLspBenchmarkResult);
+
+/// <summary>
+/// The Performance page's Analyze Project: a full analysis of the ACTIVE
+/// project from nothing (pastree/benchmark), on AThreads analysis threads (0 =
+/// auto). A count other than the one its server runs with restarts that server
+/// first - the pool is pinned per process - and holds until LspEndBenchmark.
+/// AOnDone fires once, on the main thread, when the run finalizes; never if the
+/// server goes away first (LspBenchmarkStatus says so). False, with nothing
+/// sent, when there is no active project or no server.
+/// </summary>
+function LspBenchmark(AThreads: Integer;
+  const AOnDone: TLspBenchmarkProc): Boolean;
+
+/// <summary>
+/// The active project's server while a benchmark runs: AText is the run's
+/// phase and unit counts as the server last reported them, ARunningMs how
+/// long it has run. False when the server is not up (starting, failed, or
+/// gone) - AText then says which.
+/// </summary>
+function LspBenchmarkStatus(out AText: string; out ARunningMs: UInt64): Boolean;
+
+/// <summary>
+/// The Performance page is closing: the thread count goes back to the setting
+/// (a server started for another count restarts at its next request), and a
+/// callback still waiting is dropped.
+/// </summary>
+procedure LspEndBenchmark;
+
+/// <summary>"Auto" for 0, else "N threads" - the restart line's wording.</summary>
+function ThreadsText(AThreads: Integer): string;
+
 implementation
 
 uses
@@ -1389,6 +1436,15 @@ type
     // anything if it restarts - which is what including them here does.
     FStartedLogFile: string;
     FStartedLogDetail: Boolean;
+    // The analysis thread count the running server was started with - the
+    // server pins its pool once, so the same reasoning as the log switches.
+    // FThreadsOverride (>= 0) replaces the setting while the Performance
+    // page benchmarks a count not saved yet; -1 = the setting.
+    FStartedThreads: Integer;
+    FThreadsOverride: Integer;
+    // The Performance page's callback for pastree/benchmarkDone; nil when
+    // no benchmark is waiting.
+    FBenchmarkDone: TLspBenchmarkProc;
     // The .dproj's last-write stamp when the server was started for it. The
     // server reads search paths, defines and the unit list from the .dproj
     // ONCE, at initialize, and only logs a note when the file changes on
@@ -1440,6 +1496,7 @@ type
     function EnsureSession: Boolean;
     procedure CheckSaved(const AStamp: string);
     procedure StoreDiagnostics(AParams: TJSONValue);
+    procedure HandleBenchmarkDone(AParams: TJSONValue);
     procedure Ask(const AMethod: string; const AFileName: string;
       ARow, ACol: Integer; AIncludeDeclaration, AImplHeaders: Boolean;
       var APendingId: Int64; const AOnDone: TLspHitsProc);
@@ -1506,6 +1563,9 @@ type
       ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
     procedure DcuSource(const ADcuPath: string;
       const AOnDone: TLspDcuSourceProc);
+    function Benchmark(AThreads: Integer;
+      const AOnDone: TLspBenchmarkProc): Boolean;
+    procedure EndBenchmark;
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspRenameTargetProc);
     procedure WorkspaceSymbols(const AQuery: string;
@@ -2019,6 +2079,7 @@ constructor TLspSession.Create(const AProjectFile: string);
 begin
   inherited Create;
   FProjectFile := AProjectFile;
+  FThreadsOverride := -1;
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
@@ -2384,6 +2445,10 @@ begin
   if LoggingEnabled then
     Result.LogFile := LLogPath;
   Result.SuppressLogDetail := not AdvancedLoggingEnabled;
+  if FThreadsOverride >= 0 then
+    Result.AnalysisThreads := FThreadsOverride
+  else
+    Result.AnalysisThreads := AnalysisThreadCount;
   // The IDE-side timing lines (PasTreeIdePlugin.Timing) go into the same
   // file as the server's, but only with ADVANCED logging on: they are a few
   // lines per typing pause, which is the "log nobody can skim" the advanced
@@ -2525,6 +2590,11 @@ begin
           StoreDiagnostics(AParams);
           Exit;
         end;
+        if AMethod = 'pastree/benchmarkDone' then
+        begin
+          HandleBenchmarkDone(AParams);
+          Exit;
+        end;
         LogDiagnostic('unhandled server notification: ' + AMethod);
       end;
   end;
@@ -2542,6 +2612,7 @@ begin
      SameText(FStartedConfig, LConfig) and
      SameText(FStartedLogFile, LOptions.LogFile) and
      (FStartedLogDetail = not LOptions.SuppressLogDetail) and
+     (FStartedThreads = LOptions.AnalysisThreads) and
      (FCheckingStamp <> LStamp) then
     CheckSaved(LStamp);
   if (FClient.State = lcsStopped) or
@@ -2550,6 +2621,7 @@ begin
      not SameText(FStartedConfig, LConfig) or
      not SameText(FStartedLogFile, LOptions.LogFile) or
      (FStartedLogDetail <> not LOptions.SuppressLogDetail) or
+     (FStartedThreads <> LOptions.AnalysisThreads) or
      (FRestartWhy <> '') then
   begin
     if FClient.State <> lcsStopped then
@@ -2559,6 +2631,10 @@ begin
         LogDiagnostic(Format('%s was saved and changed (%s) - restarting'
           + ' the server to read it again.',
           [ExtractFileName(LOptions.ProjectFile), FRestartWhy]))
+      else if FStartedThreads <> LOptions.AnalysisThreads then
+        LogDiagnostic(Format('analysis threads changed (%s) - restarting'
+          + ' the server for %s.', [ThreadsText(LOptions.AnalysisThreads),
+          ExtractFileName(LOptions.ProjectFile)]))
       else
         LogDiagnostic(Format('project configuration changed (%s %s %s) - '
           + 'restarting the server.',
@@ -2592,6 +2668,7 @@ begin
     FStartedConfig := LConfig;
     FStartedLogFile := LOptions.LogFile;
     FStartedLogDetail := not LOptions.SuppressLogDetail;
+    FStartedThreads := LOptions.AnalysisThreads;
     if not FClient.Start(LOptions) then
       Exit;
   end;
@@ -3645,6 +3722,77 @@ begin
       else
         AOnDone(False, '', 'pastree/dcuSource answered without a text');
     end);
+end;
+
+function ThreadsText(AThreads: Integer): string;
+begin
+  if AThreads <= 0 then
+    Result := 'Auto'
+  else if AThreads = 1 then
+    Result := '1 thread'
+  else
+    Result := Format('%d threads', [AThreads]);
+end;
+
+{ pastree/benchmark. The override is set BEFORE EnsureSession, which is what
+  restarts a server running another count; the request then waits behind the
+  new server's handshake like any other. The answer is only "started" - the
+  figures come as pastree/benchmarkDone (HandleBenchmarkDone). }
+function TLspSession.Benchmark(AThreads: Integer;
+  const AOnDone: TLspBenchmarkProc): Boolean;
+begin
+  if AThreads < 0 then
+    AThreads := 0;
+  FThreadsOverride := AThreads;
+  FBenchmarkDone := nil;
+  if not EnsureSession then
+    Exit(False);
+  FBenchmarkDone := AOnDone;
+  FClient.Request('pastree/benchmark', TJSONObject.Create,
+    procedure(ASuccess: Boolean; AResult: TJSONValue; const AError: string)
+    var
+      LResult: TLspBenchmarkResult;
+      LDone: TLspBenchmarkProc;
+    begin
+      if ASuccess or FDestroying or not Assigned(FBenchmarkDone) then
+        Exit;
+      // Refused (an older server answers MethodNotFound) or the server went
+      // away before it could start: the run will never report.
+      LDone := FBenchmarkDone;
+      FBenchmarkDone := nil;
+      LResult := Default(TLspBenchmarkResult);
+      LResult.Error := AError;
+      LDone(LResult);
+    end);
+  Result := True;
+end;
+
+procedure TLspSession.EndBenchmark;
+begin
+  FBenchmarkDone := nil;
+  FThreadsOverride := -1;
+end;
+
+procedure TLspSession.HandleBenchmarkDone(AParams: TJSONValue);
+var
+  LResult: TLspBenchmarkResult;
+  LDone: TLspBenchmarkProc;
+begin
+  if not Assigned(FBenchmarkDone) or (AParams = nil) then
+    Exit;
+  LDone := FBenchmarkDone;
+  FBenchmarkDone := nil;
+  LResult := Default(TLspBenchmarkResult);
+  LResult.Ok := AParams.GetValue<Boolean>('ok', False);
+  LResult.Error := AParams.GetValue<string>('error', '');
+  LResult.Units := AParams.GetValue<Integer>('units', 0);
+  LResult.Ms := AParams.GetValue<Int64>('ms', 0);
+  LResult.Threads := AParams.GetValue<Integer>('threads', 0);
+  LResult.CommitBeforeMB := AParams.GetValue<Int64>('commitBeforeMB', 0);
+  LResult.CommitPeakMB := AParams.GetValue<Int64>('commitPeakMB', 0);
+  LResult.CommitAfterMB := AParams.GetValue<Int64>('commitAfterMB', 0);
+  LResult.Stages := AParams.GetValue<string>('stages', '');
+  LDone(LResult);
 end;
 
 procedure TLspSession.Defines(const AMethod, AFileName: string;
@@ -5549,6 +5697,65 @@ begin
     Exit(lssReady);
   end;
   ARunningMs := GetTickCount64 - LClient.ActivitySince;
+end;
+
+function LspBenchmark(AThreads: Integer;
+  const AOnDone: TLspBenchmarkProc): Boolean;
+var
+  LSession: TLspSession;
+begin
+  Result := False;
+  if not Assigned(GPool) then
+    Exit;
+  LSession := GPool.Activate;
+  if Assigned(LSession) then
+    Result := LSession.Benchmark(AThreads, AOnDone);
+end;
+
+function LspBenchmarkStatus(out AText: string; out ARunningMs: UInt64): Boolean;
+var
+  LClient: TLspClient;
+begin
+  AText := '';
+  ARunningMs := 0;
+  if not Assigned(GSession) or not Assigned(GSession.FClient) then
+  begin
+    AText := 'no server';
+    Exit(False);
+  end;
+  LClient := GSession.FClient;
+  case LClient.State of
+    lcsStopped:
+      begin
+        AText := 'server stopped';
+        Exit(False);
+      end;
+    lcsStarting:
+      begin
+        AText := 'starting the server';
+        Exit(False);
+      end;
+    lcsFailed:
+      begin
+        AText := 'the server failed - see the Messages window';
+        Exit(False);
+      end;
+  end;
+  Result := True;
+  if LClient.Activity = laIdle then
+    Exit;
+  ARunningMs := GetTickCount64 - LClient.ActivitySince;
+  AText := LClient.ActivityMessage;
+end;
+
+procedure LspEndBenchmark;
+begin
+  if Assigned(GPool) then
+    GPool.ForEach(
+      procedure(ASession: TLspSession)
+      begin
+        ASession.EndBenchmark;
+      end);
 end;
 
 function LspFindAllAt(const AFileName: string; ARow, ACol: Integer;

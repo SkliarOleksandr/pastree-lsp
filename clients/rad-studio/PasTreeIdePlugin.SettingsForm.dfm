@@ -579,6 +579,80 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 1
       end
     end
+    object tsPerformance: TTabSheet
+      Caption = 'Performance'
+      ImageIndex = 5
+      object lblThreads: TLabel
+        Left = 16
+        Top = 23
+        Width = 91
+        Height = 15
+        Caption = 'Analysis threads'
+      end
+      object lblThreadsHint: TLabel
+        Left = 16
+        Top = 52
+        Width = 410
+        Height = 75
+        Caption =
+          'How many threads the analysis of a project runs on. Auto takes o' +
+          'ne per logical core, which is the fastest; fewer leave the machi' +
+          'ne more room while a project is analyzed. Each project'#39's server ' +
+          'is restarted for a new value at its next request, which costs on' +
+          'e full analysis.'
+        WordWrap = True
+      end
+      object cbxThreads: TComboBox
+        Left = 170
+        Top = 20
+        Width = 200
+        Height = 23
+        Style = csDropDownList
+        TabOrder = 0
+      end
+      object grpBenchmark: TGroupBox
+        Left = 16
+        Top = 270
+        Width = 430
+        Height = 160
+        Caption = 'Benchmark'
+        TabOrder = 1
+        object lblBenchmarkHint: TLabel
+          Left = 12
+          Top = 24
+          Width = 405
+          Height = 30
+          Caption =
+            'A full analysis of the active project from nothing, on the threa' +
+            'ds chosen above - no parse reused from the last run.'
+          WordWrap = True
+        end
+        object lblBenchmarkStatus: TLabel
+          Left = 12
+          Top = 96
+          Width = 405
+          Height = 52
+          AutoSize = False
+          WordWrap = True
+        end
+        object btnAnalyze: TButton
+          Left = 12
+          Top = 60
+          Width = 130
+          Height = 27
+          Caption = 'Analyze Project'
+          TabOrder = 0
+          OnClick = btnAnalyzeClick
+        end
+      end
+    end
+  end
+  object tmrBenchmark: TTimer
+    Enabled = False
+    Interval = 200
+    OnTimer = tmrBenchmarkTimer
+    Left = 24
+    Top = 584
   end
   object btnOK: TButton
     Left = 312

@@ -53,6 +53,7 @@ var
   GOk: Boolean;
   GResultJson: string;
   GError: string;
+  GBenchmarkJson: string;
 
 procedure Check(ACondition: Boolean; const AWhat: string);
 begin
@@ -205,6 +206,11 @@ begin
   Result.LogFile := TPath.Combine(TPath.GetTempPath,
     'pastree-lsp-projectsmoke.log');
   GLogPath := Result.LogFile;
+  // The Performance page's count, sent as analysisThreads - checked in the
+  // log's "analysis threads:" line. 1, PasTree's SingleThreaded mode: every
+  // other harness runs the default width, so this is the one that covers
+  // the sequential path - every check below answers from it.
+  Result.AnalysisThreads := 1;
 end;
 
 { semanticTokens/range params for one whole line of AFile (0-based). }
@@ -349,6 +355,34 @@ begin
     'projectChanged answered');
   Check(GOk and GResultJson.Contains('"changed":false'),
     'and the configuration is the same');
+
+  // The Performance page (0.67.0): the thread count reaches the pool, and
+  // Analyze Project is a full run from nothing whose figures come back as a
+  // notification - after the answer, which says only that it started.
+  Writeln;
+  Writeln('=== analysisThreads and pastree/benchmark ===');
+  Check(LogContains('analysis threads: 1 (set by the client, sequential)'),
+    'the server runs the analysis on the 1 thread asked for');
+  GBenchmarkJson := '';
+  GClient.OnNotification :=
+    procedure(const AMethod: string; AParams: TJSONValue)
+    begin
+      if (AMethod = 'pastree/benchmarkDone') and Assigned(AParams) then
+        GBenchmarkJson := AParams.ToJSON;
+    end;
+  Check(Ask('pastree/benchmark', TJSONObject.Create) and GOk and
+    GResultJson.Contains('"started":true'), 'benchmark started');
+  Check(PumpUntil(function: Boolean begin Result := GBenchmarkJson <> '' end,
+    cAnswerTimeoutMs), 'pastree/benchmarkDone arrived');
+  Writeln('  -- ' + GBenchmarkJson);
+  Check(GBenchmarkJson.Contains('"ok":true') and
+    GBenchmarkJson.Contains('"threads":1'), 'it succeeded on 1 thread');
+  Check(LogContains('parse donor refused') = False,
+    'and the run had no parse donor to refuse');
+  FindPos(LWizard, 'FActionList: TActionList', 'TActionList', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LWizard, LLine, LChar))
+    and GOk and GResultJson.ToLower.Contains('actnlist'),
+    'the project answers again after the benchmark');
 end;
 
 var

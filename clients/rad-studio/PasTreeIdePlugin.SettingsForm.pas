@@ -27,7 +27,10 @@ unit PasTreeIdePlugin.SettingsForm;
   what corrects the IDE's own behaviour rather than adding a feature - first
   the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix),
   then the unchanged StyleElements of inherited forms (0.60.0,
-  PasTreeIdePlugin.DfmStyleElementsFix).
+  PasTreeIdePlugin.DfmStyleElementsFix). Performance (0.67.0) holds the
+  analysis thread count and the Benchmark box - the one place the dialog
+  talks to a server (LspBenchmark), because comparing thread counts is only
+  useful with the figures next to the choice.
 
   IF YOU ARE EDITING THE .dfm: the only names the code depends on are the ones
   bound below (the checkboxes, their hint labels, the readout labels and the
@@ -123,8 +126,19 @@ type
     lblNoExplicitPropsHint: TLabel;
     chkNoDefaultStyleElements: TCheckBox;
     lblNoDefaultStyleElementsHint: TLabel;
+    tsPerformance: TTabSheet;
+    lblThreads: TLabel;
+    cbxThreads: TComboBox;
+    lblThreadsHint: TLabel;
+    grpBenchmark: TGroupBox;
+    lblBenchmarkHint: TLabel;
+    btnAnalyze: TButton;
+    lblBenchmarkStatus: TLabel;
+    tmrBenchmark: TTimer;
     btnOK: TButton;
     btnCancel: TButton;
+    procedure btnAnalyzeClick(Sender: TObject);
+    procedure tmrBenchmarkTimer(Sender: TObject);
     procedure lnkHomeLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
     procedure chkLoggingClick(Sender: TObject);
     procedure chkClassCompleteClick(Sender: TObject);
@@ -133,7 +147,13 @@ type
     procedure TypeStyleChanged(Sender: TObject);
     procedure pbxPreviewPaint(Sender: TObject);
   private
+    // cbxThreads' values, parallel to its items: 0 = Auto, else a count.
+    FThreadChoices: TArray<Integer>;
+    FBenchmarkStart: UInt64;
     function TypeStyles: TFontStyles;
+    procedure FillThreads(ACurrent: Integer);
+    function SelectedThreads: Integer;
+    procedure BenchmarkFinished(AOk: Boolean; const AText: string);
   end;
 
 var
@@ -160,12 +180,14 @@ implementation
 
 uses
   System.SysUtils,
+  System.Math,
   Winapi.Windows,
   Winapi.ShellAPI,
   Vcl.Graphics,
   Vcl.Themes,
   ToolsAPI,
   PasLsp.ProductVersion,
+  PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.Settings;
 
 const
@@ -281,6 +303,124 @@ begin
   LCanvas.Brush.Style := bsSolid;
 end;
 
+{ Auto, then 1, 2, 4, 8 ... below the logical core count, then the count
+  itself. 1 is not a pool width - PasTree's pool is never below 2 - but its
+  SingleThreaded mode, every stage on one thread (the server's
+  ApplyInitOptions). A stored value not in the list - set on a machine with
+  more cores - is kept as its own item rather than lost. }
+procedure TPasTreeSettingsForm.FillThreads(ACurrent: Integer);
+var
+  LCores, LCount, LIndex: Integer;
+
+  procedure Add(AValue: Integer; const AText: string);
+  begin
+    cbxThreads.Items.Add(AText);
+    FThreadChoices := FThreadChoices + [AValue];
+  end;
+
+begin
+  LCores := CPUCount;
+  cbxThreads.Items.Clear;
+  FThreadChoices := nil;
+  Add(0, Format('Auto (%d threads)', [Max(2, LCores)]));
+  Add(1, '1 thread');
+  LCount := 2;
+  while LCount < LCores do
+  begin
+    Add(LCount, Format('%d threads', [LCount]));
+    LCount := LCount * 2;
+  end;
+  if LCores >= 2 then
+    Add(LCores, Format('%d threads (all cores)', [LCores]));
+  cbxThreads.ItemIndex := -1;
+  for LIndex := 0 to High(FThreadChoices) do
+    if FThreadChoices[LIndex] = ACurrent then
+      cbxThreads.ItemIndex := LIndex;
+  if cbxThreads.ItemIndex < 0 then
+  begin
+    Add(ACurrent, Format('%d threads', [ACurrent]));
+    cbxThreads.ItemIndex := High(FThreadChoices);
+  end;
+end;
+
+function TPasTreeSettingsForm.SelectedThreads: Integer;
+begin
+  if (cbxThreads.ItemIndex >= 0) and
+     (cbxThreads.ItemIndex <= High(FThreadChoices)) then
+    Result := FThreadChoices[cbxThreads.ItemIndex]
+  else
+    Result := 0;
+end;
+
+{ A full analysis of the active project from nothing (pastree/benchmark), on
+  the count selected NOW - saved or not, so modes can be compared without
+  closing the dialog; LspEndBenchmark, when the dialog closes, puts the
+  setting back in charge. The timer shows the server's progress; the figures
+  come from the server when the run finalizes. }
+procedure TPasTreeSettingsForm.btnAnalyzeClick(Sender: TObject);
+var
+  LForm: TPasTreeSettingsForm;
+begin
+  LForm := Self;
+  FBenchmarkStart := GetTickCount64;
+  btnAnalyze.Enabled := False;
+  cbxThreads.Enabled := False;
+  lblBenchmarkStatus.Caption := 'Starting...';
+  if not LspBenchmark(SelectedThreads,
+    procedure(const AResult: TLspBenchmarkResult)
+    begin
+      if not AResult.Ok then
+        LForm.BenchmarkFinished(False, 'Failed: ' + AResult.Error)
+      else
+        LForm.BenchmarkFinished(True, Format(
+          '%d units in %s s on %s.'#13#10
+          + 'Memory: %d MB at peak, %d MB held after (server process;'
+          + ' %d MB before the run).',
+          [AResult.Units,
+           FormatFloat('0.0', AResult.Ms / 1000),
+           ThreadsText(AResult.Threads), AResult.CommitPeakMB, AResult.CommitAfterMB,
+           AResult.CommitBeforeMB]));
+    end) then
+  begin
+    BenchmarkFinished(False,
+      'No project to analyze - open one, or check the Messages window.');
+    Exit;
+  end;
+  tmrBenchmark.Enabled := True;
+end;
+
+procedure TPasTreeSettingsForm.tmrBenchmarkTimer(Sender: TObject);
+var
+  LText: string;
+  LRunningMs: UInt64;
+  LElapsed: string;
+begin
+  LElapsed := FormatFloat('0.0', (GetTickCount64 - FBenchmarkStart) / 1000)
+    + ' s';
+  if not LspBenchmarkStatus(LText, LRunningMs) then
+  begin
+    // Starting is a phase; stopped or failed is the end - the server that
+    // would have reported is gone.
+    if LText = 'starting the server' then
+      lblBenchmarkStatus.Caption := 'Starting the server... ' + LElapsed
+    else
+      BenchmarkFinished(False, 'Stopped: ' + LText);
+    Exit;
+  end;
+  if LText = '' then
+    LText := 'analyzing';
+  lblBenchmarkStatus.Caption := Format('Analyzing: %s, %s', [LText, LElapsed]);
+end;
+
+procedure TPasTreeSettingsForm.BenchmarkFinished(AOk: Boolean;
+  const AText: string);
+begin
+  tmrBenchmark.Enabled := False;
+  btnAnalyze.Enabled := True;
+  cbxThreads.Enabled := True;
+  lblBenchmarkStatus.Caption := AText;
+end;
+
 function ExecuteSettingsDialog: Boolean;
 var
   LForm: TPasTreeSettingsForm;
@@ -356,6 +496,7 @@ begin
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
+    LForm.FillThreads(LSettings.AnalysisThreads);
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -389,9 +530,13 @@ begin
     LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;
+    LSettings.AnalysisThreads := LForm.SelectedThreads;
     SaveSettings(LSettings);
     Result := True;
   finally
+    // Before the form goes: a benchmark still running must not call back
+    // into a freed form, and its thread count stops overriding the setting.
+    LspEndBenchmark;
     LForm.Free;
   end;
 end;

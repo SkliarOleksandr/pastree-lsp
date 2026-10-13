@@ -392,6 +392,10 @@ type
     DfmNoExplicitProps: Boolean;
     // IDE Fixes tab - see DfmNoDefaultStyleElements. Default True.
     DfmNoDefaultStyleElems: Boolean;
+    // Performance tab: the width of the server's analysis thread pool, 0 =
+    // auto (one per logical core, PasTree's default). See
+    // AnalysisThreadCount.
+    AnalysisThreads: Integer;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -405,6 +409,14 @@ function TypeHighlightEnabled: Boolean;
 function TypeHighlightColor: TColor;
 function TypeHighlightStyle: TFontStyles;
 function InactiveHighlightEnabled: Boolean;
+
+/// <summary>
+/// The Performance tab's thread count, sent to every server it starts as
+/// analysisThreads - 0 for Auto. The pool is pinned once per server process,
+/// so a change takes effect as each server restarts: TLspSession compares it
+/// with what its server was started with, like the log switches.
+/// </summary>
+function AnalysisThreadCount: Integer;
 
 /// <summary>
 /// Registers the ONE listener called (main thread) after the dialog saved -
@@ -458,6 +470,7 @@ const
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
+  cValueAnalysisThreads = 'AnalysisThreads';
   // The IDE level ApplyErrorInsightChoice replaced with None, to put back -
   // by name, one of cErrorInsightLevelNames.
   cValueSavedErrorInsightLevel = 'SavedErrorInsightLevel';
@@ -633,6 +646,7 @@ begin
   Result.PasTreeErrorSquiggles := False;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
+  Result.AnalysisThreads := 0;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -688,6 +702,10 @@ begin
         ReadFlag(LReg, cValueDfmNoExplicit, Result.DfmNoExplicitProps);
       Result.DfmNoDefaultStyleElems := ReadFlag(LReg,
         cValueDfmNoDefaultStyleElements, Result.DfmNoDefaultStyleElems);
+      Result.AnalysisThreads :=
+        ReadInt(LReg, cValueAnalysisThreads, Result.AnalysisThreads);
+      if Result.AnalysisThreads < 0 then
+        Result.AnalysisThreads := 0;
     finally
       LReg.CloseKey;
     end;
@@ -755,6 +773,7 @@ begin
           Ord(ASettings.DfmNoExplicitProps));
         LReg.WriteInteger(cValueDfmNoDefaultStyleElements,
           Ord(ASettings.DfmNoDefaultStyleElems));
+        LReg.WriteInteger(cValueAnalysisThreads, ASettings.AnalysisThreads);
       finally
         LReg.CloseKey;
       end;
@@ -1139,6 +1158,11 @@ end;
 function InactiveHighlightEnabled: Boolean;
 begin
   Result := CurrentSettings.HighlightInactive;
+end;
+
+function AnalysisThreadCount: Integer;
+begin
+  Result := CurrentSettings.AnalysisThreads;
 end;
 
 procedure SetSettingsSavedListener(const AListener: TProc);
