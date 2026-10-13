@@ -47,6 +47,9 @@ const
   // A constant whose value names its own type in a qualified spelling.
   CInferBlue = DemoAnnotateLib.TDemoColor.dcBlue;
   CInferLevel = 3;
+  // Integers read in both bases; an expression is folded to its value.
+  CInferMask = $FF;
+  CInferShift = CInferLevel shl 4;
 
 // Names inside a $IF expression, hovered and Ctrl+Clicked like names in code.
 {$IF CompilerVersion > 20}

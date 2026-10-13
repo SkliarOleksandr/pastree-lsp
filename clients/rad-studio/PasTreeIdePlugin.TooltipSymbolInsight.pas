@@ -91,7 +91,7 @@ uses
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.DirectiveText,
   PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings,
-  PasTreeIdePlugin.ErrorPaint;
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.CodeInsight;
 
 const
   // The native hint's measured timing (2026-10-07): its first window comes
@@ -1076,8 +1076,10 @@ begin
   SyncNativeHint;
   // Not ours, but this is the package's one cheap, late, always-on editor
   // event: the Error Insight level that could not be read at package load is
-  // retried here - see PasTreeIdePlugin.Settings.
+  // retried here - see PasTreeIdePlugin.Settings. The Insight Provider
+  // likewise, see PasTreeIdePlugin.CodeInsight.
   SyncErrorInsightChoice;
+  SyncInsightManagerChoice;
   if not TooltipSymbolInsightEnabled then
   begin
     CancelHover;

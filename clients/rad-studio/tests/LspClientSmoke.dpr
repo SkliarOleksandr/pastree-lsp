@@ -1838,15 +1838,20 @@ const
     ('IItem', 'for var IItem', 'var IItem: TInferItem', 'gap'));
   // line hint, name, expected signature
   // and generic parameters, which read as themselves, not as their owner
-  cIntrinsics: array[0..18] of array[0..2] of string = (
+  cIntrinsics: array[0..20] of array[0..2] of string = (
     // a name of a $IF expression, resolved as the unit sees it
     ('{$IF CompilerVersion', 'CompilerVersion', 'const System.CompilerVersion = '),
-    ('{$IF CInferLevel', 'CInferLevel', 'const CInferLevel = 3'),
+    ('{$IF CInferLevel', 'CInferLevel', 'const CInferLevel = 3 ($03)'),
+    // an integer in the other base too, an expression folded by PasTree's
+    // constant evaluator (Alex, 2026-10-13)
+    ('CInferMask = $FF', 'CInferMask', 'const CInferMask = $FF (255)'),
+    ('CInferShift = ', 'CInferShift',
+     'const CInferShift = CInferLevel shl 4 (48, $30)'),
     // its callees, System's and the directive's own (Alex, 2026-10-09)
     ('{$IF SizeOf', 'SizeOf', 'function System.SizeOf(const X): Integer'),
     ('{$ELSEIF Defined', 'Defined', 'function Defined(Symbol): Boolean'),
     // a $ELSEIF after a taken branch, never evaluated (Alex, 2026-10-09)
-    ('(CInferLevel > 9)', 'CInferLevel', 'const CInferLevel = 3'),
+    ('(CInferLevel > 9)', 'CInferLevel', 'const CInferLevel = 3 ($03)'),
     ('{$ELSEIF Defined', 'INFERNEVER', '{$DEFINE INFERNEVER}'),
     // a unit-qualified intrinsic type, on its name
     ('TInferQual = System.Byte', 'Byte', 'type System.Byte = 0..255'),
@@ -1906,6 +1911,16 @@ begin
   Check(GOk and GResultJson.Contains('"code":"' + LCode + '"') and
     GResultJson.Contains(Format('[%d,10]', [Pos('TDemoColor', LCode)])),
     'and marks TDemoColor in it as a type, the unit qualifier not');
+  // A type's alias is a type position: `= System.Byte` paints Byte (Alex,
+  // 2026-10-13: `FARPROC = Pointer` left Pointer plain).
+  FindPos(LFile, 'TInferQual = System', 'TInferQual', LLine, LChar);
+  Check(Ask('textDocument/hover', PositionParams(LFile, LLine, LChar)),
+    'hover on a type alias answered');
+  LCode := 'type TInferQual = System.Byte';
+  Check(GOk and GResultJson.Contains('"code":"' + LCode + '"') and
+    GResultJson.Contains(Format('[6,10,%d,4]', [Pos('Byte', LCode)])),
+    'and marks the aliased Byte as a type (got ' + Copy(GResultJson,
+    Pos('"code":', GResultJson), 90) + ')');
   // A compiler-intrinsic type reads as the native hint has it, an integer
   // with its range (Alex, 2026-10-07).
   FindPos(LFile, 'TInferWhole =', 'Integer', LLine, LChar);
@@ -2090,8 +2105,8 @@ begin
   Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),
     'hover on a constant answered');
   Check(GOk and GResultJson.Contains('"code":"const CAnswer') and
-    GResultJson.Contains('= 42"'),
-    'and reads const CAnswer ... = 42');
+    GResultJson.Contains('= 42 ($2A)"'),
+    'and reads const CAnswer ... = 42 ($2A)');
   // A parameter as the native hint spells one: `param`, the mode bracketed.
   FindPos(LUnitFile, '+ AName', 'AName', LLine, LChar);
   Check(Ask('textDocument/hover', PositionParams(LUnitFile, LLine, LChar)),

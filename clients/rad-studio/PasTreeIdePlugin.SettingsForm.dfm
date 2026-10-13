@@ -351,6 +351,37 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'RAD Studio (Error Insight)'
           'PasTree (experimental)')
       end
+      object lblInsightManager: TLabel
+        Left = 16
+        Top = 194
+        Width = 128
+        Height = 15
+        Caption = 'Code Insight Manager'
+        FocusControl = cbxInsightManager
+      end
+      object lblInsightManagerHint: TLabel
+        Left = 35
+        Top = 220
+        Width = 405
+        Height = 60
+        Caption =
+          'Who answers code completion, parameter insight and Ctrl+Click as' +
+          ' the IDE'#39's Insight Provider. PasTree registers its manager and s' +
+          'elects it in Tools > Options; switching back restores the provid' +
+          'er it replaced.'
+        WordWrap = True
+      end
+      object cbxInsightManager: TComboBox
+        Left = 170
+        Top = 190
+        Width = 270
+        Height = 23
+        Style = csDropDownList
+        TabOrder = 2
+        Items.Strings = (
+          'RAD Studio (DelphiLSP)'
+          'PasTree (experimental)')
+      end
     end
     object tsDiagnostics: TTabSheet
       Caption = 'Diagnostics'

@@ -25,7 +25,9 @@ unit PasTreeIdePlugin.CodeInsight;
       returning the target to the IDE, which then navigates and keeps history
       itself. That is the migration seam.
     - Hint text (Tooltip Insight) -> AsyncGetHintText over the server's
-      hover, stripped to tooltip plain text by the session.
+      hover, stripped to tooltip plain text by the session - only while
+      Tooltip symbol insight is OFF; with it on, our own popup is the hint
+      and this one is declined (OfferHintInsight).
     - Parameter insight (Ctrl+Shift+Space, '(' and ',') ->
       AsyncInvokeParameterCodeInsight over textDocument/signatureHelp; the
       answer feeds both IOTACodeInsightParameterList views, and the active
@@ -90,6 +92,42 @@ procedure CheckInsightProviderSelected;
 /// </summary>
 function PasTreeIsActiveInsightProvider: Boolean;
 
+/// <summary>
+/// Makes the IDE's Insight Provider agree with the settings' Code Insight
+/// Manager choice (PasTreeInsightManagerEnabled), so the user never has to
+/// find the combobox in Tools > Options > Editor > Source.
+///
+/// THROUGH THE ENVIRONMENT OPTION `InsightManager` (IOTAEnvironmentOptions.
+/// Values), the live switch DeclarationInformation and ErrorInsightLevel are
+/// flipped with. Measured on 37.0 (2026-10-13, AVImark): a string option
+/// (tkLString) holding the selected manager's IDString - "Borland.CodeInsight.
+/// LSP.Pascal" for DelphiLSP. A write reads back at once and is written
+/// through to the registry (`Insight Manager` under Editor\Source Options\
+/// Borland.EditOptions.Pascal) at once; the IDE's CURRENT manager follows
+/// lazily, at the editor's next Code Insight turn - 1 s after the write it
+/// still answered DelphiLSP, at 5 s PasTree, both ways. So "the current
+/// manager is not ours right after the switch" is not a failure.
+///
+/// PasTree: registers the manager (InitializeCodeInsight) if it is not yet,
+/// remembers the IDE's value under our key (SavedInsightManager) BEFORE writing
+/// ours. RAD Studio: puts the remembered value back over OUR value only - a
+/// provider picked in Tools > Options since is the user's. The manager stays
+/// registered until the IDE restarts: unregistering one the IDE may still hold
+/// as current is a crash risk nothing here needs to take. Called after the
+/// dialog saves and once at package load; a value that does not read yet is
+/// asked again by SyncInsightManagerChoice. FinalizeCodeInsight puts the IDE's
+/// value back before unregistering, the marker kept for the next start.
+/// </summary>
+procedure ApplyInsightManagerChoice;
+
+/// <summary>
+/// Retries an ApplyInsightManagerChoice whose option did not read, and hands
+/// its log line to the LSP log once a session can take it. Cheap when there
+/// is nothing to do; called on every editor mouse move, beside
+/// SyncErrorInsightChoice.
+/// </summary>
+procedure SyncInsightManagerChoice;
+
 implementation
 
 uses
@@ -99,6 +137,9 @@ uses
   System.Classes,
   System.Generics.Collections,
   System.Generics.Defaults,
+  System.Variants,
+  System.Win.Registry,
+  Winapi.Windows,
   Vcl.Graphics,
   ToolsAPI,
   ToolsAPI.UI,
@@ -106,7 +147,8 @@ uses
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.DcuNames,
   PasTreeIdePlugin.DcuSource,
-  PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled
+  PasTreeIdePlugin.ResultRows,   // PaintSyntaxTextTyped, EditorSyntaxColor
+  PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled, the type colour
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
   callback SYNCHRONOUSLY when the request cannot even be issued (no server
@@ -118,6 +160,18 @@ uses
   a callback that fires inside that window is deferred one main-thread queue
   pump (ForceQueue), landing after the id has been returned; the normal
   asynchronous path is not delayed by anything. }
+{ Whether this manager answers the IDE's hint (Tooltip Insight) at all. Not
+  while Tooltip symbol insight is ours: that hint is our own popup, shown
+  under every provider, and the IDE's hint is quenched through
+  DeclarationInformation - but only DelphiLSP's. With THIS manager selected
+  the IDE asked it as well, and its plain-text answer ("constant -
+  Winapi.Windows.pas:25534") came up under our popup (Alex, 2026-10-13, the
+  first run with the manager selected since 0.51). }
+function OfferHintInsight: Boolean;
+begin
+  Result := not TooltipSymbolInsightEnabled;
+end;
+
 procedure DeliverToIde(AInInvoke: Boolean; const ADeliver: TProc);
 begin
   if AInInvoke then
@@ -129,6 +183,11 @@ begin
   else
     ADeliver();
 end;
+
+const
+  // GetIDString - and the value the environment option InsightManager is
+  // given to select this manager (ApplyInsightManagerChoice).
+  cOurManagerId = 'PasTreeIdePlugin.CodeInsight';
 
 var
   // The teardown guard for async closures. A completion callback captures
@@ -152,10 +211,17 @@ type
     IOTACodeInsightSymbolList80)
   private
     FAll: TArray<TLspCompletionItem>;
+    // FAll's labels upper-cased once, parallel to it - the filter's haystack.
+    FUpper: TArray<string>;
     FVisible: TArray<Integer>;   // indices into FAll, after SetFilter
+    FFilter: string;             // the last SetFilter's text
     FSortOrder: TOTASortOrder;
     procedure Rebuild(const AFilter: string);
   public
+    { The text the viewer filters by - DrawLine underlines it in each name. }
+    property Filter: string read FFilter;
+    { The type names in the visible row I's detail - DrawLine paints them. }
+    function TypeSpansOf(I: Integer): TArray<Integer>;
     constructor Create(const AItems: TArray<TLspCompletionItem>);
     { IOTACodeInsightSymbolList }
     procedure Clear;
@@ -183,43 +249,77 @@ type
   end;
 
 constructor TPasSymbolList.Create(const AItems: TArray<TLspCompletionItem>);
+var
+  LIdx: Integer;
 begin
   inherited Create;
   FAll := AItems;
   FSortOrder := soAlpha;
   // Sorted ONCE, here: SetFilter runs per keystroke on the UI thread with
-  // whole-RTL-sized lists, and a prefix filter preserves order - so Rebuild
-  // never needs to sort, only scan. (soScope grouping, when it comes, means
-  // a second precomputed permutation, not a per-keystroke sort.)
+  // whole-RTL-sized lists, and both of Rebuild's passes preserve order - so
+  // Rebuild never needs to sort, only scan. (soScope grouping, when it comes,
+  // means a second precomputed permutation, not a per-keystroke sort.)
   TArray.Sort<TLspCompletionItem>(FAll,
     TComparer<TLspCompletionItem>.Construct(
       function(const A, B: TLspCompletionItem): Integer
       begin
         Result := CompareText(A.ItemLabel, B.ItemLabel);
       end));
+  SetLength(FUpper, Length(FAll));
+  for LIdx := 0 to High(FAll) do
+    FUpper[LIdx] := UpperCase(FAll[LIdx].ItemLabel);
   Rebuild('');
 end;
 
+{ BY CONTAINMENT, NOT PREFIX - the native viewer's rule (Alex, 2026-10-13,
+  AVImark): "fas" lists faSysFile, but also iefFast, TIEFastDrawing and
+  CC_FPFASTCALL. Until 0.68.0 this kept only the labels STARTING with the
+  filter, so the list was a fraction of DelphiLSP's for the same text - the
+  server sends every name in scope and never filtered; this did. Prefix
+  matches first, then the rest, each alphabetical, as the native list does. }
 procedure TPasSymbolList.Rebuild(const AFilter: string);
 var
-  LIdx, LCount: Integer;
+  LIdx, LCount, LPos: Integer;
+  LNeedle: string;
+  LInner: TArray<Integer>;
+  LInnerCount: Integer;
 begin
   // Counted growth, not per-element appends: this runs per keystroke and
   // FAll can hold thousands of rows.
   SetLength(FVisible, Length(FAll));
   LCount := 0;
+  if AFilter = '' then
+  begin
+    for LIdx := 0 to High(FAll) do
+      FVisible[LIdx] := LIdx;
+    Exit;
+  end;
+  LNeedle := UpperCase(AFilter);
+  SetLength(LInner, Length(FAll));
+  LInnerCount := 0;
   for LIdx := 0 to High(FAll) do
-    if (AFilter = '') or FAll[LIdx].ItemLabel.StartsWith(AFilter, True) then
+  begin
+    LPos := Pos(LNeedle, FUpper[LIdx]);
+    if LPos = 1 then
     begin
       FVisible[LCount] := LIdx;
       Inc(LCount);
+    end
+    else if LPos > 1 then
+    begin
+      LInner[LInnerCount] := LIdx;
+      Inc(LInnerCount);
     end;
-  SetLength(FVisible, LCount);
+  end;
+  for LIdx := 0 to LInnerCount - 1 do
+    FVisible[LCount + LIdx] := LInner[LIdx];
+  SetLength(FVisible, LCount + LInnerCount);
 end;
 
 procedure TPasSymbolList.Clear;
 begin
   FAll := nil;
+  FUpper := nil;
   FVisible := nil;
 end;
 
@@ -306,8 +406,16 @@ begin
   Result := False;
 end;
 
+function TPasSymbolList.TypeSpansOf(I: Integer): TArray<Integer>;
+begin
+  if (I < 0) or (I > High(FVisible)) then
+    Exit(nil);
+  Result := FAll[FVisible[I]].TypeSpans;
+end;
+
 procedure TPasSymbolList.SetFilter(const FilterText: string);
 begin
+  FFilter := FilterText;
   Rebuild(FilterText);
 end;
 
@@ -349,8 +457,9 @@ begin
     9:      Result := 'unit';        // Module
     10:     Result := 'property';
     14:     Result := 'keyword';
-    20:     Result := 'value';       // EnumMember
-    21:     Result := 'const';
+    // EnumMember: the native list calls an enum value a 'const' (it is one,
+    // typed by its enum); 'value' was ours, and no Delphi word.
+    20, 21: Result := 'const';
     24:     Result := 'operator';
     25:     Result := 'type';        // TypeParameter
   else
@@ -655,9 +764,12 @@ type
   TPasCodeInsightManager = class(TInterfacedObject, IOTACodeInsightManager100,
     IOTACodeInsightManager, IOTACodeInsightSelection,
     IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
-    IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer)
+    IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer,
+    IOTAPrimaryCodeInsightManager)
   private
     FEnabled: Boolean;
+    // GetContext's first call this session went to the log - see there.
+    FContextAsked: Boolean;
     FSymbols: IOTACodeInsightSymbolList;
     // The same object as FSymbols, typed - the callers that need item fields
     // the interface does not expose. The interface reference owns the
@@ -745,6 +857,18 @@ type
     { INTACustomDrawCodeInsightViewer }
     procedure DrawLine(Index: Integer; Canvas: TCanvas; var Rect: TRect;
       DrawingHintText: Boolean; DoDraw: Boolean; var DefaultDraw: Boolean);
+    { IOTAPrimaryCodeInsightManager - see GetContext }
+    function GetContext: TOTACodeCompletionContext;
+    { IDispatch, which IOTAPrimaryCodeInsightManager derives from: nothing
+      here is scriptable, every call answers E_NOTIMPL. }
+    function GetTypeInfoCount(out Count: Integer): HResult; stdcall;
+    function GetTypeInfo(Index, LocaleID: Integer; out TypeInfo): HResult;
+      stdcall;
+    function GetIDsOfNames(const IID: TGUID; Names: Pointer;
+      NameCount, LocaleID: Integer; DispIDs: Pointer): HResult; stdcall;
+    function Invoke(DispID: Integer; const IID: TGUID; LocaleID: Integer;
+      Flags: Word; var Params; VarResult, ExcepInfo, ArgErr: Pointer): HResult;
+      stdcall;
   end;
 
 constructor TPasCodeInsightManager.Create;
@@ -769,7 +893,7 @@ end;
 
 function TPasCodeInsightManager.GetIDString: string;
 begin
-  Result := 'PasTreeIdePlugin.CodeInsight';
+  Result := cOurManagerId;
 end;
 
 function TPasCodeInsightManager.GetDisplayName: string;
@@ -803,7 +927,8 @@ begin
   // #0 completion, #1 parameters (signatureHelp), #2 browse, #3 hints
   // (Tooltip Insight, over the server's hover), plus the trigger characters
   // '.' (completion) and '('/',' (parameter insight re-anchoring).
-  Allow := (Key = #0) or (Key = #1) or (Key = #2) or (Key = #3) or
+  Allow := (Key = #0) or (Key = #1) or (Key = #2) or
+    ((Key = #3) and OfferHintInsight) or
     (Key = '.') or (Key = '(') or (Key = ',');
 end;
 
@@ -1079,8 +1204,9 @@ end;
 function TPasCodeInsightManager.AsyncCanInvoke(
   AInsightType: TOTACodeInsightType): Boolean;
 begin
-  Result := AInsightType in [citCodeInsight, citParameterCodeInsight,
-    citBrowseCodeInsight, citHintCodeInsight];
+  Result := (AInsightType in [citCodeInsight, citParameterCodeInsight,
+    citBrowseCodeInsight]) or
+    ((AInsightType = citHintCodeInsight) and OfferHintInsight);
 end;
 
 function TPasCodeInsightManager.AsyncEnabled: Boolean;
@@ -1276,6 +1402,10 @@ var
   LInInvoke: Boolean;
 begin
   ProbeHelpInsight;
+  // Declined above already while our own hint is on; this is the backstop for
+  // an IDE that asks anyway.
+  if not OfferHintInsight then
+    Exit(-1);
   // Tooltip Insight: the server's hover, as plain text. The position is the
   // HOVERED token's, not the caret's, so the parameters must be trusted -
   // assumed to follow the browse convention confirmed live (1-based line,
@@ -1396,98 +1526,45 @@ begin
   Result := LId;
 end;
 
-{ Draws a parameter list the way the NATIVE completion window colors one
-  (matched against it live, 2026-08-22): parameter names and punctuation in
-  the base text color, TYPE text (between ':' and the next ';'/'='/end) in
-  the warm type accent, default VALUES in blue, the const/var/out modifiers
-  bold like the editor draws reserved words. A flat tokenizer over the
-  signature text is enough - the server sends the declaration's own source
-  span, so the ':'/';'/'=' structure is real Pascal, not a guess. }
-procedure DrawColoredSignature(ACanvas: TCanvas; var AX: Integer;
-  ATop: Integer; const AText: string; ABase, ATypeColor, AValueColor: TColor);
-type
-  TMode = (mName, mType, mDefault);
-
-  procedure Put(const ARun: string; AColor: TColor; ABold: Boolean = False);
-  begin
-    if ARun = '' then
-      Exit;
-    if ABold then
-      ACanvas.Font.Style := [TFontStyle.fsBold];
-    ACanvas.Font.Color := AColor;
-    ACanvas.TextOut(AX, ATop, ARun);
-    Inc(AX, ACanvas.TextWidth(ARun));
-    if ABold then
-      ACanvas.Font.Style := [];
-  end;
-
+{ A detail's overload tail ` (+N)` cut off into ATail - it is ours, not code,
+  and is drawn dim. Matched from the END: a parameter list could contain a
+  literal ' (+' of its own. }
+procedure SplitOverloadTail(var ADetail: string; out ATail: string);
 var
-  LIdx, LFrom: Integer;
-  LMode: TMode;
-  LRun: string;
+  LCut: Integer;
 begin
-  LMode := mName;
-  LIdx := 1;
-  while LIdx <= Length(AText) do
+  ATail := '';
+  LCut := ADetail.LastIndexOf(' (+');
+  if (LCut >= 0) and ADetail.EndsWith(')') and
+     (LCut >= ADetail.Length - 8) then
   begin
-    if CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
-    begin
-      LFrom := LIdx;
-      while (LIdx <= Length(AText)) and
-            CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
-        Inc(LIdx);
-      LRun := Copy(AText, LFrom, LIdx - LFrom);
-      case LMode of
-        mType:
-          Put(LRun, ATypeColor);
-        mDefault:
-          Put(LRun, AValueColor);
-      else
-        // The parameter-group modifiers read as reserved words: bold.
-        if SameText(LRun, 'const') or SameText(LRun, 'var') or
-           SameText(LRun, 'out') then
-          Put(LRun, ABase, True)
-        else
-          Put(LRun, ABase);
-      end;
-    end
-    else
-    begin
-      case AText[LIdx] of
-        ':': LMode := mType;
-        ';': LMode := mName;
-        '=': LMode := mDefault;
-      end;
-      // 'array of', 'TArray<Integer>' - keep type-mode spaces/brackets in
-      // the type color so a compound type reads as one colored phrase.
-      if (LMode = mType) and (AText[LIdx] <> ':') then
-        Put(AText[LIdx], ATypeColor)
-      else
-        Put(AText[LIdx], ABase);
-      Inc(LIdx);
-    end;
+    ATail := ADetail.Substring(LCut);
+    ADetail := ADetail.Substring(0, LCut);
   end;
 end;
 
-{ The rich-coloring pass (COMPLETION.md's deferred-polish item, delivered
-  2026-08-22): the stock renderer draws every row in one color; the native
-  DelphiLSP window dims the class word and colors the type text. This draw
-  reproduces the STOCK LAYOUT exactly - fixed class column, bold name, the
-  type text glued after it - and only takes over the COLORS: class word and
-  the ': ' / '(+N)' furniture dimmed (clGrayText), parameter names base,
-  type text in the IDE's theme-aware blue (DrawColoredSignature). On the
-  selected row everything stays the viewer's own highlight color: contrast
-  beats decoration there, which is also what the native window does. }
+{ The row as the hover hint paints a declaration (Alex, 2026-10-13: "paint
+  everything the way the tooltips do"): the stock LAYOUT - fixed class
+  column, bold name, the detail glued after it - with the hint's COLOURS. The
+  class word in the editor's reserved-word colour; the detail through
+  PaintSyntaxTextTyped, the editor's own palette for keywords, numbers,
+  strings and symbols, with the type names the server marked (data.typeSpans)
+  in the Highlighting tab's colour and style. Until 0.68.0 a hand-rolled
+  tokenizer coloured `:`-to-`;` in a violet and values in blue, which matched
+  neither the editor nor the hint. Colours stay on the selected row, as the
+  native window keeps them. }
 procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
   var Rect: TRect; DrawingHintText: Boolean; DoDraw: Boolean;
   var DefaultDraw: Boolean);
 const
   cPad = 4;
 var
-  LClass, LName, LDetail, LParamsText, LTypeText, LTail: string;
-  LColWidth, LX, LTop, LCut: Integer;
-  LUI: INTAIDEUIServices;
-  LBase, LDim, LTypeColor, LValueColor: TColor;
+  LClass, LName, LDetail, LTail: string;
+  LColWidth, LX, LTop, LMatch: Integer;
+  LRun: string;
+  LBase, LDim, LTypeColor: TColor;
+  LTypeStyle: TFontStyles;
+  LSpans: TArray<Integer>;
 begin
   // FShownSymbols, NOT FSymbols - the list the viewer is actually painting,
   // for the same reason Done and GetHelpInsightHtml read it: a late async
@@ -1507,6 +1584,9 @@ begin
   LClass := FShownSymbols.SymbolClassText[Index];
   LName := FShownSymbols.SymbolText[Index];
   LDetail := FShownSymbols.SymbolTypeText[Index];
+  LSpans := nil;
+  if Assigned(FShownObj) then
+    LSpans := FShownObj.TypeSpansOf(Index);
 
   // The class column is fixed-width - rows must align down the list, and
   // 'constructor' is the widest word the column ever holds.
@@ -1515,11 +1595,16 @@ begin
 
   if not DoDraw then
   begin
+    // Measured with the runs' own styles - a bold `const` in a parameter
+    // list is wider than a plain TextWidth of the detail.
     Canvas.Font.Style := [TFontStyle.fsBold];
     LX := Canvas.TextWidth(LName);
+    SplitOverloadTail(LDetail, LTail);
+    PaintSyntaxTextTyped(Canvas, LX, 0, LDetail, Canvas.Font.Color,
+      LSpans, TypeHighlightColor, TypeHighlightStyle, False);
     Canvas.Font.Style := [];
-    Rect.Right := Rect.Left + LColWidth + LX + Canvas.TextWidth(LDetail)
-      + 3 * cPad;
+    Inc(LX, Canvas.TextWidth(LTail));
+    Rect.Right := Rect.Left + LColWidth + LX + 3 * cPad;
     Exit;
   end;
 
@@ -1530,82 +1615,68 @@ begin
   // "disappearing" on selection.
   LBase := Canvas.Font.Color;
   LDim := clNavy;
-  LTypeColor := LBase;
-  LValueColor := LBase;
-  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-  begin
-    // The native palette: types in the warm accent, values in blue - both
-    // theme-aware so the dark theme gets its own variants.
-    LTypeColor := LUI.ThemeAwareColors[itcViolet];
-    LValueColor := clBlue;
-  end;
+  // Type names as the hint paints them: the Highlighting tab's colour and
+  // style, or the editor's identifier colour when type colouring is off.
+  if TypeHighlightEnabled then
+    LTypeColor := TypeHighlightColor
+  else
+    LTypeColor := clNone;
+  LTypeStyle := TypeHighlightStyle;
 
   LTop := Rect.Top + (Rect.Height - Canvas.TextHeight('Ag')) div 2;
   LX := Rect.Left + cPad;
 
-  Canvas.Font.Color := LDim;
+  // The class word in the editor's reserved-word colour, as the hint draws
+  // its lead - regular weight, so the fixed column measured above holds.
+  Canvas.Font.Color := EditorSyntaxColor(atReservedWord, LDim);
   Canvas.TextOut(LX, LTop, LClass);
   LX := Rect.Left + LColWidth;
 
+  // The name, bold, with the part the filter matched UNDERLINED - the native
+  // window's mark, and the only way to see why a row whose name does not start
+  // with the typed text is listed (the filter matches anywhere, see
+  // TPasSymbolList.Rebuild). Drawn in three runs so the underline covers the
+  // match alone; a name without one (no filter yet) is a single run.
   Canvas.Font.Color := LBase;
   Canvas.Font.Style := [TFontStyle.fsBold];
-  Canvas.TextOut(LX, LTop, LName);
-  Inc(LX, Canvas.TextWidth(LName));
+  LMatch := 0;
+  if Assigned(FShownObj) and (FShownObj.Filter <> '') then
+    LMatch := Pos(UpperCase(FShownObj.Filter), UpperCase(LName));
+  if LMatch > 0 then
+  begin
+    LRun := Copy(LName, 1, LMatch - 1);
+    Canvas.TextOut(LX, LTop, LRun);
+    Inc(LX, Canvas.TextWidth(LRun));
+    LRun := Copy(LName, LMatch, Length(FShownObj.Filter));
+    Canvas.Font.Style := [TFontStyle.fsBold, TFontStyle.fsUnderline];
+    Canvas.TextOut(LX, LTop, LRun);
+    Inc(LX, Canvas.TextWidth(LRun));
+    Canvas.Font.Style := [TFontStyle.fsBold];
+    LRun := Copy(LName, LMatch + Length(FShownObj.Filter), MaxInt);
+    Canvas.TextOut(LX, LTop, LRun);
+    Inc(LX, Canvas.TextWidth(LRun));
+  end
+  else
+  begin
+    Canvas.TextOut(LX, LTop, LName);
+    Inc(LX, Canvas.TextWidth(LName));
+  end;
   Canvas.Font.Style := [];
 
   if LDetail <> '' then
   begin
-    { The Detail shapes the server sends: '(params)', '(params): T', ': T' -
-      each optionally tailed by ' (+N)'. Split into params (base color,
-      regular weight - they are code, like the native window draws them),
-      ': ' furniture and the overload tail (dim), and the TYPE name (accent).
-      The tail is matched from the END: a parameter list could contain a
-      literal ' (+' of its own. }
-    LTail := '';
-    LCut := LDetail.LastIndexOf(' (+');
-    if (LCut >= 0) and LDetail.EndsWith(')') and
-       (LCut >= LDetail.Length - 8) then
-    begin
-      LTail := LDetail.Substring(LCut);
-      LDetail := LDetail.Substring(0, LCut);
-    end;
-    LParamsText := '';
-    LTypeText := '';
-    if LDetail.StartsWith('(') then
-    begin
-      LCut := LDetail.LastIndexOf('): ');
-      if LCut >= 0 then
-      begin
-        LParamsText := LDetail.Substring(0, LCut + 1);
-        LTypeText := LDetail.Substring(LCut + 3);
-      end
-      else
-        LParamsText := LDetail;
-    end
-    else if LDetail.StartsWith(': ') then
-      LTypeText := LDetail.Substring(2)
-    else
-      LParamsText := LDetail;   // unknown shape: draw plainly, never lose it
-
-    if LParamsText <> '' then
-      DrawColoredSignature(Canvas, LX, LTop, LParamsText, LBase, LTypeColor,
-        LValueColor);
-    if LTypeText <> '' then
-    begin
-      Canvas.Font.Color := LBase;   // ': ' is code furniture, like native
-      Canvas.TextOut(LX, LTop, ': ');
-      Inc(LX, Canvas.TextWidth(': '));
-      Canvas.Font.Color := LTypeColor;
-      Canvas.TextOut(LX, LTop, LTypeText);
-      Inc(LX, Canvas.TextWidth(LTypeText));
-    end;
+    SplitOverloadTail(LDetail, LTail);
+    PaintSyntaxTextTyped(Canvas, LX, LTop, LDetail, LBase, LSpans,
+      LTypeColor, LTypeStyle, True);
     if LTail <> '' then
     begin
       Canvas.Font.Color := LDim;   // '(+N)' is ours, not code - stays dim
+      Canvas.Font.Style := [];
       Canvas.TextOut(LX, LTop, LTail);
     end;
   end;
   Canvas.Font.Color := LBase;   // leave the canvas the way the viewer set it
+  Canvas.Font.Style := [];
 end;
 
 procedure TPasCodeInsightManager.AsyncParameterCodeInsightParamIndex(
@@ -1647,6 +1718,54 @@ begin
     FActiveHintId := 0;
   if FActiveParamId = AId then
     FActiveParamId := 0;
+end;
+
+{ THE PRIMARY-MANAGER CONTRACT. ToolsAPI documents that alternate managers -
+  Code Templates is one, registered beside every provider - "may query the
+  current manager from the services to get invocation context information"
+  through IOTAPrimaryCodeInsightManager. Until 0.68.0 this manager did not
+  implement it, and with PasTree selected the IDE crashed twice in the Code
+  Templates manager's own GetHelpInsightHtml, from the completion list's
+  Help Insight timer (Alex, 2026-10-13; our BPL was not on the stack, and no
+  AV was seen while DelphiLSP, a primary manager, was selected). ccAny - the
+  invocation filters nothing - is the honest answer for a list that offers
+  every name in scope. The first question of a session is logged, so whether
+  the templates manager really asks is on record. }
+function TPasCodeInsightManager.GetContext: TOTACodeCompletionContext;
+begin
+  Result := ccAny;
+  if not FContextAsked then
+  begin
+    FContextAsked := True;
+    LspLogToServer('code insight: an alternate manager asked the invocation'
+      + ' context (IOTAPrimaryCodeInsightManager), answered ccAny');
+  end;
+end;
+
+function TPasCodeInsightManager.GetTypeInfoCount(out Count: Integer): HResult;
+begin
+  Count := 0;
+  Result := E_NOTIMPL;
+end;
+
+function TPasCodeInsightManager.GetTypeInfo(Index, LocaleID: Integer;
+  out TypeInfo): HResult;
+begin
+  Pointer(TypeInfo) := nil;
+  Result := E_NOTIMPL;
+end;
+
+function TPasCodeInsightManager.GetIDsOfNames(const IID: TGUID;
+  Names: Pointer; NameCount, LocaleID: Integer; DispIDs: Pointer): HResult;
+begin
+  Result := E_NOTIMPL;
+end;
+
+function TPasCodeInsightManager.Invoke(DispID: Integer; const IID: TGUID;
+  LocaleID: Integer; Flags: Word; var Params; VarResult, ExcepInfo,
+  ArgErr: Pointer): HResult;
+begin
+  Result := E_NOTIMPL;
 end;
 
 function TPasCodeInsightManager.ShowCalculating: Boolean;
@@ -1699,10 +1818,218 @@ begin
     and SameText(LCurrent.GetIDString, GManager.GetIDString);
 end;
 
+{ ---------------------------------------------------------------------------
+  Selecting the Insight Provider - see ApplyInsightManagerChoice
+  --------------------------------------------------------------------------- }
+
+const
+  cEnvInsightManager = 'InsightManager';
+  // What RAD Studio selects for Delphi, put back when nothing was remembered.
+  cDelphiLspManagerId = 'Borland.CodeInsight.LSP.Pascal';
+  // Under <BaseRegistryKey>\PasTree, the settings' own key.
+  cSettingsKey = 'PasTree';
+  cValueSavedInsightManager = 'SavedInsightManager';
+  cApplyRetryMs = 1000;
+
+var
+  // ApplyInsightManagerChoice's option did not read: retried no sooner than
+  // GProviderRetryAt by SyncInsightManagerChoice. Reported once.
+  GProviderPending: Boolean = False;
+  GProviderRetryAt: UInt64 = 0;
+  GProviderUnreadableNoted: Boolean = False;
+  // The last line for the LSP log, until a session takes it - the call at
+  // package load runs before any project is open.
+  GProviderLogLine: string = '';
+
+procedure ProviderLog(const AText: string);
+begin
+  GProviderLogLine := 'insight provider: ' + AText;
+  if LspLogToServer(GProviderLogLine) then
+    GProviderLogLine := '';
+end;
+
+{ A failure: the provider the IDE uses now disagrees with the settings, so
+  it is worth the Build tab as well as the log. }
+procedure ProviderFailure(const AText: string);
+var
+  LMessages: IOTAMessageServices;
+begin
+  if Supports(BorlandIDEServices, IOTAMessageServices, LMessages) then
+    LMessages.AddTitleMessage('[pastree] could not set the Insight Provider: '
+      + AText);
+  ProviderLog('FAILED: ' + AText);
+end;
+
+function EnvOptions: IOTAEnvironmentOptions;
+var
+  LServices: IOTAServices;
+begin
+  Result := nil;
+  if Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Result := LServices.GetEnvironmentOptions;
+end;
+
+function OpenOurKey(AReg: TRegistry): Boolean;
+var
+  LServices: IOTAServices;
+begin
+  Result := False;
+  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Exit;
+  AReg.RootKey := HKEY_CURRENT_USER;
+  Result := AReg.OpenKey(IncludeTrailingPathDelimiter(
+    LServices.GetBaseRegistryKey) + cSettingsKey, True);
+end;
+
+function ReadSavedManager: string;
+var
+  LReg: TRegistry;
+begin
+  Result := '';
+  LReg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    if OpenOurKey(LReg) and LReg.ValueExists(cValueSavedInsightManager) then
+      Result := LReg.ReadString(cValueSavedInsightManager);
+  finally
+    LReg.Free;
+  end;
+end;
+
+{ '' deletes the marker. }
+procedure WriteSavedManager(const AValue: string);
+var
+  LReg: TRegistry;
+begin
+  LReg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    if OpenOurKey(LReg) then
+      if AValue = '' then
+        LReg.DeleteValue(cValueSavedInsightManager)
+      else
+        LReg.WriteString(cValueSavedInsightManager, AValue);
+  finally
+    LReg.Free;
+  end;
+end;
+
+{ The provider PasTree replaced: the marker, or DelphiLSP without one. }
+function ManagerToRestore: string;
+begin
+  Result := ReadSavedManager;
+  if (Result = '') or SameText(Result, cOurManagerId) then
+    Result := cDelphiLspManagerId;
+end;
+
+procedure ApplyInsightManagerChoice;
+var
+  LWant: Boolean;
+  LOptions: IOTAEnvironmentOptions;
+  LBefore, LAfter, LRestore: string;
+begin
+  GProviderPending := False;
+  try
+    LWant := PasTreeInsightManagerEnabled;
+    // Nothing of ours anywhere: nothing to do or say.
+    if not LWant and not Assigned(GManager) and (ReadSavedManager = '') then
+      Exit;
+    if LWant and not Assigned(GManager) then
+      InitializeCodeInsight;
+    LOptions := EnvOptions;
+    LBefore := '';
+    if Assigned(LOptions) then
+      LBefore := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
+    if LBefore = '' then
+    begin
+      // A value we cannot read is one we cannot put back: leave the IDE's
+      // provider alone for now and ask again - it may not be loaded yet.
+      GProviderPending := True;
+      GProviderRetryAt := GetTickCount64 + cApplyRetryMs;
+      if not GProviderUnreadableNoted then
+      begin
+        GProviderUnreadableNoted := True;
+        ProviderLog('the IDE''s ' + cEnvInsightManager
+          + ' does not read yet - asked again');
+      end;
+      Exit;
+    end;
+    if LWant then
+    begin
+      if SameText(LBefore, cOurManagerId) then
+      begin
+        ProviderLog('PasTree, already selected');
+        Exit;
+      end;
+      // Remembered BEFORE the switch: the other order, interrupted, loses
+      // the user's provider.
+      WriteSavedManager(LBefore);
+      LOptions.Values[cEnvInsightManager] := cOurManagerId;
+      LAfter := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
+      if SameText(LAfter, cOurManagerId) then
+        ProviderLog('PasTree selected in place of "' + LBefore + '"')
+      else
+        ProviderFailure('"' + cOurManagerId + '" was written over "' + LBefore
+          + '" and the option reads "' + LAfter + '"');
+    end
+    else
+    begin
+      // Only over OUR value: a provider the user has picked since in
+      // Tools > Options is theirs, and wins.
+      if SameText(LBefore, cOurManagerId) then
+      begin
+        LRestore := ManagerToRestore;
+        LOptions.Values[cEnvInsightManager] := LRestore;
+        ProviderLog('RAD Studio - put back "' + LRestore + '"; PasTree stays'
+          + ' registered until the IDE restarts');
+      end
+      else
+        ProviderLog('RAD Studio - "' + LBefore + '" is the user''s, kept');
+      WriteSavedManager('');
+    end;
+  except
+    on E: Exception do
+      ProviderFailure(E.ClassName + ': ' + E.Message);
+  end;
+end;
+
+procedure SyncInsightManagerChoice;
+begin
+  if (GProviderLogLine <> '') and LspLogToServer(GProviderLogLine) then
+    GProviderLogLine := '';
+  if GProviderPending and (GetTickCount64 >= GProviderRetryAt) then
+    ApplyInsightManagerChoice;
+end;
+
+{ At unload: the IDE's own provider back over ours, the marker kept. The
+  option writes through to the registry at once (measured 2026-10-13), so
+  without this an IDE started without the package would find a provider that
+  does not exist; with it, the next start selects PasTree again. }
+procedure RestoreProviderAtUnload;
+var
+  LOptions: IOTAEnvironmentOptions;
+  LRestore: string;
+begin
+  try
+    LOptions := EnvOptions;
+    if not Assigned(LOptions) or not SameText(Trim(VarToStrDef(
+      LOptions.Values[cEnvInsightManager], '')), cOurManagerId) then
+      Exit;
+    LRestore := ManagerToRestore;
+    LOptions.Values[cEnvInsightManager] := LRestore;
+    LspLogToServer('insight provider: unload - put back "' + LRestore + '"');
+  except
+    // Unload: nobody to tell, and nothing worth an exception into the IDE.
+  end;
+end;
+
 procedure FinalizeCodeInsight;
 var
   LServices: IOTACodeInsightServices;
 begin
+  GProviderPending := False;
+  // Before the unregister: the IDE must not be left selecting a manager that
+  // is about to be gone.
+  if Assigned(GManager) then
+    RestoreProviderAtUnload;
   GAlive := False;
   if GManagerIndex >= 0 then
   begin

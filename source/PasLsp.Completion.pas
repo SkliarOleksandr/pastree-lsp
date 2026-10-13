@@ -49,6 +49,10 @@ type
     ItemLabel: string;   // "Label" collides with the Delphi keyword
     Kind: Integer;       // LSP CompletionItemKind
     Detail: string;      // ': <declared type>' [' (+N)'] - display-verbatim
+    // The type names in Detail as 1-based (column, length) pairs - what the
+    // hover's typeSpans are for its line, so the RAD list paints a row's
+    // types as the hint does (DetailTypeSpans).
+    TypeSpans: TArray<Integer>;
     SortText: string;    // bucket-ranked; see BucketSort
     { The routine's own head keyword ('constructor', 'operator', ...) when
       the engine knows one - richer than any LSP kind, so it rides the item's
@@ -381,6 +385,62 @@ begin
     Result := CapDisplay(AModel.Tree.NodeSpanText(LInit));
 end;
 
+{ `$` and the hex digits of ANum, upper-case, padded to whole bytes. }
+function HexOf(ANum: UInt64): string;
+begin
+  Result := IntToHex(ANum, 2);
+  if Odd(Length(Result)) then
+    Result := '0' + Result;
+  Result := '$' + Result;
+end;
+
+{ A constant's value with the number in the other base after it (Alex,
+  2026-10-13): `16` reads `16 ($10)`, `$FF` reads `$FF (255)` - a literal,
+  converted from its own text, so all 64 bits are exact. Any other initializer
+  is shown with what PasTree's constant evaluator folds it to (AFolded,
+  AFoldedValue - TPasSemaProject.ConstOrdinalOf), in both bases:
+  `1 shl 4 (16, $10)`, `CBase + 2 (18, $12)`; a negative one in decimal only,
+  `-CStep (-4)`, since its hex depends on a type the row does not name. Not
+  folded (a string, a real, an expression the evaluator refuses): as written. }
+function WithOtherRadix(const AValue: string; AFolded: Boolean;
+  AFoldedValue: Int64): string;
+var
+  LText: string;
+  LNum: UInt64;
+  LIdx: Integer;
+  LLiteral: Boolean;
+begin
+  Result := AValue;
+  LText := Trim(AValue);
+  if LText = '' then
+    Exit;
+  if LText[1] = '$' then
+  begin
+    LLiteral := Length(LText) >= 2;
+    for LIdx := 2 to Length(LText) do
+      if not CharInSet(LText[LIdx], ['0'..'9', 'A'..'F', 'a'..'f']) then
+        LLiteral := False;
+    if LLiteral and TryStrToUInt64(LText, LNum) then
+      Exit(AValue + ' (' + UIntToStr(LNum) + ')');
+  end
+  else
+  begin
+    LLiteral := True;
+    for LIdx := 1 to Length(LText) do
+      if not CharInSet(LText[LIdx], ['0'..'9']) then
+        LLiteral := False;
+    if LLiteral and TryStrToUInt64(LText, LNum) then
+      Exit(AValue + ' (' + HexOf(LNum) + ')');
+  end;
+  if not AFolded then
+    Exit;
+  if AFoldedValue >= 0 then
+    Result := AValue + ' (' + IntToStr(AFoldedValue) + ', '
+      + HexOf(UInt64(AFoldedValue)) + ')'
+  else
+    Result := AValue + ' (' + IntToStr(AFoldedValue) + ')';
+end;
+
 { The head of a type DEFINITION for a completion row: the whole span for the
   small shapes ('tagABC', '0..255', 'set of TFoo', 'procedure of object'),
   the head word plus heritage for the struct kinds - their span is an entire
@@ -599,6 +659,8 @@ begin
     FSourceManager.SetBuffer(APaths[LIdx], ATexts[LIdx]);
 end;
 
+function EnumValueText(AModel: TPasSemaModel; ASym: Integer): string; forward;
+
 { What a completion row says after its name - and, from the hover, what
   follows a symbol's name in its one-line signature: a routine's parameter
   list and result type, a variable's or field's declared type, a constant's
@@ -615,6 +677,8 @@ var
   LTypeSym, LDecl: Integer;
   LItemModel: TPasSemaModel;
   LSig: TPasBuiltinSig;
+  LFolded: Boolean;
+  LFoldedValue: Int64;
 begin
   Result := '';
   LParamsText := ACompletion.ItemParamsText(AItem);
@@ -699,8 +763,14 @@ begin
             if LDecl <> NIL_NODE then
             begin
               LText := ConstValueText(LItemModel, LDecl);
+              // Folded through the project only: an overlay symbol (the
+              // edited file's own) has no project mid, and its literal is
+              // still converted from the text.
+              LFolded := (AItem.Mid >= 0) and (AProject <> nil) and
+                AProject.ConstOrdinalOf(AItem.Mid, AItem.Sym, LFoldedValue);
               if LText <> '' then
-                Result := Result + ' = ' + LText;
+                Result := Result + ' = '
+                  + WithOtherRadix(LText, LFolded, LFoldedValue);
             end;
           end;
         skVar, skField, skParam, skProperty:
@@ -715,6 +785,18 @@ begin
                 Result := ': '
                   + CapDisplay(LItemModel.Tree.NodeSpanText(LDecl));
             end;
+          end;
+        // An enum value its ordinal cast to its enum, `= TIEFastDrawing(0)`,
+        // as the native list and our hover write it - the row was bare.
+        skEnumValue:
+          begin
+            LText := EnumValueText(LItemModel, AItem.Sym);
+            LTypeSym := LItemModel.Symbols[AItem.Sym].TypeSym;
+            if (LText <> '') and (LTypeSym <> NIL_SYM) then
+              Result := ' = ' + LItemModel.Symbols[LTypeSym].Name + '('
+                + LText + ')'
+            else if LText <> '' then
+              Result := ' = ' + LText;
           end;
         skRoutine:
           if (sfBuiltin in
@@ -761,6 +843,22 @@ begin
   end;
 end;
 
+{ A word that opens a type DEFINITION rather than naming a type - what an
+  alias check after `=` must not take for the alias. }
+function IsTypeHeadWord(const AWord: string): Boolean;
+const
+  cHeads: array[0..12] of string = ('class', 'record', 'interface',
+    'dispinterface', 'object', 'packed', 'array', 'set', 'file', 'procedure',
+    'function', 'reference', 'type');
+var
+  LHead: string;
+begin
+  for LHead in cHeads do
+    if SameText(AWord, LHead) then
+      Exit(True);
+  Result := False;
+end;
+
 { The identifiers of ASig that name types, as 1-based (column, length) pairs:
   one right after a `:` or `of`, the owner qualifier in front of the dot, for
   a type its own name and the ancestors in `class(...)` / `interface(...)`,
@@ -770,7 +868,9 @@ end;
   (Alex, 2026-10-07). Of a dotted name only the segment that is the type is
   marked, never the unit qualifier in front of it. A heuristic over text the
   server composed itself, where those are the only places a type can stand -
-  the hover paints them in the type colour as the editor would. }
+  the hover paints them in the type colour as the editor would. A type's
+  alias after its `=` (or `= type`) and a pointer's target after `^` are
+  type positions too. }
 function SignatureTypeSpans(const ASig: string; AOwnerLen, ANameStart,
   ANameLen: Integer; AIsType: Boolean;
   const AKnownType: string = ''): TArray<Integer>;
@@ -811,11 +911,18 @@ begin
       // Inside a generic's angle brackets every argument is a type -
       // `TEnumerable<TPair<K,V>>` paints TPair, K and V alike (Alex,
       // 2026-10-07: only V was, by the heritage list's comma).
-      LTypePos := ((LPrev >= 1) and (ASig[LPrev] = ':')) or
+      LTypePos := ((LPrev >= 1) and CharInSet(ASig[LPrev], [':', '^'])) or
         SameText(LPrevWord, 'of') or
         ((LAngle > 0) and (LPrev >= 1) and CharInSet(ASig[LPrev], ['<', ','])) or
         (LInHeritage and (LAngle = 0) and (LPrev >= 1) and
-         CharInSet(ASig[LPrev], ['(', ',']));
+         CharInSet(ASig[LPrev], ['(', ','])) or
+        // A type's alias: `FARPROC = Pointer`, `TBase2 = type TBase` (Alex,
+        // 2026-10-13: Pointer stayed uncoloured). Not a subrange's bound
+        // (`CMin..CMax`, one dotted word here) and not the head word of a
+        // definition (`= class(`, `= record`).
+        (AIsType and (LAngle = 0) and not LInHeritage and (LPrev >= 1) and
+         ((ASig[LPrev] = '=') or SameText(LPrevWord, 'type')) and
+         (Pos('..', LWord) = 0) and not IsTypeHeadWord(LWord));
       // Segment by segment: in a type position the last one is the type, and
       // a segment spelled AKnownType is one wherever it stands.
       LLastSeg := LFrom;
@@ -1246,6 +1353,40 @@ begin
     Length(LItem.Name), LItem.Kind = skType, LKnownType);
 end;
 
+{ The type names in a completion row's detail, by the hover's own heuristic:
+  SignatureTypeSpans over the name and the detail as one line (`TFoo = class(
+  TBase)` needs the name before it to read the heritage list), the name's own
+  span dropped and the rest re-based onto the detail. An enum value's detail
+  `= TIEFastDrawing(0)` names its type where no `:` precedes it, so that name
+  is passed as the known type. }
+function DetailTypeSpans(const AName, ADetail: string;
+  AKind: TSemaSymbolKind): TArray<Integer>;
+var
+  LSpans: TArray<Integer>;
+  LKnown: string;
+  LIdx, LOpen: Integer;
+begin
+  Result := nil;
+  if ADetail = '' then
+    Exit;
+  LKnown := '';
+  if (AKind = skEnumValue) and ADetail.StartsWith(' = ') then
+  begin
+    LOpen := Pos('(', ADetail);
+    if LOpen > 4 then
+      LKnown := Copy(ADetail, 4, LOpen - 4);
+  end;
+  LSpans := SignatureTypeSpans(AName + ADetail, 0, 1, Length(AName),
+    AKind = skType, LKnown);
+  LIdx := 0;
+  while LIdx + 1 < Length(LSpans) do
+  begin
+    if LSpans[LIdx] > Length(AName) then
+      Result := Result + [LSpans[LIdx] - Length(AName), LSpans[LIdx + 1]];
+    Inc(LIdx, 2);
+  end;
+end;
+
 function TLspCompletionEngine.CompleteAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
   AProjectMid: Integer): TLspCompletionAnswer;
@@ -1348,6 +1489,8 @@ begin
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail
             + Format(' (+%d)', [LItems[LIdx].Overloads]);
+        LEntry.TypeSpans := DetailTypeSpans(LEntry.ItemLabel, LEntry.Detail,
+          LItems[LIdx].Kind);
         LEntry.SortText := BucketSort(LItems[LIdx].Bucket, LItems[LIdx].Name);
         Result.Items[LIdx] := LEntry;
       end;

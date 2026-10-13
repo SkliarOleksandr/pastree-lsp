@@ -8,7 +8,7 @@ moved. Every feature that replaces or adds to a native command has its own
 on/off switch in **Tools > PasTree > Settings**.
 
 The last section covers the features that are only reachable when you select
-**PasTree** as the Insight Provider under Tools > Options > Editor > Source.
+**PasTree** as the Code Insight Manager in Tools > PasTree > Settings.
 
 ## Navigation
 
@@ -431,11 +431,14 @@ changed is written. On by default, its own switch on the IDE Fixes tab.
 ## Through the Code Insight Manager
 
 These are the features RAD Studio routes through whichever Insight Provider is
-selected. They are inactive until you pick **PasTree** under
-Tools > Options > Editor > Source > Insight Provider, and switching back to
-DelphiLSP is the same combobox. Registration alone takes nothing over - the
-manager only answers once it is selected - and that selection is the step people
-most often miss.
+selected. They are inactive until you choose **PasTree (experimental)** as the
+**Code Insight Manager** on the Code Insight tab of Tools > PasTree > Settings:
+that registers the manager and selects it as the IDE's Insight Provider (the
+combobox under Tools > Options > Editor > Source), and switching back to
+RAD Studio restores the provider it replaced. The IDE moves to the new provider
+at its next Code Insight turn, a few seconds at most. The manager is not
+registered at all while RAD Studio is chosen, so PasTree does not appear in the
+IDE's combobox then.
 
 Note the trade this asks for: RAD Studio gates part of its own editor UI on
 DelphiLSP being the selected provider, which is exactly why Ctrl+Click

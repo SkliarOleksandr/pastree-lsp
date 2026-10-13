@@ -3344,6 +3344,7 @@ end;
 function CompletionDataJson(const AItem: TLspCompletionEntry): string;
 var
   LHtml: string;
+  LIdx: Integer;
 begin
   Result := '';
   if AItem.HeadWord <> '' then
@@ -3366,6 +3367,21 @@ begin
     if Result <> '' then
       Result := Result + ',';
     Result := Result + '"docHtml":' + JsonQuote(LHtml);
+  end;
+  // The type names in `detail` (1-based column/length pairs), for the RAD
+  // list to paint them as the hover does.
+  if Length(AItem.TypeSpans) > 0 then
+  begin
+    if Result <> '' then
+      Result := Result + ',';
+    Result := Result + '"typeSpans":[';
+    for LIdx := 0 to High(AItem.TypeSpans) do
+    begin
+      if LIdx > 0 then
+        Result := Result + ',';
+      Result := Result + IntToStr(AItem.TypeSpans[LIdx]);
+    end;
+    Result := Result + ']';
   end;
   if Result <> '' then
     Result := ',"data":{' + Result + '}';

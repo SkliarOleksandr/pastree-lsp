@@ -256,6 +256,15 @@ function LogAllIdeCrashes: Boolean;
 function PasTreeErrorSquigglesEnabled: Boolean;
 
 /// <summary>
+/// Code Insight tab (0.68.0, labelled experimental): whether PasTree's Code
+/// Insight manager is registered and selected as the IDE's Insight Provider
+/// through the environment option InsightManager - see
+/// PasTreeIdePlugin.CodeInsight's ApplyInsightManagerChoice. Default False:
+/// DelphiLSP stays the provider unless the user asks.
+/// </summary>
+function PasTreeInsightManagerEnabled: Boolean;
+
+/// <summary>
 /// IDE Fixes tab: whether the form designer is kept from writing ExplicitLeft/
 /// Top/Width/Height into form files (PasTreeIdePlugin.DfmExplicitFix). ON BY
 /// DEFAULT - see this unit's header. NOT read at the point of use: it is a
@@ -388,6 +397,8 @@ type
     // False = the IDE's Error Insight draws the error underlines, True = we
     // do (and the IDE's level is set to None) - see ApplyErrorInsightChoice.
     PasTreeErrorSquiggles: Boolean;
+    // Code Insight tab - see PasTreeInsightManagerEnabled. Default False.
+    PasTreeInsightManager: Boolean;
     // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
     DfmNoExplicitProps: Boolean;
     // IDE Fixes tab - see DfmNoDefaultStyleElements. Default True.
@@ -442,6 +453,9 @@ uses
   PasTreeIdePlugin.DfmExplicitFix,
   PasTreeIdePlugin.DfmStyleElementsFix,
   PasTreeIdePlugin.CrashLog,
+  // ApplyInsightManagerChoice after a save - the same implementation-only
+  // cycle as the form's.
+  PasTreeIdePlugin.CodeInsight,
   // LspLogToServer only, for SyncErrorInsightChoice's line.
   PasTreeIdePlugin.LspSession;
 
@@ -468,6 +482,7 @@ const
   cValueTypeFontStyle = 'TypeFontStyle';
   cValueHighlightInactive = 'HighlightInactiveCode';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
+  cValueInsightManager = 'PasTreeInsightManager';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
   cValueAnalysisThreads = 'AnalysisThreads';
@@ -644,6 +659,7 @@ begin
   Result.TypeFontStyle := [];
   Result.HighlightInactive := True;
   Result.PasTreeErrorSquiggles := False;
+  Result.PasTreeInsightManager := False;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
   Result.AnalysisThreads := 0;
@@ -698,6 +714,8 @@ begin
         ReadFlag(LReg, cValueLogAllIdeCrashes, Result.LogAllIdeCrashes);
       Result.PasTreeErrorSquiggles :=
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
+      Result.PasTreeInsightManager :=
+        ReadFlag(LReg, cValueInsightManager, Result.PasTreeInsightManager);
       Result.DfmNoExplicitProps :=
         ReadFlag(LReg, cValueDfmNoExplicit, Result.DfmNoExplicitProps);
       Result.DfmNoDefaultStyleElems := ReadFlag(LReg,
@@ -769,6 +787,8 @@ begin
           Ord(ASettings.HighlightInactive));
         LReg.WriteInteger(cValueErrorSquiggles,
           Ord(ASettings.PasTreeErrorSquiggles));
+        LReg.WriteInteger(cValueInsightManager,
+          Ord(ASettings.PasTreeInsightManager));
         LReg.WriteInteger(cValueDfmNoExplicit,
           Ord(ASettings.DfmNoExplicitProps));
         LReg.WriteInteger(cValueDfmNoDefaultStyleElements,
@@ -786,6 +806,7 @@ begin
     LReg.Free;
   end;
   ApplyErrorInsightChoice;
+  ApplyInsightManagerChoice;
   SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
   SetDfmStyleElementsFix(ASettings.DfmNoDefaultStyleElems);
   SetCrashLogAll(ASettings.LogAllIdeCrashes);
@@ -938,6 +959,11 @@ end;
 function PasTreeErrorSquigglesEnabled: Boolean;
 begin
   Result := CurrentSettings.PasTreeErrorSquiggles;
+end;
+
+function PasTreeInsightManagerEnabled: Boolean;
+begin
+  Result := CurrentSettings.PasTreeInsightManager;
 end;
 
 function DfmNoExplicitProperties: Boolean;

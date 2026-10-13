@@ -306,6 +306,17 @@ implementer does not re-derive it:
   manager is not designed to be driven through a foreign wrapper, and the
   manager-selection order for two `HandlesFile('.pas')` claimants is
   undocumented.
+- **Selecting the provider from the plugin** (0.68.0, measured 2026-10-13 on
+  37.0 with AVImark): the Insight Provider combobox is the environment option
+  `InsightManager` (`IOTAEnvironmentOptions.Values`), a `tkLString` holding the
+  selected manager's `IDString` (`Borland.CodeInsight.LSP.Pascal` for
+  DelphiLSP). Writing it reads back at once and is written through to the
+  registry (`Insight Manager` under `Editor\Source Options\
+  Borland.EditOptions.Pascal`) at once; `GetCurrentCodeInsightManager` follows
+  lazily, at the editor's next Code Insight turn - still the old manager 1 s
+  after the write, the new one at 5 s, in both directions. The settings' Code
+  Insight Manager choice does this (`ApplyInsightManagerChoice`), remembering
+  the replaced value and putting it back on the way out and at unload.
 
 ## The open experiment - CLOSED 2026-08-22, verdict NEGATIVE
 

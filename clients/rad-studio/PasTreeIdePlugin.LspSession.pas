@@ -190,6 +190,9 @@ type
     ItemLabel: string;
     Kind: Integer;      // LSP CompletionItemKind (14 = keyword, ...)
     Detail: string;     // display-verbatim, e.g. ': TStringList (+2)'
+    // The type names in Detail, 1-based (column, length) pairs - the item's
+    // data.typeSpans; nil from a server that sends none.
+    TypeSpans: TArray<Integer>;
     // The routine's head keyword ('constructor', 'operator', ...) when the
     // server knows one - carried in the item's data field; '' otherwise.
     Head: string;
@@ -2898,7 +2901,7 @@ function ParseCompletionItems(AResult: TJSONValue): TArray<TLspCompletionItem>;
 var
   LItems: TJSONArray;
   LValue: TJSONValue;
-  LObj, LRange, LStart, LEnd: TJSONObject;
+  LObj, LRange, LStart, LEnd, LData: TJSONObject;
   LItem: TLspCompletionItem;
   LLine, LChar, LEndLine, LEndChar, LDummyRow, LCount: Integer;
 begin
@@ -2936,6 +2939,9 @@ begin
     if not LObj.TryGetValue<string>('documentation.value', LItem.Doc) then
       LItem.Doc := LObj.GetValue<string>('documentation', '');
     LItem.DocHtml := LObj.GetValue<string>('data.docHtml', '');
+    LItem.TypeSpans := nil;
+    if LObj.TryGetValue<TJSONObject>('data', LData) then
+      LItem.TypeSpans := ReadIntArray(LData, 'typeSpans');
     if not LObj.TryGetValue<TJSONObject>('textEdit.range', LRange) or
        not LRange.TryGetValue<TJSONObject>('start', LStart) or
        not LRange.TryGetValue<TJSONObject>('end', LEnd) then

@@ -837,8 +837,12 @@ begin
   // asks about it degrades on its own: PasTreeIsActiveInsightProvider answers
   // False (so the Ctrl+Click override below always runs),
   // CheckInsightProviderSelected exits on GAlive, FinalizeCodeInsight skips
-  // the unregister at index -1. Uncomment to bring it back.
-  // InitializeCodeInsight;
+  // the unregister at index -1.
+  //
+  // Since 0.68.0 registered again when the settings' Code Insight Manager is
+  // PasTree, which also selects it through the environment option
+  // InsightManager - see ApplyInsightManagerChoice. A no-op when it is not.
+  ApplyInsightManagerChoice;
   // Ctrl+Click in the editor, as a mouse override independent of the Insight
   // Provider selection - for the users who cannot give that combobox up (RAD
   // Studio gates part of the editor UI on DelphiLSP being the provider). It
