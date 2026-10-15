@@ -7764,34 +7764,40 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
 
+  // The three reference searches scan THIS document's model alone (AOnlyMid,
+  // PasTree 0.109.0): the whole-closure search rehydrated every demoted unit
+  // using the symbol, on every caret move, only for the rows to be dropped.
+  // The file test below stays, and is not that filter: a model's rows include
+  // the files it $I-includes, the declaration hit can be in any unit, and the
+  // define search has no per-model form.
   LHits := nil;
   if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
-    LHits := FNav.FindUnitReferences(LTMid);
+    LHits := FNav.FindUnitReferences(LTMid, LMid);
     if FNav.UnitDeclHit(LTMid, LDecl) then
       LHits := [LDecl] + LHits;
   end
   else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSymIdx, LName) then
   begin
-    LHits := FNav.FindReferences(LTMid, LSymIdx);
+    LHits := FNav.FindReferences(LTMid, LSymIdx, False, False, LMid);
     if FNav.DeclHit(LTMid, LSymIdx, LDecl) then
       LHits := [LDecl] + LHits;
   end
   else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
-    LHits := FNav.FindBuiltinReferences(LName)
+    LHits := FNav.FindBuiltinReferences(LName, LMid)
   else if FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok) then
     LHits := DefineHitsToRefs(FNav.FindDefineReferences(LName))
   else
     Exit(BuildResponse(AMsg.IdJson, 'null'));
 
-  LKey := LowerCase(TPath.GetFullPath(LPath));
+  LKey := TPath.GetFullPath(LPath);
   LCount := 0;
   LSB := TStringBuilder.Create;
   try
     LSB.Append('[');
     for LIdx := 0 to High(LHits) do
     begin
-      if LowerCase(TPath.GetFullPath(LHits[LIdx].FilePath)) <> LKey then
+      if not SameText(TPath.GetFullPath(LHits[LIdx].FilePath), LKey) then
         Continue;
       if LCount > 0 then
         LSB.Append(',');

@@ -916,11 +916,14 @@ begin
       LItemModel := AProject.Model(AItem.Mid);
       // Library units have their text demoted after a full build
       // (TLspServer.DemoteLibraryText), and every helper below reads
-      // text - on a demoted model the token layer is nil. A unit whose
-      // stream cannot be reproduced stays demoted: no detail, not a
-      // fault.
-      if (LItemModel <> nil) and LItemModel.Demoted and
-         not AProject.EnsureHydrated(AItem.Mid) then
+      // text - on a demoted model the token layer is nil. NOT rehydrated
+      // here: the engine's readers already asked for it - in the list,
+      // ItemDocComment before this, per row; in the hover, the head of
+      // SymbolSignatureText - and since PasTree 0.110.0 a unit that cannot be
+      // rehydrated is remembered as such, where this call re-preprocessed
+      // it once more per row. Still demoted means it could not be: no
+      // detail, not a fault.
+      if (LItemModel <> nil) and LItemModel.Demoted then
         LItemModel := nil;
     end
     else

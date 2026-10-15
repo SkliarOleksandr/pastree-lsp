@@ -320,7 +320,12 @@ const
   /// `arrayofT<Integer>`. 0.107.1: through a same-unit generic ancestor
   /// (`Self.First.` in TObjectList<T: class>) the constraint's members - an
   /// older library lists nothing there.
-  cMinPasTreeVersion = '0.107.1';
+  /// 0.110.0 (2026-10-15): reference searches limited to one model (AOnlyMid,
+  /// 0.109.0 - the highlight passes its document's), and EnsureHydrated's
+  /// failure memo, which the completion detail relies on instead of its own
+  /// per-row rehydration - an older library would re-preprocess a stale
+  /// library unit on every row and every highlight, silently, in seconds.
+  cMinPasTreeVersion = '0.110.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

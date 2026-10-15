@@ -1571,13 +1571,20 @@ begin
   // answer replaces FSymbols under a popup built from the previous list, and a
   // failed re-invoke nils it outright. Indexing the newest list to draw rows
   // of the displayed one paints the wrong text where the two happen to be the
-  // same length, and falls back to DefaultDraw for rows the viewer is still
-  // showing where they do not. The bounds checks kept it from crashing, which
-  // is why it read as cosmetic.
+  // same length.
+  //
+  // A row past the list's end is drawn BLANK, never handed back with
+  // DefaultDraw: the IDE's DefaultViewerDrawLine resolves the same index
+  // through its own SymbolListAndSymbolFromIndex, which walks off the end of
+  // its symbol-list TInterfaceList and raises "List index out of bounds"
+  // (Alex, 2026-10-15, AVImarkServer, arrowing through a 51-item member list
+  // - one request, no late answer). The viewer's row count can run ahead of
+  // the list's for a paint, after a SetFilter shrank it; the next recount
+  // removes the row.
   if not Assigned(FShownSymbols) or (Index < 0) or
      (Index >= FShownSymbols.Count) then
   begin
-    DefaultDraw := True;
+    DefaultDraw := False;
     Exit;
   end;
   DefaultDraw := False;
