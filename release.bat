@@ -41,7 +41,7 @@ if not defined LVER (
 rem BUILT AND EXERCISED BEFORE PACKING, never after. A release that was never
 rem run is a release whose harnesses might have failed, and the archive gives
 rem no second chance to notice.
-call "%~dp0build.bat" %*
+call "%~dp0build.bat" %* --test
 if errorlevel 1 (
   echo.
   echo Nothing was packed: the build or the harnesses failed.

@@ -95,14 +95,19 @@ would be silent rather than a compile error.
 ## Building
 
 ```
-build.bat
+build.bat --test
 ```
 
 Builds the server, the package for each IDE of the chosen version, and the five
-harnesses - Win32, plus Win64 whenever the Win64 package is built - then runs
-them. **It must end with `all built, all harnesses passed`; anything else is a
-real failure.** Use it rather than building halves separately - the version
-check only means something if one build produces both.
+harnesses - Win32, plus Win64 whenever the Win64 package is built - and with
+`--test` runs them. **Verifying a change means `--test`, and it must end with
+`all built, all harnesses passed`; anything else is a real failure.** Without
+it the harnesses are compiled but not run - Alex's local rebuilds before an
+IDE restart (2026-10-15: the runs grow with every check and buy that rebuild
+nothing), so a plain `all built, harnesses not run` proves only that it
+compiles. `release.bat` always passes `--test`. Use it rather than building
+halves separately - the version check only means something if one build
+produces both.
 
 `install.bat` is that plus the IDE registration, `uninstall.bat` its inverse,
 `release.bat` packs the user-facing archive (both working trees must be clean;

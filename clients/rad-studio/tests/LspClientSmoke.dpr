@@ -1806,6 +1806,55 @@ begin
   end;
 end;
 
+{ 5b-bis. What a generic class's member rows say after their name
+  (2026-10-15, found probing System.Generics.Collections):
+
+  - inside the generic, completing in its own file: the rows come from the
+    overlay model, which resolves a type alone, so `GdCmp: TGdComparer<TVal>`
+    was bare (the type's node starts at its `<`, and the `:` was looked for
+    in front of that) and a routine's generic result type was missing;
+  - through `TGdBox<Integer>` in another unit: the nested type read
+    `TGdArr<Integer>` (the outer frame's arguments on the nested name) and the
+    parameter list kept the declaration's `TVal`. }
+procedure TestCompletionGenericDetail;
+var
+  LDeclFile, LUseFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5b-bis. completion detail of a generic''s members ===');
+  LDeclFile := TPath.Combine(GFixtureDir, 'DemoGenericDetail.pas');
+  LUseFile := TPath.Combine(GFixtureDir, 'DemoGenericUse.pas');
+
+  FindPos(LDeclFile, 'Self.GdArr', 'GdArr', LLine, LChar);
+  Check(Ask('textDocument/completion',
+    PositionParams(LDeclFile, LLine, LChar)),
+    'completion answered after Self. inside the generic');
+  Check(GOk and GResultJson.Contains(
+    '"label":"GdCmp","kind":5,"detail":": TGdComparer<TVal>"'),
+    'a field of a generic interface type shows it, arguments included');
+  Check(GOk and GResultJson.Contains(
+    '"label":"GdList","kind":5,"detail":": TGdList<TVal>"'),
+    'a field of a generic class type keeps its arguments');
+  Check(GOk and GResultJson.Contains(
+    '"detail":"(const AValue: TVal; AList: TGdList<TVal>): TGdList<TVal>"'),
+    'a function with a generic result type shows it');
+
+  FindPos(LUseFile, 'ABox.GdArr', 'GdArr', LLine, LChar);
+  Check(Ask('textDocument/completion',
+    PositionParams(LUseFile, LLine, LChar)),
+    'completion answered after ABox. of TGdBox<Integer>');
+  Check(GOk and GResultJson.Contains(
+    '"label":"GdArr","kind":5,"detail":": TGdBox<Integer>.TGdArr"'),
+    'a nested type reads qualified by the instantiation, not TGdArr<Integer>');
+  Check(GOk and GResultJson.Contains(
+    '"label":"GdCmp","kind":5,"detail":": TGdComparer<Integer>"'),
+    'a field''s generic type takes the argument');
+  Check(GOk and GResultJson.Contains(
+    '"detail":"(const AValue: Integer; AList: TGdList<Integer>): TGdList<Integer>"'),
+    'the parameter list takes the argument as the result type does');
+end;
+
 { 5c, continued. Every shape of a declaration whose type is not written -
   fixtures\DemoHoverInfer.pas - hovered at its declaration, and the composed
   signature must carry the type the analysis inferred (Alex, 2026-10-07: a
@@ -4713,6 +4762,7 @@ begin
       TestOverlayBeatsDisk;
       TestIncrementalPath;
       TestCompletion;
+      TestCompletionGenericDetail;
       TestHover;
       TestSignatureHelp;
       TestDocumentSymbol;

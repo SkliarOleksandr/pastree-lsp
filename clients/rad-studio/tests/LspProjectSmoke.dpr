@@ -363,6 +363,13 @@ begin
   Writeln('=== analysisThreads and pastree/benchmark ===');
   Check(LogContains('analysis threads: 1 (set by the client, sequential)'),
     'the server runs the analysis on the 1 thread asked for');
+  // 0.69.0: the .dproj's DCC_* switches reach the analysis as dcc's
+  // command-line switches (PasTree 0.106.0). The Debug config of this
+  // package's .dproj sets DCC_Optimize false - $O- first, in msbuild's order.
+  Check(LogContains('switches: $O- '),
+    'the Debug config''s switches are taken from the .dproj');
+  Check(LogContains('; console target off'),
+    'and a package is no console target');
   GBenchmarkJson := '';
   GClient.OnNotification :=
     procedure(const AMethod: string; AParams: TJSONValue)

@@ -84,7 +84,7 @@ source/PasLsp.ProductVersion.pas  one version for the server and both clients
 source/PasLsp.SourceText.pas      BOM and buffer-vs-file rules, shared likewise
 clients/rad-studio/               the RAD Studio designtime package + its tests
 clients/vscode/                   the VS Code extension (also a .vsix)
-build.bat                         builds everything and runs the harnesses
+build.bat                         builds everything; --test runs the harnesses
 out/                              build output: the server, the package per IDE in
                                   out/<version>/{win32,win64}/; out/dcu/ is throwaway
 SPEC.md                           this document
@@ -222,7 +222,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
 | `$/cancelRequest` | |
 | `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below); sent while a request waits out the analysis it started (`OnFlush`), not after its reply |
-| `pastree/projectChanged` | ours: the client saw the .dproj saved; the server re-reads it as initialize did and answers `changed` false when every part the analysis took (main source, platform, search paths, defines, .pas unit list, namespaces, aliases) is the same - the IDE re-saves the .dproj with every .dpr save, and the restart that used to follow cost a full analysis (0.61.0) |
+| `pastree/projectChanged` | ours: the client saw the .dproj saved; the server re-reads it as initialize did and answers `changed` false when every part the analysis took (main source, platform, search paths, defines, .pas unit list, namespaces, aliases, and since 0.69.0 the DCC_* compiler switches and DCC_ConsoleTarget) is the same - the IDE re-saves the .dproj with every .dpr save, and the restart that used to follow cost a full analysis (0.61.0) |
 | `pastree/benchmark` | ours (0.67.0): a full analysis FROM NOTHING - the last-good project is freed first, so there is no parse donor and the "before" memory is the process without an analysis. Answers `{"started":true}` at once; the run reports through `$/progress` like any full rebuild, and its figures arrive as the `pastree/benchmarkDone` notification: `ok`, `units`, `ms`, `threads`, `commitBeforeMB` / `commitPeakMB` / `commitAfterMB` (private bytes; the peak sampled every idle tick, 50 ms), `stages`; or `ok` false and `error`. For the RAD Studio Performance page |
 | `pastree/unusedUses`, `pastree/unreferencedUnits` | ours (0.62.0): PasTree.Sema.Lint's unused `uses` entries (`scope` unit or project) and project units nobody uses, always with `loHideGlobalInit` - a unit whose initialization reaches outside itself (another unit's routine or variable, a class member of one; not a constructor) is not offered. Rows carry `doubts` (shown, never removed) and `refused`. unreferencedUnits rows list every `uses` entry still naming the unit (`program` for the .dpr's, which the client removes by taking the unit out of the project). The edits are NOT in these answers: see `pastree/usesRemoval` |
 | `pastree/usesRemoval` | ours (0.62.0): the edits of the client's Remove, asked for at the click - `files`, each a `uri` and the `names` to take out of its `uses`, on the text as it is then (open document or disk, parse only). ONE rewrite per clause (PasLsp.UnusedUnits keeps the layout: a removed entry takes its separator and its own line; a clause with a compiler directive inside is refused). At the click and not with the search because Removes come one unit at a time, and siblings share a clause: an edit computed before the first Remove no longer matches the clause it left. `refused` and `missing` say what no edit takes out |
@@ -549,8 +549,8 @@ order they were understood:
   [PasLsp.Version](source/PasLsp.Version.pas) is the only authority, and it
   moves forward as other library requirements land.)
 
-**The suite is fully green as of 0.5.4** - `build.bat` ends with `all built, all
-harnesses passed`. The two long-standing red checks in
+**The suite is fully green as of 0.5.4** - `build.bat --test` ends with `all
+built, all harnesses passed`. The two long-standing red checks in
 `clients/rad-studio/tests/LspClientSmoke` (*"Wrap resolves despite the Cyrillic
 literal earlier on the line"* and *"and lands exactly on Wrap's declaration
 (18,9)"*), red since before the move into this repository, are the two the fix

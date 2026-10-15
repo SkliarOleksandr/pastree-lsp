@@ -311,7 +311,16 @@ const
   /// 0.98.0 (2026-10-12): PlanRename / PlanUnitRename with AInactive - the old
   /// name in dead conditional code listed, not refused (an older library does
   /// not compile).
-  cMinPasTreeVersion = '0.98.0';
+  /// 0.107.0 (2026-10-15): the .dproj's switch start state and -CC
+  /// (TPasDProj.Switches / ConsoleTarget, SetSwitchStart / SetConsoleTarget,
+  /// PasStartOptState - 0.106.0, an older library does not compile), and the
+  /// completion list's eight fixes plus XTypeText's `TList<Integer>.arrayofT`
+  /// for a type nested in a generic - an older library would silently list
+  /// protected members outside their class and render the nested type as
+  /// `arrayofT<Integer>`. 0.107.1: through a same-unit generic ancestor
+  /// (`Self.First.` in TObjectList<T: class>) the constraint's members - an
+  /// older library lists nothing there.
+  cMinPasTreeVersion = '0.107.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

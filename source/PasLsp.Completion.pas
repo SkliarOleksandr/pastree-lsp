@@ -139,10 +139,26 @@ type
     FSourceManager: TPasSourceManager;
     FDefines: TPasDefines;
     FPreprocessor: TPasPreprocessor;
+    // The program's own define set when its CONSOLE differs from the units'
+    // (Configure); nil otherwise. FHostConsole: the client's or the .dproj's
+    // defines name CONSOLE themselves, which no APPTYPE decision overrides.
+    FProgramDefines: TPasDefines;
+    FHostConsole: Boolean;
   public
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths, ADefines: TArray<string>);
     destructor Destroy; override;
+    { The analysis's per-project preprocessor state, mirrored so the overlay
+      is preprocessed as the analysis preprocessed the file (PasTree 0.106.0:
+      TPasSemaProject.ConfigurePP): the switch state every file starts in
+      (the .dproj's DCC_* switches, PasStartOptState), and CONSOLE - for the
+      units the program's APPTYPE directive before its `uses` (AUnitsConsole,
+      TPasSemaProject.UnitsConsoleOf), for the program's own text -CC
+      (AConsoleTarget). Without it a Release config's `$IFOPT D+` code was
+      live in completion while the analysis had it dead. Cheap: called before
+      every request. }
+    procedure Configure(const AStart: TPasOptState; const AProgramFile: string;
+      AConsoleTarget, AUnitsConsole: Boolean);
     { Replaces the engine's overlay set with the given open documents. Called
       by the server before each CompleteAt so an $I include with unsaved
       edits is preprocessed from its LIVE text, not from disk - the same
@@ -337,11 +353,33 @@ begin
     Result := AModel.Tree.Nodes[Result].Parent;
 end;
 
-{ The type expression child of a var/field/param/property declaration: the
-  first child whose PRECEDING visible token is the ':'. Kind alone cannot
-  split it out - the names before it are nkIdent and a type alias after it
-  is nkIdent too. NIL_NODE when the declaration carries no ':' (an untyped
-  `var` parameter, an inferred inline var). }
+{ The first visible token a node's TEXT starts at - its own FirstToken or an
+  earlier one of its leading child. Not always the same: an instantiation
+  `IComparer<T>` is an nkTypeArgs whose FirstToken is the `<`, its name the
+  child before it, so the token in front of it is the name, not the `:`. }
+function NodeStartToken(AModel: TPasSemaModel; ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := AModel.Tree.Nodes[ANode].FirstToken;
+  LChild := AModel.Tree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (AModel.Tree.Nodes[LChild].FirstToken >= 0) and
+       (AModel.Tree.Nodes[LChild].FirstToken < Result) then
+      Result := AModel.Tree.Nodes[LChild].FirstToken;
+    LChild := AModel.Tree.Nodes[LChild].FirstChild;
+  end;
+end;
+
+{ The type expression child of a var/field/param/property declaration (and of
+  a routine's heading: its result type): the first child whose PRECEDING
+  visible token is the ':'. Kind alone cannot split it out - the names before
+  it are nkIdent and a type alias after it is nkIdent too. Preceding the TEXT,
+  NodeStartToken - a generic type's node starts at its `<` (2026-10-15: every
+  `FCmp: IComparer<T>` row of an edited generic class was bare). NIL_NODE
+  when the declaration carries no ':' (an untyped `var` parameter, an
+  inferred inline var, a procedure). }
 function DeclTypeExprNode(AModel: TPasSemaModel; ADecl: Integer): Integer;
 var
   LPrev: Integer;
@@ -349,7 +387,7 @@ begin
   Result := AModel.Tree.Nodes[ADecl].FirstChild;
   while Result <> NIL_NODE do
   begin
-    LPrev := AModel.Tree.Nodes[Result].FirstToken - 1;
+    LPrev := NodeStartToken(AModel, Result) - 1;
     if LPrev >= 0 then
       with AModel.Tree.Source.Visible[LPrev] do
         if AModel.Tree.Source.Files[FileId].Tokens[TokenIndex].Kind =
@@ -637,16 +675,46 @@ begin
   // parse a different text than the closure saw.
   FDefines := CreatePlatformDefines(APlatform);
   for LDefine in ADefines do
+  begin
     FDefines.Define(LDefine);
+    if SameText(Trim(LDefine), 'CONSOLE') then
+      FHostConsole := True;
+  end;
   FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines);
 end;
 
 destructor TLspCompletionEngine.Destroy;
 begin
   FPreprocessor.Free;
+  FProgramDefines.Free;
   FDefines.Free;
   FSourceManager.Free;
   inherited;
+end;
+
+procedure TLspCompletionEngine.Configure(const AStart: TPasOptState;
+  const AProgramFile: string; AConsoleTarget, AUnitsConsole: Boolean);
+begin
+  FPreprocessor.StartState := AStart;
+  // Detached before the old set goes: the preprocessor holds it by reference.
+  FPreprocessor.SetProgramDefines(AProgramFile, nil);
+  FreeAndNil(FProgramDefines);
+  if FHostConsole then
+    Exit;
+  // The units' set changes in place, as the project's does (SetUnitsConsole).
+  if AUnitsConsole then
+    FDefines.Define('CONSOLE')
+  else
+    FDefines.Undefine('CONSOLE');
+  if (AProgramFile <> '') and (AConsoleTarget <> AUnitsConsole) then
+  begin
+    FProgramDefines := FDefines.Clone;
+    if AConsoleTarget then
+      FProgramDefines.Define('CONSOLE')
+    else
+      FProgramDefines.Undefine('CONSOLE');
+    FPreprocessor.SetProgramDefines(AProgramFile, FProgramDefines);
+  end;
 end;
 
 procedure TLspCompletionEngine.SetOverlays(const APaths,
@@ -660,6 +728,110 @@ begin
 end;
 
 function EnumValueText(AModel: TPasSemaModel; ASym: Integer): string; forward;
+function GenericParamsText(AModel: TPasSemaModel; ADecl: Integer;
+  out AParamAt: TArray<Integer>): string; forward;
+
+{ A symbol's type AS WRITTEN at its declaration - a variable's, field's,
+  parameter's or property's `: Type`, a function's result type - or '' when
+  the declaration writes none. The overlay rows' answer: the fresh model of
+  the edited file resolves a type alone, so a cross-unit or generic type is
+  either nothing (`IComparer<T>`, `TList<T>`: the row was bare) or a bare
+  name that drops the arguments (`TArray`, and in System.Generics.Collections
+  even the unit's own class TArray for System's TArray<T>). The text is what
+  the user wrote, arguments included (2026-10-15). }
+function DeclaredTypeText(AModel: TPasSemaModel; ASym: Integer): string;
+var
+  LDecl: Integer;
+begin
+  Result := '';
+  if AModel.Symbols[ASym].Kind = skRoutine then
+    LDecl := DeclOfKinds(AModel, ASym, [nkRoutine])
+  else
+    LDecl := DeclOfKinds(AModel, ASym, [nkVarDecl, nkParam, nkPropertyDecl,
+      nkInlineVar, nkConstDecl, nkInlineConst]);
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := DeclTypeExprNode(AModel, LDecl);
+  if LDecl <> NIL_NODE then
+    Result := CapDisplay(CollapseWs(AModel.Tree.NodeSpanText(LDecl)));
+end;
+
+{ A routine's parameter list with the generic's parameters replaced by an
+  instantiation's arguments: `TList<Integer>.Add` reads `(const Value:
+  Integer)`, not `(const Value: T)` - the result type after it was already
+  substituted (SubstX), the list was the declaration's text. Only the TYPE
+  positions are touched - after a `:`, up to the `;` or a default's `=` - so a
+  parameter that happens to be named like a type parameter keeps its name,
+  and so does a qualified `X.T`. ANames/AArgs pair up by index. }
+function SubstParamsText(const AText: string; const ANames,
+  AArgs: TArray<string>): string;
+var
+  LPos, LStart, LIdx: Integer;
+  LInType, LFound: Boolean;
+  LWord: string;
+begin
+  Result := '';
+  LInType := False;
+  LPos := 1;
+  while LPos <= Length(AText) do
+  begin
+    if CharInSet(AText[LPos], ['A'..'Z', 'a'..'z', '_']) then
+    begin
+      LStart := LPos;
+      while (LPos <= Length(AText)) and
+            CharInSet(AText[LPos], ['A'..'Z', 'a'..'z', '_', '0'..'9']) do
+        Inc(LPos);
+      LWord := Copy(AText, LStart, LPos - LStart);
+      LFound := False;
+      if LInType and ((LStart = 1) or (AText[LStart - 1] <> '.')) then
+        for LIdx := 0 to High(ANames) do
+          if SameText(LWord, ANames[LIdx]) then
+          begin
+            Result := Result + AArgs[LIdx];
+            LFound := True;
+            Break;
+          end;
+      if not LFound then
+        Result := Result + LWord;
+      Continue;
+    end;
+    case AText[LPos] of
+      ':': LInType := True;
+      ';', '=', ')': LInType := False;
+    end;
+    Result := Result + AText[LPos];
+    Inc(LPos);
+  end;
+end;
+
+{ The generic parameter names of the instantiation AInst's generic and the
+  display text of its arguments, by index - SubstParamsText's two lists. Empty
+  when they do not pair up (a malformed declaration). }
+procedure InstanceParamMap(AProject: TPasSemaProject; AInst: Integer;
+  out ANames, AArgs: TArray<string>);
+var
+  LInst: TSemaInstance;
+  LModel: TPasSemaModel;
+  LAt: TArray<Integer>;
+  LText: string;
+  LIdx: Integer;
+begin
+  ANames := nil;
+  AArgs := nil;
+  LInst := AProject.Instance(AInst);
+  LModel := AProject.Model(LInst.UnitId);
+  if (LModel = nil) or (LInst.Sym = NIL_SYM) or
+     (LModel.Demoted and not AProject.EnsureHydrated(LInst.UnitId)) then
+    Exit;
+  LText := GenericParamsText(LModel, LModel.Symbols[LInst.Sym].DeclNode, LAt);
+  if Length(LAt) div 2 <> Length(LInst.Args) then
+    Exit;
+  for LIdx := 0 to High(LInst.Args) do
+  begin
+    ANames := ANames + [Copy(LText, LAt[LIdx * 2], LAt[LIdx * 2 + 1])];
+    AArgs := AArgs + [AProject.XTypeText(LInst.Args[LIdx])];
+  end;
+end;
 
 { What a completion row says after its name - and, from the hover, what
   follows a symbol's name in its one-line signature: a routine's parameter
@@ -674,6 +846,7 @@ function ItemDetailText(ACompletion: TPasCompletion; AProject: TPasSemaProject;
 var
   LX: TSemaXType;
   LParamsText, LText: string;
+  LNames, LArgs: TArray<string>;
   LTypeSym, LDecl: Integer;
   LItemModel: TPasSemaModel;
   LSig: TPasBuiltinSig;
@@ -695,22 +868,37 @@ begin
   begin
     LX := AProject.SymDeclTypeX(AItem.Mid, AItem.Sym);
     if AItem.Ctx <> NIL_INST then
+    begin
       LX := AProject.SubstX(LX, AItem.Ctx, 0);
+      // The parameter list is the declaration's text: its `T` takes the
+      // instantiation's argument as the result type above does.
+      if Result <> '' then
+      begin
+        InstanceParamMap(AProject, AItem.Ctx, LNames, LArgs);
+        if LNames <> nil then
+          Result := SubstParamsText(Result, LNames, LArgs);
+      end;
+    end;
     if XValid(LX) then
       Result := Result + ': ' + AProject.XTypeText(LX);
   end
   // OVERLAY-declared symbols - the edited file's own locals, params
   // and members, i.e. the rows the user looks at most - have no
-  // project mid, but the fresh model resolved their declared type
-  // intra-unit: TypeSym's name is the honest (if unexpanded) answer.
-  // Without this branch the mixed list reads as types randomly
-  // missing (review finding, 2026-08-22).
+  // project mid. Their type as WRITTEN (DeclaredTypeText) comes first:
+  // the fresh model resolves types alone, so a generic or cross-unit
+  // one was bare or lost its arguments. TypeSym's name is the fallback
+  // for a declaration whose type is not written out. Without this
+  // branch the mixed list reads as types randomly missing (review
+  // finding, 2026-08-22).
   else if (AItem.Mid < 0) and (AItem.Sym <> NIL_SYM) and
      (AItem.Kind in [skVar, skConst, skField, skParam,
        skProperty, skRoutine]) then
   begin
+    LText := DeclaredTypeText(AOverlay, AItem.Sym);
     LTypeSym := AOverlay.Symbols[AItem.Sym].TypeSym;
-    if LTypeSym <> NIL_SYM then
+    if LText <> '' then
+      Result := Result + ': ' + LText
+    else if LTypeSym <> NIL_SYM then
       Result := Result + ': '
         + AOverlay.Symbols[LTypeSym].Name;
   end;

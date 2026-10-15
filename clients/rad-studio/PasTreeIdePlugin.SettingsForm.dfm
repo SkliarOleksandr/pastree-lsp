@@ -16,7 +16,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
   TextHeight = 15
   object bvlHeader: TBevel
     Left = 0
-    Top = 92
+    Top = 108
     Width = 500
     Height = 2
     Align = alTop
@@ -26,7 +26,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     Left = 0
     Top = 0
     Width = 500
-    Height = 92
+    Height = 108
     Align = alTop
     BevelOuter = bvNone
     ParentBackground = False
@@ -60,39 +60,57 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     end
     object lblBuilt: TLabel
       Left = 50
-      Top = 64
+      Top = 87
       Width = 24
       Height = 15
       Caption = 'Built'
     end
+    object lbPasTreeVersion: TLabel
+      Left = 50
+      Top = 66
+      Width = 81
+      Height = 15
+      Caption = 'PasTree Version'
+    end
     object lnkHome: TLinkLabel
-      Left = 197
+      Left = 353
       Top = 41
-      Width = 215
+      Width = 62
       Height = 19
       Caption = 
-        '<a href="https://github.com/SkliarOleksandr/pastree-lsp">github.' +
-        'com/SkliarOleksandr/pastree-lsp</a>'
+        '<a href="https://github.com/SkliarOleksandr/pastree-lsp">pastree' +
+        '-lsp</a>'
       TabOrder = 0
       OnLinkClick = lnkHomeLinkClick
     end
     object lnkHomePasTree: TLinkLabel
-      Left = 198
-      Top = 60
-      Width = 253
+      Left = 353
+      Top = 62
+      Width = 135
       Height = 19
       Caption = 
         '<a href="https://github.com/SkliarOleksandr/object-pascal-tree">' +
-        'github.com/SkliarOleksandr/object-pascal-tree</a>'
+        'object-pascal-tree parser</a>'
       TabOrder = 1
+      OnLinkClick = lnkHomeLinkClick
+    end
+    object lnkHomeObjPasSpec: TLinkLabel
+      Left = 353
+      Top = 83
+      Width = 143
+      Height = 19
+      Caption = 
+        '<a href="https://github.com/SkliarOleksandr/object-pascal-spec">' +
+        'object pascal specification</a>'
+      TabOrder = 2
       OnLinkClick = lnkHomeLinkClick
     end
   end
   object pgcSettings: TPageControl
-    Left = 12
-    Top = 106
-    Width = 476
-    Height = 470
+    Left = 8
+    Top = 116
+    Width = 484
+    Height = 478
     ActivePage = tsNavigation
     TabOrder = 1
     object tsNavigation: TTabSheet
@@ -301,13 +319,53 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblTooltipSymbolInsightHint: TLabel
         Left = 35
         Top = 41
-        Width = 405
+        Width = 398
         Height = 45
-        Caption =
+        Caption = 
           'The declaration under the mouse in the editor'#39's colours, its doc' +
-          'umentation and a link to it. Replaces the IDE'#39's own Tooltip sym' +
-          'bol insight, which is switched off in Tools > Options while this ' +
+          'umentation and a link to it. Replaces the IDE'#39's own Tooltip symb' +
+          'ol insight, which is switched off in Tools > Options while this ' +
           'is on.'
+        WordWrap = True
+      end
+      object lblErrorSquiggles: TLabel
+        Left = 16
+        Top = 104
+        Width = 69
+        Height = 15
+        Caption = 'Errors Insight'
+        FocusControl = cbxErrorSquiggles
+      end
+      object lblErrorSquigglesHint: TLabel
+        Left = 35
+        Top = 130
+        Width = 394
+        Height = 45
+        Caption = 
+          'Who underlines the errors and warnings in the editor. PasTree dr' +
+          'aws the analysis'#39's own and switches the IDE'#39's Error Insight to N' +
+          'one, so they are not drawn twice; switching back restores the le' +
+          'vel it replaced.'
+        WordWrap = True
+      end
+      object lblInsightManager: TLabel
+        Left = 16
+        Top = 194
+        Width = 117
+        Height = 15
+        Caption = 'Code Insight Manager'
+        FocusControl = cbxInsightManager
+      end
+      object lblInsightManagerHint: TLabel
+        Left = 35
+        Top = 220
+        Width = 403
+        Height = 45
+        Caption = 
+          'Who answers code completion, parameter insight and Ctrl+Click as' +
+          ' the IDE'#39's Insight Provider. PasTree registers its manager and s' +
+          'elects it in Tools > Options; switching back restores the provid' +
+          'er it replaced.'
         WordWrap = True
       end
       object chkTooltipSymbolInsight: TCheckBox
@@ -320,26 +378,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 0
       end
-      object lblErrorSquiggles: TLabel
-        Left = 16
-        Top = 104
-        Width = 74
-        Height = 15
-        Caption = 'Errors Insight'
-        FocusControl = cbxErrorSquiggles
-      end
-      object lblErrorSquigglesHint: TLabel
-        Left = 35
-        Top = 130
-        Width = 405
-        Height = 45
-        Caption =
-          'Who underlines the errors and warnings in the editor. PasTree dra' +
-          'ws the analysis'#39's own and switches the IDE'#39's Error Insight to No' +
-          'ne, so they are not drawn twice; switching back restores the lev' +
-          'el it replaced.'
-        WordWrap = True
-      end
       object cbxErrorSquiggles: TComboBox
         Left = 170
         Top = 100
@@ -350,26 +388,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Items.Strings = (
           'RAD Studio (Error Insight)'
           'PasTree (experimental)')
-      end
-      object lblInsightManager: TLabel
-        Left = 16
-        Top = 194
-        Width = 128
-        Height = 15
-        Caption = 'Code Insight Manager'
-        FocusControl = cbxInsightManager
-      end
-      object lblInsightManagerHint: TLabel
-        Left = 35
-        Top = 220
-        Width = 405
-        Height = 60
-        Caption =
-          'Who answers code completion, parameter insight and Ctrl+Click as' +
-          ' the IDE'#39's Insight Provider. PasTree registers its manager and s' +
-          'elects it in Tools > Options; switching back restores the provid' +
-          'er it replaced.'
-        WordWrap = True
       end
       object cbxInsightManager: TComboBox
         Left = 170
@@ -418,6 +436,17 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'line of dashes.'
         WordWrap = True
       end
+      object lblLogAllIdeCrashesHint: TLabel
+        Left = 35
+        Top = 251
+        Width = 389
+        Height = 30
+        Caption = 
+          'Writes every access violation in the IDE to pastree-ide-crash.lo' +
+          'g. Off writes only those with PasTree on the stack and counts th' +
+          'e IDE'#39's own.'
+        WordWrap = True
+      end
       object chkLogging: TCheckBox
         Left = 16
         Top = 20
@@ -446,17 +475,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Checked = True
         State = cbChecked
         TabOrder = 2
-      end
-      object lblLogAllIdeCrashesHint: TLabel
-        Left = 35
-        Top = 251
-        Width = 390
-        Height = 45
-        Caption =
-          'Writes every access violation in the IDE to pastree-ide-crash.lo' +
-          'g. Off writes only those with PasTree on the stack and counts t' +
-          'he IDE'#39's own.'
-        WordWrap = True
       end
       object chkLogAllIdeCrashes: TCheckBox
         Left = 16
@@ -490,6 +508,18 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Width = 405
         Height = 40
         OnPaint = pbxPreviewPaint
+      end
+      object lblHighlightInactiveHint: TLabel
+        Left = 35
+        Top = 199
+        Width = 377
+        Height = 45
+        Caption = 
+          'Lines an {$IFDEF}, {$IF} or {$ELSE} branch leaves out are painte' +
+          'd one flat gray, by the conditions as the analysis evaluated the' +
+          'm - the project'#39's defines, platform and compiler version include' +
+          'd.'
+        WordWrap = True
       end
       object chkHighlightTypes: TCheckBox
         Left = 16
@@ -538,18 +568,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 4
         OnClick = TypeStyleChanged
       end
-      object lblHighlightInactiveHint: TLabel
-        Left = 35
-        Top = 199
-        Width = 392
-        Height = 45
-        Caption =
-          'Lines an {$IFDEF}, {$IF} or {$ELSE} branch leaves out are painte' +
-          'd one flat gray, by the conditions as the analysis evaluated the' +
-          'm - the project''s defines, platform and compiler version include' +
-          'd.'
-        WordWrap = True
-      end
       object chkHighlightInactive: TCheckBox
         Left = 16
         Top = 178
@@ -577,6 +595,18 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'ead and dropped at the next save.'
         WordWrap = True
       end
+      object lblNoDefaultStyleElementsHint: TLabel
+        Left = 35
+        Top = 141
+        Width = 365
+        Height = 60
+        Caption = 
+          'An inherited form or a frame no longer gets StyleElements = [seF' +
+          'ont, seClient, seBorder] written when nobody changed it - the de' +
+          'signer compared it with a styled ancestor'#39's reduced set. A value' +
+          ' you really changed is still written.'
+        WordWrap = True
+      end
       object chkNoExplicitProps: TCheckBox
         Left = 16
         Top = 20
@@ -586,18 +616,6 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Checked = True
         State = cbChecked
         TabOrder = 0
-      end
-      object lblNoDefaultStyleElementsHint: TLabel
-        Left = 35
-        Top = 141
-        Width = 392
-        Height = 60
-        Caption =
-          'An inherited form or a frame no longer gets StyleElements = [seF' +
-          'ont, seClient, seBorder] written when nobody changed it - the de' +
-          'signer compared it with a styled ancestor'#39's reduced set. A value' +
-          ' you really changed is still written.'
-        WordWrap = True
       end
       object chkNoDefaultStyleElements: TCheckBox
         Left = 16
@@ -616,16 +634,16 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       object lblThreads: TLabel
         Left = 16
         Top = 23
-        Width = 91
+        Width = 85
         Height = 15
         Caption = 'Analysis threads'
       end
       object lblThreadsHint: TLabel
         Left = 16
         Top = 52
-        Width = 410
-        Height = 75
-        Caption =
+        Width = 409
+        Height = 60
+        Caption = 
           'How many threads the analysis of a project runs on. Auto takes o' +
           'ne per logical core, which is the fastest; fewer leave the machi' +
           'ne more room while a project is analyzed. Each project'#39's server ' +
@@ -651,9 +669,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         object lblBenchmarkHint: TLabel
           Left = 12
           Top = 24
-          Width = 405
+          Width = 380
           Height = 30
-          Caption =
+          Caption = 
             'A full analysis of the active project from nothing, on the threa' +
             'ds chosen above - no parse reused from the last run.'
           WordWrap = True
@@ -678,16 +696,9 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
     end
   end
-  object tmrBenchmark: TTimer
-    Enabled = False
-    Interval = 200
-    OnTimer = tmrBenchmarkTimer
-    Left = 24
-    Top = 584
-  end
   object btnOK: TButton
-    Left = 312
-    Top = 594
+    Left = 316
+    Top = 600
     Width = 85
     Height = 27
     Caption = 'OK'
@@ -696,13 +707,20 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
     TabOrder = 2
   end
   object btnCancel: TButton
-    Left = 403
-    Top = 594
+    Left = 407
+    Top = 600
     Width = 85
     Height = 27
     Cancel = True
     Caption = 'Cancel'
     ModalResult = 2
     TabOrder = 3
+  end
+  object tmrBenchmark: TTimer
+    Enabled = False
+    Interval = 200
+    OnTimer = tmrBenchmarkTimer
+    Left = 232
+    Top = 24
   end
 end

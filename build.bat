@@ -1,7 +1,7 @@
 @echo off
 rem Build the whole product: the LSP server, the RAD Studio package for each
-rem IDE of the chosen version, and the package's test harnesses -- then run
-rem the harnesses.
+rem IDE of the chosen version, and the package's test harnesses -- and, with
+rem --test, run the harnesses.
 rem
 rem ONE SCRIPT FOR BOTH HALVES, ON PURPOSE. The server and the package are one
 rem deliverable sharing one version (PasLsp.ProductVersion), and the failure
@@ -23,14 +23,43 @@ rem in exactly that arrangement, so this script is the same script there --
 rem no second layout that only ever runs on someone else's machine.
 rem
 rem Takes the same arguments as scripts\ide.bat: an explicit RAD Studio version,
-rem win32 and/or win64 to narrow the IDEs, and --yes.
+rem win32 and/or win64 to narrow the IDEs, and --yes. Plus one of its own:
+rem
+rem   --test   run the harnesses after building them.
+rem
+rem THE HARNESSES ARE BUILT EVERY TIME AND RUN ONLY ON REQUEST. Running them
+rem starts the server over every fixture project, several times, and grows
+rem with every check added; a local rebuild before restarting the IDE gets
+rem nothing from that wait (Alex, 2026-10-15). Compiling them stays in every
+rem build: it is cheap, and VersionSmoke's Win32 build is the tripwire for the
+rem package's two shared units gaining a dependency - a compile-time check.
+rem A change is not verified until "build.bat --test" ends with "all built,
+rem all harnesses passed"; release.bat always passes --test.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
+
+rem --test is this script's alone: scripts\ide.bat takes any word it does not
+rem know for a RAD Studio version, so it is taken out before the rest goes on.
+rem SHIFT MOVES %0 TOO, so the script's own directory is kept before the loop:
+rem %~dp0 after it names wherever the last argument pointed.
+set "LHERE=%~dp0"
+set "LRUNTESTS="
+set "LIDEARGS="
+:args
+if "%~1"=="" goto :argsdone
+if /i "%~1"=="--test" (
+  set "LRUNTESTS=1"
+) else (
+  set "LIDEARGS=!LIDEARGS! %1"
+)
+shift
+goto :args
+:argsdone
 
 rem WHICH RAD STUDIO, AND WHICH OF ITS IDEs -- resolved before anything is
 rem compiled, because it may ask, and a question is worth nothing after a
 rem five-minute build. See scripts\ide.bat for why one place decides this.
-call "%~dp0scripts\ide.bat" %*
+call "%LHERE%scripts\ide.bat" %LIDEARGS%
 if errorlevel 1 exit /b 1
 
 rem THE IDE MUST BE CLOSED, and it is now CHECKED rather than only stated
@@ -40,7 +69,7 @@ rem about the IDE and reads like a permissions or disk problem. That message
 rem cost time three separate times while this script was being written, and
 rem once more from release.bat, which reached the same failure through here
 rem because only install.bat was checking.
-call "%~dp0scripts\ide-closed.bat"
+call "%LHERE%scripts\ide-closed.bat"
 if errorlevel 1 exit /b 1
 
 call "%BDSROOT%\bin\rsvars.bat"
@@ -197,9 +226,10 @@ if defined LBUILD64 (
 rem -- 4. run them. VersionSmoke and LspTextSmoke need nothing; the other three
 rem       take the server path as argv[1] -- passed explicitly rather than
 rem       relying on their relative default, so a broken default cannot
-rem       silently pass here.
-echo === running harnesses ===
+rem       silently pass here. Only with --test - see the header.
 set FAILED=
+if not defined LRUNTESTS goto :skiprun
+echo === running harnesses ===
 for %%T in (%HARNESSES%) do (
   echo --- %%T
   "%TESTOUT%\%%T.exe" "%CD%\out\pastree-server.exe"
@@ -212,6 +242,7 @@ if defined LBUILD64 (
     if errorlevel 1 set FAILED=!FAILED! %%T^(Win64^)
   )
 )
+:skiprun
 
 echo.
 "out\pastree-server.exe" --version
@@ -237,6 +268,10 @@ if not "!FAILED!"=="" (
   exit /b 1
 )
 echo.
+if not defined LRUNTESTS (
+  echo all built, harnesses not run ^(build.bat --test runs them^)
+  exit /b 0
+)
 echo all built, all harnesses passed
 exit /b 0
 

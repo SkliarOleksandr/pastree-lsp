@@ -70,9 +70,11 @@ type
     imgLogo: TImage;
     lblProduct: TLabel;
     lblVersion: TLabel;
+    lbPasTreeVersion: TLabel;
     lblBuilt: TLabel;
     lnkHome: TLinkLabel;
     lnkHomePasTree: TLinkLabel;
+    lnkHomeObjPasSpec: TLinkLabel;
     bvlHeader: TBevel;
     pgcSettings: TPageControl;
     tsNavigation: TTabSheet;
@@ -431,6 +433,7 @@ var
   LTheming: IOTAIDEThemingServices;
   LSettings: TPasTreeSettings;
   LThemed: Boolean;
+  LPasTreeVersion: string;
 begin
   Result := False;
 
@@ -459,8 +462,7 @@ begin
     // it. Transparent uses the bitmap's bottom-left pixel, the same convention
     // the splash screen reads - see PasTreeIdePlugin.Logo.rc.
     try
-      LForm.imgLogo.Picture.Bitmap.LoadFromResourceName(HInstance,
-        'PASTREE_LOGO');
+      LForm.imgLogo.Picture.Bitmap.LoadFromResourceName(HInstance, 'PASTREE_LOGO');
       LForm.imgLogo.Transparent := True;
     except
       // Decoration. A dialog that refuses to open because its logo is missing
@@ -473,6 +475,13 @@ begin
     // dialog can honestly report on - the server's own stamp belongs to the
     // server and is in its log.
     LForm.lblBuilt.Caption := 'Built ' + BinaryBuiltOn(ThisBinaryPath);
+    // PasTree is linked into the server, not into this package, so the
+    // server says which one - a running one, else the exe on disk.
+    LPasTreeVersion := LspPasTreeVersion;
+    if LPasTreeVersion <> '' then
+      LForm.lbPasTreeVersion.Caption := 'PasTree ' + LPasTreeVersion
+    else
+      LForm.lbPasTreeVersion.Caption := 'PasTree - server not found';
 
     LSettings := LoadSettings;
     LForm.chkCtrlClick.Checked := LSettings.CtrlClickNavigation;

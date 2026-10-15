@@ -202,6 +202,15 @@ type
     FInitPlatform: string;
     FInitConfig: string;
     FProjectSig: TArray<string>;
+    // The .dproj's DCC_* switches as msbuild hands them to dcc
+    // (TPasDProj.Switches) and the start state they make (PasStartOptState),
+    // and DCC_ConsoleTarget (-CC). PasTree 0.106.0: without them every unit
+    // started in dcc's no-config state - a Release config's `{$IFOPT D+}`
+    // code was live - and CONSOLE was never defined for a console program's
+    // units. Empty / dcc's default / False for a bare .dpr.
+    FSwitches: TArray<string>;
+    FSwitchStart: TPasOptState;
+    FConsoleTarget: Boolean;
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
     // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
@@ -796,8 +805,9 @@ const
   // The parts of a .dproj the server takes at initialize, in the order
   // DProjSignature returns them - what pastree/projectChanged names when one
   // differs.
-  cDProjParts: array[0..6] of string = ('main source', 'platform',
-    'search paths', 'defines', 'unit list', 'namespaces', 'unit aliases');
+  cDProjParts: array[0..8] of string = ('main source', 'platform',
+    'search paths', 'defines', 'unit list', 'namespaces', 'unit aliases',
+    'compiler switches', 'console target');
 
 { What of a loaded .dproj the analysis depends on, one string per part of
   cDProjParts. Order-preserving on purpose: the search path order decides
@@ -826,7 +836,37 @@ begin
     LAliases := LAliases + [LAlias.Alias + '=' + LAlias.UnitName];
   Result := [ADProj.MainSource, PlatformName(ADProj.Platform),
     Joined(ADProj.SearchPaths), Joined(ADProj.Defines), Joined(LFiles),
-    Joined(ADProj.Namespaces), Joined(LAliases)];
+    Joined(ADProj.Namespaces), Joined(LAliases), Joined(ADProj.Switches),
+    BoolToStr(ADProj.ConsoleTarget, True)];
+end;
+
+{ The CONSOLE the units compiled with program AModel get: its last live
+  APPTYPE directive before its `uses` clause - after it the units were
+  already compiled - else -CC (AConsoleTarget). Not a program: -CC. The
+  completion overlay's units must see what the analysis's saw; this is
+  PasTree 0.106.0's TPasSemaProject.UnitsConsoleOf, which is private there,
+  over the same public tree API (dcc64 37.0, PasTree local/probe-b62). }
+function UnitsConsoleOf(AModel: TPasSemaModel; AConsoleTarget: Boolean): Boolean;
+var
+  LChild, LVis: Integer;
+begin
+  Result := AConsoleTarget;
+  if (AModel = nil) or (Length(AModel.Tree.Nodes) = 0) or
+     (AModel.Tree.Nodes[0].Kind <> nkProgram) then
+    Exit;
+  LVis := MaxInt;
+  LChild := AModel.Tree.Nodes[0].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkUsesClause then
+    begin
+      LVis := AModel.Tree.Nodes[LChild].FirstToken;
+      Break;
+    end;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if not AModel.Tree.Source.AppTypeBefore(LVis, Result) then
+    Result := AConsoleTarget;
 end;
 
 { "process started HH:MM:SS.zzz, N ms before initialize" - see the caller. }
@@ -945,6 +985,8 @@ begin
   FInitPlatform := LPlatformStr;
   FInitConfig := LConfigStr;
   FProjectSig := nil;
+  FSwitches := nil;
+  FConsoleTarget := False;
 
   if not ((LPlatformStr = '') or
     TryParsePlatformName(LPlatformStr, FPlatform)) then
@@ -962,6 +1004,8 @@ begin
         FPlatform := LDProj.Platform;
         FSearchPaths := LDProj.SearchPaths;
         FDefines := LDProj.Defines;
+        FSwitches := LDProj.Switches;
+        FConsoleTarget := LDProj.ConsoleTarget;
         // Every unit the project lists, main source included - see
         // FProjectFiles. Only .pas rows can name a unit; a .dfm/.res row in
         // the list would pin a non-unit under a unit's name.
@@ -1050,6 +1094,13 @@ begin
       Tell(2, 'PasTree: the libraryPaths setting is not a list of strings'
         + ' - ignored, so rename will not refuse library sources', True);
   end;
+  FSwitchStart := PasStartOptState(FSwitches);
+  // The switches as dcc gets them, on one line: "why is this {$IFOPT D+}
+  // branch dead" is answered by the config the .dproj evaluated to.
+  LogHeader(Format('switches: %s; console target %s',
+    [IfThen(Length(FSwitches) = 0, '(dcc defaults)',
+       string.Join(' ', FSwitches)),
+     IfThen(FConsoleTarget, 'on (-CC)', 'off')]));
   LogHeader(Format('configured: platform=%s main=%s paths=%d defines=%d'
     + ' libraryPaths=%d projectFiles=%d projectDir=%s',
     [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
@@ -1213,6 +1264,11 @@ begin
     FSession.PinUnitFile(LItem);
   for LAlias in FAliases do
     FSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
+  // The .dproj's switch start state and -CC (PasTree 0.106.0). Before
+  // SetParseDonor, whose gate compares both: a donor whose units saw
+  // another start state or CONSOLE cannot donate them.
+  FSession.SetSwitchStart(FSwitchStart);
+  FSession.SetConsoleTarget(FConsoleTarget);
   // PARSE REUSE (PasTree's stage A): the last-good project donates the parse
   // of every unit whose text - main file and every $I include - is byte-for-
   // byte what this run would read. It must outlive the build, and it does:
@@ -3312,8 +3368,23 @@ procedure TLspServer.SyncCompletionOverlays;
 var
   LDocs: TArray<TLspDocument>;
   LPaths, LTexts: TArray<string>;
-  LIdx: Integer;
+  LIdx, LMainMid: Integer;
+  LUnitsConsole: Boolean;
 begin
+  // The units' CONSOLE is the program's `{$APPTYPE}` decision, which only the
+  // analysis has read; -CC until there is one.
+  LUnitsConsole := FConsoleTarget;
+  if (FProject <> nil) and (FNav <> nil) and (FMainSource <> '') then
+  begin
+    LMainMid := FNav.ModelIdOf(FMainSource);
+    // Never demoted - DemoteLibraryText keeps project units - but its tree
+    // is what is read, so a demoted one keeps -CC rather than being read.
+    if (LMainMid >= 0) and not FProject.Model(LMainMid).Demoted then
+      LUnitsConsole := UnitsConsoleOf(FProject.Model(LMainMid),
+        FConsoleTarget);
+  end;
+  FCompletion.Configure(FSwitchStart, FMainSource, FConsoleTarget,
+    LUnitsConsole);
   LDocs := FDocs.All;
   SetLength(LPaths, Length(LDocs));
   SetLength(LTexts, Length(LDocs));

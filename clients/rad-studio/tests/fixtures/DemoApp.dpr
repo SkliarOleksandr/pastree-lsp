@@ -25,6 +25,8 @@ uses
   DemoForm in 'DemoForm.pas',
   DemoAnnotateLib in 'DemoAnnotateLib.pas',
   DemoAnnotateUse in 'DemoAnnotateUse.pas',
+  DemoGenericDetail in 'DemoGenericDetail.pas',
+  DemoGenericUse in 'DemoGenericUse.pas',
   DemoMissingUnit in 'DemoMissingUnit.pas';
 
 var

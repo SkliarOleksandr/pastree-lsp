@@ -955,7 +955,8 @@ What that took, as checked on 2026-09-27 against 13.2 and 12.3 on one machine:
 
 **`build.bat` at the repository root builds everything** - server, this
 package for each IDE of the version, all five harnesses (Win32, and Win64 as
-well whenever the Win64 package is built) - and runs the harnesses. That is the
+well whenever the Win64 package is built) - and, with `--test`, runs the
+harnesses (`release.bat` always passes it; a local rebuild skips the wait). That is the
 intended way,
 and not merely a convenience: the package and the server share one version and
 check each other for equality at the handshake, which only means anything if a

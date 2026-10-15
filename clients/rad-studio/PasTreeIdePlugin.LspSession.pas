@@ -1361,6 +1361,15 @@ procedure LspEndBenchmark;
 /// <summary>"Auto" for 0, else "N threads" - the restart line's wording.</summary>
 function ThreadsText(AThreads: Integer): string;
 
+/// <summary>
+/// The PasTree version a running server reported at its handshake
+/// (serverInfo.pastreeVersion) - the active project's if it is up, else any
+/// ready one: every session runs the same pastree-server.exe. With no server
+/// up, the exe a session would start is run with --version (it exits at once,
+/// starting no LSP session). '' when neither answers.
+/// </summary>
+function LspPasTreeVersion: string;
+
 implementation
 
 uses
@@ -3738,6 +3747,105 @@ begin
     Result := '1 thread'
   else
     Result := Format('%d threads', [AThreads]);
+end;
+
+{ The first line pastree-server.exe --version prints, '' if it cannot be run
+  or says nothing within AWaitMs. The exe answers --version before it creates
+  anything (pastree-server.dpr), so this is a process start and nothing more;
+  the output is one short line, far below a pipe's buffer, so waiting for the
+  exit first cannot deadlock against an unread pipe. }
+function ServerVersionBanner(const AExe: string; AWaitMs: Cardinal): string;
+var
+  LSa: TSecurityAttributes;
+  LRead, LWrite: THandle;
+  LSi: TStartupInfo;
+  LPi: TProcessInformation;
+  LCmd: string;
+  LBuf: array[0..1023] of AnsiChar;
+  LGot: DWORD;
+  LBytes: RawByteString;
+begin
+  Result := '';
+  if (AExe = '') or not FileExists(AExe) then
+    Exit;
+  LSa := Default(TSecurityAttributes);
+  LSa.nLength := SizeOf(LSa);
+  LSa.bInheritHandle := True;
+  if not CreatePipe(LRead, LWrite, @LSa, 0) then
+    Exit;
+  try
+    SetHandleInformation(LRead, HANDLE_FLAG_INHERIT, 0);
+    LSi := Default(TStartupInfo);
+    LSi.cb := SizeOf(LSi);
+    LSi.dwFlags := STARTF_USESTDHANDLES;
+    LSi.hStdOutput := LWrite;
+    LSi.hStdError := LWrite;
+    LSi.hStdInput := 0;
+    LCmd := '"' + AExe + '" --version';
+    UniqueString(LCmd);
+    if not CreateProcess(nil, PChar(LCmd), nil, nil, True, CREATE_NO_WINDOW,
+      nil, PChar(ExtractFilePath(AExe)), LSi, LPi) then
+      Exit;
+    // Our copy of the write end goes now, so the read below sees end-of-file
+    // once the child has exited rather than waiting on a handle we hold.
+    CloseHandle(LWrite);
+    LWrite := 0;
+    try
+      if WaitForSingleObject(LPi.hProcess, AWaitMs) <> WAIT_OBJECT_0 then
+      begin
+        TerminateProcess(LPi.hProcess, 1);
+        Exit;
+      end;
+    finally
+      CloseHandle(LPi.hThread);
+      CloseHandle(LPi.hProcess);
+    end;
+    LBytes := '';
+    while ReadFile(LRead, LBuf, SizeOf(LBuf), LGot, nil) and (LGot > 0) do
+      LBytes := LBytes + Copy(PAnsiChar(@LBuf[0]), 1, LGot);
+    Result := Trim(string(LBytes));
+    if Pos(#10, Result) > 0 then
+      Result := Trim(Copy(Result, 1, Pos(#10, Result) - 1));
+  finally
+    CloseHandle(LRead);
+    if LWrite <> 0 then
+      CloseHandle(LWrite);
+  end;
+end;
+
+function LspPasTreeVersion: string;
+const
+  cMarker = '(PasTree ';
+var
+  LSession: TLspSession;
+  LBanner: string;
+  LAt, LEnd: Integer;
+begin
+  Result := '';
+  if Assigned(GSession) and GSession.IsReady then
+    Result := GSession.FClient.PasTreeVersion;
+  if (Result = '') and Assigned(GPool) then
+    for LSession in GPool.ReadySessions do
+    begin
+      Result := LSession.FClient.PasTreeVersion;
+      if Result <> '' then
+        Exit;
+    end;
+  if Result <> '' then
+    Exit;
+  // No server up: ask the exe a session WOULD start (FindServerExe, the same
+  // lookup), so the dialog names the PasTree of the binary on disk rather
+  // than nothing. Its banner is PasLspVersionBanner:
+  // "pastree-lsp-server 0.69.0 (PasTree 0.108.2, built ...)".
+  LBanner := ServerVersionBanner(FindServerExe(PackageDir), 3000);
+  LAt := Pos(cMarker, LBanner);
+  if LAt = 0 then
+    Exit;
+  Inc(LAt, Length(cMarker));
+  LEnd := LAt;
+  while (LEnd <= Length(LBanner)) and not CharInSet(LBanner[LEnd], [',', ')', ' ']) do
+    Inc(LEnd);
+  Result := Copy(LBanner, LAt, LEnd - LAt);
 end;
 
 { pastree/benchmark. The override is set BEFORE EnsureSession, which is what
