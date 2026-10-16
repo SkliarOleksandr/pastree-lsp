@@ -1,16 +1,16 @@
 unit DemoUnit;
 
-{ Fixture for tests\LspClientSmoke.dpr - see DemoApp.dpr. }
+{ Fixture for tests\LspClientSmoke.dpr - see DemoApp.dpr. Fixed lines. }
 
 interface
 
 type
   TBox = record
-    Value: string;
+    Value: string; const CSlots = 4;
   end;
 
 const
-  CAnswer = 42; CCastMask = Cardinal(Ord('A'));
+  CAnswer = 42; CCastMask = Cardinal(Ord('A')); CBoxSlots = TBox.CSlots;
 
 /// <summary>
 /// Greets a person

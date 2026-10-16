@@ -1836,6 +1836,18 @@ begin
   Check(LRow.Contains('"detail":" = Cardinal(Ord(''A''))') and
     LRow.Contains('"typeSpans":[4,8]'),
     'a typecast''s type is a type span, Ord is not (got ' + LRow + ')');
+  // A type qualifying a constant's value is one too, found by what the name
+  // is bound to (Alex, 2026-10-16: `TColors` of `TColors.SysCaptionText`).
+  LRow := '';
+  LAt := Pos('"label":"CBoxSlots"', GResultJson);
+  if GOk and (LAt > 0) then
+  begin
+    LRow := Copy(GResultJson, LAt, MaxInt);
+    LRow := Copy(LRow, 1, Pos('{"label"', LRow) - 1);
+  end;
+  Check(LRow.Contains('"detail":" = TBox.CSlots') and
+    LRow.Contains('"typeSpans":[4,4]'),
+    'a type qualifying a constant''s value is a type span (got ' + LRow + ')');
   Check(GOk and GResultJson.Contains('(const S: <string|array>): Integer'),
     'the Length builtin shows params AND the curated result type');
   Check(GOk and GResultJson.Contains(

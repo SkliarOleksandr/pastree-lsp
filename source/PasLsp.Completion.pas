@@ -454,6 +454,68 @@ begin
     Result := CapDisplay(AModel.Tree.NodeSpanText(LInit));
 end;
 
+{ The names in a constant's initializer that the analysis bound to a type -
+  `TColors` of `clCaptionText = TColors.SysCaptionText`, which no text rule
+  can tell from a unit qualifier (Alex, 2026-10-16). Read off the model's
+  RefMap / ExtRefMap, so a demoted library model still answers: only the
+  symbol tables are looked at. ADecl is the nkConstDecl / nkInlineConst. }
+function ConstValueTypeNames(AProject: TPasSemaProject; AModel: TPasSemaModel;
+  ADecl: Integer): TArray<string>;
+
+  procedure Walk(ANode: Integer);
+  var
+    LSym, LChild: Integer;
+    LExt: TPasExtRef;
+    LTarget: TPasSemaModel;
+  begin
+    if AModel.Tree.Nodes[ANode].Kind = nkIdent then
+    begin
+      LTarget := nil;
+      LSym := NIL_SYM;
+      if ANode <= High(AModel.RefMap) then
+        LSym := AModel.RefMap[ANode];
+      if LSym <> NIL_SYM then
+        LTarget := AModel
+      else if (AProject <> nil) and AModel.ExtRefMap.TryGetValue(ANode, LExt) and
+         (LExt.UnitId >= 0) and (LExt.UnitId < AProject.ModelCount) then
+      begin
+        LTarget := AProject.Model(LExt.UnitId);
+        LSym := LExt.Sym;
+      end;
+      if (LTarget <> nil) and (LSym >= 0) and (LSym < LTarget.SymCount) and
+         (LTarget.Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        Result := Result + [LTarget.Symbols[LSym].Name];
+    end;
+    LChild := AModel.Tree.Nodes[ANode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      Walk(LChild);
+      LChild := AModel.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
+var
+  LChild: Integer;
+  LSeenName: Boolean;
+begin
+  Result := nil;
+  if (AModel = nil) or AModel.Demoted or (ADecl = NIL_NODE) then
+    Exit;
+  // The name is skipped as ConstValueText skips it; a written type after it
+  // is a type anyway.
+  LSeenName := False;
+  LChild := AModel.Tree.Nodes[ADecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if not (AModel.Tree.Nodes[LChild].Kind in [nkAttrGroup, nkDirective]) then
+      if not LSeenName then
+        LSeenName := True
+      else
+        Walk(LChild);
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 { `$` and the hex digits of ANum, upper-case, padded to whole bytes. }
 function HexOf(ANum: UInt64): string;
 begin
@@ -1093,9 +1155,10 @@ end;
   one right after a `:` or `of`, the owner qualifier in front of the dot, for
   a type its own name and the ancestors in `class(...)` / `interface(...)`,
   every argument inside a generic's `<...>`, nested ones included,
-  and anywhere a segment spelled AKnownType - the declared type of a
+  and anywhere a segment spelled one of AKnownTypes - the declared type of a
   constant, which its value writes as `System.UITypes.TMsgDlgBtn.mbCancel`
-  (Alex, 2026-10-07). Of a dotted name only the segment that is the type is
+  (Alex, 2026-10-07), and the types its value names (ConstValueTypeNames).
+  Of a dotted name only the segment that is the type is
   marked, never the unit qualifier in front of it. A heuristic over text the
   server composed itself, where those are the only places a type can stand -
   the hover paints them in the type colour as the editor would. A type's
@@ -1105,7 +1168,8 @@ end;
   an intrinsic: a constant expression can call nothing else. }
 function SignatureTypeSpans(const ASig: string; AOwnerLen, ANameStart,
   ANameLen: Integer; AIsType: Boolean;
-  const AKnownType: string = ''; ACastIsType: Boolean = False): TArray<Integer>;
+  const AKnownTypes: TArray<string> = nil;
+  ACastIsType: Boolean = False): TArray<Integer>;
 var
   LIdx, LFrom, LPrev, LSeg, LLastSeg, LAngle: Integer;
   LWord, LPrevWord: string;
@@ -1116,6 +1180,16 @@ var
   procedure Add(AFrom, ALen: Integer);
   begin
     LResult := LResult + [AFrom, ALen];
+  end;
+
+  function IsKnownType(const ASeg: string): Boolean;
+  var
+    LKnown: string;
+  begin
+    for LKnown in AKnownTypes do
+      if SameText(ASeg, LKnown) then
+        Exit(True);
+    Result := False;
   end;
 
 begin
@@ -1163,7 +1237,7 @@ begin
          LowerCase(Copy(LWord, LastDelimiter('.', LWord) + 1, MaxInt)),
          LBuiltin));
       // Segment by segment: in a type position the last one is the type, and
-      // a segment spelled AKnownType is one wherever it stands.
+      // a segment spelled a known type is one wherever it stands.
       LLastSeg := LFrom;
       for LSeg := LFrom to LIdx - 1 do
         if ASig[LSeg] = '.' then
@@ -1174,8 +1248,8 @@ begin
         LPrev := LSeg;
         while (LPrev < LIdx) and (ASig[LPrev] <> '.') do
           Inc(LPrev);
-        if (LTypePos and (LSeg = LLastSeg)) or ((AKnownType <> '') and
-           SameText(Copy(ASig, LSeg, LPrev - LSeg), AKnownType)) then
+        if (LTypePos and (LSeg = LLastSeg)) or
+           IsKnownType(Copy(ASig, LSeg, LPrev - LSeg)) then
           Add(LSeg, LPrev - LSeg);
         LSeg := LPrev + 1;
       end;
@@ -1398,6 +1472,7 @@ var
   LOwner, LOwnerLen, LNameStart, LDecl, LTypeSym: Integer;
   LX: TSemaXType;
   LKnownType, LSep, LText, LBase, LOwnerText: string;
+  LKnownTypes: TArray<string>;
   LNode, LSegAt, LSpanIdx: Integer;
   LOwnerSpans, LOwnerParamAt: TArray<Integer>;
 begin
@@ -1574,7 +1649,8 @@ begin
   LNameStart := Length(LHead) + 2 + IfThen(LOwnerLen > 0, LOwnerLen + 1, 0);
   // A constant's value may name its own type inside a qualified value
   // (`System.UITypes.TMsgDlgBtn.mbCancel`): that segment is a type too.
-  LKnownType := '';
+  // And the types its value names - `TColors` of `TColors.SysCaptionText`.
+  LKnownTypes := nil;
   if LItem.Kind = skConst then
   begin
     LX := AProject.DeclTypeX(AMid, ASym);
@@ -1584,12 +1660,15 @@ begin
       if LastDelimiter('.', LKnownType) > 0 then
         LKnownType := Copy(LKnownType, LastDelimiter('.', LKnownType) + 1,
           MaxInt);
+      LKnownTypes := [LKnownType];
     end;
+    LKnownTypes := LKnownTypes + ConstValueTypeNames(AProject, LModel,
+      DeclOfKinds(LModel, ASym, [nkConstDecl, nkInlineConst]));
   end;
   // The name's own `<K,V>` follows it, so the scan from the name's end
   // paints those parameters as a generic's arguments.
   ATypeSpans := LOwnerSpans + SignatureTypeSpans(Result, 0, LNameStart,
-    Length(LItem.Name), LItem.Kind = skType, LKnownType,
+    Length(LItem.Name), LItem.Kind = skType, LKnownTypes,
     LItem.Kind = skConst);
 end;
 
@@ -1598,23 +1677,25 @@ end;
   TBase)` needs the name before it to read the heritage list), the name's own
   span dropped and the rest re-based onto the detail. An enum value's detail
   `= TIEFastDrawing(0)` names its type where no `:` precedes it, so that name
-  is passed as the known type. }
+  is passed as the known type, and a constant's AValueTypes - the types its
+  value names (ConstValueTypeNames). }
 function DetailTypeSpans(const AName, ADetail: string;
-  AKind: TSemaSymbolKind): TArray<Integer>;
+  AKind: TSemaSymbolKind;
+  const AValueTypes: TArray<string> = nil): TArray<Integer>;
 var
   LSpans: TArray<Integer>;
-  LKnown: string;
+  LKnown: TArray<string>;
   LIdx, LOpen: Integer;
 begin
   Result := nil;
   if ADetail = '' then
     Exit;
-  LKnown := '';
+  LKnown := AValueTypes;
   if (AKind = skEnumValue) and ADetail.StartsWith(' = ') then
   begin
     LOpen := Pos('(', ADetail);
     if LOpen > 4 then
-      LKnown := Copy(ADetail, 4, LOpen - 4);
+      LKnown := LKnown + [Copy(ADetail, 4, LOpen - 4)];
   end;
   LSpans := SignatureTypeSpans(AName + ADetail, 0, 1, Length(AName),
     AKind = skType, LKnown, AKind = skConst);
@@ -1642,6 +1723,8 @@ var
   LIdx: Integer;
   LEntry: TLspCompletionEntry;
   LWithTypes: Boolean;
+  LValueTypes: TArray<string>;
+  LValueModel: TPasSemaModel;
 begin
   Result := Default(TLspCompletionAnswer);
   Result.ReplaceColFrom := APasCol;
@@ -1729,8 +1812,22 @@ begin
         if LItems[LIdx].Overloads > 0 then
           LEntry.Detail := LEntry.Detail
             + Format(' (+%d)', [LItems[LIdx].Overloads]);
+        LValueTypes := nil;
+        if (LItems[LIdx].Kind = skConst) and (LItems[LIdx].Sym <> NIL_SYM) then
+        begin
+          if LItems[LIdx].Mid < 0 then
+            LValueModel := LModel
+          else if AProject <> nil then
+            LValueModel := AProject.Model(LItems[LIdx].Mid)
+          else
+            LValueModel := nil;
+          if LValueModel <> nil then
+            LValueTypes := ConstValueTypeNames(AProject, LValueModel,
+              DeclOfKinds(LValueModel, LItems[LIdx].Sym,
+                [nkConstDecl, nkInlineConst]));
+        end;
         LEntry.TypeSpans := DetailTypeSpans(LEntry.ItemLabel, LEntry.Detail,
-          LItems[LIdx].Kind);
+          LItems[LIdx].Kind, LValueTypes);
         LEntry.SortText := BucketSort(LItems[LIdx].Bucket, LItems[LIdx].Name);
         Result.Items[LIdx] := LEntry;
       end;
