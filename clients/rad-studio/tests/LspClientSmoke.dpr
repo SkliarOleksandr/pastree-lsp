@@ -578,6 +578,63 @@ begin
   Check(not GOk and GError.Contains('conditional symbol'),
     'and is refused, naming the reason');
 end;
+
+{ 2c-bis. pastree/optionsAt (PasTree 0.112.0): the compiler options in
+  effect at a position, over the switch directives at the end of
+  fixtures\DemoDefines.pas. At the unit's first line nothing has been set
+  there: 25 base rows and no unit row. Inside the pushed state RANGECHECKS
+  is the long form's OFF; at the final `end.` the pop has put back the
+  switch group's ON, and the row names that group - not the directive the
+  pop undid - while SCOPEDENUMS, an option with no letter, names its own. }
+procedure TestOptionsAt;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  function Row(const AName, AOption, ALetter, AValue, AOrigin,
+    ASnippet: string): string;
+  begin
+    Result := Format('"name":"%s","option":"%s","letter":"%s","value":"%s",' +
+      '"origin":"%s","snippet":"%s"',
+      [AName, AOption, ALetter, AValue, AOrigin, ASnippet]);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 2c-bis. options at cursor ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoDefines.pas');
+  DidOpen(LFile);
+
+  Check(Ask('pastree/optionsAt', PositionParams(LFile, 0, 0)),
+    'optionsAt on the unit header answered');
+  Check(GOk and (Length(GResultJson.Split(['"option":'])) = 26),
+    'with 25 rows, one per option');
+  Check(GOk and not GResultJson.Contains('"origin":"unit"'),
+    'none set by the unit yet');
+  Check(GOk and GResultJson.Contains(Row('$R- RANGECHECKS OFF', 'RANGECHECKS',
+    'R', 'OFF', 'default', '$R- RANGECHECKS OFF')),
+    'RANGECHECKS is dcc''s default OFF, its row text as the snippet');
+
+  FindPos(LFile, '{$RANGECHECKS OFF}', 'OFF', LLine, LChar);
+  Check(Ask('pastree/optionsAt', PositionParams(LFile, LLine, LChar)),
+    'optionsAt inside the pushed state answered');
+  Check(GOk and GResultJson.Contains(Row('$R- RANGECHECKS OFF', 'RANGECHECKS',
+    'R', 'OFF', 'unit', '{$RANGECHECKS OFF}')),
+    'RANGECHECKS is the long form''s OFF');
+  Check(GOk and GResultJson.Contains(Row('$Q+ OVERFLOWCHECKS ON',
+    'OVERFLOWCHECKS', 'Q', 'ON', 'unit', '{$R+,Q+}')),
+    'OVERFLOWCHECKS still the group''s ON');
+
+  FindPos(LFile, 'end.', 'end', LLine, LChar);
+  Check(Ask('pastree/optionsAt', PositionParams(LFile, LLine, LChar)),
+    'optionsAt at the final end. answered');
+  Check(GOk and GResultJson.Contains(Row('$R+ RANGECHECKS ON', 'RANGECHECKS',
+    'R', 'ON', 'unit', '{$R+,Q+}')),
+    'after the pop RANGECHECKS is ON again, named by the group that set it');
+  Check(GOk and GResultJson.Contains(Row('SCOPEDENUMS ON', 'SCOPEDENUMS', '',
+    'ON', 'unit', '{$SCOPEDENUMS ON}')),
+    'a long-form-only option has no letter and names its directive');
+end;
 { 2d. A unit the server sees only compiled, and pastree/dcuSource.
 
   fixtures\DemoDcu.pas imports DemoDcuLib, whose .pas is nowhere on the
@@ -4765,6 +4822,7 @@ begin
       TestQueuedBeforeReady(GExe);
       TestNavigation;
       TestDefines;
+      TestOptionsAt;
       TestDcuSource;
       TestNonAsciiPositions;
       TestBareInherited;

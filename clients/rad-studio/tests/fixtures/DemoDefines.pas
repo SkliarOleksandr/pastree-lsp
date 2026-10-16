@@ -39,4 +39,13 @@ begin
 {$ENDIF}
 end;
 
+// Options at cursor (pastree/optionsAt): range and overflow checks on,
+// a pushed state where one of them is switched off again, the pop, and a
+// long-form-only option. Below the last pinned position on purpose.
+{$R+,Q+}
+{$PUSHOPT}
+{$RANGECHECKS OFF}
+{$POPOPT}
+{$SCOPEDENUMS ON}
+
 end.

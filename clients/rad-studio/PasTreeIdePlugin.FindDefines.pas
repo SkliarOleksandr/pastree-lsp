@@ -31,8 +31,11 @@ unit PasTreeIdePlugin.FindDefines;
       would answer a question nobody asked, unlike a shared unit's
       references, which really are one fact seen from two closures.
 
-  Two commands, one Messages tab ("Find Defines"), cleared and rebuilt on
-  each call - the tab's title line says which one ran. `Find All > Defines`
+  Three commands, one Messages tab ("Find Defines"), cleared and rebuilt on
+  each call - the tab's title line says which one ran. The third, `Options
+  at cursor` (PasTree 0.112.0, OptionsAt; `pastree/optionsAt`), is the
+  same question about compiler options - what an $IFOPT written there would
+  see - asked and shown as Defines at cursor is, a flat list. `Find All > Defines`
   groups by file (one header per file, as Find References does) plus two
   more groups, "Project defines" and "Platform defines" - the PasTree demo's
   own shape (AGroupKeys). `Defines at cursor` is a FLAT list, one row per
@@ -49,6 +52,9 @@ procedure ExecuteFindDefines(const AView: IOTAEditView);
 
 /// <summary>Defines at cursor: the flat in-effect set.</summary>
 procedure ExecuteDefinesAtCursor(const AView: IOTAEditView);
+
+/// <summary>Options at cursor: the compiler options in effect.</summary>
+procedure ExecuteOptionsAtCursor(const AView: IOTAEditView);
 
 /// <summary>
 /// Removes the "Find Defines" Messages tab - call once from
@@ -307,6 +313,70 @@ begin
   ResultScrollToTop;
 end;
 
+{ An option row's text and span. A `project` or `default` row arrives as a
+  base define's does - its snippet IS the row's text (`$R- RANGECHECKS
+  OFF`), highlighted whole - so DisplaySnippet shows it as it is, tagged
+  with its origin. A `unit` row's snippet is the directive's line and its
+  span the directive, and here the row's text DOES go in front: unlike a
+  define's name, the option is not always readable from the directive -
+  the group `$R-,Q+` sets two, and after a $POPOPT the row points at the directive
+  that set the value before the $PUSHOPT. The span is shifted by exactly
+  the prefix put in front of it, the one place it moves. }
+function OptionDisplay(const ARow: TLspDefineRow;
+  out AMatchStart, AMatchLen: Integer): string;
+var
+  LPrefix: string;
+begin
+  Result := DisplaySnippet(ARow, AMatchStart, AMatchLen);
+  if (ARow.Origin <> 'unit') or (TrimRight(ARow.Snippet) = '') then
+    Exit;
+  LPrefix := ARow.Name + ' - ';
+  Result := LPrefix + Result;
+  if AMatchLen > 0 then
+    AMatchStart := AMatchStart + Length(LPrefix);
+end;
+
+/// <summary>
+/// Options at cursor: a flat list, one row per option, in the server's
+/// order - dcc's defaults, the project's switches, then the ones a directive
+/// set, by file and line.
+/// </summary>
+procedure ReportOptionsAt(const ARows: TArray<TLspDefineRow>);
+var
+  LMessageServices: IOTAMessageServices;
+  LGroup: IOTAMessageGroup;
+  LRow: TLspDefineRow;
+  LDisplay, LTag: string;
+  LMatchStart, LMatchLen, LUnitRows: Integer;
+begin
+  if not Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    Exit;
+  LUnitRows := 0;
+  for LRow in ARows do
+    if LRow.Origin = 'unit' then
+      Inc(LUnitRows);
+  LGroup := GetOrCreateMessageGroup(LMessageServices);
+  LMessageServices.ClearMessageGroup(LGroup);
+  LMessageServices.AddCustomMessagePtr(
+    NewTitleRow(Format('PasTree Options at cursor: %d option(s), %d set in units',
+      [Length(ARows), LUnitRows])), LGroup);
+
+  for LRow in ARows do
+  begin
+    LDisplay := OptionDisplay(LRow, LMatchStart, LMatchLen);
+    if LRow.Origin = 'unit' then
+      LTag := ''
+    else
+      LTag := LRow.Origin;
+    LMessageServices.AddCustomMessagePtr(
+      NewSnippetRow(LRow.Hit.FilePath, LRow.Hit.Row, LRow.Hit.Col,
+        LDisplay, LMatchStart, LMatchLen, LTag, LRow.Hit.TypeSpans),
+      LGroup);
+  end;
+  LMessageServices.ShowMessageView(LGroup);
+  ResultScrollToTop;
+end;
+
 procedure ExecuteFindDefines(const AView: IOTAEditView);
 var
   LCursorFile: string;
@@ -386,6 +456,50 @@ begin
     begin
       CloseWaitDialog;
       LogDiagnostic(Format('Defines at cursor: unhandled %s: %s',
+        [E.ClassName, E.Message]));
+    end;
+  end;
+end;
+
+procedure ExecuteOptionsAtCursor(const AView: IOTAEditView);
+var
+  LCursorFile: string;
+  LRow, LCol: Integer;
+begin
+  try
+    if not Assigned(AView) then
+      Exit;
+    LCursorFile := AView.Buffer.FileName;
+    LRow := AView.Buffer.EditPosition.Row;
+    LCol := AView.Buffer.EditPosition.Column;
+    ShowWaitDialog('Finding options at cursor...');
+    LspLogToServer(Format('optionsAt: asking %s(%d,%d)',
+      [ExtractFileName(LCursorFile), LRow, LCol]));
+    LspOptionsAt(LCursorFile, LRow, LCol,
+      procedure(ASuccess: Boolean; const ARows: TArray<TLspDefineRow>;
+        const AError: string)
+      begin
+        LspLogToServer(Format('optionsAt: answer ok=%s rows=%d err=%s',
+          [BoolToStr(ASuccess, True), Length(ARows), AError]));
+        if not GAlive then
+          Exit;
+        if not ASuccess then
+        begin
+          CloseWaitDialog;   // as above
+          LogDiagnostic('Options at cursor: ' + AError);
+          Exit;
+        end;
+        ReportUnderWaitDialog(Length(ARows),
+          procedure
+          begin
+            ReportOptionsAt(ARows);
+          end);
+      end);
+  except
+    on E: Exception do
+    begin
+      CloseWaitDialog;
+      LogDiagnostic(Format('Options at cursor: unhandled %s: %s',
         [E.ClassName, E.Message]));
     end;
   end;

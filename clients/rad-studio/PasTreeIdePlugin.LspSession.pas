@@ -163,6 +163,8 @@ type
   /// their own: Hit.FilePath is '' when the analysis has no main module, a
   /// row to list rather than to jump to. Active is False for a $DEFINE in a
   /// dead branch (findDefines only - definesAt never returns one).
+  /// pastree/optionsAt answers the same shape (LspOptionsAt), Origin 'unit',
+  /// 'project' or 'default'.
   /// </summary>
   TLspDefineRow = record
     Hit: TLspHit;
@@ -872,6 +874,17 @@ procedure LspFindDefines(const AFileName: string;
 procedure LspDefinesAt(const AFileName: string; ARow, ACol: Integer;
   const AOnDone: TLspDefinesProc);
 
+/// <summary>
+/// The compiler options in effect at an IDE position (PasTree 0.112.0,
+/// OptionsAt) - what an $IFOPT written there would see, one row per option,
+/// in the define rows' shape: Name is the row's text (`$R- RANGECHECKS OFF`),
+/// Origin 'unit' (Hit on the directive that set it), 'project' or
+/// 'default'. Project-scoped like LspDefinesAt, for the same reason: an
+/// option is unit-local, its start state the project's.
+/// </summary>
+procedure LspOptionsAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspDefinesProc);
+
 type
   /// <summary>
   /// Delivered on the main thread, once, for LspDcuSource. On success AText
@@ -1568,9 +1581,9 @@ type
     procedure Hierarchy(const AMethod, AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHierarchyOneProc);
     { AMethod is 'pastree/findDefines' (AHasPosition False, ARow/ACol
-      ignored) or 'pastree/definesAt' (AHasPosition True). One method
-      because both answer the same bare array of rows - only the request
-      shape differs. }
+      ignored), 'pastree/definesAt' or 'pastree/optionsAt' (AHasPosition
+      True). One method because all three answer the same bare array of
+      rows - only the request shape differs. }
     procedure Defines(const AMethod, AFileName: string; AHasPosition: Boolean;
       ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
     procedure DcuSource(const ADcuPath: string;
@@ -5540,6 +5553,21 @@ begin
     Exit;
   end;
   LSession.Defines('pastree/definesAt', AFileName, {AHasPosition} True,
+    ARow, ACol, AOnDone);
+end;
+
+procedure LspOptionsAt(const AFileName: string; ARow, ACol: Integer;
+  const AOnDone: TLspDefinesProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Defines('pastree/optionsAt', AFileName, {AHasPosition} True,
     ARow, ACol, AOnDone);
 end;
 

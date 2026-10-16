@@ -449,6 +449,7 @@ type
     function HandleFindAllAt(const AMsg: TLspIncoming): string;
     function HandleFindDefines(const AMsg: TLspIncoming): string;
     function HandleDefinesAt(const AMsg: TLspIncoming): string;
+    function HandleOptionsAt(const AMsg: TLspIncoming): string;
     function HandleDcuSource(const AMsg: TLspIncoming): string;
     function HandleProjectChanged(const AMsg: TLspIncoming): string;
     function HandleBenchmark(const AMsg: TLspIncoming): string;
@@ -4789,6 +4790,107 @@ begin
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
 end;
 
+{ An option row's text, short form first, then long: `$R- RANGECHECKS OFF`,
+  `$A8 ALIGN 8`, the long form alone for an option with no letter
+  (`SCOPEDENUMS ON`) - the PasTree demo's own spelling of the row. }
+function OptionRowText(const ASite: TPasOptionSite): string;
+begin
+  Result := ASite.Name + ' ' + ASite.Value;
+  if ASite.Letter = #0 then
+    Exit;
+  if ASite.Option in [optA, optZ] then
+    Result := '$' + ASite.Letter + ASite.Value + ' ' + Result
+  else if ASite.Value = 'ON' then
+    Result := '$' + ASite.Letter + '+ ' + Result
+  else
+    Result := '$' + ASite.Letter + '- ' + Result;
+end;
+
+{ One row of pastree/optionsAt: a TPasOptionSite, in the define rows' shape
+  (DefineSiteJson) so a client reads both alike - `name` is the row's text
+  (OptionRowText), and `option` / `letter` / `value` the parts it is made
+  of. A `unit` row's snippet is the directive's source line, hiFrom/hiTo the
+  directive in it; a `project` or `default` row has no source site of its
+  own, so its snippet is the row's text, highlighted whole, and its uri the
+  main module's header as a project define's is - '' when the analysis has
+  no main module. }
+function OptionSiteJson(const ASite: TPasOptionSite): string;
+const
+  cOrigin: array[TPasOptionOrigin] of string = ('unit', 'project', 'default');
+var
+  LUri, LText, LSnippet, LLetter: string;
+  LHiFrom, LHiTo: Integer;
+begin
+  if ASite.Hit.FilePath = '' then
+    LUri := ''
+  else
+    LUri := PathToUri(ASite.Hit.FilePath);
+  LText := OptionRowText(ASite);
+  if ASite.Origin = ooUnit then
+  begin
+    LSnippet := ASite.Hit.Snippet;
+    LHiFrom := ASite.Hit.HiFrom;
+    LHiTo := ASite.Hit.HiTo;
+  end
+  else
+  begin
+    LSnippet := LText;
+    LHiFrom := 0;
+    LHiTo := Length(LText);
+  end;
+  if ASite.Letter = #0 then
+    LLetter := ''
+  else
+    LLetter := ASite.Letter;
+  Result := Format('{"uri":%s,"filePath":%s,"line":%d,"col":%d,' +
+    '"name":%s,"option":%s,"letter":%s,"value":%s,"origin":%s,' +
+    '"snippet":%s,"hiFrom":%d,"hiTo":%d}',
+    [JsonQuote(LUri), JsonQuote(ASite.Hit.FilePath), ASite.Hit.Line,
+     ASite.Hit.Col, JsonQuote(LText), JsonQuote(ASite.Name),
+     JsonQuote(LLetter), JsonQuote(ASite.Value),
+     JsonQuote(cOrigin[ASite.Origin]), JsonQuote(LSnippet), LHiFrom, LHiTo]);
+end;
+
+{ pastree/optionsAt - OURS, not LSP. What OptionsAt (PasTree 0.112.0) is:
+  the compiler options in effect at the cursor of a model's main file - what
+  an $IFOPT written there would see - one row per option, base first (dcc's
+  defaults, the project's switches), then the ones a live directive set, by
+  file/line/col, $PUSHOPT/$POPOPT replayed. A file with no model of its own
+  (an opened .inc) is not an error: the answer is then the project's start
+  state, as definesAt's is its base set. }
+function TLspServer.HandleOptionsAt(const AMsg: TLspIncoming): string;
+var
+  LPath: string;
+  LLine, LChar, LPasLine, LPasCol, LMid, LIdx, LUnitRows: Integer;
+  LSites: TArray<TPasOptionSite>;
+  LJson: TArray<string>;
+begin
+  LPath := DocPathOf(AMsg.Params);
+  if (LPath = '') or
+     not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
+     not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
+    Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
+      'optionsAt: textDocument.uri and position required'));
+  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  LMid := FNav.ModelIdOf(LPath);
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  LSites := FNav.OptionsAt(LMid, LPasLine, LPasCol);
+  SetLength(LJson, Length(LSites));
+  LUnitRows := 0;
+  for LIdx := 0 to High(LSites) do
+  begin
+    LJson[LIdx] := OptionSiteJson(LSites[LIdx]);
+    if LSites[LIdx].Origin = ooUnit then
+      Inc(LUnitRows);
+  end;
+  Log(Format('pastree/optionsAt: %s -> %d options, %d set in units',
+    [PosTag(LPath, LPasLine, LPasCol), Length(LSites), LUnitRows]));
+  Result := BuildResponse(AMsg.IdJson, '[' + string.Join(',', LJson) + ']');
+end;
+
 { pastree/dcuSource - OURS, not LSP. The interface text PasTree generates
   for a compiled unit (PasTree 0.37.0, PasTree.Dcu / PasTree.Dcu.Source),
   for a host that wants to SHOW the file a navigation answer landed in when
@@ -8005,6 +8107,8 @@ begin
         Exit(HandleFindDefines(LMsg));
       if LMsg.Method = 'pastree/definesAt' then
         Exit(HandleDefinesAt(LMsg));
+      if LMsg.Method = 'pastree/optionsAt' then
+        Exit(HandleOptionsAt(LMsg));
       if LMsg.Method = 'pastree/dcuSource' then
         Exit(HandleDcuSource(LMsg));
       if LMsg.Method = 'pastree/projectChanged' then

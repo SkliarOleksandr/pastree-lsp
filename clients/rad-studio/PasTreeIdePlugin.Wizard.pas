@@ -113,13 +113,17 @@ type
     out among the first seven - its command lives in
     PasTreeIdePlugin.FindReferences, the other six in
     PasTreeIdePlugin.FindHierarchy - which is why the two enums are not one.
-    The last two, Defines and DefinesAtCursor (PasTree 0.28.0), are a third
-    family of their own in PasTreeIdePlugin.FindDefines: unlike the other
-    seven they need NO IDENTITY at the caret - ItemApplies always answers
+    The next three, Defines and DefinesAtCursor (PasTree 0.28.0) and
+    OptionsAtCursor (0.112.0), are a third family of their own in
+    PasTreeIdePlugin.FindDefines: unlike the other seven they need NO
+    IDENTITY at the caret - ItemApplies always answers
     True for them, there being no findAllAt gate to ask. }
   TFindAllItem = (faiReferences, faiOverrides, faiImplementations,
     faiDescendants, faiAssignments, faiCreations, faiDestructions,
     faiDefines, faiDefinesAtCursor,
+    // PasTree 0.112.0's OptionsAt: the same question about compiler
+    // options, PasTreeIdePlugin.FindDefines too, never greyed.
+    faiOptionsAtCursor,
     // PasTree 0.93.0's unused-units checks - PasTreeIdePlugin.UnusedUnits;
     // project questions like the define inventories, never greyed.
     faiUnusedUnits, faiProjectUnusedUnits, faiUnreferencedUnits);
@@ -295,14 +299,14 @@ const
   cItemName: array[TFindAllItem] of string =
     ('References', 'Overrides', 'Implementations', 'Descendants',
      'Assignments', 'Creations', 'Destructions',
-     'Defines', 'DefinesAtCursor',
+     'Defines', 'DefinesAtCursor', 'OptionsAtCursor',
      'UnusedUnits', 'ProjectUnusedUnits', 'UnreferencedUnits');
   // What the menu actually shows - "Defines at cursor" reads as PasTree's
   // own demo has it, a space its Name/Category may not carry.
   cItemCaption: array[TFindAllItem] of string =
     ('References', 'Overrides', 'Implementations', 'Descendants',
      'Assignments', 'Creations', 'Destructions',
-     'Defines', 'Defines at cursor',
+     'Defines', 'Defines at cursor', 'Options at cursor',
      'Unused Units', 'Unused Units in the Project', 'Units Nobody Uses');
 var
   LAction: TAction;
@@ -323,7 +327,7 @@ begin
   begin
     { A RULE IN FRONT OF THE DEFINE INVENTORIES. The seven above answer
       about the caret and grey themselves when it is not their subject;
-      these two answer about the PROJECT and are always enabled, which is a
+      these three answer about the PROJECT and are always enabled, which is a
       different kind of command and reads as one with a line between them
       (Alex, 2026-09-14).
 
@@ -565,7 +569,7 @@ begin
     // FindDefines/DefinesAt need no cursor at all - so findAllAt has no gate
     // for them and they are always offered, exactly as PasTree's own demo
     // greys nothing on these two.
-    faiDefines, faiDefinesAtCursor: Result := True;
+    faiDefines, faiDefinesAtCursor, faiOptionsAtCursor: Result := True;
     faiUnusedUnits, faiProjectUnusedUnits, faiUnreferencedUnits:
       Result := True;
   else
@@ -650,6 +654,7 @@ begin
       faiDestructions:    ExecuteFindAll(facDestructions, FEditorServices.TopView);
       faiDefines:         ExecuteFindDefines(FEditorServices.TopView);
       faiDefinesAtCursor: ExecuteDefinesAtCursor(FEditorServices.TopView);
+      faiOptionsAtCursor: ExecuteOptionsAtCursor(FEditorServices.TopView);
       faiUnusedUnits:
         ExecuteUnusedUnits(uucUnit, FEditorServices.TopView);
       faiProjectUnusedUnits:

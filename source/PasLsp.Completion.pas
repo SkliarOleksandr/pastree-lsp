@@ -353,6 +353,37 @@ begin
     Result := AModel.Tree.Nodes[Result].Parent;
 end;
 
+{ Is AX, its aliases followed, an enumerated type - `TDemoColor = (dcRed,
+  ...)`? Read off the defining declaration's tree (nodes outlive a demoted
+  model's text), since PasTree keeps its own type category private. }
+function IsEnumTypeX(AProject: TPasSemaProject; const AX: TSemaXType): Boolean;
+var
+  LX: TSemaXType;
+  LModel: TPasSemaModel;
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  if not XValid(AX) then
+    Exit;
+  LX := AProject.CanonTypeX(AX);
+  if not XValid(LX) or (LX.UnitId < 0) or
+     (LX.UnitId >= AProject.ModelCount) then
+    Exit;
+  LModel := AProject.Model(LX.UnitId);
+  if (LModel = nil) or (LX.Sym < 0) or (LX.Sym >= Length(LModel.Symbols)) then
+    Exit;
+  LDecl := DeclOfKinds(LModel, LX.Sym, [nkTypeDecl]);
+  if LDecl = NIL_NODE then
+    Exit;
+  LChild := LModel.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LModel.Tree.Nodes[LChild].Kind = nkEnumType then
+      Exit(True);
+    LChild := LModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 { The first visible token a node's TEXT starts at - its own FirstToken or an
   earlier one of its leading child. Not always the same: an instantiation
   `IComparer<T>` is an nkTypeArgs whose FirstToken is the `<`, its name the
@@ -439,9 +470,13 @@ end;
   AFoldedValue - TPasSemaProject.ConstOrdinalOf), in both bases:
   `1 shl 4 (16, $10)`, `CBase + 2 (18, $12)`; a negative one in decimal only,
   `-CStep (-4)`, since its hex depends on a type the row does not name. Not
-  folded (a string, a real, an expression the evaluator refuses): as written. }
+  folded (a string, a real, an expression the evaluator refuses): as written.
+  Nor is an enumeration's value (AIsEnum - the constant's type is an enum):
+  the evaluator folds `TDemoColor.dcBlue` to its ordinal, but `dcBlue (1,
+  $01)` is a number nobody wrote about a value that is no number (Alex,
+  2026-10-16). }
 function WithOtherRadix(const AValue: string; AFolded: Boolean;
-  AFoldedValue: Int64): string;
+  AFoldedValue: Int64; AIsEnum: Boolean = False): string;
 var
   LText: string;
   LNum: UInt64;
@@ -470,7 +505,7 @@ begin
     if LLiteral and TryStrToUInt64(LText, LNum) then
       Exit(AValue + ' (' + HexOf(LNum) + ')');
   end;
-  if not AFolded then
+  if not AFolded or AIsEnum then
     Exit;
   if AFoldedValue >= 0 then
     Result := AValue + ' (' + IntToStr(AFoldedValue) + ', '
@@ -850,7 +885,7 @@ var
   LTypeSym, LDecl: Integer;
   LItemModel: TPasSemaModel;
   LSig: TPasBuiltinSig;
-  LFolded: Boolean;
+  LFolded, LIsEnum: Boolean;
   LFoldedValue: Int64;
 begin
   Result := '';
@@ -959,9 +994,13 @@ begin
               // still converted from the text.
               LFolded := (AItem.Mid >= 0) and (AProject <> nil) and
                 AProject.ConstOrdinalOf(AItem.Mid, AItem.Sym, LFoldedValue);
+              // An enum-typed constant folds to its ordinal too, which is
+              // not shown (WithOtherRadix).
+              LIsEnum := LFolded and IsEnumTypeX(AProject,
+                AProject.DeclTypeX(AItem.Mid, AItem.Sym));
               if LText <> '' then
                 Result := Result + ' = '
-                  + WithOtherRadix(LText, LFolded, LFoldedValue);
+                  + WithOtherRadix(LText, LFolded, LFoldedValue, LIsEnum);
             end;
           end;
         skVar, skField, skParam, skProperty:

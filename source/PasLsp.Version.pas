@@ -325,7 +325,10 @@ const
   /// failure memo, which the completion detail relies on instead of its own
   /// per-row rehydration - an older library would re-preprocess a stale
   /// library unit on every row and every highlight, silently, in seconds.
-  cMinPasTreeVersion = '0.110.0';
+  /// 0.112.0 (2026-10-16): TPasNavigator.OptionsAt / TPasOptionSite, the
+  /// compiler options in effect at a position, behind pastree/optionsAt (an
+  /// older library does not compile).
+  cMinPasTreeVersion = '0.112.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
