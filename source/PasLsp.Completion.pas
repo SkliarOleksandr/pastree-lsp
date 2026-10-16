@@ -1061,15 +1061,18 @@ end;
   server composed itself, where those are the only places a type can stand -
   the hover paints them in the type colour as the editor would. A type's
   alias after its `=` (or `= type`) and a pointer's target after `^` are
-  type positions too. }
+  type positions too. With ACastIsType - a constant's value - a name written
+  right before `(` is a typecast's type, `HRESULT($8001011B)`, unless it is
+  an intrinsic: a constant expression can call nothing else. }
 function SignatureTypeSpans(const ASig: string; AOwnerLen, ANameStart,
   ANameLen: Integer; AIsType: Boolean;
-  const AKnownType: string = ''): TArray<Integer>;
+  const AKnownType: string = ''; ACastIsType: Boolean = False): TArray<Integer>;
 var
   LIdx, LFrom, LPrev, LSeg, LLastSeg, LAngle: Integer;
   LWord, LPrevWord: string;
   LInHeritage, LTypePos: Boolean;
   LResult: TArray<Integer>;
+  LBuiltin: TPasBuiltinSig;
 
   procedure Add(AFrom, ALen: Integer);
   begin
@@ -1113,7 +1116,13 @@ begin
         // definition (`= class(`, `= record`).
         (AIsType and (LAngle = 0) and not LInHeritage and (LPrev >= 1) and
          ((ASig[LPrev] = '=') or SameText(LPrevWord, 'type')) and
-         (Pos('..', LWord) = 0) and not IsTypeHeadWord(LWord));
+         (Pos('..', LWord) = 0) and not IsTypeHeadWord(LWord)) or
+        // A typecast in a constant's value (Alex, 2026-10-16: HRESULT of
+        // `RPC_E_ACCESS_DENIED = HRESULT($8001011B)` stayed uncoloured).
+        (ACastIsType and (LAngle = 0) and (LIdx <= Length(ASig)) and
+         (ASig[LIdx] = '(') and not PasBuiltinSignature(
+         LowerCase(Copy(LWord, LastDelimiter('.', LWord) + 1, MaxInt)),
+         LBuiltin));
       // Segment by segment: in a type position the last one is the type, and
       // a segment spelled AKnownType is one wherever it stands.
       LLastSeg := LFrom;
@@ -1541,7 +1550,8 @@ begin
   // The name's own `<K,V>` follows it, so the scan from the name's end
   // paints those parameters as a generic's arguments.
   ATypeSpans := LOwnerSpans + SignatureTypeSpans(Result, 0, LNameStart,
-    Length(LItem.Name), LItem.Kind = skType, LKnownType);
+    Length(LItem.Name), LItem.Kind = skType, LKnownType,
+    LItem.Kind = skConst);
 end;
 
 { The type names in a completion row's detail, by the hover's own heuristic:
@@ -1568,7 +1578,7 @@ begin
       LKnown := Copy(ADetail, 4, LOpen - 4);
   end;
   LSpans := SignatureTypeSpans(AName + ADetail, 0, 1, Length(AName),
-    AKind = skType, LKnown);
+    AKind = skType, LKnown, AKind = skConst);
   LIdx := 0;
   while LIdx + 1 < Length(LSpans) do
   begin

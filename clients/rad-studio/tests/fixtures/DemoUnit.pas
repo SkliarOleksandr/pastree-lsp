@@ -10,7 +10,7 @@ type
   end;
 
 const
-  CAnswer = 42;
+  CAnswer = 42; CCastMask = Cardinal(Ord('A'));
 
 /// <summary>
 /// Greets a person

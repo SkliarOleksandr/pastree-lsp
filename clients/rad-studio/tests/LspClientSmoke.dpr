@@ -1710,8 +1710,8 @@ end;
   a Cyrillic literal - the same line the definition columns are pinned on. }
 procedure TestCompletion;
 var
-  LUnitFile, LUniFile, LPatched: string;
-  LLine, LChar, LDocCount: Integer;
+  LUnitFile, LUniFile, LPatched, LRow: string;
+  LLine, LChar, LDocCount, LAt: Integer;
 begin
   Writeln;
   Writeln('=== 5b. completion: the PasTree engine over the overlay ===');
@@ -1765,6 +1765,20 @@ begin
   Check(GOk and GResultJson.Contains('"label":"CAnswer"'),
     'CAnswer is offered');
   Check(GOk and GResultJson.Contains(' = 42'), 'and its row shows the value');
+  // A typecast in a constant's value names a type (Alex, 2026-10-16:
+  // `HRESULT($8001011B)` left HRESULT plain); an intrinsic call does not.
+  // CCastMask shares CAnswer's line, so the fixed positions of the semantic
+  // token checks stay where they are.
+  LRow := '';
+  LAt := Pos('"label":"CCastMask"', GResultJson);
+  if GOk and (LAt > 0) then
+  begin
+    LRow := Copy(GResultJson, LAt, MaxInt);
+    LRow := Copy(LRow, 1, Pos('{"label"', LRow) - 1);
+  end;
+  Check(LRow.Contains('"detail":" = Cardinal(Ord(''A''))') and
+    LRow.Contains('"typeSpans":[4,8]'),
+    'a typecast''s type is a type span, Ord is not (got ' + LRow + ')');
   Check(GOk and GResultJson.Contains('(const S: <string|array>): Integer'),
     'the Length builtin shows params AND the curated result type');
   Check(GOk and GResultJson.Contains(
