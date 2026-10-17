@@ -141,6 +141,7 @@ uses
   System.Win.Registry,
   Winapi.Windows,
   Vcl.Graphics,
+  Vcl.Themes,
   ToolsAPI,
   ToolsAPI.UI,
   PasTreeIdePlugin.LspSession,
@@ -384,6 +385,10 @@ function TPasSymbolList.FindIdent(const AnIdent: string): Integer;
 var
   LIdx: Integer;
 begin
+  // Filtered, the first row is the one selected, whatever the viewer asks
+  // with (Alex, 2026-10-16) - Rebuild already put the best match there.
+  if FFilter <> '' then
+    Exit(0);
   // "Closest partial match": the first visible label the ident is a prefix
   // of; failing that, the top of the list keeps the viewer somewhere sane.
   for LIdx := 0 to High(FVisible) do
@@ -1543,6 +1548,24 @@ begin
   end;
 end;
 
+var
+  GSelectionProbes: Integer = 0;
+
+{ The first rows of a session say what the viewer prepared them with and
+  whether DrawLine took that for the selection - the record to read if the
+  selected row is painted wrong again. }
+procedure LogSelectionProbe(AIndex: Integer; ABrush: TColor;
+  ASelected: Boolean);
+begin
+  if GSelectionProbes >= 12 then
+    Exit;
+  Inc(GSelectionProbes);
+  LspLogToServer(Format('code insight: row %d brush $%.6x (style highlight '
+    + '$%.6x) selected=%s', [AIndex, ColorToRGB(ABrush),
+    ColorToRGB(StyleServices.GetSystemColor(clHighlight)),
+    BoolToStr(ASelected, True)]));
+end;
+
 { The row as the hover hint paints a declaration (Alex, 2026-10-13: "paint
   everything the way the tooltips do"): the stock LAYOUT - fixed class
   column, bold name, the detail glued after it - with the hint's COLOURS. The
@@ -1551,8 +1574,8 @@ end;
   strings and symbols, with the type names the server marked (data.typeSpans)
   in the Highlighting tab's colour and style. Until 0.68.0 a hand-rolled
   tokenizer coloured `:`-to-`;` in a violet and values in blue, which matched
-  neither the editor nor the hint. Colours stay on the selected row, as the
-  native window keeps them. }
+  neither the editor nor the hint. The selected row is one colour on the
+  editor's Marked block bar, as the native window paints it. }
 procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
   var Rect: TRect; DrawingHintText: Boolean; DoDraw: Boolean;
   var DefaultDraw: Boolean);
@@ -1562,9 +1585,11 @@ var
   LClass, LName, LDetail, LTail: string;
   LColWidth, LX, LTop, LMatch: Integer;
   LRun: string;
-  LBase, LDim, LTypeColor: TColor;
+  LBase, LDim, LTypeColor, LForce, LBar, LOldBrush: TColor;
+  LOldBrushStyle: TBrushStyle;
   LTypeStyle: TFontStyles;
   LSpans: TArray<Integer>;
+  LSelected: Boolean;
 begin
   // FShownSymbols, NOT FSymbols - the list the viewer is actually painting,
   // for the same reason Done and GetHelpInsightHtml read it: a late async
@@ -1615,11 +1640,39 @@ begin
     Exit;
   end;
 
-  // The viewer prepared Canvas for this row (highlight brush on the
-  // selected row) - LBase is whatever it chose. Colors STAY on the selected
-  // row: the native window keeps its signature colors under the highlight
-  // bar, and the first pass here that flattened them read as the coloring
-  // "disappearing" on selection.
+  // The selected row as the native list paints it (Alex, 2026-10-16): a bar
+  // across the whole row in the editor's Marked block background, every run
+  // in its foreground - white on $A56D53 by default. The viewer's own
+  // preparation was the system highlight brush, which TextOut painted under
+  // each run alone: pale boxes behind the class word and the text. Runs go
+  // out transparent on the bar, so no run paints a box of its own.
+  //
+  // WHICH row is selected is read off that preparation - the brush in the
+  // style's highlight colour - not asked of the viewer. Asked, it lagged:
+  // Selected[Index] and GetManagerSelectedIndex both still named the row the
+  // selection was LEAVING while the viewer repainted it, so every row arrowed
+  // past kept its bar (Alex, 2026-10-17, twice: a record's four fields, then
+  // seventeen rows).
+  LOldBrush := Canvas.Brush.Color;
+  LSelected := (ColorToRGB(LOldBrush) =
+      ColorToRGB(StyleServices.GetSystemColor(clHighlight))) or
+    (ColorToRGB(LOldBrush) = ColorToRGB(clHighlight));
+  LogSelectionProbe(Index, LOldBrush, LSelected);
+  LForce := clNone;
+  LOldBrushStyle := Canvas.Brush.Style;
+  // Every row is filled whole before its runs, the bar or the background the
+  // viewer prepared: the viewer does not clear a row, so a row the selection
+  // left kept its bar (Alex, 2026-10-17: "the background is not cleared").
+  if LSelected then
+    EditorMarkedBlockColors(LForce, LBar)
+  else
+    LBar := LOldBrush;
+  Canvas.Brush.Color := LBar;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.FillRect(Rect);
+  Canvas.Brush.Style := bsClear;
+
+  // LBase is the text colour the viewer chose for the row.
   LBase := Canvas.Font.Color;
   LDim := clNavy;
   // Type names as the hint paints them: the Highlighting tab's colour and
@@ -1636,6 +1689,8 @@ begin
   // The class word in the editor's reserved-word colour, as the hint draws
   // its lead - regular weight, so the fixed column measured above holds.
   Canvas.Font.Color := EditorSyntaxColor(atReservedWord, LDim);
+  if LForce <> clNone then
+    Canvas.Font.Color := LForce;
   Canvas.TextOut(LX, LTop, LClass);
   LX := Rect.Left + LColWidth;
 
@@ -1645,6 +1700,8 @@ begin
   // TPasSymbolList.Rebuild). Drawn in three runs so the underline covers the
   // match alone; a name without one (no filter yet) is a single run.
   Canvas.Font.Color := LBase;
+  if LForce <> clNone then
+    Canvas.Font.Color := LForce;
   Canvas.Font.Style := [TFontStyle.fsBold];
   LMatch := 0;
   if Assigned(FShownObj) and (FShownObj.Filter <> '') then
@@ -1674,16 +1731,21 @@ begin
   begin
     SplitOverloadTail(LDetail, LTail);
     PaintSyntaxTextTyped(Canvas, LX, LTop, LDetail, LBase, LSpans,
-      LTypeColor, LTypeStyle, True);
+      LTypeColor, LTypeStyle, True, LForce);
     if LTail <> '' then
     begin
       Canvas.Font.Color := LDim;   // '(+N)' is ours, not code - stays dim
+      if LForce <> clNone then
+        Canvas.Font.Color := LForce;
       Canvas.Font.Style := [];
       Canvas.TextOut(LX, LTop, LTail);
     end;
   end;
-  Canvas.Font.Color := LBase;   // leave the canvas the way the viewer set it
+  // Leave the canvas the way the viewer set it.
+  Canvas.Font.Color := LBase;
   Canvas.Font.Style := [];
+  Canvas.Brush.Color := LOldBrush;
+  Canvas.Brush.Style := LOldBrushStyle;
 end;
 
 procedure TPasCodeInsightManager.AsyncParameterCodeInsightParamIndex(

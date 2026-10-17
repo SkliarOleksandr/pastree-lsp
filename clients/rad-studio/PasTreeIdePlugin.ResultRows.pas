@@ -175,10 +175,21 @@ procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
 /// ADoDraw=False only advances AX, for a caller that measures the line before
 /// it lays the window out (the hover hint): the runs' widths depend on their
 /// styles, so a plain TextWidth of the whole line would be short.
+/// AForceColor, when not clNone, replaces every run's colour (a selected
+/// row); the styles still follow the palette and the type spans.
 /// </summary>
 procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
-  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean);
+  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean;
+  AForceColor: TColor = clNone);
+
+/// <summary>
+/// The editor's "Marked block" colours (Tools > Options > Editor > Colors) -
+/// what the native Code Completion list paints its selected row in, measured
+/// on 37.0: a full-width bar in the background colour, every run in the
+/// foreground one (Alex, 2026-10-16). False without the editor services.
+/// </summary>
+function EditorMarkedBlockColors(out AFore, ABack: TColor): Boolean;
 
 /// <summary>
 /// PaintSyntaxText on a raw DC, colours only, for a caller that has taken
@@ -853,9 +864,24 @@ begin
   end;
 end;
 
+function EditorMarkedBlockColors(out AFore, ABack: TColor): Boolean;
+var
+  LOptions: INTACodeEditorOptions;
+begin
+  AFore := clHighlightText;
+  ABack := clHighlight;
+  Result := TryEditorOptions(LOptions);
+  if Result then
+  begin
+    AFore := LOptions.FontColor[MarkedBlock];
+    ABack := LOptions.BackgroundColor[MarkedBlock];
+  end;
+end;
+
 procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
-  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean);
+  ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean;
+  AForceColor: TColor);
 var
   LOptions: INTACodeEditorOptions;
   LHavePalette: Boolean;
@@ -882,6 +908,8 @@ begin
       LColor := ATypeColor;
       LStyle := ATypeStyle;
     end;
+    if AForceColor <> clNone then
+      LColor := AForceColor;
     ACanvas.Font.Color := LColor;
     ACanvas.Font.Style := LStyle;
     LText := Copy(AText, LRun.Start, LRun.Len);
