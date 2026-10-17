@@ -407,6 +407,10 @@ type
     // auto (one per logical core, PasTree's default). See
     // AnalysisThreadCount.
     AnalysisThreads: Integer;
+    // Performance tab: the server analyzes library units interface-only
+    // ("lightLibraries", the server's light mode). Default True, as the
+    // server's. See LightLibrariesEnabled.
+    LightLibraries: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -428,6 +432,13 @@ function InactiveHighlightEnabled: Boolean;
 /// with what its server was started with, like the log switches.
 /// </summary>
 function AnalysisThreadCount: Integer;
+
+/// <summary>
+/// The Performance tab's library switch, sent as lightLibraries=false when
+/// off. Fixed per server process like the thread count: TLspSession restarts
+/// a server started with the other value.
+/// </summary>
+function LightLibrariesEnabled: Boolean;
 
 /// <summary>
 /// Registers the ONE listener called (main thread) after the dialog saved -
@@ -486,6 +497,7 @@ const
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
   cValueAnalysisThreads = 'AnalysisThreads';
+  cValueLightLibraries = 'LightLibraries';
   // The IDE level ApplyErrorInsightChoice replaced with None, to put back -
   // by name, one of cErrorInsightLevelNames.
   cValueSavedErrorInsightLevel = 'SavedErrorInsightLevel';
@@ -663,6 +675,7 @@ begin
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
   Result.AnalysisThreads := 0;
+  Result.LightLibraries := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -724,6 +737,8 @@ begin
         ReadInt(LReg, cValueAnalysisThreads, Result.AnalysisThreads);
       if Result.AnalysisThreads < 0 then
         Result.AnalysisThreads := 0;
+      Result.LightLibraries :=
+        ReadFlag(LReg, cValueLightLibraries, Result.LightLibraries);
     finally
       LReg.CloseKey;
     end;
@@ -794,6 +809,8 @@ begin
         LReg.WriteInteger(cValueDfmNoDefaultStyleElements,
           Ord(ASettings.DfmNoDefaultStyleElems));
         LReg.WriteInteger(cValueAnalysisThreads, ASettings.AnalysisThreads);
+        LReg.WriteInteger(cValueLightLibraries,
+          Ord(ASettings.LightLibraries));
       finally
         LReg.CloseKey;
       end;
@@ -1189,6 +1206,11 @@ end;
 function AnalysisThreadCount: Integer;
 begin
   Result := CurrentSettings.AnalysisThreads;
+end;
+
+function LightLibrariesEnabled: Boolean;
+begin
+  Result := CurrentSettings.LightLibraries;
 end;
 
 procedure SetSettingsSavedListener(const AListener: TProc);

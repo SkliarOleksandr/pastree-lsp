@@ -20,6 +20,14 @@ program LspProjectSmoke;
     IOTAWizard   - the ToolsAPI search path
     TMenuManager - the project itself, via the .dproj's own MainSource
 
+  TWO PASSES, two servers: lightLibraries=false first, every unit in full,
+  then the default - the library trees analyzed interface-only (0.71.0).
+  Every check runs in both, and the light pass must answer a library body
+  (TAction.Create's, a ToolsAPI.Editor method's after the file is
+  opened) and
+  the project's unused units exactly as the full pass did - through the
+  promotions that make those units full on demand.
+
   Usage: LspProjectSmoke.exe [path\to\pastree-server.exe] [IDE root dir]
   The IDE root defaults to %BDS% (rsvars.bat sets it).
 }
@@ -29,7 +37,9 @@ program LspProjectSmoke;
 uses
   Winapi.Windows,
   System.SysUtils,
+  System.StrUtils,
   System.Classes,
+  System.Generics.Collections,   // TJSONArray's inline accessors expand
   System.IOUtils,
   System.JSON,
   PasTreeIdePlugin.LspClient;
@@ -54,6 +64,12 @@ var
   GResultJson: string;
   GError: string;
   GBenchmarkJson: string;
+  // The full pass's answers, compared with the light pass's: light mode
+  // must answer the project's questions exactly as the full analysis does,
+  // library bodies included once a unit is promoted.
+  GFullBodyJson: string;
+  GFullImplJson: string;
+  GFullUnusedJson: string;
 
 procedure Check(ACondition: Boolean; const AWhat: string);
 begin
@@ -104,6 +120,75 @@ begin
     LStream.Free;
   end;
   Result := TEncoding.UTF8.GetString(LBytes).Contains(AText);
+end;
+
+{ LogContains without regard to case - a path in the log is spelled as the
+  analysis found the file, which a check should not depend on. }
+function LogContainsText(const AText: string): Boolean;
+var
+  LStream: TFileStream;
+  LBytes: TBytes;
+begin
+  Result := False;
+  if not TFile.Exists(GLogPath) then
+    Exit;
+  try
+    LStream := TFileStream.Create(GLogPath, fmOpenRead or fmShareDenyNone);
+  except
+    Exit;
+  end;
+  try
+    SetLength(LBytes, LStream.Size);
+    if Length(LBytes) > 0 then
+      LStream.ReadBuffer(LBytes[0], Length(LBytes));
+  finally
+    LStream.Free;
+  end;
+  Result := TEncoding.UTF8.GetString(LBytes).ToLower.Contains(AText.ToLower);
+end;
+
+{ The file and the 0-based line of a Location answer ('' / -1 for none). }
+procedure ResultLocation(const AJson: string; out APath: string;
+  out ALine: Integer);
+var
+  LValue: TJSONValue;
+  LUri: string;
+begin
+  APath := '';
+  ALine := -1;
+  LValue := TJSONObject.ParseJSONValue(AJson);
+  try
+    if LValue is TJSONArray then
+    begin
+      if TJSONArray(LValue).Count = 0 then
+        Exit;
+      if TJSONArray(LValue).Items[0].TryGetValue<string>('uri', LUri) then
+        APath := LspUriToPath(LUri);
+      TJSONArray(LValue).Items[0].TryGetValue<Integer>('range.start.line',
+        ALine);
+    end
+    else if LValue is TJSONObject then
+    begin
+      if LValue.TryGetValue<string>('uri', LUri) then
+        APath := LspUriToPath(LUri);
+      LValue.TryGetValue<Integer>('range.start.line', ALine);
+    end;
+  finally
+    LValue.Free;
+  end;
+end;
+
+{ The 0-based line of a unit's `implementation` keyword, -1 if none. }
+function ImplementationLine(const AFile: string): Integer;
+var
+  LLines: TArray<string>;
+  I: Integer;
+begin
+  Result := -1;
+  LLines := TFile.ReadAllLines(AFile);
+  for I := 0 to High(LLines) do
+    if SameText(Trim(LLines[I]), 'implementation') then
+      Exit(I);
 end;
 
 function Ask(const AMethod: string; AParams: TJSONObject): Boolean;
@@ -190,7 +275,7 @@ end;
 /// the .dproj verbatim, the normalised platform, the active configuration, and
 /// the IDE source paths the .dproj cannot supply.
 /// </summary>
-function BuildOptions(const AIdeRoot: string): TLspInitOptions;
+function BuildOptions(const AIdeRoot: string; ALight: Boolean): TLspInitOptions;
 var
   LSource: string;
 begin
@@ -203,8 +288,15 @@ begin
   LSource := IncludeTrailingPathDelimiter(AIdeRoot) + 'source\';
   Result.SearchPaths := [LSource + 'rtl', LSource + 'vcl',
     LSource + 'ToolsAPI'];
+  // The same list again as libraryPaths, as the session sends it - and that
+  // is what light mode reads: the units under those trees (and the Studio
+  // source tree) are analyzed interface-only unless the client says
+  // lightLibraries=false. Both passes send the trees, so the only difference
+  // between them is the switch.
+  Result.LibraryPaths := Result.SearchPaths;
+  Result.NoLightLibraries := not ALight;
   Result.LogFile := TPath.Combine(TPath.GetTempPath,
-    'pastree-lsp-projectsmoke.log');
+    'pastree-lsp-projectsmoke' + IfThen(ALight, '-light', '') + '.log');
   GLogPath := Result.LogFile;
   // The Performance page's count, sent as analysisThreads - checked in the
   // log's "analysis threads:" line. 1, PasTree's SingleThreaded mode: every
@@ -260,16 +352,17 @@ begin
   end;
 end;
 
-procedure Run(const AExe, AIdeRoot: string);
+procedure Run(const AExe, AIdeRoot: string; ALight: Boolean);
 var
-  LWizard, LErrorPaint: string;
-  LLine, LChar: Integer;
+  LWizard, LErrorPaint, LActnList, LEditorFile, LBodyFile: string;
+  LLine, LChar, LBodyLine: Integer;
   LOptions: TLspInitOptions;
+  LParams, LDoc: TJSONObject;
 
 begin
   LWizard := TPath.Combine(GRepoDir, 'PasTreeIdePlugin.Wizard.pas');
 
-  LOptions := BuildOptions(AIdeRoot);
+  LOptions := BuildOptions(AIdeRoot, ALight);
   // Emptied rather than appended to: every check below asks whether THIS run
   // wrote a line, and the server's own run separator is not something a
   // Contains() can tell one side of.
@@ -302,6 +395,7 @@ begin
     'definition answered');
   Check(GOk and GResultJson.ToLower.Contains('actnlist'),
     'TActionList resolves into Vcl.ActnList');
+  ResultLocation(GResultJson, LActnList, LBodyLine);
 
   Writeln;
   Writeln('=== the ToolsAPI search path: IOTAWizard ===');
@@ -333,6 +427,7 @@ begin
     PositionParams(LErrorPaint, LLine, LChar)), 'definition answered');
   Check(GOk and GResultJson.ToLower.Contains('toolsapi.editor'),
     'TNTACodeEditorNotifier resolves into ToolsAPI.Editor');
+  ResultLocation(GResultJson, LEditorFile, LBodyLine);
   Check(Ask('textDocument/semanticTokens/range', RangeParams(LErrorPaint, LLine)),
     'semanticTokens/range answered for that line');
   Check(GOk and HasToken(GResultJson, Length('TNTACodeEditorNotifier'), 2),
@@ -344,6 +439,98 @@ begin
     'semanticTokens/range answered again with the document open');
   Check(GOk and HasToken(GResultJson, Length('TNTACodeEditorNotifier'), 2),
     'and the ancestor is still a `class` token');
+
+  // LIGHT MODE (0.71.0): the units under libraryPaths are analyzed
+  // interface-only unless the client turns it off, and a unit is made full
+  // when an answer needs its bodies. Both passes ask the same three things;
+  // the light pass must answer each exactly as the full one did.
+  Writeln;
+  Writeln('=== light libraries: ' + IfThen(ALight, 'on', 'off') + ' ===');
+  if ALight then
+  begin
+    Check(LogContains('light libraries: on - '),
+      'the library trees are analyzed interface-only');
+    Check(LogContains(' units analyzed interface-only, '),
+      'and the analysis says how many units are light');
+  end
+  else
+    Check(LogContains('light libraries: off (lightLibraries=false)'),
+      'lightLibraries=false analyzes every unit in full');
+
+  // Ctrl+Click on a library ROUTINE goes to its body - which a light unit
+  // does not have until it is promoted.
+  Writeln;
+  Writeln('=== a library routine''s body: TAction.Create ===');
+  FindPos(LWizard, 'LAction := TAction.Create(FActionList)', 'Create', LLine,
+    LChar);
+  Check(Ask('textDocument/definition', PositionParams(LWizard, LLine, LChar)),
+    'definition answered');
+  ResultLocation(GResultJson, LBodyFile, LBodyLine);
+  Check(GOk and SameText(LBodyFile, LActnList),
+    'TAction.Create resolves into Vcl.ActnList');
+  Check((LBodyFile <> '') and
+    (LBodyLine > ImplementationLine(LBodyFile)),
+    'and lands in its body, past `implementation`');
+  if ALight then
+  begin
+    Check(GResultJson = GFullBodyJson,
+      'the same location as the full analysis');
+    Check(LogContainsText('promoted ' + LActnList + ' to a full analysis'
+      + ' in'), 'Vcl.ActnList was promoted to answer it');
+  end
+  else
+  begin
+    GFullBodyJson := GResultJson;
+    Check(not LogContains('promotion started'),
+      'nothing is promoted in full mode');
+  end;
+
+  // A library file OPENED, as Ctrl+Click into it does: promoted in the
+  // background, then its own method headers toggle to their bodies.
+  Writeln;
+  Writeln('=== a library file opened: ToolsAPI.Editor ===');
+  Check(LEditorFile <> '', 'ToolsAPI.Editor''s file is known');
+  DidOpen(LEditorFile);
+  if ALight then
+    Check(PumpUntil(function: Boolean
+        begin
+          Result := LogContainsText('promoted ' + LEditorFile +
+            ' to a full analysis in');
+        end, cAnswerTimeoutMs),
+      'opening it promotes it');
+  // TNTACodeEditorNotifier's own header: `virtual` - the interfaces above
+  // it declare the same names with no body.
+  FindPos(LEditorFile, 'function AllowedEvents: TCodeEditorEvents; virtual;',
+    'AllowedEvents', LLine, LChar);
+  Check(Ask('textDocument/implementation',
+    PositionParams(LEditorFile, LLine, LChar)), 'implementation answered');
+  ResultLocation(GResultJson, LBodyFile, LBodyLine);
+  Check(GOk and SameText(LBodyFile, LEditorFile) and
+    (LBodyLine > ImplementationLine(LEditorFile)),
+    'a method header goes to its body in the same unit');
+  if ALight then
+    Check(GResultJson = GFullImplJson,
+      'the same location as the full analysis')
+  else
+    GFullImplJson := GResultJson;
+
+  // The uses lint reads library implementations (inline bodies, the
+  // initialization a removal leaves out); light mode promotes what it reads
+  // first, so the rows are the full analysis's.
+  Writeln;
+  Writeln('=== Unused Units in the Project ===');
+  LParams := TJSONObject.Create;
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(LWizard));
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('scope', 'project');
+  Check(Ask('pastree/unusedUses', LParams) and GOk, 'unusedUses answered');
+  Check(GResultJson.Contains('"rows":['), 'with rows');
+  if ALight then
+    Check(GResultJson = GFullUnusedJson,
+      'the same rows as the full analysis, doubts included')
+  else
+    GFullUnusedJson := GResultJson;
 
   // What a save of the .dproj asks before the plugin restarts the server
   // (0.61.0): the file did not change, so the configuration is the same - a
@@ -423,7 +610,23 @@ begin
         Writeln('  [log] ' + AText);
       end);
     try
-      Run(GExe, GIdeRoot);
+      Writeln;
+      Writeln('##### pass 1: lightLibraries=false - every unit in full #####');
+      Run(GExe, GIdeRoot, False);
+    finally
+      FreeAndNil(GClient);
+    end;
+    // A server of its own for the light pass: the mode is fixed at
+    // initialize.
+    GClient := TLspClient.Create(GExe, ExtractFilePath(GExe),
+      procedure(const AText: string)
+      begin
+        Writeln('  [log] ' + AText);
+      end);
+    try
+      Writeln;
+      Writeln('##### pass 2: light libraries (the default) #####');
+      Run(GExe, GIdeRoot, True);
     finally
       FreeAndNil(GClient);
     end;

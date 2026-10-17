@@ -659,13 +659,37 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Style = csDropDownList
         TabOrder = 0
       end
+      object chkLightLibraries: TCheckBox
+        Left = 16
+        Top = 130
+        Width = 430
+        Height = 17
+        Caption = 'Analyze library units interface-only'
+        Checked = True
+        State = cbChecked
+        TabOrder = 1
+      end
+      object lblLightHint: TLabel
+        Left = 16
+        Top = 154
+        Width = 409
+        Height = 75
+        Caption =
+          'RTL, VCL and third-party units on the IDE'#39's library paths are a' +
+          'nalyzed without their implementations: about half the memory an' +
+          'd a faster start, the project'#39's own units answered as before. ' +
+          'A library unit is analyzed in full when it is opened, navigated ' +
+          'into or needed by Unused Units. Each project'#39's server is restar' +
+          'ted for a change at its next request.'
+        WordWrap = True
+      end
       object grpBenchmark: TGroupBox
         Left = 16
         Top = 270
         Width = 430
         Height = 160
         Caption = 'Benchmark'
-        TabOrder = 1
+        TabOrder = 2
         object lblBenchmarkHint: TLabel
           Left = 12
           Top = 24

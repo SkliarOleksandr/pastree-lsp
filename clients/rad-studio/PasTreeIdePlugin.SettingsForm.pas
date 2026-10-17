@@ -136,6 +136,8 @@ type
     lblThreads: TLabel;
     cbxThreads: TComboBox;
     lblThreadsHint: TLabel;
+    chkLightLibraries: TCheckBox;
+    lblLightHint: TLabel;
     grpBenchmark: TGroupBox;
     lblBenchmarkHint: TLabel;
     btnAnalyze: TButton;
@@ -511,6 +513,7 @@ begin
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
     LForm.FillThreads(LSettings.AnalysisThreads);
+    LForm.chkLightLibraries.Checked := LSettings.LightLibraries;
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -546,6 +549,7 @@ begin
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;
     LSettings.AnalysisThreads := LForm.SelectedThreads;
+    LSettings.LightLibraries := LForm.chkLightLibraries.Checked;
     SaveSettings(LSettings);
     Result := True;
   finally

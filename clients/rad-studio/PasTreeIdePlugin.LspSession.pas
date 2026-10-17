@@ -1467,6 +1467,9 @@ type
     // page benchmarks a count not saved yet; -1 = the setting.
     FStartedThreads: Integer;
     FThreadsOverride: Integer;
+    // The Performance page's library switch the server was started with -
+    // fixed per server process like the thread count.
+    FStartedNoLight: Boolean;
     // The Performance page's callback for pastree/benchmarkDone; nil when
     // no benchmark is waiting.
     FBenchmarkDone: TLspBenchmarkProc;
@@ -2474,6 +2477,9 @@ begin
     Result.AnalysisThreads := FThreadsOverride
   else
     Result.AnalysisThreads := AnalysisThreadCount;
+  // The server's light mode is on unless this says otherwise; it reads the
+  // library trees from LibraryPaths above.
+  Result.NoLightLibraries := not LightLibrariesEnabled;
   // The IDE-side timing lines (PasTreeIdePlugin.Timing) go into the same
   // file as the server's, but only with ADVANCED logging on: they are a few
   // lines per typing pause, which is the "log nobody can skim" the advanced
@@ -2493,6 +2499,8 @@ begin
 end;
 
 function TLspSession.EnsureSession: Boolean;
+const
+  cOnOff: array[Boolean] of string = ('off', 'on');
 var
   LProject: IOTAProject;
   LOptions: TLspInitOptions;
@@ -2638,6 +2646,7 @@ begin
      SameText(FStartedLogFile, LOptions.LogFile) and
      (FStartedLogDetail = not LOptions.SuppressLogDetail) and
      (FStartedThreads = LOptions.AnalysisThreads) and
+     (FStartedNoLight = LOptions.NoLightLibraries) and
      (FCheckingStamp <> LStamp) then
     CheckSaved(LStamp);
   if (FClient.State = lcsStopped) or
@@ -2647,6 +2656,7 @@ begin
      not SameText(FStartedLogFile, LOptions.LogFile) or
      (FStartedLogDetail <> not LOptions.SuppressLogDetail) or
      (FStartedThreads <> LOptions.AnalysisThreads) or
+     (FStartedNoLight <> LOptions.NoLightLibraries) or
      (FRestartWhy <> '') then
   begin
     if FClient.State <> lcsStopped then
@@ -2659,6 +2669,11 @@ begin
       else if FStartedThreads <> LOptions.AnalysisThreads then
         LogDiagnostic(Format('analysis threads changed (%s) - restarting'
           + ' the server for %s.', [ThreadsText(LOptions.AnalysisThreads),
+          ExtractFileName(LOptions.ProjectFile)]))
+      else if FStartedNoLight <> LOptions.NoLightLibraries then
+        LogDiagnostic(Format('library units interface-only turned %s -'
+          + ' restarting the server for %s.',
+          [cOnOff[not LOptions.NoLightLibraries],
           ExtractFileName(LOptions.ProjectFile)]))
       else
         LogDiagnostic(Format('project configuration changed (%s %s %s) - '
@@ -2694,6 +2709,7 @@ begin
     FStartedLogFile := LOptions.LogFile;
     FStartedLogDetail := not LOptions.SuppressLogDetail;
     FStartedThreads := LOptions.AnalysisThreads;
+    FStartedNoLight := LOptions.NoLightLibraries;
     if not FClient.Start(LOptions) then
       Exit;
   end;
