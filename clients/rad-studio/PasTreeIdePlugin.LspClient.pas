@@ -123,6 +123,13 @@ type
     /// analysis thread pool. 0 = the server's default, one per logical core.
     /// </summary>
     AnalysisThreads: Integer;
+    /// <summary>
+    /// Sent as lightLibraries=false: every unit analyzed in full. NEGATIVE,
+    /// like SuppressLogDetail, so Default(TLspInitOptions) keeps the server's
+    /// default (light libraries on) for the harnesses and every caller that
+    /// predates the switch.
+    /// </summary>
+    NoLightLibraries: Boolean;
     /// <summary>Caller owns the returned object.</summary>
     function ToJson: TJSONObject;
   end;
@@ -585,6 +592,9 @@ begin
   // Same reasoning: 0 is the server's default.
   if AnalysisThreads > 0 then
     LResult.AddPair('analysisThreads', TJSONNumber.Create(AnalysisThreads));
+  // Only when off, for the same reason.
+  if NoLightLibraries then
+    LResult.AddPair('lightLibraries', TJSONBool.Create(False));
   // Real JSON arrays: the server logs a warning and ignores any other shape,
   // which already cost this project a debugging round once.
   AddStrings('searchPaths', SearchPaths);

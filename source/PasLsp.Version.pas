@@ -328,7 +328,15 @@ const
   /// 0.112.0 (2026-10-16): TPasNavigator.OptionsAt / TPasOptionSite, the
   /// compiler options in effect at a position, behind pastree/optionsAt (an
   /// older library does not compile).
-  cMinPasTreeVersion = '0.112.0';
+  /// 0.117.1 (2026-10-17): light mode - SetLightPaths, LightCount, IsLight,
+  /// PromoteUnit / PromotedFiles, CreateForPromotion, LintPromotions (an
+  /// older library does not compile), and the fixes that make it safe: the
+  /// implementation `uses` of a light unit kept (0.116.0 - without it the
+  /// patched library copies a project keeps in its tree drop out of the
+  /// index), the preprocessor stopping at `implementation` (0.117.0), a
+  /// promotion no longer read as an interface change (0.114.0 - against an
+  /// older one every promotion redoes hundreds of consumers, silently).
+  cMinPasTreeVersion = '0.117.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

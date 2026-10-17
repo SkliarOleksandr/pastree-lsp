@@ -40,6 +40,12 @@ the archive.
   completion, signature help, rename, workspace symbol search, and more.
 - Runs an edit through incremental reanalysis of the one changed module
   instead of rebuilding the whole closure, whenever the change qualifies.
+- Analyzes library units (RTL, VCL, third-party - the IDE's library paths)
+  interface-only by default: on a 3,782-unit closure 2.1 s and 1.2 GB
+  instead of 3.8 s and 2.1 GB, the project's own units answered exactly as
+  before. A library unit is analyzed in full when it is opened, navigated
+  into or needed by Unused Units. `lightLibraries: false` turns it off -
+  see [SPEC.md](SPEC.md), "Light libraries".
 
 **Install / requirements**
 

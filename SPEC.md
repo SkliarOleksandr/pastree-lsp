@@ -884,6 +884,71 @@ edit, and a revert. Section 5r does the same for a unit that exists only as a
 buffer, in both arrival orders, and for an edit elsewhere right after the
 unit joined.
 
+## Light libraries
+
+PasTree's light mode (its `docs/library-light-mode.md`): the units under
+given directory trees are analyzed interface-only for good, every other unit
+as before. The project's own units bind only to what library interfaces
+declare, so their answers do not change; what changes is the cost. Measured
+on a 3,782-unit closure (Win32, the IDE's library paths, this server, three
+runs each): full 3,782 units in 3.4-4.0 s, 2.1 GB committed after the
+library text is demoted; light 3,086 units (1,391 of them light) in
+2.0-2.3 s, 1.2 GB.
+
+`lightLibraries` in the initializationOptions, default **true**. The trees
+are the client's `libraryPaths` - the IDE's library and browsing paths -
+plus `$(BDS)\source`, MINUS every tree that holds the project directory, the
+main source or a unit the project lists (`LightTreesFor`; each one dropped
+is logged). PasTree exempts those files and that directory anyway; dropping
+the tree too keeps a library path that points at a parent of the project
+from making the project's siblings light. A client that sends no
+`libraryPaths` gets full mode - the server cannot tell somebody else's tree
+from the user's. The log's `light libraries:` header line says on or off and
+how many trees; after each full build `light libraries: N of M units
+analyzed interface-only, K promoted` (`light tree <dir>` lines in the
+detail block). The RAD Studio client sends `lightLibraries: false` when the
+Performance page's "Analyze library units interface-only" is cleared, and
+restarts the server for a change; VS Code has `pastree.lightLibraries`.
+
+A light unit is made full on demand - PasTree's `PromoteUnit`, the module
+path over its whole text, 40-270 ms a unit, its consumers left alone:
+
+- **Opened** (`didOpen`, Ctrl+Click into a library file): in the background,
+  as a module session (`TPasAsyncSession.CreateForPromotion`, `StartPromotion`).
+  Until it lands the document answers from its interface. A build running or
+  scheduled goes first; `FinalizeAnalysisIfDone` then promotes every open
+  light document, one at a time - which also covers a donor-less rebuild
+  that loaded one light again.
+- **Navigated into**: `textDocument/definition` on a routine of a light unit
+  (the redirect to the body), `textDocument/implementation` in a light unit -
+  promoted first, then answered (`PromoteForRequest`, which waits like any
+  analysis and stays cancellable).
+- **Linted**: `pastree/unusedUses` and `pastree/unreferencedUnits` run
+  PasTree's `LintPromotions` and promote what it names until it names
+  nothing (`PrepareLint`) - on the dispatcher, in a batch: one navigator per
+  round, one rebuild per round for every refusal that asks for one. On the
+  closure above: 513 units in four rounds, 25 s against a full lint of
+  5.5 s, and the 6,231 rows identical to the full analysis's.
+
+A promotion PasTree refuses with `promote-needs-rebuild` (a `$IF` it cannot
+re-decide in place) has put the unit into the project's `PromotedFiles`;
+the server rebuilds with the project as parse donor, which loads it full.
+A unit asking a second time, or refused for any other reason, stays light
+and is not asked again until the next full build (`FPromoteRebuilt`,
+`FPromoteRefused`). Promoted units stay full for the session: every rebuild
+with a donor carries them. Each promotion is one log line with its time:
+`promoted <file> to a full analysis in N ms (<why>; K units taken in)`, or
+`promotion of <file> refused (...)` / `asks for a rebuild (...)`.
+
+What a light analysis no longer sees is library BODIES: a reference, an
+assignment, a creation or a destruction written inside one is not found
+(`textDocument/references`, Find All's sites), and the log says so for a
+library target (`uses inside library bodies are not searched`). Own units
+are referenced from library bodies only through dispatch, which goes
+through a library symbol. `LspProjectSmoke` is the gate: every check twice,
+`lightLibraries: false` and then the default, and the light pass must answer
+a library body and the project's unused units exactly as the full pass.
+
 ## What the log contains
 
 `PASTREE_LSP_LOG`, or the `logFile` initializationOption (which wins). Per

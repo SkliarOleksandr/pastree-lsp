@@ -24,7 +24,13 @@ unit PasLsp.Server;
                   rename refuses to rewrite any file under one of these, and
                   the server has no way to work out which of its search paths
                   they are. Absent = no such refusal
-    "host"        - free text naming the client and its version, logged next
+    "lightLibraries" - True (the default) analyzes the units under those
+                  same trees - plus the Studio source tree, minus any tree
+                  holding the project - interface-only (PasTree's light
+                  mode): a unit is made full when it is opened, navigated
+                  into or linted. False = every unit in full. No effect
+                  without libraryPaths
+    "host"       - free text naming the client and its version, logged next
                   to the build banner; the server cannot know it
     "logFile", "logUnits" - where the log goes, and whether it inventories
                   every unit of the closure
@@ -130,6 +136,9 @@ type
     shape, only the PasTree call differs. }
   TFindSitesKind = (fskAssignments, fskCreations, fskDestructions);
 
+  { What one promotion of a light unit came to (TLspServer.NotePromotion). }
+  TLspPromoteOutcome = (poPromoted, poRebuild, poRefused);
+
   { One semantic token (HandleSemanticTokens' answer, and the per-line type
     spans the result surfaces carry). The legend indices live beside the
     legend constant below. }
@@ -186,6 +195,27 @@ type
     // file-level refusal at all, which is the right default for a client that
     // says nothing: the symbol-level gates still stand.
     FLibraryPaths: TArray<string>;
+    // LIGHT MODE (PasTree's library-light-mode.md). FLightLibraries is the
+    // "lightLibraries" option (default True); FLightPaths the trees whose
+    // units are analyzed interface-only - FLibraryPaths plus the Studio
+    // source tree, minus every tree holding the project directory, the main
+    // source or a listed file (LightTreesFor). Empty = full mode, which is
+    // also what a client sending no libraryPaths gets: the server cannot
+    // tell somebody else's tree from the user's without them.
+    FLightLibraries: Boolean;
+    FLightPaths: TArray<string>;
+    // A light unit made full on demand (PromoteUnit): opened, navigated
+    // into, or needed by the lint. The async kind (didOpen) runs as a module
+    // session - FModuleMode with FPromoteMode, FModuleFile the unit - and
+    // FPromoteWhy says what asked, for the log. FPromoteRefused: units whose
+    // promotion was refused, not offered again until the next full build;
+    // FPromoteRebuilt: units that already got the rebuild a
+    // `promote-needs-rebuild` asks for - asked again, it is a refusal, so a
+    // unit the rebuild still loads light cannot loop.
+    FPromoteMode: Boolean;
+    FPromoteWhy: string;
+    FPromoteRefused: TStringList;
+    FPromoteRebuilt: TStringList;
     // The project's OWN unit list (.dproj DCCReference rows, resolved) and
     // its directory. Both pin unit resolution ahead of every search path,
     // PasTree 0.31.0: a patched copy of a library unit that the project
@@ -358,6 +388,19 @@ type
     function TakeInNamer(out ANamer: string): Boolean;
     procedure LogTakenIn;
     function TryStartModuleAnalysis: Boolean;
+    function LightTreesFor: TArray<string>;
+    function StartPromotion(const APath, AWhy: string): Boolean;
+    function TakeBackPromotion: Boolean;
+    function NotePromotion(const APath, AWhy: string; AAccepted: Boolean;
+      AMs: UInt64; ABaseCount: Integer): TLspPromoteOutcome;
+    function PromoteOpenLightDoc: Boolean;
+    function PromoteForRequest(const APath, AWhy,
+      ARequestIdJson: string): Boolean;
+    function PrepareLint(const ADocPath: string; AProjectScope: Boolean;
+      const ARequestIdJson: string): Boolean;
+    function LintMids(const ADocPath: string;
+      AProjectScope: Boolean): TArray<Integer>;
+    procedure NoteLightBodies(const AWhat: string; ATMid: Integer);
     procedure StartProgress(const ATitle: string);
     procedure ReportProgress;
     procedure EndProgress(const AMessage: string);
@@ -591,6 +634,15 @@ begin
   FTakeIn.CaseSensitive := False;
   FTakeIn.Sorted := True;
   FTakeIn.Duplicates := dupIgnore;
+  FPromoteRefused := TStringList.Create;
+  FPromoteRefused.CaseSensitive := False;
+  FPromoteRefused.Sorted := True;
+  FPromoteRefused.Duplicates := dupIgnore;
+  FPromoteRebuilt := TStringList.Create;
+  FPromoteRebuilt.CaseSensitive := False;
+  FPromoteRebuilt.Sorted := True;
+  FPromoteRebuilt.Duplicates := dupIgnore;
+  FLightLibraries := True;
   FPlatform := pfWin64;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
   FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
@@ -611,6 +663,8 @@ begin
   FOutgoing.Free;
   FDocs.Free;
   FTakeIn.Free;
+  FPromoteRefused.Free;
+  FPromoteRebuilt.Free;
   FLineTokenCache.Free;
   inherited;
 end;
@@ -937,6 +991,10 @@ begin
     // entirely with a negative value. 0 = say nothing, keep the library's.
     FModuleRedoLimit := AOptions.GetValue<Integer>('moduleRedoLimit', 0);
     FAnalysisThreads := Max(0, AOptions.GetValue<Integer>('analysisThreads', 0));
+    // Absent or malformed reads as True - light mode is the default (PasTree's
+    // light-mode plan, decision D1): own units bind identically, the server
+    // holds about half the memory and starts in about 60% of the time.
+    FLightLibraries := AOptions.GetValue<Boolean>('lightLibraries', True);
   end;
   // HERE, before anything creates a TPasSemaProject: its constructor pins
   // the pool at the default width, and the pin is first-caller-wins for the
@@ -1114,6 +1172,18 @@ begin
   if Length(FLibraryPaths) = 0 then
     Log('  no libraryPaths declared - rename will not refuse RTL/VCL or'
       + ' third-party sources on the grounds of where they live');
+  // After the project's directory and files are known: they are what the
+  // light trees exclude.
+  FLightPaths := LightTreesFor;
+  if Length(FLightPaths) > 0 then
+    LogHeader(Format('light libraries: on - %d trees analyzed interface-only'
+      + ' (a unit is made full when opened, navigated into or linted)',
+      [Length(FLightPaths)]))
+  else if not FLightLibraries then
+    LogHeader('light libraries: off (lightLibraries=false) - every unit'
+      + ' analyzed in full')
+  else
+    LogHeader('light libraries: off - no library trees outside the project');
   // THE PATHS THEMSELVES, not just how many. A count tells you nothing about
   // the failure this actually has: a plausible-looking number of paths that
   // happen to be the wrong directories (the IDE plugin sent three that did not
@@ -1133,6 +1203,8 @@ begin
   // hundred-and-forty-line path block is not answering it.
   for LItem in FLibraryPaths do
     LLines := LLines + ['  library path ' + LItem];
+  for LItem in FLightPaths do
+    LLines := LLines + ['  light tree ' + LItem];
   for LItem in FDefines do
     LLines := LLines + ['  define ' + LItem];
   for LItem in FNamespaces do
@@ -1168,7 +1240,15 @@ begin
     // anyway - AnalyzeModuleOnly ignores Cancel, it is one commit point - so
     // waiting here costs nothing that was not already paid, and it buys the
     // project back.
-    if FModuleMode then
+    if FModuleMode and FPromoteMode then
+    begin
+      // A promotion in flight: waited out and taken back, its outcome
+      // logged. A rebuild it asks for is this one.
+      FSession.WaitFor;
+      if TakeBackPromotion then
+        FNoModuleOnce := True;
+    end
+    else if FModuleMode then
     begin
       FSession.WaitFor;
       FreeAndNil(FNav);
@@ -1270,6 +1350,13 @@ begin
   // another start state or CONSOLE cannot donate them.
   FSession.SetSwitchStart(FSwitchStart);
   FSession.SetConsoleTarget(FConsoleTarget);
+  // Light mode, before SetParseDonor like the rest: the donor gate keeps a
+  // light donor model from standing in for a full one and back. The units
+  // promoted so far ride on the donor (AdoptParseDonor copies its
+  // PromotedFiles), so a rebuild keeps them full; the incremental
+  // CreateForModule path inherits the trees with the project.
+  if Length(FLightPaths) > 0 then
+    FSession.SetLightPaths(FLightPaths);
   // PARSE REUSE (PasTree's stage A): the last-good project donates the parse
   // of every unit whose text - main file and every $I include - is byte-for-
   // byte what this run would read. It must outlive the build, and it does:
@@ -1479,6 +1566,26 @@ begin
   LError := FSession.LastError;
   if LError <> '' then
     Tell(1, 'PasTree: the analysis failed - ' + LError, True);
+  // A PROMOTION (didOpen of a light unit): nothing about the inputs moved,
+  // so none of the rebuild bookkeeping below applies - only the promoted
+  // unit's own diagnostics can be new. A rebuild it asks for starts here;
+  // otherwise the next open light document, if any, is promoted.
+  if FModuleMode and FPromoteMode then
+  begin
+    var LPromoted := FModuleFile;
+    EndProgress(Format('promoted in %d ms', [GetTickCount64 - FBuildStart]));
+    if TakeBackPromotion then
+    begin
+      FNoModuleOnce := True;
+      StartAnalysis(LPromoted);
+      Exit;
+    end;
+    if FDocs.TryGet(LPromoted, LDoc) then
+      PublishDiagnosticsFor(LDoc);
+    if FPendingDue = 0 then
+      PromoteOpenLightDoc;
+    Exit;
+  end;
   // A module session that FAILED PAST ITS COMMIT POINT (PasTree 0.96.0,
   // moMustDiscard): the project is half-updated - some models swapped, the
   // cross passes not redone. It is not the refused case below: kept, it
@@ -1545,6 +1652,9 @@ begin
   if not LWasModule then
   begin
     FDiskReadAt := FBuildDiskReadAt;
+    // A new closure: a promotion refused in the last one may go through in
+    // this one (see FPromoteRefused).
+    FPromoteRefused.Clear;
     // Before the "analysis done" line, so its memory figure is what the
     // server holds from here on.
     DemoteLibraryText;
@@ -1563,6 +1673,14 @@ begin
     [IfThen(LWasModule, 'done (incremental)', 'done'), FProject.ModelCount,
      GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings,
      MemoryLine]));
+  // How many units are interface-only and how many were made full - after a
+  // full build only, like the parse record: an incremental run changes
+  // neither count.
+  if not LWasModule and (Length(FLightPaths) > 0) then
+    Log(Format('light libraries: %d of %d units analyzed interface-only, %d'
+      + ' promoted to a full analysis',
+      [FProject.LightCount, FProject.ModelCount,
+       Length(FProject.PromotedFiles)]));
   // A benchmark's run is the full one it started (StartAnalysis from
   // HandleBenchmark); an incremental one cannot be in between, since the
   // benchmark freed the project the incremental path needs.
@@ -1627,6 +1745,12 @@ begin
       StartAnalysis('');
     end;
   end;
+  // A light unit open in the editor is made full now that there is a
+  // project to promote it in - one opened while the build ran, or one a
+  // donor-less rebuild loaded light again. Not while a change waits: its
+  // rebuild comes first, and this runs again when it lands.
+  if (FSession = nil) and (FPendingDue = 0) then
+    PromoteOpenLightDoc;
 end;
 
 { The client-liveness watchdog.
@@ -2375,12 +2499,382 @@ begin
   end;
 end;
 
+{ -------- light mode -------- }
+
+{ The trees whose units are analyzed interface-only: the client's
+  libraryPaths (the IDE's library and browsing paths) plus the Studio source
+  tree - every RTL/VCL directory, not only the ones a browsing path names -
+  MINUS every tree that holds the project directory, the main source or a
+  file the project lists. PasTree exempts those files and that directory
+  anyway (pins, roots, project directory); dropping the whole tree is the
+  host's half of the same rule: a library path pointing at a parent of the
+  project would otherwise make every sibling of the project light, and a
+  light own unit answers wrongly with no error. Empty when the option is off
+  or the client sent no libraryPaths. }
+function TLspServer.LightTreesFor: TArray<string>;
+var
+  LTrees, LOwn: TArray<string>;
+  LTree, LOwnFile, LBds: string;
+  LKeep: Boolean;
+begin
+  Result := nil;
+  if not FLightLibraries or (Length(FLibraryPaths) = 0) then
+    Exit;
+  LTrees := FLibraryPaths;
+  // $(BDS): the IDE sets it for the processes it starts, rsvars.bat for a
+  // command line, and the VS Code client passes it on (ide.js).
+  LBds := GetEnvironmentVariable('BDS');
+  if (LBds <> '') and TDirectory.Exists(TPath.Combine(LBds, 'source')) then
+    LTrees := LTrees + [TPath.Combine(LBds, 'source')];
+  LOwn := FProjectFiles;
+  if FMainSource <> '' then
+    LOwn := LOwn + [FMainSource];
+  if FProjectDir <> '' then
+    LOwn := LOwn + [IncludeTrailingPathDelimiter(FProjectDir)];
+  for LTree in PasNormalizeDirTrees(LTrees) do
+  begin
+    LKeep := True;
+    for LOwnFile in LOwn do
+      if PasUnderDirTrees(LOwnFile, [LTree]) then
+      begin
+        Log(Format('  light libraries: %s holds %s - analyzed in full',
+          [LTree, LOwnFile]));
+        LKeep := False;
+        Break;
+      end;
+    if LKeep and (IndexStr(LTree, Result) < 0) then
+      Result := Result + [LTree];
+  end;
+end;
+
+{ Starts making the light unit APath full (TPasAsyncSession.
+  CreateForPromotion), as a module session: the session owns the project
+  until FinalizeAnalysisIfDone (or StartAnalysis) takes it back through
+  TakeBackPromotion. False - nothing started - when light mode is off, a
+  session is running, there is no project, APath is not a light unit of it,
+  or its promotion was refused in this closure already. Measured at 40-200 ms
+  a unit on a 3,782-unit closure, System.pas and System.Classes included.
+
+  No buffers are handed over: the project keeps the ones the last build
+  analyzed, so the promoted unit is read exactly as the closure read it, and
+  an edit waiting in the debounce gets its own run. }
+function TLspServer.StartPromotion(const APath, AWhy: string): Boolean;
+var
+  LMid: Integer;
+  LPath: string;
+begin
+  Result := False;
+  if (Length(FLightPaths) = 0) or (FSession <> nil) or (FProject = nil) then
+    Exit;
+  LMid := FProject.ModelIdOf(APath);
+  if (LMid < 0) or not FProject.IsLight(LMid) then
+    Exit;
+  LPath := FProject.ModelFile(LMid);
+  if FPromoteRefused.IndexOf(LPath) >= 0 then
+    Exit;
+  FModuleBaseCount := FProject.ModelCount;
+  FModuleFile := LPath;
+  FModuleMode := True;
+  FPromoteMode := True;
+  FPromoteWhy := AWhy;
+  FSession := TPasAsyncSession.CreateForPromotion(FProject, LPath);
+  FProject := nil;          // the session owns it now
+  FreeAndNil(FNav);         // and the navigator pointed into it
+  FBuildStart := GetTickCount64;
+  // The incremental title: a promotion is the module path, and the IDE's
+  // status panel shows it only past its threshold, like any other.
+  StartProgress(cProgressTitleIncremental);
+  Log(Format('promotion started: %s (%s) - a light unit made full',
+    [LPath, AWhy]));
+  FSession.Start;
+  Result := True;
+end;
+
+{ Takes a finished promotion session's project back and says what happened.
+  True when a rebuild is due: the promotion asked for one
+  (`promote-needs-rebuild` - its `$IF` questions cannot be re-decided in
+  place; the unit is in the project's PromotedFiles now, so a rebuild with
+  this project as donor loads it full), or it failed past its commit point
+  (the project is discarded, the rebuild runs donor-less). A unit that asks
+  for its rebuild a second time is refused instead (FPromoteRebuilt). }
+function TLspServer.TakeBackPromotion: Boolean;
+var
+  LPath, LWhy, LError: string;
+  LAccepted, LDiscard: Boolean;
+  LMs: UInt64;
+begin
+  LPath := FModuleFile;
+  LWhy := FPromoteWhy;
+  LMs := GetTickCount64 - FBuildStart;
+  LAccepted := FSession.ModuleAccepted;
+  LDiscard := FSession.ModuleNeedsFullRebuild;
+  LError := FSession.LastError;
+  FreeAndNil(FNav);
+  FProject := FSession.TakeProject;
+  FreeAndNil(FSession);
+  FModuleMode := False;
+  FPromoteMode := False;
+  FPromoteWhy := '';
+  FOutlineCache := '';   // a new project: the outline table is stale
+  FreeAndNil(FLineTokenCache);
+  if LError <> '' then
+    Log(Format('promotion of %s failed: %s', [LPath, LError]));
+  if LDiscard or (FProject = nil) then
+  begin
+    Log(Format('promotion of %s failed past its commit point - project' +
+      ' discarded, full rebuild without a parse donor', [LPath]));
+    FreeAndNil(FProject);
+    Exit(True);
+  end;
+  FNav := NewNavigator;
+  Result := NotePromotion(LPath, LWhy, LAccepted, LMs, FModuleBaseCount) =
+    poRebuild;
+end;
+
+{ The outcome of one PromoteUnit, said in the log and remembered: one line
+  per promotion with its time (accepted), or why not. poRebuild when it asks
+  for the rebuild `promote-needs-rebuild` means - the first time; a unit
+  asking again is refused (FPromoteRebuilt), as is any other refusal
+  (FPromoteRefused, until the next full build). }
+function TLspServer.NotePromotion(const APath, AWhy: string;
+  AAccepted: Boolean; AMs: UInt64; ABaseCount: Integer): TLspPromoteOutcome;
+var
+  LTimings: string;
+begin
+  LTimings := FProject.StageTimings;
+  if AAccepted then
+  begin
+    Result := poPromoted;
+    if not LTimings.StartsWith('promote=already-full') then
+      Log(Format('promoted %s to a full analysis in %d ms (%s; %d units'
+        + ' taken in) %s', [APath, AMs, AWhy,
+         FProject.ModelCount - ABaseCount, LTimings]));
+  end
+  else if LTimings.Contains('promote-needs-rebuild') and
+     (FPromoteRebuilt.IndexOf(APath) < 0) then
+  begin
+    Result := poRebuild;
+    FPromoteRebuilt.Add(APath);
+    Log(Format('promotion of %s asks for a rebuild (%s) - rebuilding with'
+      + ' it full', [APath, LTimings]));
+  end
+  else
+  begin
+    Result := poRefused;
+    FPromoteRefused.Add(APath);
+    Log(Format('promotion of %s refused (%s) - its bodies stay unanalyzed'
+      + ' (light)', [APath, LTimings]));
+  end;
+end;
+
+{ The first open document that is a light unit, promoted (StartPromotion):
+  a library file the user opened - Ctrl+Click into System.Classes - gets its
+  bodies, its semantic colouring and its outline. Until the promotion lands
+  the document answers from the interface-only model. False when nothing
+  was started. }
+function TLspServer.PromoteOpenLightDoc: Boolean;
+var
+  LDoc: TLspDocument;
+begin
+  Result := False;
+  if (Length(FLightPaths) = 0) or (FSession <> nil) or (FProject = nil) then
+    Exit;
+  for LDoc in FDocs.All do
+    if StartPromotion(LDoc.Path, 'opened') then
+      Exit(True);
+end;
+
+{ A promotion a REQUEST needs before it can answer - navigation into a
+  library body, the lint: started, then waited out like any analysis
+  (WaitAnalyzed, cancellable), a rebuild it asks for included. True when the
+  unit is fully analyzed afterwards. False when nothing was promoted, or the
+  request was cancelled meanwhile - then FNav is nil, which the caller
+  answers. Call it with no session running (after WaitAnalyzed). }
+function TLspServer.PromoteForRequest(const APath, AWhy,
+  ARequestIdJson: string): Boolean;
+var
+  LMid: Integer;
+begin
+  Result := False;
+  if not StartPromotion(APath, AWhy) then
+    Exit;
+  if not WaitAnalyzed('', ARequestIdJson) then
+    Exit;
+  if (FProject = nil) or (FNav = nil) then
+    Exit;
+  LMid := FProject.ModelIdOf(APath);
+  Result := (LMid >= 0) and not FProject.IsLight(LMid);
+end;
+
+{ The units a lint request checks, from the CURRENT navigator - after a
+  promotion's rebuild the model ids are a new project's. }
+function TLspServer.LintMids(const ADocPath: string;
+  AProjectScope: Boolean): TArray<Integer>;
+var
+  LMid: Integer;
+begin
+  Result := nil;
+  if FNav = nil then
+    Exit;
+  if AProjectScope then
+    Exit(ProjectUnitMids);
+  LMid := FNav.ModelIdOf(ADocPath);
+  if LMid >= 0 then
+    Result := [LMid];
+end;
+
+{ THE USES LINT READS LIBRARY IMPLEMENTATIONS - an inline routine's body,
+  the initialization a removal would leave out of the program - which a
+  light unit does not have. On its own the lint answers those on the safe
+  side (a doubt on the row); PasTree's LintPromotions names the light units
+  it had to treat as unknown, and promoting them until the answer is empty
+  makes the lint exactly the full analysis's (the 3,782-unit closure:
+  6,231 rows, identical). Promotions refused leave their doubts on the rows.
+
+  ON THE DISPATCHER, IN A BATCH - not one promotion session per unit: a
+  round can name hundreds (521 on that closure, against a full lint of
+  5.5 s), and a session each - a thread, a navigator over the whole project,
+  the wait loop's poll - doubled the time the promotions themselves take.
+  One navigator per round, and at most one rebuild per round for every
+  `promote-needs-rebuild` in it (four rebuilds of 3 s each before). Called
+  after WaitAnalyzed, so no session owns the project. False = the request
+  was cancelled while a rebuild ran. }
+function TLspServer.PrepareLint(const ADocPath: string;
+  AProjectScope: Boolean; const ARequestIdJson: string): Boolean;
+var
+  LNeed, LPromotedNow: TArray<string>;
+  LPath: string;
+  LRound, LDone, LRefused, LMid, LBase: Integer;
+  LAny, LRebuild, LDiscard, LOk: Boolean;
+  LStart, LOne: UInt64;
+  LDoc: TLspDocument;
+begin
+  Result := True;
+  if (FNav = nil) or (FSession <> nil) or (FProject.LightCount = 0) then
+    Exit;
+  LStart := GetTickCount64;
+  LDone := 0;
+  LRefused := 0;
+  LRound := 0;
+  // Each round's promotions take their implementation-only units in, light,
+  // and those may be needed in turn. Bounded: a refusal is not retried
+  // (FPromoteRefused), so a round with nothing promoted ends it anyway.
+  while LRound < 10 do
+  begin
+    Inc(LRound);
+    LNeed := LintPromotions(FNav, LintMids(ADocPath, AProjectScope),
+      [loHideGlobalInit]);
+    if LNeed = nil then
+      Break;
+    LAny := False;
+    LRebuild := False;
+    LDiscard := False;
+    LPromotedNow := nil;
+    FreeAndNil(FNav);   // PromoteUnit replaces models the navigator holds
+    FOutlineCache := '';
+    FreeAndNil(FLineTokenCache);
+    for LPath in LNeed do
+    begin
+      LMid := FProject.ModelIdOf(LPath);
+      if (LMid < 0) or not FProject.IsLight(LMid) or
+         (FPromoteRefused.IndexOf(LPath) >= 0) then
+        Continue;
+      LBase := FProject.ModelCount;
+      LOne := GetTickCount64;
+      LOk := False;
+      try
+        if FProject.PromoteUnit(LPath) then
+          LOk := True;
+      except
+        on E: Exception do
+        begin
+          Log(Format('promotion of %s failed: %s: %s',
+            [LPath, E.ClassName, E.Message]));
+          // Past its commit point the project is half-updated: never shown,
+          // never donated - the module path's moMustDiscard.
+          if FProject.NeedsFullRebuild then
+          begin
+            LDiscard := True;
+            Break;
+          end;
+        end;
+      end;
+      case NotePromotion(LPath, 'lint', LOk, GetTickCount64 - LOne, LBase) of
+        poPromoted:
+          begin
+            Inc(LDone);
+            LAny := True;
+            LPromotedNow := LPromotedNow + [LPath];
+          end;
+        poRebuild:
+          begin
+            LRebuild := True;
+            LAny := True;
+          end;
+        poRefused:
+          Inc(LRefused);
+      end;
+    end;
+    if LDiscard then
+    begin
+      Log('lint: a promotion failed past its commit point - project' +
+        ' discarded, full rebuild without a parse donor');
+      FreeAndNil(FProject);
+      LRebuild := True;
+    end
+    else
+    begin
+      FNav := NewNavigator;
+      // A promoted unit open in the editor has a whole body's diagnostics now.
+      for LPath in LPromotedNow do
+        if FDocs.TryGet(LPath, LDoc) then
+          PublishDiagnosticsFor(LDoc);
+    end;
+    if LRebuild then
+    begin
+      // The units that asked are in the project's PromotedFiles: a rebuild
+      // with it as the parse donor loads them full.
+      FNoModuleOnce := True;
+      StartAnalysis('');
+      if not WaitAnalyzed('', ARequestIdJson) then
+        Exit(False);
+      if FNav = nil then
+        Break;
+    end;
+    if not LAny then
+      Break;
+  end;
+  if LDone + LRefused > 0 then
+    Log(Format('lint: %d light units promoted first, %d refused, %d rounds,'
+      + ' in %d ms', [LDone, LRefused, LRound, GetTickCount64 - LStart]));
+end;
+
+{ What a light analysis no longer sees, said where an answer is missing it:
+  library BODIES are not analyzed, so a reference, an override call, an
+  assignment or a creation written inside one is not found. Logged for a
+  library target only - library code does not otherwise reference the
+  project's own units (dispatch into own code is the one exception, and it
+  goes through a library symbol). }
+procedure TLspServer.NoteLightBodies(const AWhat: string; ATMid: Integer);
+begin
+  if (FProject = nil) or (FProject.LightCount = 0) or (ATMid < 0) or
+     (ATMid >= FProject.ModelCount) then
+    Exit;
+  if FProject.IsLight(ATMid) or
+     PasUnderDirTrees(FProject.ModelFile(ATMid), FLightPaths) then
+    Log(Format('%s: uses inside library bodies are not searched - %d units'
+      + ' are analyzed interface-only (light libraries)',
+      [AWhat, FProject.LightCount]));
+end;
+
 function TLspServer.StateLine: string;
 var
   LSession, LProject: string;
 begin
   if FSession = nil then
     LSession := 'none'
+  else if FModuleMode and FPromoteMode then
+    LSession := 'promote(' + FModuleFile + ')'
   else if FModuleMode then
     LSession := 'module(' + FModuleFile + ')'
   else
@@ -2903,6 +3397,12 @@ begin
     if (FProject <> nil) and FDocs.TryGet(LPath, LDoc) then
       PublishDiagnosticsFor(LDoc);
   end;
+  // A LIGHT UNIT OPENED - a library file Ctrl+Clicked into: made full in
+  // the background, so its bodies navigate, colour and outline like any
+  // other unit's. Until it lands, it answers from its interface. With a
+  // build running or scheduled, FinalizeAnalysisIfDone promotes it after.
+  if (FSession = nil) and (FPendingDue = 0) then
+    StartPromotion(LPath, 'opened');
 end;
 
 procedure TLspServer.HandleDidChange(AParams: TJSONValue);
@@ -3017,6 +3517,8 @@ var
   LResolved, LOwnHeader: Boolean;
   LIfStart, LIfLen, LIfMid, LIfSym: Integer;
   LIfHit: TPasRefHit;
+  LSymMid, LSym: Integer;
+  LSymName, LTargetFile: string;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -3147,7 +3649,30 @@ begin
   // be a method header, and Ctrl+Click landed in that method's body
   // (2026-09-22). A routine declared in an include and implemented in the
   // host loses the redirect and lands on its header, which is still right.
+  // A ROUTINE OF A LIGHT UNIT has no body in the analysis - the light model
+  // never parsed its implementation - so the redirect would quietly land on
+  // the header. The unit is promoted first (40-200 ms), then asked again;
+  // a refused promotion keeps the header, and the log says why.
   if not ADeclarationOnly and not LOwnHeader and
+     SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) and
+     FProject.IsLight(LTarget.UnitId) and
+     FNav.SymbolAt(LMid, LPasLine, LPasCol, LSymMid, LSym, LSymName) and
+     (LSymMid = LTarget.UnitId) and
+     (FProject.Model(LSymMid).Symbols[LSym].Kind = skRoutine) then
+  begin
+    LTargetFile := FProject.ModelFile(LTarget.UnitId);
+    if not PromoteForRequest(LTargetFile, 'definition', AMsg.IdJson) and
+       (FNav = nil) then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+    LTarget.UnitId := FProject.ModelIdOf(LTargetFile);
+    if (LTarget.UnitId >= 0) and FProject.IsLight(LTarget.UnitId) then
+      Log(Format(AMsg.Method + ': %s ''%s'' - the body is not loaded: %s'
+        + ' is analyzed interface-only and its promotion was refused',
+        [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
+         TPath.GetFileName(LTargetFile)]));
+  end;
+  if not ADeclarationOnly and not LOwnHeader and (LTarget.UnitId >= 0) and
      SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) and
      FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
        LImplTarget) then
@@ -3751,6 +4276,7 @@ begin
     if LImplHeaders then
       LKind := 'symbol, implementation headers';
     LHits := FNav.FindReferences(LTMid, LSym, LImplHeaders);
+    NoteLightBodies(AMsg.Method, LTMid);
     if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
       LHits := [LDecl] + LHits;
     LForms := FNav.FindFormSites(LTMid, LSym);
@@ -4610,6 +5136,7 @@ begin
     fskCreations:    LRows := FNav.FindCreations(LTMid, LSym);
     fskDestructions: LRows := FNav.FindDestructions(LTMid, LSym);
   end;
+  NoteLightBodies(AMsg.Method, LTMid);
   Log(Format('%s: %s ''%s'' -> %d rows',
     [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   LJson := nil;
@@ -5540,6 +6067,22 @@ begin
     LFound := FNav.GotoImplementation(LMid, LPasLine, LPasCol, LTarget)
   else
     LFound := FNav.GotoDeclaration(LMid, LPasLine, LPasCol, LTarget);
+  // In a LIGHT unit there is no implementation to toggle to - the document
+  // is normally promoted when it is opened, but not if that has not landed
+  // or was refused. Promoted here and asked again; said when it stays light.
+  if not LFound and AToImpl and FProject.IsLight(LMid) then
+  begin
+    if not PromoteForRequest(LPath, LWhat, AMsg.IdJson) and (FNav = nil) then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+    LMid := FNav.ModelIdOf(LPath);
+    if (LMid >= 0) and not FProject.IsLight(LMid) then
+      LFound := FNav.GotoImplementation(LMid, LPasLine, LPasCol, LTarget)
+    else
+      Log(Format('%s: %s the body is not loaded: %s is analyzed'
+        + ' interface-only and its promotion was refused',
+        [LWhat, PosTag(LPath, LPasLine, LPasCol), TPath.GetFileName(LPath)]));
+  end;
   if not LFound then
   begin
     // Not an error: the cursor is simply not on a routine that HAS another
@@ -6377,6 +6920,13 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
+  // Light units the lint must see in full are promoted first - see
+  // PrepareLint. A promotion's rebuild makes a new project, which is why the
+  // units are looked up only after it.
+  if not PrepareLint(LPath, LScope = 'project', AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
   LStart := GetTickCount64;
   if LScope = 'unit' then
   begin
@@ -6468,6 +7018,11 @@ var
 begin
   LPath := DocPathOf(AMsg.Params);
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if FNav = nil then
+    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
+  // As pastree/unusedUses: the light units the lint reads promoted first.
+  if not PrepareLint(LPath, True, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));

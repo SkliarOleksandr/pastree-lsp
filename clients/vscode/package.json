@@ -1,8 +1,8 @@
-﻿{
+{
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.70.2",
+  "version": "0.71.1",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -92,6 +92,11 @@
           "type": "integer",
           "default": 0,
           "description": "How many threads the analysis runs on. 0 = one per logical core (the fastest); fewer leave the machine more room; 1 runs every stage on one thread. Takes effect when the server restarts."
+        },
+        "pastree.lightLibraries": {
+          "type": "boolean",
+          "default": true,
+          "description": "Analyze the IDE's library units (RTL, VCL, third-party) interface-only: about half the memory and a faster start, the project's own units answered exactly as before. A library unit is analyzed in full when it is opened, navigated into or needed by Unused Units. Off analyzes every unit in full. Takes effect when the server restarts."
         },
         "pastree.searchPaths": {
           "type": "array",
