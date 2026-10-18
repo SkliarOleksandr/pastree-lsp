@@ -28,6 +28,10 @@ const
   LSP_INTERNAL_ERROR = -32603;
   LSP_SERVER_NOT_INITIALIZED = -32002;
   LSP_REQUEST_CANCELLED = -32800;
+  // The answer was overtaken by a change of the analysis - the protocol's
+  // ContentModified, which a client drops or asks again: the workspace
+  // refused because an analysis session held the project (PasLsp.Server).
+  LSP_CONTENT_MODIFIED = -32801;
   // A request that resolved fine but whose ANSWER is a refusal the user
   // must read - a rename the analysis declines. Distinct from
   // INVALID_PARAMS: the client sent nothing wrong.

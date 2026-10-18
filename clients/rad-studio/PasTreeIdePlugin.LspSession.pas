@@ -825,7 +825,8 @@ type
     lssReady,        // up, no analysis running
     lssIncremental,  // an incremental (one module) analysis is running
     lssFull,         // a full rebuild is running
-    lssFailed        // died or would not start
+    lssFailed,       // died or would not start
+    lssLibrary       // a request is making library bodies full (light mode)
   );
 
 /// <summary>
@@ -836,7 +837,14 @@ type
 /// this on a timer, and a timer may not start servers.
 /// </summary>
 function LspServerStatusFor(const AFileName: string;
-  out ARunningMs: UInt64): TLspServerStatus;
+  out ARunningMs: UInt64): TLspServerStatus; overload;
+/// <summary>
+/// The same, and the run's last progress message (AMessage, '' when there
+/// is none) - "library bodies: 12 unit(s)", what the wait dialog of a Find
+/// shows while the server makes library bodies full before it answers.
+/// </summary>
+function LspServerStatusFor(const AFileName: string;
+  out ARunningMs: UInt64; out AMessage: string): TLspServerStatus; overload;
 
 /// <summary>
 /// Which Find All commands apply at the caret - SYNCHRONOUS, and the only
@@ -1437,6 +1445,10 @@ type
   private
     FClient: TLspClient;
     FDocs: TLspDocumentSync;
+    // The server's last user-facing message written to the Messages window
+    // (window/showMessage, or a logMessage up to Warning) - see the
+    // OnNotification handler: one message arrives as both.
+    FLastServerSaid: string;
     FExePath: string;
     // THE PROJECT THIS SESSION IS FOR, as a file name - see
     // GetOpenProjectByFile for why a name and not an interface. Fixed at
@@ -2637,6 +2649,35 @@ begin
         if AMethod = 'pastree/benchmarkDone' then
         begin
           HandleBenchmarkDone(AParams);
+          Exit;
+        end;
+        // What the server says to the user - a configuration it could not
+        // read, an analysis that failed, and in light mode "library
+        // implementations not searched: N units" after a Find or the
+        // library analyzed in full for the session: the TEXT in the
+        // Messages window, where it used to arrive as the bare method name.
+        // window/logMessage only up to Warning (type 2): its Info and Log
+        // lines are the server log's business.
+        // The server sends a message it SHOWS as a logMessage first (its
+        // Tell): the showMessage right behind it, same text, is not said
+        // twice.
+        if AMethod = 'window/logMessage' then
+        begin
+          FLastServerSaid := '';
+          if (AParams <> nil) and
+             (AParams.GetValue<Integer>('type', 4) <= 2) then
+          begin
+            FLastServerSaid := AParams.GetValue<string>('message', '');
+            LogDiagnostic(FLastServerSaid);
+          end;
+          Exit;
+        end;
+        if AMethod = 'window/showMessage' then
+        begin
+          if (AParams <> nil) and
+             (AParams.GetValue<string>('message', '') <> FLastServerSaid) then
+            LogDiagnostic(AParams.GetValue<string>('message', ''));
+          FLastServerSaid := '';
           Exit;
         end;
         LogDiagnostic('unhandled server notification: ' + AMethod);
@@ -5844,10 +5885,19 @@ end;
 function LspServerStatusFor(const AFileName: string;
   out ARunningMs: UInt64): TLspServerStatus;
 var
+  LMessage: string;
+begin
+  Result := LspServerStatusFor(AFileName, ARunningMs, LMessage);
+end;
+
+function LspServerStatusFor(const AFileName: string;
+  out ARunningMs: UInt64; out AMessage: string): TLspServerStatus;
+var
   LSession: TLspSession;
   LClient: TLspClient;
 begin
   ARunningMs := 0;
+  AMessage := '';
   Result := lssNone;
   if not Assigned(GPool) then
     Exit;
@@ -5865,10 +5915,12 @@ begin
   case LClient.Activity of
     laIncremental: Result := lssIncremental;
     laFull: Result := lssFull;
+    laLibrary: Result := lssLibrary;
   else
     Exit(lssReady);
   end;
   ARunningMs := GetTickCount64 - LClient.ActivitySince;
+  AMessage := LClient.ActivityMessage;
 end;
 
 function LspBenchmark(AThreads: Integer; ALight: Boolean;

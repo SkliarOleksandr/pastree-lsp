@@ -43,9 +43,12 @@ the archive.
 - Analyzes library units (RTL, VCL, third-party - the IDE's library paths)
   interface-only by default: on a 3,782-unit closure 2.1 s and 1.2 GB
   instead of 3.8 s and 2.1 GB, the project's own units answered exactly as
-  before. A library unit is analyzed in full when it is opened, navigated
-  into or needed by Unused Units. `lightLibraries: false` turns it off -
-  see [SPEC.md](SPEC.md), "Light libraries".
+  before. Every answer is still the full analysis's: a library unit is
+  analyzed in full when it is opened, and a request that needs library
+  bodies - Find References, the Find All family, Find All Defines, rename,
+  Unused Units - makes them full first, with progress, through PasTree's
+  workspace. `lightLibraries: false` turns it off - see [SPEC.md](SPEC.md),
+  "Light libraries".
 
 **Install / requirements**
 

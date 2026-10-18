@@ -220,13 +220,13 @@ IDE plugin first, VS Code second), not by protocol order.
 | `textDocument/hover` | declaration card + XMLDoc; `pastreeHtml` carries the same as a Help Insight page, `pastreeHover` as fields (code line with its `typeSpans`, doc, kind, note, declaration file/line/col) for the RAD hover window; a conditional symbol gets a `{$DEFINE X}` card noting the `$DEFINE` it sees, or that the project defines it |
 | `textDocument/publishDiagnostics` | push, open documents; PasTree's `ReportUnresolvedMembers` is on since 0.52.4, so an unresolved member after a dot is E2003 like a bare name |
 | `workspace/didChangeWatchedFiles` | client watches, server decides |
-| `$/cancelRequest` | |
-| `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below); sent while a request waits out the analysis it started (`OnFlush`), not after its reply |
+| `$/cancelRequest` | noted by the reader thread the moment it arrives, so it stops a request waiting out an analysis and a request whose workspace query is making library bodies full (0.72.0, see "Light libraries") |
+| `$/progress` + `window/workDoneProgress/create` | server-initiated, message-only (see below); sent while a request waits out the analysis it started (`OnFlush`), not after its reply; a request making library bodies full reports on its own stream, its `workDoneToken` when it sent one |
 | `pastree/projectChanged` | ours: the client saw the .dproj saved; the server re-reads it as initialize did and answers `changed` false when every part the analysis took (main source, platform, search paths, defines, .pas unit list, namespaces, aliases, and since 0.69.0 the DCC_* compiler switches and DCC_ConsoleTarget) is the same - the IDE re-saves the .dproj with every .dpr save, and the restart that used to follow cost a full analysis (0.61.0) |
 | `pastree/benchmark` | ours (0.67.0): a full analysis FROM NOTHING - the last-good project is freed first, so there is no parse donor and the "before" memory is the process without an analysis. Answers `{"started":true}` at once; the run reports through `$/progress` like any full rebuild, and its figures arrive as the `pastree/benchmarkDone` notification: `ok`, `units`, `ms`, `threads`, `lightUnits` (0.71.2: units analyzed interface-only, 0 in full mode), `commitBeforeMB` / `commitPeakMB` / `commitAfterMB` (private bytes; the peak sampled every idle tick, 50 ms), `stages`; or `ok` false and `error`. For the RAD Studio Performance page |
 | `pastree/unusedUses`, `pastree/unreferencedUnits` | ours (0.62.0): PasTree.Sema.Lint's unused `uses` entries (`scope` unit or project) and project units nobody uses, always with `loHideGlobalInit` - a unit whose initialization reaches outside itself (another unit's routine or variable, a class member of one; not a constructor) is not offered. Rows carry `doubts` (shown, never removed) and `refused`. unreferencedUnits rows list every `uses` entry still naming the unit (`program` for the .dpr's, which the client removes by taking the unit out of the project). The edits are NOT in these answers: see `pastree/usesRemoval` |
 | `pastree/usesRemoval` | ours (0.62.0): the edits of the client's Remove, asked for at the click - `files`, each a `uri` and the `names` to take out of its `uses`, on the text as it is then (open document or disk, parse only). ONE rewrite per clause (PasLsp.UnusedUnits keeps the layout: a removed entry takes its separator and its own line; a clause with a compiler directive inside is refused). At the click and not with the search because Removes come one unit at a time, and siblings share a clause: an edit computed before the first Remove no longer matches the clause it left. `refused` and `missing` say what no edit takes out |
-| `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log |
+| `window/logMessage`, `window/showMessage` | user-actionable trouble, not just the log - and in light mode a warning `PasTree: <request> - library implementations not searched: N units` when an answer could not get every library body it needed, and one `showMessage` when a request escalated to a full analysis of the library (the session stays full) |
 | `textDocument/typeDefinition` | three routes, in order: the declared type EXPRESSION (crosses units, follows an alias), the model-local `TypeSym`, and - for a symbol that names no type at all - the cross pass (`DeclTypeX`, then `SymDeclTypeX`). The third exists because an inferred inline `var` and a bare `property Items;` promotion name their type nowhere, and answered null here while member resolution THROUGH the same name worked (2026-09-07) |
 | `textDocument/documentHighlight` | occurrences in the current file |
 | `textDocument/semanticTokens/full`, `/range` | what every identifier resolved to, as standard token types (`class`, `struct`, `enum`, `interface`, `type`, `typeParameter`, `parameter`, `variable`, `property`, `enumMember`, `function`, `method`, `namespace`) with `declaration`/`readonly`/`defaultLibrary`; `$IFDEF`'d-out lines as `comment`. Keywords, strings and comments are NOT sent - the client grammar owns them. No `full/delta` (see Tier 3) |
@@ -612,6 +612,21 @@ All four shipped. Two notes worth keeping:
   open, which nothing noticed while only VS Code showed it. Most incremental
   runs take tens of milliseconds; deciding what is worth showing is the
   client's job (the IDE waits 250 ms).
+- **A request making library bodies full has a stream of its own (0.72.0)**,
+  titled `PasTree: library bodies` (`cProgressTitleLibrary`; `PasTree:
+  analyzing the library in full` when its first report is an escalation's
+  rebuild, `cProgressTitleLibraryFull`) - see "Light libraries", "The
+  workspace". Opened on the first report of a workspace query that has
+  something to do (an own-code question says nothing), on the request's
+  own `workDoneToken` when the client sent one and on a created token
+  otherwise; its reports are PasTree's lines ("library bodies: 12 unit(s)",
+  "intf: 812 of 1400 units" during a rebuild), flushed at once since the
+  dispatcher is inside the query; ended when the query is. The IDE plugin
+  reads the word "library" off the title: its status panel says `library
+  bodies...` and the running Find's wait dialog shows the report line. Not
+  `cancellable` in the progress sense: the request's `$/cancelRequest`
+  stops it - between promotion rounds and inside a rebuild - and the
+  request then answers -32800.
 
 ### Tier 2 - real features, bounded work
 
@@ -905,49 +920,99 @@ from making the project's siblings light. A client that sends no
 `libraryPaths` gets full mode - the server cannot tell somebody else's tree
 from the user's. The log's `light libraries:` header line says on or off and
 how many trees; after each full build `light libraries: N of M units
-analyzed interface-only, K promoted` (`light tree <dir>` lines in the
-detail block). The RAD Studio client sends `lightLibraries: false` when the
+analyzed interface-only, K promoted to a full analysis` (`light tree <dir>`
+lines in the detail block). The RAD Studio client sends `lightLibraries: false` when the
 Performance page's "Parsing mode" is Full instead of Fast (the default), and
 restarts the server for a change; VS Code has `pastree.lightLibraries`.
 
-A light unit is made full on demand - PasTree's `PromoteUnit`, the module
-path over its whole text, 40-270 ms a unit, its consumers left alone:
+### The workspace: every answer is the full analysis's (0.72.0)
 
-- **Opened** (`didOpen`, Ctrl+Click into a library file): in the background,
-  as a module session (`TPasAsyncSession.CreateForPromotion`, `StartPromotion`).
-  Until it lands the document answers from its interface. A build running or
+What a light analysis does not have is library BODIES - a reference, an
+override, an assignment, a creation, a `$DEFINE`, an inline routine the lint
+reads, written inside one. Since 0.72.0 (PasTree 0.121.0) the server does
+not work around that per request: the analysis lives in one PasTree
+`TPasWorkspace` (PasTree's `docs/library-light-mode.md`, "The workspace"),
+and every query that can need library bodies runs through it. The query
+asks PasTree which bodies its answer needs, the workspace makes them full
+(`EnsureFull`: a batch of promotions - PasTree's `PromoteUnit`, 40-270 ms a
+unit -, a rebuild with the project as parse donor when one asks for it, or
+an ESCALATION to a full analysis when that is cheaper), and then answers:
+the full analysis's answer. In full mode every demand is empty and a
+workspace query is the navigator's own call.
+
+- **Through the workspace entries**: `textDocument/references` (symbol,
+  built-in and conditional-symbol identities), `pastree/findOverrides`,
+  `findImplementations` (method and interface), `findDescendants`,
+  `findAssignments` / `findCreations` / `findDestructions`,
+  `pastree/findDefines`, rename (`PlanRename` with the inactive uses), and
+  the uses lint (`pastree/unusedUses`, `pastree/unreferencedUnits`, with
+  `loHideGlobalInit` as before). A symbol travels as a `TPasSymbolKey`
+  (file, name, declaration site), which survives the promotions and the
+  rebuild a query may run; model ids taken before it are re-resolved after
+  it.
+- **One file, one position** (`TPasWorkspace.InFile` / `At`): the file a
+  position request stands in is made full first when it is a light
+  document - `definition`, `implementation` / `declaration`,
+  `typeDefinition`, `hover`, `documentHighlight`, `semanticTokens`,
+  rename's identity, the Find All gates, `definesAt`, `optionsAt`.
+  `definition`'s redirect to a ROUTINE's body asks for the target's file
+  the same way. `documentHighlight` stays on the file on purpose: its rows
+  are all in that file, so the file is the whole demand - the references
+  entry would meet the whole search's demand first (for `Free`, the
+  library) on every caret move. Hover makes the hovered file full, not the
+  hovered name's unit: the card needs the declaration, which a light unit
+  has.
+- **Opened** (`didOpen`, Ctrl+Click into a library file): still promoted in
+  the background, as a module session (`TPasAsyncSession.CreateForPromotion`,
+  `StartPromotion`), so the editor stays responsive; the workspace hands the
+  project to the session (`Release`) and takes it back (`Adopt`). Until it
+  lands the document answers from its interface. A build running or
   scheduled goes first; `FinalizeAnalysisIfDone` then promotes every open
-  light document, one at a time - which also covers a donor-less rebuild
-  that loaded one light again.
-- **Navigated into**: `textDocument/definition` on a routine of a light unit
-  (the redirect to the body), `textDocument/implementation` in a light unit -
-  promoted first, then answered (`PromoteForRequest`, which waits like any
-  analysis and stays cancellable).
-- **Linted**: `pastree/unusedUses` and `pastree/unreferencedUnits` run
-  PasTree's `LintPromotions` and promote what it names until it names
-  nothing (`PrepareLint`) - on the dispatcher, in a batch: one navigator per
-  round, one rebuild per round for every refusal that asks for one. On the
-  closure above: 513 units in four rounds, 25 s against a full lint of
-  5.5 s, and the 6,231 rows identical to the full analysis's.
+  light document, one at a time. A promotion refused with
+  `promote-needs-rebuild` rebuilds with the project as donor; refused again,
+  or for any other reason, the unit stays light until the next full build
+  (`FPromoteRebuilt`, `FPromoteRefused`). Log: `promoted <file> to a full
+  analysis in N ms (opened; K units taken in)`.
+- **Ownership**: a module session takes the project (`Release`, then
+  `Adopt(TakeProject)`), a full rebuild borrows it as its parse donor
+  (`Lend` / `EndLend`, then `Adopt` of the new project). A query that would
+  have to change the project while a session holds it is refused by PasTree
+  (`EPasWorkspaceBusy`) and answered with `ContentModified` (-32801, "an
+  analysis is running - ask again when it is done"). Requests wait the
+  analysis out first, so this is rare; the position requests answer from
+  what is analyzed instead.
+- **Options**, set once (`QueryOptions`): escalation `esRun` (PasTree's
+  decision D8 - run it, with progress); `Cancelled` reads the request's
+  `$/cancelRequest`, which the READER thread notes while the dispatcher sits
+  inside the query (polled between promotion rounds and inside a rebuild,
+  on PasTree's worker threads too; one promotion round is not
+  interruptible); `OnProgress` sends `$/progress` (see "Tier 1" above: a
+  stream titled `PasTree: library bodies`, opened on the first report, the
+  request's own `workDoneToken` when it sent one).
+- **Status**: each query logs what it cost (`<request>: library bodies made
+  full first - N unit(s) promoted, M loaded, P preprocessed in R round(s),
+  T ms`, plus `rebuilt with them` / `escalated to a full analysis` and every
+  refused unit). `NotSearched` - units whose bodies the answer needed and
+  did not get, 0 unless PasTree refused a promotion - goes to
+  `window/logMessage` as a warning (`PasTree: <request> - library
+  implementations not searched: N units`, which the RAD Studio client
+  writes to the Messages window) and, on the Find All and lint answers, as
+  a `notSearched` member of the answer object. An escalation is announced
+  once (`window/showMessage`): the session then STAYS FULL (decision D9) -
+  `FLightPaths` is emptied, so every later rebuild configures no light
+  trees.
 
-A promotion PasTree refuses with `promote-needs-rebuild` (a `$IF` it cannot
-re-decide in place) has put the unit into the project's `PromotedFiles`;
-the server rebuilds with the project as parse donor, which loads it full.
-A unit asking a second time, or refused for any other reason, stays light
-and is not asked again until the next full build (`FPromoteRebuilt`,
-`FPromoteRefused`). Promoted units stay full for the session: every rebuild
-with a donor carries them. Each promotion is one log line with its time:
-`promoted <file> to a full analysis in N ms (<why>; K units taken in)`, or
-`promotion of <file> refused (...)` / `asks for a rebuild (...)`.
+The workspace's own rebuilds need a project configured exactly as
+`StartAnalysis` configures its session, buffers included
+(`NewConfiguredProject`, the workspace's `TPasProjectFactory`); the two are
+kept in step by hand, and a setting missing from one is a rebuild that
+analyzes a different project, silently.
 
-What a light analysis no longer sees is library BODIES: a reference, an
-assignment, a creation or a destruction written inside one is not found
-(`textDocument/references`, Find All's sites), and the log says so for a
-library target (`uses inside library bodies are not searched`). Own units
-are referenced from library bodies only through dispatch, which goes
-through a library symbol. `LspProjectSmoke` is the gate: every check twice,
-`lightLibraries: false` and then the default, and the light pass must answer
-a library body and the project's unused units exactly as the full pass.
+`LspProjectSmoke` is the gate: every check twice, `lightLibraries: false`
+and then the default, and the light pass must answer a library routine's
+body, an opened library file's toggle, the project's unused units, and a
+library class's descendants and references exactly as the full pass did,
+with nothing left unsearched.
 
 ## What the log contains
 

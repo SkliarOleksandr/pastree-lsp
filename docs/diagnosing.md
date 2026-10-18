@@ -121,6 +121,25 @@ reasoning is in `SPEC.md`; do not re-derive it.
 Ruled out by measurement, so do not start there: out-of-process overhead (nil -
 in-process is the same 15 s) and Debug-vs-Release (~2%, inside noise).
 
+## "A Find took seconds" (light mode)
+
+With library units analyzed interface-only (the default "Fast" parsing
+mode), a request whose answer needs library BODIES makes them full first,
+inside the request - Find References on a library symbol, Find
+Descendants of `TObject`, Find All Defines, rename, Unused Units (see
+`SPEC.md`, "Light libraries", "The workspace"). That is the cost of the
+full analysis's answer, paid once per unit: the next request needing the
+same bodies finds them full. The status panel says `library bodies...`
+while it runs. Grep the log for `library bodies made full first`: each
+line names the request, how many units it promoted and loaded, the rounds,
+the milliseconds, and `rebuilt with them` / `escalated to a full analysis`
+when it went that far. An escalation happens once a session: the server
+then analyzes the library in full until it restarts (a `window/showMessage`
+says so). `refused:` lines under it name units PasTree would not promote;
+their bodies stay unsearched, and the request said `library implementations
+not searched: N units`. If this is the common case for a project, the Full
+parsing mode costs one slower analysis instead.
+
 ## Go To (Ctrl+G) is slow on a big project
 
 Before 0.46.0 this was NOT the analysis - the project list comes off the

@@ -72,10 +72,13 @@ type
 
   /// <summary>
   /// What the server's analysis is doing, off its `$/progress` stream: no
-  /// stream open, an incremental (one module) run, or a full rebuild. Reset to
-  /// laIdle whenever the connection goes, since a new server starts silent.
+  /// stream open, an incremental (one module) run, a full rebuild, or a
+  /// request making library bodies full before it answers (light mode - a
+  /// Find on TObject, the uses lint; the server's cProgressTitleLibrary).
+  /// Reset to laIdle whenever the connection goes, since a new server starts
+  /// silent.
   /// </summary>
-  TLspActivity = (laIdle, laIncremental, laFull);
+  TLspActivity = (laIdle, laIncremental, laFull, laLibrary);
 
   /// <summary>
   /// What the server needs to know about the project, mirroring
@@ -1457,11 +1460,13 @@ begin
       [AIdJson.ToJSON, cLspMethodNotFound]));
 end;
 
-{ `$/progress` from the server's background analysis. The `begin` title says
-  which kind of run it is - the server's cProgressTitleIncremental carries the
-  word "incremental", any other title is a full rebuild (PasLsp.Server). A
-  `report` changes nothing here; an `end` closes only its own token, so a late
-  `end` of a replaced run cannot clear the run that replaced it. }
+{ `$/progress` from the server's background analysis - or from a request
+  that makes library bodies full before it answers. The `begin` title says
+  which kind of run it is - the server's cProgressTitleLibrary and
+  cProgressTitleLibraryFull carry the word "library", cProgressTitleIncremental
+  the word "incremental", any other title is a full rebuild (PasLsp.Server).
+  A `report` changes only the message; an `end` closes only its own token,
+  so a late `end` of a replaced run cannot clear the run that replaced it. }
 procedure TLspClient.HandleProgress(AParams: TJSONValue);
 var
   LToken, LKind, LTitle: string;
@@ -1474,10 +1479,12 @@ begin
   begin
     LTitle := AParams.GetValue<string>('value.title', '');
     FActivityToken := LToken;
-    FActivityMessage := '';
+    FActivityMessage := AParams.GetValue<string>('value.message', '');
     FActivitySince := GetTickCount64;
     Inc(FActivityRuns);
-    if Pos('incremental', LowerCase(LTitle)) > 0 then
+    if Pos('library', LowerCase(LTitle)) > 0 then
+      FActivity := laLibrary
+    else if Pos('incremental', LowerCase(LTitle)) > 0 then
       FActivity := laIncremental
     else
       FActivity := laFull;

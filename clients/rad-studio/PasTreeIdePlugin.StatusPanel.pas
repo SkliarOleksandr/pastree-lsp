@@ -7,7 +7,10 @@ unit PasTreeIdePlugin.StatusPanel;
 
   DATA: the server's `$/progress` stream. The server opens one per analysis
   run, titled by its kind (PasLsp.Server, cProgressTitleFull /
-  cProgressTitleIncremental), and TLspClient keeps the run in progress
+  cProgressTitleIncremental), and one for a request that makes library
+  bodies full before it answers (cProgressTitleLibrary - "library bodies...",
+  whose report line also goes under the running command's wait dialog),
+  and TLspClient keeps the run in progress
   (Activity, ActivitySince); LspServerStatusFor routes a file to the server
   that answers it - its owning project's in a group - without creating a
   session.
@@ -53,6 +56,7 @@ uses
   ToolsAPI,
   DockForm,
   PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.WaitDialog,
   PasTreeIdePlugin.Timing;
 
 const
@@ -228,10 +232,10 @@ end;
 function TStatusPanels.TextFor(const AFileName: string): string;
 var
   LRunningMs: UInt64;
-  LDots: string;
+  LDots, LMessage: string;
 begin
   LDots := StringOfChar('.', FDots + 1);
-  case LspServerStatusFor(AFileName, LRunningMs) of
+  case LspServerStatusFor(AFileName, LRunningMs, LMessage) of
     lssStarting:
       Result := cPrefix + 'Starting' + LDots;
     lssReady:
@@ -246,6 +250,19 @@ begin
         Result := cPrefix + 'Ready'
       else
         Result := cPrefix + 'analyzing' + LDots;
+    lssLibrary:
+      begin
+        // A Find, a rename or the uses lint waiting while the server makes
+        // the library bodies it needs full (light mode). Its wait dialog -
+        // the command's own progress surface - gets the server's line under
+        // the description; a no-op when no dialog of ours is up.
+        if LRunningMs < cBusyAfterMs then
+          Result := cPrefix + 'Ready'
+        else
+          Result := cPrefix + 'library bodies' + LDots;
+        if LMessage <> '' then
+          UpdateWaitDialogWork('PasTree: ' + LMessage);
+      end;
     lssFailed:
       Result := cPrefix + 'Stopped';
   else

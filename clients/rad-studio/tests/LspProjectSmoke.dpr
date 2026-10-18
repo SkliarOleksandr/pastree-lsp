@@ -23,10 +23,11 @@ program LspProjectSmoke;
   TWO PASSES, two servers: lightLibraries=false first, every unit in full,
   then the default - the library trees analyzed interface-only (0.71.0).
   Every check runs in both, and the light pass must answer a library body
-  (TAction.Create's, a ToolsAPI.Editor method's after the file is
-  opened) and
-  the project's unused units exactly as the full pass did - through the
-  promotions that make those units full on demand.
+  (TAction.Create's, a ToolsAPI.Editor method's after the file is opened),
+  the project's unused units and a library class's descendants and
+  references exactly as the full pass did - through the server's workspace,
+  which makes the library units an answer needs full inside the request
+  (0.72.0), and the promotion of an opened file.
 
   Usage: LspProjectSmoke.exe [path\to\pastree-server.exe] [IDE root dir]
   The IDE root defaults to %BDS% (rsvars.bat sets it).
@@ -70,6 +71,8 @@ var
   GFullBodyJson: string;
   GFullImplJson: string;
   GFullUnusedJson: string;
+  GFullDescKeys: string;
+  GFullRefKeys: string;
 
 procedure Check(ACondition: Boolean; const AWhat: string);
 begin
@@ -175,6 +178,52 @@ begin
     end;
   finally
     LValue.Free;
+  end;
+end;
+
+{ The identities an answer names - every object in it with a uri and a
+  position (a Location's range.start, a Find All row's line/col) as one
+  "uri line:col" line - sorted, so two answers listing the same places in
+  another order compare equal. '' for none. }
+function AnswerKeys(const AJson: string): string;
+var
+  LKeys: TStringList;
+  LValue: TJSONValue;
+
+  procedure Walk(AValue: TJSONValue);
+  var
+    LUri: string;
+    LLine, LCol: Integer;
+  begin
+    if AValue is TJSONArray then
+      for var LItem in TJSONArray(AValue) do
+        Walk(LItem)
+    else if AValue is TJSONObject then
+    begin
+      if AValue.TryGetValue<string>('uri', LUri) then
+        if (AValue.TryGetValue<Integer>('line', LLine) and
+            AValue.TryGetValue<Integer>('col', LCol)) or
+           (AValue.TryGetValue<Integer>('range.start.line', LLine) and
+            AValue.TryGetValue<Integer>('range.start.character', LCol)) then
+          LKeys.Add(Format('%s %d:%d', [LowerCase(LUri), LLine, LCol]));
+      for var LPair in TJSONObject(AValue) do
+        Walk(LPair.JsonValue);
+    end;
+  end;
+
+begin
+  LKeys := TStringList.Create;
+  try
+    LValue := TJSONObject.ParseJSONValue(AJson);
+    try
+      Walk(LValue);
+    finally
+      LValue.Free;
+    end;
+    LKeys.Sort;
+    Result := LKeys.Text;
+  finally
+    LKeys.Free;
   end;
 end;
 
@@ -475,14 +524,18 @@ begin
   begin
     Check(GResultJson = GFullBodyJson,
       'the same location as the full analysis');
-    Check(LogContainsText('promoted ' + LActnList + ' to a full analysis'
-      + ' in'), 'Vcl.ActnList was promoted to answer it');
+    // Inside the request, through the server's workspace (0.72.0), not by
+    // a promotion of the server's own any more.
+    Check(LogContains('textDocument/definition: library bodies made full'
+      + ' first - '), 'Vcl.ActnList was made full inside the request');
   end
   else
   begin
     GFullBodyJson := GResultJson;
     Check(not LogContains('promotion started'),
       'nothing is promoted in full mode');
+    Check(not LogContains('library bodies made full first'),
+      'and no request makes library bodies full in full mode');
   end;
 
   // A library file OPENED, as Ctrl+Click into it does: promoted in the
@@ -531,6 +584,43 @@ begin
       'the same rows as the full analysis, doubts included')
   else
     GFullUnusedJson := GResultJson;
+
+  // A LIBRARY class's descendants and references (0.72.0): the server's
+  // workspace makes the library bodies these answers need full inside the
+  // request, so the light pass answers both exactly as the full one - the
+  // same rows, compared by identity (the order may follow model ids, which
+  // a light closure numbers differently), and none of them left unsearched.
+  Writeln;
+  Writeln('=== a library class''s descendants and references:'
+    + ' TNTACodeEditorNotifier ===');
+  FindPos(LErrorPaint, 'TPasErrorPaintNotifier = class(TNTACodeEditorNotifier)',
+    'TNTACodeEditorNotifier', LLine, LChar);
+  Check(Ask('pastree/findDescendants',
+    PositionParams(LErrorPaint, LLine, LChar)) and GOk,
+    'findDescendants answered');
+  Check(GResultJson.Contains('"typeName":"TPasErrorPaintNotifier"'),
+    'the package''s own notifier is among the descendants');
+  Check(not GResultJson.Contains('"notSearched"'),
+    'and no library unit was left unsearched');
+  if ALight then
+    Check(AnswerKeys(GResultJson) = GFullDescKeys,
+      'the same descendants as the full analysis')
+  else
+    GFullDescKeys := AnswerKeys(GResultJson);
+  LParams := PositionParams(LErrorPaint, LLine, LChar);
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('includeDeclaration', TJSONBool.Create(True));
+  LParams.AddPair('context', LDoc);
+  Check(Ask('textDocument/references', LParams) and GOk,
+    'references answered');
+  Check(Length(AnswerKeys(GResultJson)) > 0, 'with locations');
+  if ALight then
+    Check(AnswerKeys(GResultJson) = GFullRefKeys,
+      'the same references as the full analysis')
+  else
+    GFullRefKeys := AnswerKeys(GResultJson);
+  Check(not LogContains('library implementations not searched'),
+    'no answer of this pass left library implementations unsearched');
 
   // What a save of the .dproj asks before the plugin restarts the server
   // (0.61.0): the file did not change, so the configuration is the same - a

@@ -336,7 +336,15 @@ const
   /// index), the preprocessor stopping at `implementation` (0.117.0), a
   /// promotion no longer read as an interface change (0.114.0 - against an
   /// older one every promotion redoes hundreds of consumers, silently).
-  cMinPasTreeVersion = '0.117.1';
+  /// 0.121.0 (2026-10-18): the workspace - TPasWorkspace (0.120.0, PasTree's
+  /// light mode stage 12a), which owns the analysis and makes the library
+  /// bodies a query needs full inside the query (Demand, EnsureFull, the
+  /// rebuild, the escalation), TPasSymbolKey, TPasQueryOptions /
+  /// TPasQueryStatus - and its PlanRename overload with AInactive (0.121.0).
+  /// An older library does not compile; 0.118.0-0.119.0's demands under it
+  /// are what make each light answer the full analysis's (0.119.0: every
+  /// query family has its demand).
+  cMinPasTreeVersion = '0.121.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

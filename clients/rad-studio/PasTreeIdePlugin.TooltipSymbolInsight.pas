@@ -1326,6 +1326,8 @@ begin
       Result := 'PasTree: analyzing (inc)' + LDots;
     lssFull:
       Result := 'PasTree: analyzing' + LDots;
+    lssLibrary:
+      Result := 'PasTree: library bodies' + LDots;
   else
     Result := 'PasTree: waiting for the answer' + LDots;
   end;

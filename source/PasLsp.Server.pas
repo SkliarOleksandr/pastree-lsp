@@ -27,9 +27,11 @@ unit PasLsp.Server;
     "lightLibraries" - True (the default) analyzes the units under those
                   same trees - plus the Studio source tree, minus any tree
                   holding the project - interface-only (PasTree's light
-                  mode): a unit is made full when it is opened, navigated
-                  into or linted. False = every unit in full. No effect
-                  without libraryPaths
+                  mode): a unit is made full when it is opened, and every
+                  answer that needs library bodies makes them full first
+                  (TPasWorkspace), so it is the full analysis's answer.
+                  False = every unit in full. No effect without
+                  libraryPaths
     "host"       - free text naming the client and its version, logged next
                   to the build banner; the server cannot know it
     "logFile", "logUnits" - where the log goes, and whether it inventories
@@ -88,6 +90,7 @@ uses
   PasLsp.UseUnit,
   PasLsp.UnusedUnits,
   PasTree.Sema.Lint,
+  PasTree.Sema.Workspace,
   PasLsp.BlockClose,
   PasLsp.SourceText,
   PasLsp.XmlDoc,
@@ -204,10 +207,18 @@ type
     // tell somebody else's tree from the user's without them.
     FLightLibraries: Boolean;
     FLightPaths: TArray<string>;
-    // A light unit made full on demand (PromoteUnit): opened, navigated
-    // into, or needed by the lint. The async kind (didOpen) runs as a module
-    // session - FModuleMode with FPromoteMode, FModuleFile the unit - and
-    // FPromoteWhy says what asked, for the log. FPromoteRefused: units whose
+    // THE WORKSPACE ESCALATED (PasTree's decision D9): a query found a full
+    // analysis cheaper than the library bodies it needed and rebuilt the
+    // project in full. The session stays full from then on - FLightPaths is
+    // emptied and LightTreesFor answers nothing - so the next rebuild does
+    // not go back to light and pay for the same bodies again.
+    FLightEscalated: Boolean;
+    // A light unit OPENED in the editor is made full in the background
+    // (PromoteUnit through TPasAsyncSession.CreateForPromotion), so the
+    // editor stays responsive while it runs; the queries make the units they
+    // need full themselves, inside the workspace (FWS). The session runs as
+    // a module session - FModuleMode with FPromoteMode, FModuleFile the unit
+    // - and FPromoteWhy says what asked, for the log. FPromoteRefused: units whose
     // promotion was refused, not offered again until the next full build;
     // FPromoteRebuilt: units that already got the rebuild a
     // `promote-needs-rebuild` asks for - asked again, it is a refusal, so a
@@ -244,8 +255,35 @@ type
     // Analysis state (phase 2, all touched by the DISPATCHER thread only:
     // the async session's worker builds its own project in isolation -
     // TPasAsyncSession's double-buffering contract).
+    //
+    // THE WORKSPACE OWNS THE ANALYSIS (PasTree.Sema.Workspace, 0.120.0): the
+    // last completed project goes into FWS (InstallProject), and every query
+    // that can need a light unit's bodies runs through it, which makes those
+    // units full inside the query - the answer is the full analysis's.
+    // FProject and FNav are MIRRORS of FWS.Project / FWS.Nav, owned by FWS,
+    // re-read after anything that can replace them (WsSynced): a workspace
+    // query may promote units (new models, a new navigator) or rebuild the
+    // project. nil while a module session holds the project (FWsReleased)
+    // and when nothing is analyzed (FWS = nil).
     FProject: TPasSemaProject;      // last COMPLETED analysis (may be nil)
     FNav: TPasNavigator;
+    FWS: TPasWorkspace;
+    // FWS.Generation the mirrors and the per-analysis caches were taken at.
+    FWsGen: Integer;
+    // FWS.Release handed the project to a module session; Adopt ends it.
+    FWsReleased: Boolean;
+    // FWS.Lend: the project is the running full session's parse donor.
+    FWsLent: Boolean;
+    // The request a workspace query runs for: its id (the $/cancelRequest
+    // the query's Cancelled polls - read on PasTree's worker threads while
+    // the dispatcher sits inside the query, never written meanwhile) and its
+    // workDoneToken (JSON, '' when the client sent none).
+    FQueryId: string;
+    FQueryToken: string;
+    // The $/progress stream a workspace query opened ('' = none) - apart
+    // from FProgressToken, the background analysis's.
+    FQueryProgress: string;
+    FQueryReportTick: UInt64;
     // pastree/outline scope "project", serialized, for the FProject it was
     // built from: the list changes only when an analysis installs a new
     // project (FinalizeAnalysisIfDone), so it is dropped there - and a
@@ -394,13 +432,35 @@ type
     function NotePromotion(const APath, AWhy: string; AAccepted: Boolean;
       AMs: UInt64; ABaseCount: Integer): TLspPromoteOutcome;
     function PromoteOpenLightDoc: Boolean;
-    function PromoteForRequest(const APath, AWhy,
-      ARequestIdJson: string): Boolean;
-    function PrepareLint(const ADocPath: string; AProjectScope: Boolean;
-      const ARequestIdJson: string): Boolean;
-    function LintMids(const ADocPath: string;
-      AProjectScope: Boolean): TArray<Integer>;
-    procedure NoteLightBodies(const AWhat: string; ATMid: Integer);
+    { ---- the workspace (see FWS) ---- }
+    { A configured, NOT analyzed project - the analysis StartAnalysis runs,
+      minus the run: the workspace's rebuilds (TPasProjectFactory). }
+    function NewConfiguredProject: TPasSemaProject;
+    function QueryOptions: TPasQueryOptions;
+    { AProject (owned from here on) becomes the analysis: the workspace is
+      created for the first, every later one is adopted. nil = DropProject. }
+    procedure InstallProject(AProject: TPasSemaProject);
+    { The project, handed to a module session (it takes ownership); FProject
+      and FNav are nil until InstallProject takes it back. }
+    function ReleaseProject: TPasSemaProject;
+    { No analysis any more: the workspace and its project freed. }
+    procedure DropProject;
+    procedure EndDonorLend;
+    { FProject / FNav re-read from the workspace; on a new generation the
+      per-analysis caches dropped and the open documents rehydrated. }
+    procedure WsSynced;
+    { After a workspace query: what it cost logged, NotSearched and an
+      escalation said, the mirrors re-read. Returns Status.NotSearched. }
+    function WsDone(const AWhat: string): Integer;
+    { A symbol as the workspace takes it: by what survives a promotion. }
+    function SymKey(AMid, ASym: Integer): TPasSymbolKey;
+    { The file - or the position - analyzed in full (InFile / At with no
+      question of their own): the light document a request stands in made
+      full first. Answers False only when the request was cancelled. A busy
+      workspace (a session holds the project) leaves the answer partial. }
+    function EnsureFileFull(const APath, AWhat: string): Boolean;
+    procedure QueryProgress(const AProgress: TPasQueryProgress);
+    procedure EndQueryProgress;
     procedure StartProgress(const ATitle: string);
     procedure ReportProgress;
     procedure EndProgress(const AMessage: string);
@@ -421,12 +481,6 @@ type
       never started" and "an answer walked a broken model", and the two have
       nothing in common. Cheap and side-effect-free, so both handlers can
       call it unconditionally. }
-    { THE ONLY PLACE A NAVIGATOR IS CONSTRUCTED, so the configuration that has
-      to ride along with it cannot be forgotten at one of the three sites that
-      used to do this by hand. Today that is LibraryPaths, whose absence is
-      SILENT in the worst way: rename simply stops refusing RTL/VCL sources
-      and rewrites somebody else's files instead. }
-    function NewNavigator: TPasNavigator;
     procedure DemoteLibraryText;
     procedure HydrateOpenDoc(ANav: TPasNavigator; const APath: string);
     function StateLine: string;
@@ -475,6 +529,9 @@ type
     function HandleUnusedUses(const AMsg: TLspIncoming): string;
     function HandleUnreferencedUnits(const AMsg: TLspIncoming): string;
     function ProjectUnitMids: TArray<Integer>;
+    { The files of AMids, for a workspace query - a file survives the
+      rebuild a query may run, a model id does not. }
+    function ModelFiles(const AMids: TArray<Integer>): TArray<string>;
     function UsesEntryNode(AMid: Integer; const AUnitName: string;
       ALine, ACol: Integer): Integer;
     procedure RemovalRefusals(const AByModel: TDictionary<Integer,
@@ -558,6 +615,11 @@ const
   // (PasTreeIdePlugin.LspClient, ProgressKindOf) - see SPEC.md.
   cProgressTitleFull = 'PasTree: analyzing';
   cProgressTitleIncremental = 'PasTree: incremental';
+  // A workspace query making library bodies full (QueryProgress) - and the
+  // escalation, a full analysis of the library. Both carry "library", the
+  // plugin's word for this kind of run.
+  cProgressTitleLibrary = 'PasTree: library bodies';
+  cProgressTitleLibraryFull = 'PasTree: analyzing the library in full';
 
   ST_NAMESPACE = 0;
   ST_TYPE = 1;
@@ -849,8 +911,9 @@ begin
     FreeAndNil(FSession);   // Destroy drains the worker - quick, the cancel
                             // lands mid-pass (FCancelCheck in PasTree)
   end;
-  FreeAndNil(FNav);
-  FreeAndNil(FProject);
+  // After the session: a module session owned the released project (freed
+  // with it), a full one borrowed it as its donor.
+  DropProject;
   FDirty := True;
 end;
 
@@ -1177,7 +1240,8 @@ begin
   FLightPaths := LightTreesFor;
   if Length(FLightPaths) > 0 then
     LogHeader(Format('light libraries: on - %d trees analyzed interface-only'
-      + ' (a unit is made full when opened, navigated into or linted)',
+      + ' (a unit is made full when opened, or when an answer needs its'
+      + ' bodies)',
       [Length(FLightPaths)]))
   else if not FLightLibraries then
     LogHeader('light libraries: off (lightLibraries=false) - every unit'
@@ -1251,17 +1315,13 @@ begin
     else if FModuleMode then
     begin
       FSession.WaitFor;
-      FreeAndNil(FNav);
-      FProject := FSession.TakeProject;
+      InstallProject(FSession.TakeProject);
       // Failed past its commit point: half-updated, never shown or donated
       // (see FinalizeAnalysisIfDone). The rebuild below runs donor-less.
       if FSession.ModuleNeedsFullRebuild then
         DiscardHalfUpdatedProject;
-      FOutlineCache := '';   // a new project: the outline table is stale
-      FreeAndNil(FLineTokenCache);
       if FProject <> nil then
       begin
-        FNav := NewNavigator;
         if FSession.ModuleAccepted then
         begin
           // The run committed: the project now IS the inputs that session
@@ -1278,6 +1338,8 @@ begin
     else
       FSession.Cancel;
     FreeAndNil(FSession);
+    // A cancelled full session no longer reads its donor.
+    EndDonorLend;
   end;
   FModuleMode := False;
   FModuleFile := '';
@@ -1354,7 +1416,13 @@ begin
   // light donor model from standing in for a full one and back. The units
   // promoted so far ride on the donor (AdoptParseDonor copies its
   // PromotedFiles), so a rebuild keeps them full; the incremental
-  // CreateForModule path inherits the trees with the project.
+  // CreateForModule path inherits the trees with the project. Empty after
+  // the workspace escalated (FLightEscalated): the session stays full.
+  //
+  // KEEP IN STEP WITH NewConfiguredProject: everything set on the session
+  // above and below, buffers included, is what the workspace's own rebuilds
+  // configure - a setting missing there is a rebuild that analyzes a
+  // different project than this one, silently.
   if Length(FLightPaths) > 0 then
     FSession.SetLightPaths(FLightPaths);
   // PARSE REUSE (PasTree's stage A): the last-good project donates the parse
@@ -1364,12 +1432,23 @@ begin
   // done. AFTER the namespace/alias calls above, which the donor gate
   // compares. False means the configuration moved and the donor was refused;
   // the run then parses everything, which is only the old cost.
+  //
+  // LENT, through the workspace: while the session reads its donor, a query
+  // that would have to promote a unit of it refuses (EPasWorkspaceBusy)
+  // instead of changing the project under the worker. EndDonorLend when the
+  // session ends - finalized, cancelled or freed.
   if FProject <> nil then
-    if not FSession.SetParseDonor(FProject) then
+  begin
+    FWsLent := True;
+    if not FSession.SetParseDonor(FWS.Lend) then
+    begin
+      EndDonorLend;
       // Since PasTree 0.96.0 also a project whose run did not complete (it
       // raised or was cancelled - RunComplete is False).
       Log('parse donor refused: the analysis configuration changed, or the' +
         ' last run did not complete');
+    end;
+  end;
   // Document truth, stamped with the client's version - compared on
   // completion to catch a snapshot that went stale mid-build.
   for LDoc in FDocs.All do
@@ -1549,10 +1628,7 @@ procedure TLspServer.DiscardHalfUpdatedProject;
 begin
   Log(Format('incremental failed past its commit point for %s - project' +
     ' discarded, full rebuild without a parse donor', [FModuleFile]));
-  FreeAndNil(FNav);
-  FreeAndNil(FProject);
-  FOutlineCache := '';
-  FreeAndNil(FLineTokenCache);
+  DropProject;
 end;
 
 procedure TLspServer.FinalizeAnalysisIfDone;
@@ -1594,7 +1670,7 @@ begin
   // configuration). Freed here, and the rebuild starts from nothing.
   if FModuleMode and FSession.ModuleNeedsFullRebuild then
   begin
-    FProject := FSession.TakeProject;
+    InstallProject(FSession.TakeProject);
     FreeAndNil(FSession);
     FModuleMode := False;
     DiscardHalfUpdatedProject;
@@ -1608,13 +1684,9 @@ begin
   // start the real rebuild, which picks it up as the parse donor.
   if FModuleMode and not FSession.ModuleAccepted then
   begin
-    FProject := FSession.TakeProject;
-    FOutlineCache := '';   // a new project: the outline table is stale
-    FreeAndNil(FLineTokenCache);
+    InstallProject(FSession.TakeProject);
     FreeAndNil(FSession);
     FModuleMode := False;
-    if FProject <> nil then
-      FNav := NewNavigator;
     // NOT IfThen: it is an ordinary function, so BOTH arms are evaluated
     // before the call and FProject.StageTimings would dereference nil in the
     // one case the expression exists to describe.
@@ -1629,12 +1701,12 @@ begin
     StartAnalysis(FModuleFile);
     Exit;
   end;
-  FreeAndNil(FNav);
-  FreeAndNil(FProject);
-  FProject := FSession.TakeProject;
-  FOutlineCache := '';   // a new project: the outline table is stale
-  FreeAndNil(FLineTokenCache);
+  // The new project replaces the old one in the workspace (Adopt frees the
+  // old), after the session that read it as its donor is gone.
+  var LNew := FSession.TakeProject;
   FreeAndNil(FSession);
+  EndDonorLend;
+  InstallProject(LNew);
   if FProject = nil then
   begin
     // The stream has to close here too: a client showing "analyzing" off it
@@ -1645,7 +1717,6 @@ begin
         'the analysis returned no project'));
     Exit;
   end;
-  FNav := NewNavigator;
   CommitBuiltParts;
   LWasModule := FModuleMode;
   FModuleMode := False;
@@ -2219,9 +2290,9 @@ begin
   // whichever project is about to take the module run.
   if FModuleRedoLimit <> 0 then
     FProject.ModuleRedoLimit := FModuleRedoLimit;
-  FSession := TPasAsyncSession.CreateForModule(FProject, LPath);
-  FProject := nil;          // the session owns it now
-  FreeAndNil(FNav);         // and the navigator pointed into it
+  // Released by the workspace (FProject / FNav nil): the session owns it
+  // now, and a query arriving meanwhile refuses rather than walk it.
+  FSession := TPasAsyncSession.CreateForModule(ReleaseProject, LPath);
   // Every overlay, not just the edited one: the project's buffer table has to
   // stay the truth about what the editor holds, exactly as a full session
   // leaves it.
@@ -2361,17 +2432,300 @@ begin
   Result := WaitForSingleObject(FClientHandle, 0) = WAIT_OBJECT_0;
 end;
 
-function TLspServer.NewNavigator: TPasNavigator;
+{ -------- the workspace -------- }
+
+function TLspServer.NewConfiguredProject: TPasSemaProject;
+var
+  LAlias: TPasUnitAlias;
+  LItem: string;
+  LDoc: TLspDocument;
+begin
+  // StartAnalysis's configuration, setting for setting (see the note
+  // there), on a bare project instead of a session.
+  Result := TPasSemaProject.Create(FPlatform, FSearchPaths, FDefines);
+  try
+    Result.SetNamespaces(FNamespaces);
+    Result.ReportUnresolvedMembers := True;
+    if FPoolWidth = 1 then
+      Result.SingleThreaded := True;
+    if FProjectDir <> '' then
+      Result.SetProjectDir(FProjectDir);
+    for LItem in FProjectFiles do
+      Result.PinUnitFile(LItem);
+    for LAlias in FAliases do
+      Result.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
+    Result.SwitchStart := FSwitchStart;
+    Result.ConsoleTarget := FConsoleTarget;
+    // The workspace clears them itself on an escalation; FLightPaths is
+    // empty anyway once one happened (FLightEscalated).
+    if Length(FLightPaths) > 0 then
+      Result.LightPaths := FLightPaths;
+    // The editor's text, as the analysis being rebuilt read it: a query
+    // runs after WaitAnalyzed, so the documents are what it analyzed.
+    for LDoc in FDocs.All do
+      Result.SetBuffer(LDoc.Path, LDoc.Text, LDoc.Version);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+{ The options every workspace query runs with, set once when the workspace
+  is created (TPasWorkspace.Options).
+
+  - Escalation esRun - PasTree's decision D8: when a query's library bodies
+    cost more than analyzing the library in full, the full analysis runs,
+    with progress, and the session stays full (D9, see FLightEscalated).
+  - Cancelled - the in-flight request's $/cancelRequest. The READER thread
+    notes it in FCancels the moment it arrives (PasLsp.Transport), so it is
+    seen while the dispatcher sits inside the query: PasTree polls this
+    between promotion rounds and inside a rebuild's analysis, on its worker
+    threads too - which is why it reads only FCancels (locked) and FQueryId,
+    which nothing writes while a query runs. A client process that died
+    cancels as well. One promotion round is not interruptible (PasTree's
+    EnsureFull): a cancel lands after it.
+  - OnProgress - $/progress for the long ones (QueryProgress), on the
+    dispatcher thread: PasTree calls it from the query's own thread. }
+function TLspServer.QueryOptions: TPasQueryOptions;
+begin
+  Result := Default(TPasQueryOptions);
+  Result.Escalation := esRun;
+  Result.Cancelled :=
+    function: Boolean
+    begin
+      Result := ((FQueryId <> '') and FCancels.IsCancelled(FQueryId)) or
+        ClientGone;
+    end;
+  Result.OnProgress :=
+    procedure(AProgress: TPasQueryProgress)
+    begin
+      QueryProgress(AProgress);
+    end;
+end;
+
+procedure TLspServer.InstallProject(AProject: TPasSemaProject);
+begin
+  if AProject = nil then
+  begin
+    DropProject;
+    Exit;
+  end;
+  if FWS = nil then
+  begin
+    FWS := TPasWorkspace.Create(AProject,
+      function: TPasSemaProject
+      begin
+        Result := NewConfiguredProject;
+      end);
+    // Kept by the workspace across every navigator it creates - a promotion
+    // or a rebuild inside a query makes a new one, and a navigator without
+    // them silently stops refusing a rename of RTL/VCL sources.
+    FWS.LibraryPaths := FLibraryPaths;
+    FWS.Options := QueryOptions;
+  end
+  else
+  begin
+    EndDonorLend;
+    FWS.Adopt(AProject);
+  end;
+  FWsReleased := False;
+  WsSynced;
+end;
+
+function TLspServer.ReleaseProject: TPasSemaProject;
+begin
+  Result := FWS.Release;
+  FWsReleased := True;
+  WsSynced;
+end;
+
+procedure TLspServer.DropProject;
+begin
+  // A released workspace does not free the project its session owns, and
+  // a lent one is freed only after its session (every caller ends it first).
+  FWsLent := False;
+  FWsReleased := False;
+  FreeAndNil(FWS);
+  // A new workspace counts its generations from the start again: never
+  // equal to this, so WsSynced treats its first project as new.
+  FWsGen := -1;
+  FProject := nil;
+  FNav := nil;
+  FOutlineCache := '';
+  FreeAndNil(FLineTokenCache);
+end;
+
+procedure TLspServer.EndDonorLend;
+begin
+  if FWsLent and (FWS <> nil) then
+    FWS.EndLend;
+  FWsLent := False;
+end;
+
+procedure TLspServer.WsSynced;
 var
   LDoc: TLspDocument;
 begin
-  Result := TPasNavigator.Create(FProject);
-  Result.LibraryPaths := FLibraryPaths;
+  if (FWS = nil) or FWsReleased then
+  begin
+    FProject := nil;
+    FNav := nil;
+    Exit;
+  end;
+  FProject := FWS.Project;
+  FNav := FWS.Nav;
+  if FWS.Generation = FWsGen then
+    Exit;
+  FWsGen := FWS.Generation;
+  // A new project or new models: the outline table and the type spans are
+  // views of the old ones.
+  FOutlineCache := '';
+  FreeAndNil(FLineTokenCache);
   // Every project swap passes through here, so this is where an open
   // document demoted in the project being swapped in gets its text back -
   // see HydrateOpenDoc.
   for LDoc in FDocs.All do
-    HydrateOpenDoc(Result, LDoc.Path);
+    HydrateOpenDoc(FNav, LDoc.Path);
+end;
+
+function TLspServer.WsDone(const AWhat: string): Integer;
+var
+  LStatus: TPasQueryStatus;
+  LNote: string;
+begin
+  EndQueryProgress;
+  if FWS = nil then
+    Exit(0);
+  LStatus := FWS.Status;
+  Result := LStatus.NotSearched;
+  if (LStatus.Rounds > 0) or LStatus.Rebuilt or LStatus.Escalated then
+  begin
+    LNote := '';
+    if LStatus.Rebuilt then
+      LNote := LNote + ', rebuilt with them';
+    if LStatus.Escalated then
+      LNote := LNote + ', escalated to a full analysis';
+    if LStatus.Cancelled then
+      LNote := LNote + ', cancelled';
+    Log(Format('%s: library bodies made full first - %d unit(s) promoted, %d '
+      + 'loaded, %d preprocessed in %d round(s)%s, %d ms', [AWhat,
+      LStatus.Promoted, LStatus.Loaded, LStatus.Preprocessed, LStatus.Rounds,
+      LNote, LStatus.Ms]));
+    for var LRefused in LStatus.Refused do
+      Log('  refused: ' + LRefused);
+  end;
+  if LStatus.NotSearched > 0 then
+    Tell(2, Format('PasTree: %s - library implementations not searched: %d'
+      + ' units', [AWhat, LStatus.NotSearched]));
+  if LStatus.Escalated and not FLightEscalated then
+  begin
+    // D9: full for the rest of the session - the next rebuild configures
+    // no light trees (StartAnalysis, NewConfiguredProject).
+    FLightEscalated := True;
+    FLightPaths := nil;
+    Tell(3, Format('PasTree: %s needed more library implementations than a'
+      + ' full analysis costs - the library is analyzed in full for the rest'
+      + ' of this session', [AWhat]), True);
+  end;
+  WsSynced;
+  if LStatus.Rebuilt or LStatus.Escalated then
+    // A rebuild reads every library unit's text again: demoted as after any
+    // full build.
+    DemoteLibraryText;
+  if LStatus.Changed then
+    // A promoted unit open in the editor has a whole body's diagnostics now.
+    PublishDiagnostics;
+end;
+
+function TLspServer.SymKey(AMid, ASym: Integer): TPasSymbolKey;
+begin
+  Result := TPasSymbolKey.Make(FProject, AMid, ASym);
+end;
+
+function TLspServer.EnsureFileFull(const APath, AWhat: string): Boolean;
+begin
+  Result := True;
+  if (FWS = nil) or FWsReleased then
+    Exit;
+  try
+    FWS.InFile<Boolean>(APath,
+      function(ANav: TPasNavigator; AMid: Integer): Boolean
+      begin
+        Result := True;
+      end);
+  except
+    on E: EPasWorkspaceBusy do
+      // The project is a running session's donor: answered from what is
+      // analyzed, as before the workspace - the session's result is next.
+      Log(Format('%s: %s stays as analyzed - %s', [AWhat,
+        TPath.GetFileName(APath), E.Message]));
+  end;
+  WsDone(AWhat);
+  Result := not FWS.Status.Cancelled;
+end;
+
+{ $/progress for a workspace query that has to make library bodies full or
+  rebuild - the long case, seconds on a large closure. A stream of its own
+  (FQueryProgress), opened on the first report: a query whose demand is
+  empty - every own-code question - says nothing. The request's own
+  workDoneToken when the client sent one (no create needed), otherwise a
+  server token created like the background analysis's (StartProgress).
+  The title carries "library", which the IDE plugin reads as this kind of
+  run (PasTreeIdePlugin.LspClient, HandleProgress). Flushed at once: the
+  dispatcher is inside the query and nothing else would send it. }
+procedure TLspServer.QueryProgress(const AProgress: TPasQueryProgress);
+var
+  LNow: UInt64;
+  LTitle: string;
+begin
+  Log('  ' + AProgress.Text);
+  if not FClientProgress then
+    Exit;
+  LNow := GetTickCount64;
+  if FQueryProgress = '' then
+  begin
+    if FQueryToken <> '' then
+      FQueryProgress := FQueryToken
+    else
+    begin
+      Inc(FProgressSeq);
+      FQueryProgress := JsonQuote(Format('pastree-%d', [FProgressSeq]));
+      Inc(FNextServerId);
+      Notify(Format('{"jsonrpc":"2.0","id":%d,'
+        + '"method":"window/workDoneProgress/create","params":{"token":%s}}',
+        [FNextServerId, FQueryProgress]));
+    end;
+    case AProgress.Stage of
+      qsEscalate: LTitle := cProgressTitleLibraryFull;
+    else
+      LTitle := cProgressTitleLibrary;
+    end;
+    Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+      + '"value":{"kind":"begin","title":%s,"cancellable":false,'
+      + '"message":%s}}}', [FQueryProgress, JsonQuote(LTitle),
+      JsonQuote(AProgress.Text)]));
+    FQueryReportTick := LNow;
+  end
+  else
+  begin
+    if LNow - FQueryReportTick < 200 then
+      Exit;   // as ReportProgress: movement without a flood
+    FQueryReportTick := LNow;
+    Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+      + '"value":{"kind":"report","message":%s}}}',
+      [FQueryProgress, JsonQuote(AProgress.Text)]));
+  end;
+  if Assigned(FOnFlush) then
+    FOnFlush;
+end;
+
+procedure TLspServer.EndQueryProgress;
+begin
+  if FQueryProgress = '' then
+    Exit;
+  Notify(Format('{"jsonrpc":"2.0","method":"$/progress","params":{"token":%s,'
+    + '"value":{"kind":"end"}}}', [FQueryProgress]));
+  FQueryProgress := '';
 end;
 
 { Frees the text layer (sources, tokens, line tables) of every unit that is
@@ -2449,7 +2803,7 @@ end;
   into) was not open then, and the diagnostics and documentSymbol paths read
   an open document's tokens without asking - a demoted one would lose its
   underline positions and its whole outline, silently. Called on didOpen and
-  at every project swap (NewNavigator); a no-op for a model that has its
+  at every project swap (WsSynced); a no-op for a model that has its
   text. Only on the live project: a module session owns it while FProject is
   nil, and the swap after it catches up. }
 procedure TLspServer.HydrateOpenDoc(ANav: TPasNavigator; const APath: string);
@@ -2518,7 +2872,8 @@ var
   LKeep: Boolean;
 begin
   Result := nil;
-  if not FLightLibraries or (Length(FLibraryPaths) = 0) then
+  // After an escalation the session stays full (FLightEscalated).
+  if not FLightLibraries or FLightEscalated or (Length(FLibraryPaths) = 0) then
     Exit;
   LTrees := FLibraryPaths;
   // $(BDS): the IDE sets it for the processes it starts, rsvars.bat for a
@@ -2577,9 +2932,9 @@ begin
   FModuleMode := True;
   FPromoteMode := True;
   FPromoteWhy := AWhy;
-  FSession := TPasAsyncSession.CreateForPromotion(FProject, LPath);
-  FProject := nil;          // the session owns it now
-  FreeAndNil(FNav);         // and the navigator pointed into it
+  // Released by the workspace, as a module session's (see
+  // TryStartModuleAnalysis); TakeBackPromotion adopts it again.
+  FSession := TPasAsyncSession.CreateForPromotion(ReleaseProject, LPath);
   FBuildStart := GetTickCount64;
   // The incremental title: a promotion is the module path, and the IDE's
   // status panel shows it only past its threshold, like any other.
@@ -2609,24 +2964,20 @@ begin
   LAccepted := FSession.ModuleAccepted;
   LDiscard := FSession.ModuleNeedsFullRebuild;
   LError := FSession.LastError;
-  FreeAndNil(FNav);
-  FProject := FSession.TakeProject;
+  InstallProject(FSession.TakeProject);
   FreeAndNil(FSession);
   FModuleMode := False;
   FPromoteMode := False;
   FPromoteWhy := '';
-  FOutlineCache := '';   // a new project: the outline table is stale
-  FreeAndNil(FLineTokenCache);
   if LError <> '' then
     Log(Format('promotion of %s failed: %s', [LPath, LError]));
   if LDiscard or (FProject = nil) then
   begin
     Log(Format('promotion of %s failed past its commit point - project' +
       ' discarded, full rebuild without a parse donor', [LPath]));
-    FreeAndNil(FProject);
+    DropProject;
     Exit(True);
   end;
-  FNav := NewNavigator;
   Result := NotePromotion(LPath, LWhy, LAccepted, LMs, FModuleBaseCount) =
     poRebuild;
 end;
@@ -2682,189 +3033,6 @@ begin
   for LDoc in FDocs.All do
     if StartPromotion(LDoc.Path, 'opened') then
       Exit(True);
-end;
-
-{ A promotion a REQUEST needs before it can answer - navigation into a
-  library body, the lint: started, then waited out like any analysis
-  (WaitAnalyzed, cancellable), a rebuild it asks for included. True when the
-  unit is fully analyzed afterwards. False when nothing was promoted, or the
-  request was cancelled meanwhile - then FNav is nil, which the caller
-  answers. Call it with no session running (after WaitAnalyzed). }
-function TLspServer.PromoteForRequest(const APath, AWhy,
-  ARequestIdJson: string): Boolean;
-var
-  LMid: Integer;
-begin
-  Result := False;
-  if not StartPromotion(APath, AWhy) then
-    Exit;
-  if not WaitAnalyzed('', ARequestIdJson) then
-    Exit;
-  if (FProject = nil) or (FNav = nil) then
-    Exit;
-  LMid := FProject.ModelIdOf(APath);
-  Result := (LMid >= 0) and not FProject.IsLight(LMid);
-end;
-
-{ The units a lint request checks, from the CURRENT navigator - after a
-  promotion's rebuild the model ids are a new project's. }
-function TLspServer.LintMids(const ADocPath: string;
-  AProjectScope: Boolean): TArray<Integer>;
-var
-  LMid: Integer;
-begin
-  Result := nil;
-  if FNav = nil then
-    Exit;
-  if AProjectScope then
-    Exit(ProjectUnitMids);
-  LMid := FNav.ModelIdOf(ADocPath);
-  if LMid >= 0 then
-    Result := [LMid];
-end;
-
-{ THE USES LINT READS LIBRARY IMPLEMENTATIONS - an inline routine's body,
-  the initialization a removal would leave out of the program - which a
-  light unit does not have. On its own the lint answers those on the safe
-  side (a doubt on the row); PasTree's LintPromotions names the light units
-  it had to treat as unknown, and promoting them until the answer is empty
-  makes the lint exactly the full analysis's (the 3,782-unit closure:
-  6,231 rows, identical). Promotions refused leave their doubts on the rows.
-
-  ON THE DISPATCHER, IN A BATCH - not one promotion session per unit: a
-  round can name hundreds (521 on that closure, against a full lint of
-  5.5 s), and a session each - a thread, a navigator over the whole project,
-  the wait loop's poll - doubled the time the promotions themselves take.
-  One navigator per round, and at most one rebuild per round for every
-  `promote-needs-rebuild` in it (four rebuilds of 3 s each before). Called
-  after WaitAnalyzed, so no session owns the project. False = the request
-  was cancelled while a rebuild ran. }
-function TLspServer.PrepareLint(const ADocPath: string;
-  AProjectScope: Boolean; const ARequestIdJson: string): Boolean;
-var
-  LNeed, LPromotedNow: TArray<string>;
-  LPath: string;
-  LRound, LDone, LRefused, LMid, LBase: Integer;
-  LAny, LRebuild, LDiscard, LOk: Boolean;
-  LStart, LOne: UInt64;
-  LDoc: TLspDocument;
-begin
-  Result := True;
-  if (FNav = nil) or (FSession <> nil) or (FProject.LightCount = 0) then
-    Exit;
-  LStart := GetTickCount64;
-  LDone := 0;
-  LRefused := 0;
-  LRound := 0;
-  // Each round's promotions take their implementation-only units in, light,
-  // and those may be needed in turn. Bounded: a refusal is not retried
-  // (FPromoteRefused), so a round with nothing promoted ends it anyway.
-  while LRound < 10 do
-  begin
-    Inc(LRound);
-    LNeed := LintPromotions(FNav, LintMids(ADocPath, AProjectScope),
-      [loHideGlobalInit]);
-    if LNeed = nil then
-      Break;
-    LAny := False;
-    LRebuild := False;
-    LDiscard := False;
-    LPromotedNow := nil;
-    FreeAndNil(FNav);   // PromoteUnit replaces models the navigator holds
-    FOutlineCache := '';
-    FreeAndNil(FLineTokenCache);
-    for LPath in LNeed do
-    begin
-      LMid := FProject.ModelIdOf(LPath);
-      if (LMid < 0) or not FProject.IsLight(LMid) or
-         (FPromoteRefused.IndexOf(LPath) >= 0) then
-        Continue;
-      LBase := FProject.ModelCount;
-      LOne := GetTickCount64;
-      LOk := False;
-      try
-        if FProject.PromoteUnit(LPath) then
-          LOk := True;
-      except
-        on E: Exception do
-        begin
-          Log(Format('promotion of %s failed: %s: %s',
-            [LPath, E.ClassName, E.Message]));
-          // Past its commit point the project is half-updated: never shown,
-          // never donated - the module path's moMustDiscard.
-          if FProject.NeedsFullRebuild then
-          begin
-            LDiscard := True;
-            Break;
-          end;
-        end;
-      end;
-      case NotePromotion(LPath, 'lint', LOk, GetTickCount64 - LOne, LBase) of
-        poPromoted:
-          begin
-            Inc(LDone);
-            LAny := True;
-            LPromotedNow := LPromotedNow + [LPath];
-          end;
-        poRebuild:
-          begin
-            LRebuild := True;
-            LAny := True;
-          end;
-        poRefused:
-          Inc(LRefused);
-      end;
-    end;
-    if LDiscard then
-    begin
-      Log('lint: a promotion failed past its commit point - project' +
-        ' discarded, full rebuild without a parse donor');
-      FreeAndNil(FProject);
-      LRebuild := True;
-    end
-    else
-    begin
-      FNav := NewNavigator;
-      // A promoted unit open in the editor has a whole body's diagnostics now.
-      for LPath in LPromotedNow do
-        if FDocs.TryGet(LPath, LDoc) then
-          PublishDiagnosticsFor(LDoc);
-    end;
-    if LRebuild then
-    begin
-      // The units that asked are in the project's PromotedFiles: a rebuild
-      // with it as the parse donor loads them full.
-      FNoModuleOnce := True;
-      StartAnalysis('');
-      if not WaitAnalyzed('', ARequestIdJson) then
-        Exit(False);
-      if FNav = nil then
-        Break;
-    end;
-    if not LAny then
-      Break;
-  end;
-  if LDone + LRefused > 0 then
-    Log(Format('lint: %d light units promoted first, %d refused, %d rounds,'
-      + ' in %d ms', [LDone, LRefused, LRound, GetTickCount64 - LStart]));
-end;
-
-{ What a light analysis no longer sees, said where an answer is missing it:
-  library BODIES are not analyzed, so a reference, an override call, an
-  assignment or a creation written inside one is not found. Logged for a
-  library target only - library code does not otherwise reference the
-  project's own units (dispatch into own code is the one exception, and it
-  goes through a library symbol). }
-procedure TLspServer.NoteLightBodies(const AWhat: string; ATMid: Integer);
-begin
-  if (FProject = nil) or (FProject.LightCount = 0) or (ATMid < 0) or
-     (ATMid >= FProject.ModelCount) then
-    Exit;
-  if FProject.IsLight(ATMid) or
-     PasUnderDirTrees(FProject.ModelFile(ATMid), FLightPaths) then
-    Log(Format('%s: uses inside library bodies are not searched - %d units'
-      + ' are analyzed interface-only (light libraries)',
-      [AWhat, FProject.LightCount]));
 end;
 
 function TLspServer.StateLine: string;
@@ -3517,8 +3685,9 @@ var
   LResolved, LOwnHeader: Boolean;
   LIfStart, LIfLen, LIfMid, LIfSym: Integer;
   LIfHit: TPasRefHit;
-  LSymMid, LSym: Integer;
+  LSymMid, LSym, LDeclLine, LDeclCol: Integer;
   LSymName, LTargetFile: string;
+  LFound: Boolean;
 begin
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
@@ -3528,6 +3697,10 @@ begin
       'definition: textDocument.uri and position required'));
 
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  // A light document - a library file not promoted yet - has no bodies to
+  // click in: made full first (a no-op for every other file).
+  if not EnsureFileFull(LPath, AMsg.Method) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));   // analysis produced nothing
@@ -3649,34 +3822,40 @@ begin
   // be a method header, and Ctrl+Click landed in that method's body
   // (2026-09-22). A routine declared in an include and implemented in the
   // host loses the redirect and lands on its header, which is still right.
-  // A ROUTINE OF A LIGHT UNIT has no body in the analysis - the light model
-  // never parsed its implementation - so the redirect would quietly land on
-  // the header. The unit is promoted first (40-200 ms), then asked again;
-  // a refused promotion keeps the header, and the log says why.
-  if not ADeclarationOnly and not LOwnHeader and
-     SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) and
-     FProject.IsLight(LTarget.UnitId) and
-     FNav.SymbolAt(LMid, LPasLine, LPasCol, LSymMid, LSym, LSymName) and
-     (LSymMid = LTarget.UnitId) and
-     (FProject.Model(LSymMid).Symbols[LSym].Kind = skRoutine) then
-  begin
-    LTargetFile := FProject.ModelFile(LTarget.UnitId);
-    if not PromoteForRequest(LTargetFile, 'definition', AMsg.IdJson) and
-       (FNav = nil) then
-      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
-        'request cancelled'));
-    LTarget.UnitId := FProject.ModelIdOf(LTargetFile);
-    if (LTarget.UnitId >= 0) and FProject.IsLight(LTarget.UnitId) then
-      Log(Format(AMsg.Method + ': %s ''%s'' - the body is not loaded: %s'
-        + ' is analyzed interface-only and its promotion was refused',
-        [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
-         TPath.GetFileName(LTargetFile)]));
-  end;
+  // A ROUTINE's body lives in its unit's implementation, which a LIGHT unit
+  // (a library one, analyzed interface-only) does not have: the redirect
+  // goes through the workspace, which makes the target's file full first
+  // (TPasWorkspace.InFile - the navigator's own call for a unit analyzed in
+  // full). A refused promotion keeps the header, and the log says why
+  // (WsDone). Only for a routine: a type or a variable has no body to go
+  // to, and making its unit full would be the cost without the answer.
   if not ADeclarationOnly and not LOwnHeader and (LTarget.UnitId >= 0) and
-     SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) and
-     FNav.GotoImplementation(LTarget.UnitId, LTarget.Line, LTarget.Col,
-       LImplTarget) then
-    LTarget := LImplTarget;
+     SameFileName(LTarget.FilePath, FProject.ModelFile(LTarget.UnitId)) then
+  begin
+    if FNav.SymbolAt(LMid, LPasLine, LPasCol, LSymMid, LSym, LSymName) and
+       (LSymMid = LTarget.UnitId) and
+       (FProject.Model(LSymMid).Symbols[LSym].Kind = skRoutine) then
+    begin
+      LTargetFile := FProject.ModelFile(LTarget.UnitId);
+      LDeclLine := LTarget.Line;
+      LDeclCol := LTarget.Col;
+      LFound := FWS.InFile<Boolean>(LTargetFile,
+        function(ANav: TPasNavigator; AFileMid: Integer): Boolean
+        begin
+          Result := ANav.GotoImplementation(AFileMid, LDeclLine, LDeclCol,
+            LImplTarget);
+        end);
+      WsDone(AMsg.Method);
+      if FWS.Status.Cancelled then
+        Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+          'request cancelled'));
+    end
+    else
+      LFound := FNav.GotoImplementation(LTarget.UnitId, LTarget.Line,
+        LTarget.Col, LImplTarget);
+    if LFound then
+      LTarget := LImplTarget;
+  end;
   Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
@@ -4233,7 +4412,10 @@ var
   LSB: TStringBuilder;
   LIdx: Integer;
   LKind, LRow: string;
+  LKey: TPasSymbolKey;
+  LNotSearched: Integer;
 begin
+  LNotSearched := 0;
   LPath := DocPathOf(AMsg.Params);
   Log('textDocument/references: ' + LPath);
   if (LPath = '') or
@@ -4248,6 +4430,8 @@ begin
 
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if not EnsureFileFull(LPath, AMsg.Method) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LMid := FNav.ModelIdOf(LPath);
@@ -4255,6 +4439,10 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
 
+  // The symbol and builtin searches go through the workspace: a reference
+  // written inside a library body is found once that unit is made full,
+  // which the query does itself (the full analysis's answer). The ids taken
+  // before it are stale after it - the key is re-resolved for the rest.
   LHits := nil;
   LForms := nil;
   // UnitAt BEFORE SymbolAt (the IDE plugin now uses the same order):
@@ -4275,16 +4463,34 @@ begin
     LKind := 'symbol';
     if LImplHeaders then
       LKind := 'symbol, implementation headers';
-    LHits := FNav.FindReferences(LTMid, LSym, LImplHeaders);
-    NoteLightBodies(AMsg.Method, LTMid);
-    if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
-      LHits := [LDecl] + LHits;
-    LForms := FNav.FindFormSites(LTMid, LSym);
+    // A symbol with no declaration site has no key (nothing to find it by
+    // again after a promotion): asked of the navigator directly, as is.
+    LKey := SymKey(LTMid, LSym);
+    if LKey.Valid then
+    begin
+      LHits := FWS.FindReferences(LKey, LImplHeaders);
+      LNotSearched := WsDone(AMsg.Method);
+      if FWS.Status.Cancelled then
+        Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+          'request cancelled'));
+    end
+    else
+      LHits := FNav.FindReferences(LTMid, LSym, LImplHeaders);
+    if not LKey.Valid or LKey.Resolve(FProject, LTMid, LSym) then
+    begin
+      if LInclDecl and FNav.DeclHit(LTMid, LSym, LDecl) then
+        LHits := [LDecl] + LHits;
+      LForms := FNav.FindFormSites(LTMid, LSym);
+    end;
   end
   else if FNav.BuiltinNameAt(LMid, LPasLine, LPasCol, LName) then
   begin
     LKind := 'builtin';
-    LHits := FNav.FindBuiltinReferences(LName);
+    LHits := FWS.FindBuiltinReferences(LName);
+    LNotSearched := WsDone(AMsg.Method);
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
   end
   else if FNav.DefineAt(LMid, LPasLine, LPasCol, LName, LRawTok) then
   begin
@@ -4292,7 +4498,11 @@ begin
     // $IFDEF / $IFNDEF / Defined(). The $DEFINE sites are among the hits -
     // there is no separate declaration to include.
     LKind := 'define';
-    LHits := DefineHitsToRefs(FNav.FindDefineReferences(LName));
+    LHits := DefineHitsToRefs(FWS.FindDefineReferences(LName));
+    LNotSearched := WsDone(AMsg.Method);
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
   end
   else
   begin
@@ -4301,10 +4511,12 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
 
-  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits%s',
+  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits%s%s',
     [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits),
      IfThen(Length(LForms) > 0,
-       Format(' + %d in form files', [Length(LForms)]), '')]));
+       Format(' + %d in form files', [Length(LForms)]), ''),
+     IfThen(LNotSearched > 0,
+       Format(', %d library units not searched', [LNotSearched]), '')]));
   LSB := TStringBuilder.Create;
   try
     LSB.Append('[');
@@ -4420,10 +4632,14 @@ var
   LOther: string;
   LDecl: TPasRefHit;
   LFamily: TArray<TPasRenameFamilyMember>;
+  LKey: TPasSymbolKey;
 begin
   Result := False;
   APlan := Default(TLspRenamePlanned);
   AError := '';
+  // A position inside a light document's body names nothing until the file
+  // is full (a cancel here is the plan's own query's to report).
+  EnsureFileFull(APath, 'rename');
   if FNav = nil then
   begin
     AError := 'The project has not been analyzed yet.';
@@ -4490,8 +4706,29 @@ begin
   end;
   if ANewName = '' then
     Exit(True);
-  Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} APlan.Edits,
-    {out} APlan.Carried, {out} LFamily, {out} APlan.Inactive, {out} AError);
+  // Through the workspace: an edit inside a library body that the light
+  // analysis does not have is still an edit the plan must carry (or the
+  // reason it refuses). The ids are stale after it - re-resolved below.
+  LKey := SymKey(LTMid, LSym);
+  if LKey.Valid then
+  begin
+    Result := FWS.PlanRename(LKey, ANewName, {out} APlan.Edits,
+      {out} APlan.Carried, {out} LFamily, {out} APlan.Inactive, {out} AError);
+    WsDone('rename');
+    if Result and FWS.Status.Cancelled then
+    begin
+      Result := False;
+      AError := 'The rename was cancelled.';
+    end
+    else if Result and not LKey.Resolve(FProject, LTMid, LSym) then
+    begin
+      Result := False;
+      AError := 'The symbol is no longer in the analysis.';
+    end;
+  end
+  else
+    Result := FNav.PlanRename(LTMid, LSym, ANewName, {out} APlan.Edits,
+      {out} APlan.Carried, {out} LFamily, {out} APlan.Inactive, {out} AError);
   if not Result then
   begin
     APlan.Edits := nil;
@@ -4836,9 +5073,13 @@ begin
 end;
 
 { The envelope every Find All method answers with: an object holding `name`
-  and `rows`, the rows an array of HierarchyRowJson objects. }
+  and `rows`, the rows an array of HierarchyRowJson objects - and
+  `notSearched`, only when not 0: the library units whose implementations
+  the answer needed and did not get (a promotion PasTree refused - see
+  TPasQueryStatus.NotSearched), so the rows may be short of the full
+  analysis's. }
 function HierarchyAnswer(const AName: string;
-  const ARows: TArray<string>): string;
+  const ARows: TArray<string>; ANotSearched: Integer = 0): string;
 var
   LSB: TStringBuilder;
   LIdx: Integer;
@@ -4852,7 +5093,10 @@ begin
         LSB.Append(',');
       LSB.Append(ARows[LIdx]);
     end;
-    LSB.Append(']}');
+    LSB.Append(']');
+    if ANotSearched > 0 then
+      LSB.AppendFormat(',"notSearched":%d', [ANotSearched]);
+    LSB.Append('}');
     Result := LSB.ToString;
   finally
     LSB.Free;
@@ -4884,7 +5128,9 @@ begin
       ATag + ': textDocument.uri and position required');
     Exit;
   end;
-  if not WaitAnalyzed(APath, AMsg.IdJson) then
+  // The gate reads the position: in a light document it must be full first.
+  if not WaitAnalyzed(APath, AMsg.IdJson) or
+     not EnsureFileFull(APath, ATag) then
   begin
     AReply := BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
       'request cancelled');
@@ -4941,6 +5187,8 @@ var
   LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
   LRows: TArray<TPasOverrideHit>;
   LJson: TArray<string>;
+  LKey: TPasSymbolKey;
+  LNotSearched: Integer;
 begin
   if not FindAllPreamble(AMsg, 'findOverrides', LPath, LMid, LPasLine,
     LPasCol, Result) then
@@ -4951,7 +5199,20 @@ begin
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  LRows := FNav.FindOverrides(LTMid, LSym);
+  // Through the workspace: an override in a library unit's implementation
+  // section is a row once the unit is made full, which the query does.
+  LNotSearched := 0;
+  LKey := SymKey(LTMid, LSym);
+  if LKey.Valid then
+  begin
+    LRows := FWS.FindOverrides(LKey);
+    LNotSearched := WsDone('findOverrides');
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+  end
+  else
+    LRows := FNav.FindOverrides(LTMid, LSym);
   Log(Format('findOverrides: %s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
@@ -4959,7 +5220,8 @@ begin
     LJson[LIdx] := WithTypeSpans(HierarchyRowJson(LRows[LIdx].Hit,
       cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, ''),
       LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
-  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson,
+    LNotSearched));
 end;
 
 { pastree/findImplementations - OURS, not LSP. The interface-side twin of
@@ -4997,25 +5259,47 @@ var
   LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
   LRows: TArray<TPasImplHit>;
   LJson: TArray<string>;
+  LKey: TPasSymbolKey;
+  LNotSearched: Integer;
+  LIsMethod: Boolean;
 begin
   if not FindAllPreamble(AMsg, 'findImplementations', LPath, LMid, LPasLine,
     LPasCol, Result) then
     Exit;
-  if FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
-  begin
-    LRows := FNav.FindImplementations(LTMid, LSym);
-    LWhat := 'interface method';
-  end
+  LIsMethod := FNav.InterfaceMethodAt(LMid, LPasLine, LPasCol, LTMid, LSym,
+    LName);
+  if LIsMethod then
+    LWhat := 'interface method'
   else if FNav.InterfaceAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
-  begin
-    LRows := FNav.FindInterfaceImplementors(LTMid, LSym);
-    LWhat := 'interface';
-  end
+    LWhat := 'interface'
   else
   begin
     Log(Format('findImplementations: %s -> not an interface or interface method',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
+  // Through the workspace, as findOverrides: a class implementing the
+  // interface inside a library unit's implementation section is found once
+  // the unit is full.
+  LNotSearched := 0;
+  LKey := SymKey(LTMid, LSym);
+  if not LKey.Valid then
+  begin
+    if LIsMethod then
+      LRows := FNav.FindImplementations(LTMid, LSym)
+    else
+      LRows := FNav.FindInterfaceImplementors(LTMid, LSym);
+  end
+  else
+  begin
+    if LIsMethod then
+      LRows := FWS.FindImplementations(LKey)
+    else
+      LRows := FWS.FindInterfaceImplementors(LKey);
+    LNotSearched := WsDone('findImplementations');
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
   end;
   Log(Format('findImplementations: %s %s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LWhat, LName, Length(LRows)]));
@@ -5025,7 +5309,8 @@ begin
       cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName,
       LRows[LIdx].ViaTypeName),
       LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
-  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson,
+    LNotSearched));
 end;
 
 { pastree/findDescendants - OURS, not LSP. Every class below the class (or
@@ -5051,6 +5336,8 @@ var
   LPasLine, LPasCol, LMid, LTMid, LSym, LIdx: Integer;
   LRows: TArray<TPasDescendantHit>;
   LJson: TArray<string>;
+  LKey: TPasSymbolKey;
+  LNotSearched: Integer;
 begin
   if not FindAllPreamble(AMsg, 'findDescendants', LPath, LMid, LPasLine,
     LPasCol, Result) then
@@ -5061,7 +5348,22 @@ begin
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  LRows := FNav.FindDescendants(LTMid, LSym);
+  // Through the workspace: a class declared in a library unit's
+  // implementation section is a descendant once the unit is full - TObject's
+  // descendants are a large part of the library, so this is the query most
+  // likely to take the escalation to a full analysis (with progress).
+  LNotSearched := 0;
+  LKey := SymKey(LTMid, LSym);
+  if LKey.Valid then
+  begin
+    LRows := FWS.FindDescendants(LKey);
+    LNotSearched := WsDone('findDescendants');
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+  end
+  else
+    LRows := FNav.FindDescendants(LTMid, LSym);
   Log(Format('findDescendants: %s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
@@ -5070,7 +5372,8 @@ begin
       cKindWord[LRows[LIdx].Kind], LRows[LIdx].TypeName, '',
       LRows[LIdx].ParentTypeName, LRows[LIdx].Depth),
       LineTypeSpansJson(LRows[LIdx].Hit.FilePath, LRows[LIdx].Hit.Line));
-  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson,
+    LNotSearched));
 end;
 
 { pastree/findAssignments, pastree/findCreations, pastree/findDestructions -
@@ -5117,6 +5420,8 @@ var
   LDecl: TPasRefHit;
   LRows: TArray<TPasRefHit>;
   LJson: TArray<string>;
+  LKey: TPasSymbolKey;
+  LNotSearched: Integer;
 begin
   if not FindAllPreamble(AMsg, cTag[AKind], LPath, LMid, LPasLine, LPasCol,
     Result) then
@@ -5131,16 +5436,35 @@ begin
       [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), cNotSubject[AKind]]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  case AKind of
-    fskAssignments:  LRows := FNav.FindAssignments(LTMid, LSym);
-    fskCreations:    LRows := FNav.FindCreations(LTMid, LSym);
-    fskDestructions: LRows := FNav.FindDestructions(LTMid, LSym);
-  end;
-  NoteLightBodies(AMsg.Method, LTMid);
+  // Through the workspace: the writes, creations and frees inside library
+  // bodies are rows once those units are full, which the query does. The
+  // ids are re-resolved after it for the declaration row.
+  LNotSearched := 0;
+  LKey := SymKey(LTMid, LSym);
+  if LKey.Valid then
+  begin
+    case AKind of
+      fskAssignments:  LRows := FWS.FindAssignments(LKey);
+      fskCreations:    LRows := FWS.FindCreations(LKey);
+      fskDestructions: LRows := FWS.FindDestructions(LKey);
+    end;
+    LNotSearched := WsDone(cTag[AKind]);
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+    if not LKey.Resolve(FProject, LTMid, LSym) then
+      LTMid := -1;
+  end
+  else
+    case AKind of
+      fskAssignments:  LRows := FNav.FindAssignments(LTMid, LSym);
+      fskCreations:    LRows := FNav.FindCreations(LTMid, LSym);
+      fskDestructions: LRows := FNav.FindDestructions(LTMid, LSym);
+    end;
   Log(Format('%s: %s ''%s'' -> %d rows',
     [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   LJson := nil;
-  if FNav.DeclHit(LTMid, LSym, LDecl) then
+  if (LTMid >= 0) and FNav.DeclHit(LTMid, LSym, LDecl) then
     LJson := LJson + [WithTypeSpans(
       HierarchyRowJson(LDecl, 'declaration', '', ''),
       LineTypeSpansJson(LDecl.FilePath, LDecl.Line))];
@@ -5148,7 +5472,8 @@ begin
     LJson := LJson + [WithTypeSpans(
       HierarchyRowJson(LRows[LIdx], cRowWord[AKind], '', ''),
       LineTypeSpansJson(LRows[LIdx].FilePath, LRows[LIdx].Line))];
-  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson));
+  Result := BuildResponse(AMsg.IdJson, HierarchyAnswer(LName, LJson,
+    LNotSearched));
 end;
 
 function JsonBool(AValue: Boolean): string;
@@ -5277,13 +5602,22 @@ end;
 function TLspServer.HandleFindDefines(const AMsg: TLspIncoming): string;
 var
   LSites: TArray<TPasDefineSite>;
+  LNotSearched: Integer;
 begin
   if not WaitAnalyzed('', AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
-  LSites := FNav.FindDefines;
-  Log(Format('pastree/findDefines: %d rows', [Length(LSites)]));
+  // Through the workspace: a $DEFINE in a library unit's implementation
+  // section is a row whether or not that file is open - the units whose
+  // implementations the preprocessor never read are read first.
+  LSites := FWS.FindDefines;
+  LNotSearched := WsDone('pastree/findDefines');
+  if FWS.Status.Cancelled then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  Log(Format('pastree/findDefines: %d rows%s', [Length(LSites),
+    IfThen(LNotSearched > 0,
+      Format(', %d library units not searched', [LNotSearched]), '')]));
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
 end;
 
@@ -5311,7 +5645,23 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LMid := FNav.ModelIdOf(LPath);
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  LSites := FNav.DefinesAt(LMid, LPasLine, LPasCol);
+  // A position in a light unit's implementation is past where its
+  // preprocessing stopped: through the workspace (At), which makes the file
+  // full first. A file with no model (an .inc) answers the base set as is.
+  if LMid < 0 then
+    LSites := FNav.DefinesAt(LMid, LPasLine, LPasCol)
+  else
+  begin
+    LSites := FWS.At<TArray<TPasDefineSite>>(LPath, LPasLine, LPasCol,
+      function(ANav: TPasNavigator; AFileMid: Integer): TArray<TPasDefineSite>
+      begin
+        Result := ANav.DefinesAt(AFileMid, LPasLine, LPasCol);
+      end);
+    WsDone('pastree/definesAt');
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+  end;
   Log(Format('pastree/definesAt: %s -> %d names',
     [PosTag(LPath, LPasLine, LPasCol), Length(LSites)]));
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
@@ -5404,7 +5754,21 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   LMid := FNav.ModelIdOf(LPath);
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  LSites := FNav.OptionsAt(LMid, LPasLine, LPasCol);
+  // As definesAt: through the workspace for a file with a model of its own.
+  if LMid < 0 then
+    LSites := FNav.OptionsAt(LMid, LPasLine, LPasCol)
+  else
+  begin
+    LSites := FWS.At<TArray<TPasOptionSite>>(LPath, LPasLine, LPasCol,
+      function(ANav: TPasNavigator; AFileMid: Integer): TArray<TPasOptionSite>
+      begin
+        Result := ANav.OptionsAt(AFileMid, LPasLine, LPasCol);
+      end);
+    WsDone('pastree/optionsAt');
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+  end;
   SetLength(LJson, Length(LSites));
   LUnitRows := 0;
   for LIdx := 0 to High(LSites) do
@@ -5560,25 +5924,19 @@ function TLspServer.HandleBenchmark(const AMsg: TLspIncoming): string;
 begin
   if FSession <> nil then
   begin
-    // A module session owns the last-good project (see StartAnalysis): take
-    // it back before freeing anything, or it is freed with the session.
+    // A module session owns the last-good project (see StartAnalysis) and
+    // frees it with itself - waited out first, it is one commit point; a
+    // full one is cancelled, and its donor dropped below.
     if FModuleMode then
-    begin
-      FSession.WaitFor;
-      FreeAndNil(FNav);
-      FreeAndNil(FProject);
-      FProject := FSession.TakeProject;
-    end
+      FSession.WaitFor
     else
       FSession.Cancel;
     FreeAndNil(FSession);
     FModuleMode := False;
+    FPromoteMode := False;
     FModuleFile := '';
   end;
-  FreeAndNil(FNav);
-  FreeAndNil(FProject);
-  FOutlineCache := '';
-  FreeAndNil(FLineTokenCache);
+  DropProject;
   FBenchmark := True;
   FBenchCommitBefore := ProcessCommitBytes;
   FBenchCommitPeak := FBenchCommitBefore;
@@ -6037,7 +6395,7 @@ function TLspServer.HandleToggle(const AMsg: TLspIncoming;
   AToImpl: Boolean): string;
 var
   LPath, LWhat: string;
-  LLine, LChar, LPasLine, LPasCol, LMid: Integer;
+  LLine, LChar, LPasLine, LPasCol: Integer;
   LTarget: TPasNavTarget;
   LFound: Boolean;
 begin
@@ -6057,32 +6415,27 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
-  LMid := FNav.ModelIdOf(LPath);
-  if LMid < 0 then
+  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
+  // A LIGHT unit has no implementation to toggle to - the document is
+  // normally promoted when it is opened, but not if that has not landed
+  // yet. Through the workspace, which makes the file full first (the
+  // navigator's own call for any other file); a refused promotion is in
+  // the log (WsDone).
+  LFound := FWS.InFile<Boolean>(LPath,
+    function(ANav: TPasNavigator; AFileMid: Integer): Boolean
+    begin
+      if AToImpl then
+        Result := ANav.GotoImplementation(AFileMid, LPasLine, LPasCol, LTarget)
+      else
+        Result := ANav.GotoDeclaration(AFileMid, LPasLine, LPasCol, LTarget);
+    end);
+  WsDone(LWhat);
+  if FWS.Status.Cancelled then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  if (FNav = nil) or (FNav.ModelIdOf(LPath) < 0) then
   begin
     Log(LWhat + ': file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
-  end;
-  LspToPasTree(LLine, LChar, LPasLine, LPasCol);
-  if AToImpl then
-    LFound := FNav.GotoImplementation(LMid, LPasLine, LPasCol, LTarget)
-  else
-    LFound := FNav.GotoDeclaration(LMid, LPasLine, LPasCol, LTarget);
-  // In a LIGHT unit there is no implementation to toggle to - the document
-  // is normally promoted when it is opened, but not if that has not landed
-  // or was refused. Promoted here and asked again; said when it stays light.
-  if not LFound and AToImpl and FProject.IsLight(LMid) then
-  begin
-    if not PromoteForRequest(LPath, LWhat, AMsg.IdJson) and (FNav = nil) then
-      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
-        'request cancelled'));
-    LMid := FNav.ModelIdOf(LPath);
-    if (LMid >= 0) and not FProject.IsLight(LMid) then
-      LFound := FNav.GotoImplementation(LMid, LPasLine, LPasCol, LTarget)
-    else
-      Log(Format('%s: %s the body is not loaded: %s is analyzed'
-        + ' interface-only and its promotion was refused',
-        [LWhat, PosTag(LPath, LPasLine, LPasCol), TPath.GetFileName(LPath)]));
   end;
   if not LFound then
   begin
@@ -6806,6 +7159,23 @@ begin
   end;
 end;
 
+function TLspServer.ModelFiles(const AMids: TArray<Integer>): TArray<string>;
+begin
+  SetLength(Result, Length(AMids));
+  for var LIdx := 0 to High(AMids) do
+    Result[LIdx] := FProject.ModelFile(AMids[LIdx]);
+end;
+
+{ ',"notSearched":N' for an answer object, or '' for 0 - see HierarchyAnswer
+  for what the count is. }
+function NotSearchedMember(ANotSearched: Integer): string;
+begin
+  if ANotSearched > 0 then
+    Result := Format(',"notSearched":%d', [ANotSearched])
+  else
+    Result := '';
+end;
+
 // Where a node's first visible token starts in the main file, 1-based;
 // False for a node in an include or out of range.
 function NodeMainPos(AModel: TPasSemaModel; ANode: Integer;
@@ -6909,6 +7279,7 @@ var
   LRowMid, LRowNode: TArray<Integer>;
   LSB: TStringBuilder;
   LStart: UInt64;
+  LNotSearched: Integer;
 begin
   LPath := DocPathOf(AMsg.Params);
   LScope := 'unit';
@@ -6918,13 +7289,6 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'unusedUses: scope must be "unit" or "project"'));
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  if FNav = nil then
-    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
-  // Light units the lint must see in full are promoted first - see
-  // PrepareLint. A promotion's rebuild makes a new project, which is why the
-  // units are looked up only after it.
-  if not PrepareLint(LPath, LScope = 'project', AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
@@ -6939,7 +7303,16 @@ begin
   end
   else
     LMids := ProjectUnitMids;
-  LRows := FindUnusedUses(FNav, LMids, [loHideGlobalInit]);
+  // THE LINT READS LIBRARY IMPLEMENTATIONS - an inline routine's body, the
+  // initialization a removal would leave out of the program - which a light
+  // unit does not have. Through the workspace, which makes the units the
+  // lint reads full first (a rebuild with the project as donor when a
+  // promotion asks for one): the rows are the full analysis's. By file,
+  // since the model ids are a new project's after a rebuild.
+  LRows := FWS.FindUnusedUses(ModelFiles(LMids), [loHideGlobalInit]);
+  LNotSearched := WsDone('pastree/unusedUses');
+  if FWS.Status.Cancelled then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
 
   LByModel := TDictionary<Integer, TArray<Integer>>.Create;
   LRefused := TDictionary<Int64, string>.Create;
@@ -6987,7 +7360,8 @@ begin
     Log(Format('pastree/unusedUses %s: %d units checked -> %d entries, %d ' +
       'with a doubt, in %d ms', [LScope, Length(LMids), Length(LRows), LMid,
       GetTickCount64 - LStart]));
-    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']}');
+    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']' +
+      NotSearchedMember(LNotSearched) + '}');
   finally
     LSB.Free;
     LRefused.Free;
@@ -7016,20 +7390,21 @@ var
   LSB, LListed: TStringBuilder;
   LStart: UInt64;
   LLine, LCol: Integer;
+  LNotSearched: Integer;
 begin
   LPath := DocPathOf(AMsg.Params);
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
-  // As pastree/unusedUses: the light units the lint reads promoted first.
-  if not PrepareLint(LPath, True, AMsg.IdJson) then
-    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  if FNav = nil then
-    Exit(BuildResponse(AMsg.IdJson, '{"rows":[]}'));
   LStart := GetTickCount64;
   LMids := ProjectUnitMids;
-  LRows := FindUnreferencedUnits(FNav, LMids, [loHideGlobalInit]);
+  // As pastree/unusedUses: through the workspace, which makes the light
+  // units the lint reads full first.
+  LRows := FWS.FindUnreferencedUnits(ModelFiles(LMids), [loHideGlobalInit]);
+  LNotSearched := WsDone('pastree/unreferencedUnits');
+  if FWS.Status.Cancelled then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
 
   LSB := TStringBuilder.Create;
   LListed := TStringBuilder.Create;
@@ -7088,7 +7463,8 @@ begin
     Log(Format('pastree/unreferencedUnits: %d units checked -> %d nobody ' +
       'uses, in %d ms', [Length(LMids), Length(LRows),
       GetTickCount64 - LStart]));
-    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']}');
+    Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']' +
+      NotSearchedMember(LNotSearched) + '}');
   finally
     LListed.Free;
     LSB.Free;
@@ -7406,6 +7782,11 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'hover: textDocument.uri and position required'));
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  // The hovered FILE in full (a light document's bodies), not the hovered
+  // name's unit: a card needs the declaration, which a light unit has, and
+  // promoting a unit per name the mouse passes over would stall the editor.
+  if not EnsureFileFull(LPath, 'hover') then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -7852,7 +8233,8 @@ begin
      not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'typeDefinition: textDocument.uri and position required'));
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+  if not WaitAnalyzed(LPath, AMsg.IdJson) or
+     not EnsureFileFull(LPath, AMsg.Method) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -8341,7 +8723,11 @@ begin
     LFromLine := AMsg.Params.GetValue<Integer>('range.start.line', 0);
     LToLine := AMsg.Params.GetValue<Integer>('range.end.line', MaxInt);
   end;
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+  // A light document's bodies are tokens too: the file made full first
+  // through the workspace (an opened library file is normally promoted in
+  // the background already, and this is then the navigator's own call).
+  if not WaitAnalyzed(LPath, AMsg.IdJson) or
+     not EnsureFileFull(LPath, 'semanticTokens') then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -8413,7 +8799,15 @@ begin
      not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'documentHighlight: textDocument.uri and position required'));
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+  // The document in full through the workspace (InFile) - and NOTHING MORE:
+  // every hit kept below is in this file, bound by this file's own body, so
+  // a full file is the whole demand. TPasWorkspace.FindReferences with the
+  // file passed would answer the same rows but meet the WHOLE search's
+  // demand first (the bodies of every unit that may reference the symbol -
+  // for `Free` or `Create`, the library: an escalation to a full analysis
+  // on a caret move).
+  if not WaitAnalyzed(LPath, AMsg.IdJson) or
+     not EnsureFileFull(LPath, AMsg.Method) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -8506,6 +8900,22 @@ begin
       if LMsg.IsRequest and FCancels.IsCancelled(LMsg.IdJson) then
         Exit(BuildError(LMsg.IdJson, LSP_REQUEST_CANCELLED,
           'request cancelled'));
+
+      // What a workspace query of this request reads (QueryOptions,
+      // QueryProgress): whose $/cancelRequest stops it, and the progress
+      // token the client may have handed over for it.
+      FQueryId := '';
+      FQueryToken := '';
+      if LMsg.IsRequest then
+      begin
+        FQueryId := LMsg.IdJson;
+        if LMsg.Params <> nil then
+        begin
+          var LToken := LMsg.Params.FindValue('workDoneToken');
+          if (LToken <> nil) and not (LToken is TJSONNull) then
+            FQueryToken := LToken.ToJSON;
+        end;
+      end;
 
       if LMsg.Method = 'initialize' then
         Exit(HandleInitialize(LMsg));
@@ -8719,8 +9129,26 @@ begin
         Result := BuildError(LMsg.IdJson, LSP_METHOD_NOT_FOUND,
           'method not supported: ' + LMsg.Method);
     except
+      { THE WORKSPACE REFUSED: an analysis session holds the project (a
+        module session owns it, or a full one reads it as its donor) and the
+        answer needed library bodies made full. Not a fault - the request
+        is answered as one that met a running analysis, and asking again
+        when it is done answers it. Every request waits the analysis out
+        first (WaitAnalyzed), so this is the rare case of a request that
+        does not, or a session started inside the request. }
+      on E: EPasWorkspaceBusy do
+      begin
+        EndQueryProgress;
+        Log('busy in ' + LMsg.Method + ': ' + E.Message);
+        if LMsg.IsRequest then
+          Result := BuildError(LMsg.IdJson, LSP_CONTENT_MODIFIED,
+            'PasTree: an analysis is running - ask again when it is done')
+        else
+          Result := '';
+      end;
       on E: Exception do
       begin
+        EndQueryProgress;
         // The main thread goes on serving (see the idle finalize).
         PasRecoverStackOverflow;
         // The pending idle-fault count first, so the two are not interleaved
