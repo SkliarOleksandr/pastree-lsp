@@ -407,7 +407,7 @@ type
     // auto (one per logical core, PasTree's default). See
     // AnalysisThreadCount.
     AnalysisThreads: Integer;
-    // Performance tab: the server analyzes library units interface-only
+    // Performance tab, "Parsing mode" Fast (True) / Full: the server analyzes library units interface-only
     // ("lightLibraries", the server's light mode). Default True, as the
     // server's. See LightLibrariesEnabled.
     LightLibraries: Boolean;

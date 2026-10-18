@@ -659,35 +659,45 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Style = csDropDownList
         TabOrder = 0
       end
-      object chkLightLibraries: TCheckBox
+      object lblParseMode: TLabel
         Left = 16
+        Top = 133
+        Width = 69
+        Height = 15
+        Caption = 'Parsing mode'
+        FocusControl = cbxParseMode
+      end
+      object cbxParseMode: TComboBox
+        Left = 170
         Top = 130
-        Width = 430
-        Height = 17
-        Caption = 'Analyze library units interface-only'
-        Checked = True
-        State = cbChecked
+        Width = 200
+        Height = 23
+        Style = csDropDownList
         TabOrder = 1
+        Items.Strings = (
+          'Fast'
+          'Full')
       end
       object lblLightHint: TLabel
         Left = 16
-        Top = 154
+        Top = 162
         Width = 409
-        Height = 75
+        Height = 90
         Caption =
-          'RTL, VCL and third-party units on the IDE'#39's library paths are a' +
-          'nalyzed without their implementations: about half the memory an' +
-          'd a faster start, the project'#39's own units answered as before. ' +
-          'A library unit is analyzed in full when it is opened, navigated ' +
-          'into or needed by Unused Units. Each project'#39's server is restar' +
-          'ted for a change at its next request.'
+          'Fast: RTL, VCL and third-party units on the IDE'#39's library paths' +
+          ' are analyzed without their implementations - about half the me' +
+          'mory and a faster start, the project'#39's own units answered as be' +
+          'fore. A library unit is analyzed in full when it is opened, navi' +
+          'gated into or needed by Unused Units. Full: every unit with its ' +
+          'implementation. Each project'#39's server is restarted for a change' +
+          ' at its next request.'
         WordWrap = True
       end
       object grpBenchmark: TGroupBox
         Left = 16
         Top = 270
         Width = 430
-        Height = 160
+        Height = 190
         Caption = 'Benchmark'
         TabOrder = 2
         object lblBenchmarkHint: TLabel
@@ -696,15 +706,15 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           Width = 380
           Height = 30
           Caption = 
-            'A full analysis of the active project from nothing, on the threa' +
-            'ds chosen above - no parse reused from the last run.'
+            'A full analysis of the active project from nothing, with the thr' +
+            'eads and parsing mode above - no parse reused from the last run.'
           WordWrap = True
         end
         object lblBenchmarkStatus: TLabel
           Left = 12
           Top = 96
           Width = 405
-          Height = 52
+          Height = 80
           AutoSize = False
           WordWrap = True
         end

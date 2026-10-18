@@ -1336,6 +1336,9 @@ type
     Units: Integer;
     Ms: Int64;
     Threads: Integer;
+    // Library units analyzed interface-only (0 = Full mode, or a server
+    // older than 0.71.2).
+    LightUnits: Integer;
     CommitBeforeMB: Int64;
     CommitPeakMB: Int64;
     CommitAfterMB: Int64;
@@ -1347,13 +1350,14 @@ type
 /// <summary>
 /// The Performance page's Analyze Project: a full analysis of the ACTIVE
 /// project from nothing (pastree/benchmark), on AThreads analysis threads (0 =
-/// auto). A count other than the one its server runs with restarts that server
-/// first - the pool is pinned per process - and holds until LspEndBenchmark.
+/// auto) and in Fast (ALight) or Full parsing mode. A count or mode other than
+/// the one its server runs with restarts that server first - both are pinned
+/// per process - and holds until LspEndBenchmark.
 /// AOnDone fires once, on the main thread, when the run finalizes; never if the
 /// server goes away first (LspBenchmarkStatus says so). False, with nothing
 /// sent, when there is no active project or no server.
 /// </summary>
-function LspBenchmark(AThreads: Integer;
+function LspBenchmark(AThreads: Integer; ALight: Boolean;
   const AOnDone: TLspBenchmarkProc): Boolean;
 
 /// <summary>
@@ -1365,9 +1369,9 @@ function LspBenchmark(AThreads: Integer;
 function LspBenchmarkStatus(out AText: string; out ARunningMs: UInt64): Boolean;
 
 /// <summary>
-/// The Performance page is closing: the thread count goes back to the setting
-/// (a server started for another count restarts at its next request), and a
-/// callback still waiting is dropped.
+/// The Performance page is closing: the thread count and the parsing mode go
+/// back to the settings (a server started for another count or mode restarts
+/// at its next request), and a callback still waiting is dropped.
 /// </summary>
 procedure LspEndBenchmark;
 
@@ -1467,6 +1471,9 @@ type
     // page benchmarks a count not saved yet; -1 = the setting.
     FStartedThreads: Integer;
     FThreadsOverride: Integer;
+    // FLightOverride replaces the library switch the same way: -1 = the
+    // setting, 1 = Fast (light libraries), 0 = Full.
+    FLightOverride: Integer;
     // The Performance page's library switch the server was started with -
     // fixed per server process like the thread count.
     FStartedNoLight: Boolean;
@@ -1591,7 +1598,7 @@ type
       ARow, ACol: Integer; const AOnDone: TLspDefinesProc);
     procedure DcuSource(const ADcuPath: string;
       const AOnDone: TLspDcuSourceProc);
-    function Benchmark(AThreads: Integer;
+    function Benchmark(AThreads: Integer; ALight: Boolean;
       const AOnDone: TLspBenchmarkProc): Boolean;
     procedure EndBenchmark;
     procedure RenameTarget(const AFileName: string; ARow, ACol: Integer;
@@ -2108,6 +2115,7 @@ begin
   inherited Create;
   FProjectFile := AProjectFile;
   FThreadsOverride := -1;
+  FLightOverride := -1;
   FExePath := FindServerExe(PackageDir);
   FDocs := nil;
   FClient := nil;
@@ -2479,7 +2487,10 @@ begin
     Result.AnalysisThreads := AnalysisThreadCount;
   // The server's light mode is on unless this says otherwise; it reads the
   // library trees from LibraryPaths above.
-  Result.NoLightLibraries := not LightLibrariesEnabled;
+  if FLightOverride >= 0 then
+    Result.NoLightLibraries := FLightOverride = 0
+  else
+    Result.NoLightLibraries := not LightLibrariesEnabled;
   // The IDE-side timing lines (PasTreeIdePlugin.Timing) go into the same
   // file as the server's, but only with ADVANCED logging on: they are a few
   // lines per typing pause, which is the "log nobody can skim" the advanced
@@ -2500,7 +2511,7 @@ end;
 
 function TLspSession.EnsureSession: Boolean;
 const
-  cOnOff: array[Boolean] of string = ('off', 'on');
+  cParseMode: array[Boolean] of string = ('Full', 'Fast');
 var
   LProject: IOTAProject;
   LOptions: TLspInitOptions;
@@ -2671,9 +2682,9 @@ begin
           + ' the server for %s.', [ThreadsText(LOptions.AnalysisThreads),
           ExtractFileName(LOptions.ProjectFile)]))
       else if FStartedNoLight <> LOptions.NoLightLibraries then
-        LogDiagnostic(Format('library units interface-only turned %s -'
+        LogDiagnostic(Format('parsing mode changed (%s) -'
           + ' restarting the server for %s.',
-          [cOnOff[not LOptions.NoLightLibraries],
+          [cParseMode[not LOptions.NoLightLibraries],
           ExtractFileName(LOptions.ProjectFile)]))
       else
         LogDiagnostic(Format('project configuration changed (%s %s %s) - '
@@ -3881,12 +3892,13 @@ end;
   restarts a server running another count; the request then waits behind the
   new server's handshake like any other. The answer is only "started" - the
   figures come as pastree/benchmarkDone (HandleBenchmarkDone). }
-function TLspSession.Benchmark(AThreads: Integer;
+function TLspSession.Benchmark(AThreads: Integer; ALight: Boolean;
   const AOnDone: TLspBenchmarkProc): Boolean;
 begin
   if AThreads < 0 then
     AThreads := 0;
   FThreadsOverride := AThreads;
+  FLightOverride := Ord(ALight);
   FBenchmarkDone := nil;
   if not EnsureSession then
     Exit(False);
@@ -3914,6 +3926,7 @@ procedure TLspSession.EndBenchmark;
 begin
   FBenchmarkDone := nil;
   FThreadsOverride := -1;
+  FLightOverride := -1;
 end;
 
 procedure TLspSession.HandleBenchmarkDone(AParams: TJSONValue);
@@ -3931,6 +3944,7 @@ begin
   LResult.Units := AParams.GetValue<Integer>('units', 0);
   LResult.Ms := AParams.GetValue<Int64>('ms', 0);
   LResult.Threads := AParams.GetValue<Integer>('threads', 0);
+  LResult.LightUnits := AParams.GetValue<Integer>('lightUnits', 0);
   LResult.CommitBeforeMB := AParams.GetValue<Int64>('commitBeforeMB', 0);
   LResult.CommitPeakMB := AParams.GetValue<Int64>('commitPeakMB', 0);
   LResult.CommitAfterMB := AParams.GetValue<Int64>('commitAfterMB', 0);
@@ -5857,7 +5871,7 @@ begin
   ARunningMs := GetTickCount64 - LClient.ActivitySince;
 end;
 
-function LspBenchmark(AThreads: Integer;
+function LspBenchmark(AThreads: Integer; ALight: Boolean;
   const AOnDone: TLspBenchmarkProc): Boolean;
 var
   LSession: TLspSession;
@@ -5867,7 +5881,7 @@ begin
     Exit;
   LSession := GPool.Activate;
   if Assigned(LSession) then
-    Result := LSession.Benchmark(AThreads, AOnDone);
+    Result := LSession.Benchmark(AThreads, ALight, AOnDone);
 end;
 
 function LspBenchmarkStatus(out AText: string; out ARunningMs: UInt64): Boolean;

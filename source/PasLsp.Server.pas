@@ -5528,15 +5528,16 @@ begin
       + '"params":{"ok":false,"error":%s}}', [JsonQuote(AError)]));
     Exit;
   end;
-  Log(Format('benchmark: %d units in %d ms on %d threads; commit before'
-    + ' %d MB, peak %d MB, after %d MB',
-    [FProject.ModelCount, LMs, FPoolWidth, FBenchCommitBefore shr 20,
-     FBenchCommitPeak shr 20, LAfter shr 20]));
+  Log(Format('benchmark: %d units in %d ms on %d threads, %d interface-only;'
+    + ' commit before %d MB, peak %d MB, after %d MB',
+    [FProject.ModelCount, LMs, FPoolWidth, FProject.LightCount,
+     FBenchCommitBefore shr 20, FBenchCommitPeak shr 20, LAfter shr 20]));
   Notify(Format('{"jsonrpc":"2.0","method":"pastree/benchmarkDone",'
-    + '"params":{"ok":true,"units":%d,"ms":%d,"threads":%d,'
+    + '"params":{"ok":true,"units":%d,"ms":%d,"threads":%d,"lightUnits":%d,'
     + '"commitBeforeMB":%d,"commitPeakMB":%d,"commitAfterMB":%d,'
     + '"stages":%s}}',
-    [FProject.ModelCount, LMs, FPoolWidth, FBenchCommitBefore shr 20,
+    [FProject.ModelCount, LMs, FPoolWidth, FProject.LightCount,
+     FBenchCommitBefore shr 20,
      FBenchCommitPeak shr 20, LAfter shr 20,
      JsonQuote(FProject.StageTimings)]));
 end;

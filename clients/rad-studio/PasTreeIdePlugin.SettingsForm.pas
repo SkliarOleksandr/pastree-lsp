@@ -136,7 +136,8 @@ type
     lblThreads: TLabel;
     cbxThreads: TComboBox;
     lblThreadsHint: TLabel;
-    chkLightLibraries: TCheckBox;
+    lblParseMode: TLabel;
+    cbxParseMode: TComboBox;
     lblLightHint: TLabel;
     grpBenchmark: TGroupBox;
     lblBenchmarkHint: TLabel;
@@ -360,10 +361,22 @@ begin
     Result := 0;
 end;
 
+{ The benchmark result's parsing mode: Fast with the number of library units
+  it analyzed interface-only, or Full - which a Fast run with no library
+  trees (no library paths) is as well. }
+function ParseModeText(const AResult: TLspBenchmarkResult): string;
+begin
+  if AResult.LightUnits > 0 then
+    Result := Format('Fast mode (%d library units interface-only)',
+      [AResult.LightUnits])
+  else
+    Result := 'Full mode';
+end;
+
 { A full analysis of the active project from nothing (pastree/benchmark), on
-  the count selected NOW - saved or not, so modes can be compared without
-  closing the dialog; LspEndBenchmark, when the dialog closes, puts the
-  setting back in charge. The timer shows the server's progress; the figures
+  the count and parsing mode selected NOW - saved or not, so they can be
+  compared without closing the dialog; LspEndBenchmark, when the dialog
+  closes, puts the settings back in charge. The timer shows the server's progress; the figures
   come from the server when the run finalizes. }
 procedure TPasTreeSettingsForm.btnAnalyzeClick(Sender: TObject);
 var
@@ -373,20 +386,22 @@ begin
   FBenchmarkStart := GetTickCount64;
   btnAnalyze.Enabled := False;
   cbxThreads.Enabled := False;
+  cbxParseMode.Enabled := False;
   lblBenchmarkStatus.Caption := 'Starting...';
-  if not LspBenchmark(SelectedThreads,
+  if not LspBenchmark(SelectedThreads, cbxParseMode.ItemIndex <> 1,
     procedure(const AResult: TLspBenchmarkResult)
     begin
       if not AResult.Ok then
         LForm.BenchmarkFinished(False, 'Failed: ' + AResult.Error)
       else
         LForm.BenchmarkFinished(True, Format(
-          '%d units in %s s on %s.'#13#10
+          '%d units in %s s on %s, %s.'#13#10
           + 'Memory: %d MB at peak, %d MB held after (server process;'
           + ' %d MB before the run).',
           [AResult.Units,
            FormatFloat('0.0', AResult.Ms / 1000),
-           ThreadsText(AResult.Threads), AResult.CommitPeakMB, AResult.CommitAfterMB,
+           ThreadsText(AResult.Threads), ParseModeText(AResult),
+           AResult.CommitPeakMB, AResult.CommitAfterMB,
            AResult.CommitBeforeMB]));
     end) then
   begin
@@ -426,6 +441,7 @@ begin
   tmrBenchmark.Enabled := False;
   btnAnalyze.Enabled := True;
   cbxThreads.Enabled := True;
+  cbxParseMode.Enabled := True;
   lblBenchmarkStatus.Caption := AText;
 end;
 
@@ -513,7 +529,7 @@ begin
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
     LForm.FillThreads(LSettings.AnalysisThreads);
-    LForm.chkLightLibraries.Checked := LSettings.LightLibraries;
+    LForm.cbxParseMode.ItemIndex := Ord(not LSettings.LightLibraries);
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
@@ -549,7 +565,7 @@ begin
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;
     LSettings.AnalysisThreads := LForm.SelectedThreads;
-    LSettings.LightLibraries := LForm.chkLightLibraries.Checked;
+    LSettings.LightLibraries := LForm.cbxParseMode.ItemIndex <> 1;
     SaveSettings(LSettings);
     Result := True;
   finally
