@@ -137,6 +137,7 @@ uses
   System.Classes,
   System.Generics.Collections,
   System.Generics.Defaults,
+  System.StrUtils,
   System.Variants,
   System.Win.Registry,
   Winapi.Windows,
@@ -208,9 +209,103 @@ var
   --------------------------------------------------------------------------- }
 
 type
+  { The IDE's own "Code completion filtering" choices (Options > Editor >
+    Language > Insight Options), which the native list obeys and ours did not
+    read (Alex, 2026-10-19). Environment options, named as coreide370 names
+    them; a name the IDE does not answer keeps the IDE's default. }
+  TInsightFilterOptions = record
+    Contained: Boolean;     // CodeInsightContainedSymbols - "contain filter"
+    StartsFirst: Boolean;   // CodeInsightFilterStartsWith - prefix matches first
+    Shortest: Boolean;      // CodeInsightShorterSymbols - select the shortest
+    Underline: Boolean;     // CodeInsightFilterUnderline
+  end;
+
+var
+  // What the viewer asked a list, for the first calls of a session - the
+  // record to read when a selection is wrong (Alex, 2026-10-19: a list opened
+  // on `System.sys` had no row selected).
+  GListTraces: Integer = 0;
+  // The environment option names the IDE answers, read once; nil = not yet.
+  GEnvOptionNames: TArray<string>;
+  GEnvOptionNamesRead: Boolean = False;
+
+procedure TraceList(const AText: string);
+begin
+  if GListTraces >= 40 then
+    Exit;
+  Inc(GListTraces);
+  LspLogToServer('code insight list: ' + AText);
+end;
+
+function ReadInsightFilterOptions: TInsightFilterOptions;
+var
+  LServices: IOTAServices;
+  LOptions: IOTAEnvironmentOptions;
+  LNames: TOTAOptionNameArray;
+  LIdx: Integer;
+  LLog: string;
+
+  function ReadBool(const AName: string; ADefault: Boolean): Boolean;
+  var
+    LValue: Variant;
+  begin
+    Result := ADefault;
+    if not MatchText(AName, GEnvOptionNames) then
+      Exit;
+    try
+      LValue := LOptions.Values[AName];
+      if VarIsOrdinal(LValue) or (VarType(LValue) = varBoolean) then
+        Result := LValue <> 0
+      else if VarIsStr(LValue) then
+        Result := SameText(VarToStr(LValue), 'True') or
+          (VarToStr(LValue) = '1');
+    except
+      Result := ADefault;
+    end;
+  end;
+
+begin
+  // The IDE's defaults: contains on, starts-with first on, shortest off,
+  // underline on.
+  Result.Contained := True;
+  Result.StartsFirst := True;
+  Result.Shortest := False;
+  Result.Underline := True;
+  LOptions := nil;
+  if Supports(BorlandIDEServices, IOTAServices, LServices) then
+    LOptions := LServices.GetEnvironmentOptions;
+  if not Assigned(LOptions) then
+    Exit;
+  if not GEnvOptionNamesRead then
+  begin
+    GEnvOptionNamesRead := True;
+    LLog := '';
+    try
+      LNames := LOptions.GetOptionNames;
+      for LIdx := 0 to High(LNames) do
+        if ContainsText(LNames[LIdx].Name, 'CodeInsight') then
+        begin
+          GEnvOptionNames := GEnvOptionNames + [LNames[LIdx].Name];
+          LLog := LLog + ' ' + LNames[LIdx].Name;
+        end;
+    except
+      on E: Exception do
+        LLog := ' (unreadable: ' + E.Message + ')';
+    end;
+    LspLogToServer('code insight: environment options' + LLog);
+  end;
+  Result.Contained := ReadBool('CodeInsightContainedSymbols', Result.Contained);
+  Result.StartsFirst := ReadBool('CodeInsightFilterStartsWith',
+    Result.StartsFirst);
+  Result.Shortest := ReadBool('CodeInsightShorterSymbols', Result.Shortest);
+  Result.Underline := ReadBool('CodeInsightFilterUnderline', Result.Underline);
+end;
+
+type
   TPasSymbolList = class(TInterfacedObject, IOTACodeInsightSymbolList,
     IOTACodeInsightSymbolList80)
   private
+    FOptions: TInsightFilterOptions;
     FAll: TArray<TLspCompletionItem>;
     // FAll's labels upper-cased once, parallel to it - the filter's haystack.
     FUpper: TArray<string>;
@@ -221,9 +316,11 @@ type
   public
     { The text the viewer filters by - DrawLine underlines it in each name. }
     property Filter: string read FFilter;
+    property Options: TInsightFilterOptions read FOptions;
     { The type names in the visible row I's detail - DrawLine paints them. }
     function TypeSpansOf(I: Integer): TArray<Integer>;
-    constructor Create(const AItems: TArray<TLspCompletionItem>);
+    constructor Create(const AItems: TArray<TLspCompletionItem>;
+      const AOptions: TInsightFilterOptions);
     { IOTACodeInsightSymbolList }
     procedure Clear;
     function GetCount: Integer;
@@ -249,13 +346,15 @@ type
     function GetSymbolDocumentation(I: Integer): string;
   end;
 
-constructor TPasSymbolList.Create(const AItems: TArray<TLspCompletionItem>);
+constructor TPasSymbolList.Create(const AItems: TArray<TLspCompletionItem>;
+  const AOptions: TInsightFilterOptions);
 var
   LIdx: Integer;
 begin
   inherited Create;
   FAll := AItems;
   FSortOrder := soAlpha;
+  FOptions := AOptions;
   // Sorted ONCE, here: SetFilter runs per keystroke on the UI thread with
   // whole-RTL-sized lists, and both of Rebuild's passes preserve order - so
   // Rebuild never needs to sort, only scan. (soScope grouping, when it comes,
@@ -301,7 +400,12 @@ begin
   for LIdx := 0 to High(FAll) do
   begin
     LPos := Pos(LNeedle, FUpper[LIdx]);
-    if LPos = 1 then
+    // The IDE's Insight Options: without "contain filter" only prefix
+    // matches stay; without "starts with first" every match is one
+    // alphabetical run.
+    if (LPos > 1) and not FOptions.Contained then
+      Continue;
+    if (LPos = 1) or ((LPos > 1) and not FOptions.StartsFirst) then
     begin
       FVisible[LCount] := LIdx;
       Inc(LCount);
@@ -384,17 +488,45 @@ end;
 function TPasSymbolList.FindIdent(const AnIdent: string): Integer;
 var
   LIdx: Integer;
+  LNeedle: string;
+  LPrefixOnly: Boolean;
 begin
-  // Filtered, the first row is the one selected, whatever the viewer asks
-  // with (Alex, 2026-10-16) - Rebuild already put the best match there.
-  if FFilter <> '' then
-    Exit(0);
-  // "Closest partial match": the first visible label the ident is a prefix
-  // of; failing that, the top of the list keeps the viewer somewhere sane.
-  for LIdx := 0 to High(FVisible) do
-    if FAll[FVisible[LIdx]].ItemLabel.StartsWith(AnIdent, True) then
-      Exit(LIdx);
   Result := 0;
+  if FFilter <> '' then
+  begin
+    // Filtered, the first row is the one selected, whatever the viewer asks
+    // with (Alex, 2026-10-16) - Rebuild already put the best match there -
+    // or, under "Select shortest matching symbol", the shortest of the
+    // prefix matches (of all matches when none starts with the filter).
+    if FOptions.Shortest and (Length(FVisible) > 1) then
+    begin
+      LNeedle := UpperCase(FFilter);
+      LPrefixOnly := False;
+      for LIdx := 0 to High(FVisible) do
+        if FUpper[FVisible[LIdx]].StartsWith(LNeedle) then
+        begin
+          LPrefixOnly := True;
+          Break;
+        end;
+      Result := -1;
+      for LIdx := 0 to High(FVisible) do
+        if (not LPrefixOnly or FUpper[FVisible[LIdx]].StartsWith(LNeedle)) and
+           ((Result < 0) or (Length(FUpper[FVisible[LIdx]]) <
+              Length(FUpper[FVisible[Result]]))) then
+          Result := LIdx;
+    end;
+  end
+  else
+    // "Closest partial match": the first visible label the ident is a prefix
+    // of; failing that, the top of the list keeps the viewer somewhere sane.
+    for LIdx := 0 to High(FVisible) do
+      if FAll[FVisible[LIdx]].ItemLabel.StartsWith(AnIdent, True) then
+      begin
+        Result := LIdx;
+        Break;
+      end;
+  TraceList(Format('FindIdent("%s") under filter "%s" -> %d of %d',
+    [AnIdent, FFilter, Result, Length(FVisible)]));
 end;
 
 function TPasSymbolList.FindSymIndex(const Ident: string;
@@ -402,13 +534,25 @@ function TPasSymbolList.FindSymIndex(const Ident: string;
 var
   LIdx: Integer;
 begin
+  Result := False;
   for LIdx := 0 to High(FVisible) do
     if SameText(FAll[FVisible[LIdx]].ItemLabel, Ident) then
     begin
       Index := LIdx;
-      Exit(True);
+      Result := True;
+      Break;
     end;
-  Result := False;
+  // The viewer (37.0) selects through THIS call alone: after every SetFilter
+  // it asks FindSymIndex(<filter>) and never FindIdent, so a filter that is
+  // no whole label selected nothing (Alex, 2026-10-19, the trace below). A
+  // filtered list answers its best row instead - FindIdent's choice.
+  if not Result and (FFilter <> '') and (Length(FVisible) > 0) then
+  begin
+    Index := FindIdent(Ident);
+    Result := True;
+  end;
+  TraceList(Format('FindSymIndex("%s") under filter "%s" -> %s',
+    [Ident, FFilter, BoolToStr(Result, True)]));
 end;
 
 function TPasSymbolList.TypeSpansOf(I: Integer): TArray<Integer>;
@@ -422,6 +566,8 @@ procedure TPasSymbolList.SetFilter(const FilterText: string);
 begin
   FFilter := FilterText;
   Rebuild(FilterText);
+  TraceList(Format('SetFilter("%s") -> %d of %d', [FilterText,
+    Length(FVisible), Length(FAll)]));
 end;
 
 function TPasSymbolList.GetSymbolText(Index: Integer): string;
@@ -1227,11 +1373,18 @@ var
   LView: IOTAEditView;
   LFileName: string;
   LInInvoke: Boolean;
+  LOptions: TInsightFilterOptions;
 begin
   LView := CurrentView;
   if not Assigned(LView) then
     Exit(-1);
   LFileName := LView.Buffer.FileName;
+  // Read here, on the UI thread, per invocation - the list itself is built
+  // in the answer's callback, and an options-page change holds from the
+  // next list on.
+  LOptions := ReadInsightFilterOptions;
+  TraceList(Format('invoked (how %d) at %d:%d with "%s"', [Ord(AHowInvoked),
+    LView.Buffer.EditPosition.Row, LView.Buffer.EditPosition.Column, AStr]));
   // THE POSITION COMES FROM THE CARET, NOT FROM THE PARAMETERS. The first
   // live bring-up (2026-08-21) showed why: with the caret after `beg` the
   // parameters carried a position whose text was NOT `beg` - the server saw
@@ -1259,7 +1412,7 @@ begin
       FActiveId := 0;
       if ASuccess then
       begin
-        FSymbolsObj := TPasSymbolList.Create(AItems);
+        FSymbolsObj := TPasSymbolList.Create(AItems, LOptions);
         FSymbols := FSymbolsObj;
       end
       else
@@ -1704,7 +1857,8 @@ begin
     Canvas.Font.Color := LForce;
   Canvas.Font.Style := [TFontStyle.fsBold];
   LMatch := 0;
-  if Assigned(FShownObj) and (FShownObj.Filter <> '') then
+  if Assigned(FShownObj) and (FShownObj.Filter <> '') and
+     FShownObj.Options.Underline then
     LMatch := Pos(UpperCase(FShownObj.Filter), UpperCase(LName));
   if LMatch > 0 then
   begin

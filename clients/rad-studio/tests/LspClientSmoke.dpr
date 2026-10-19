@@ -1887,6 +1887,30 @@ begin
   finally
     SendDidChange(LUniFile, TFile.ReadAllText(LUniFile));
   end;
+
+  // A unit qualifier continues into the used units under it (Alex,
+  // 2026-10-19: `System.` offered System's exports and no SysUtils). The
+  // harness has no RTL, so the subject is the fixture's own dotted unit:
+  // `Demo.` is no unit, only the head of Demo.Dotted. In the overlay only,
+  // and in a project unit - a file outside the project has no closure to
+  // name units from. (The full-name row, `System.SysUtils` for `uses
+  // SysUtils`, needs unit scope names - PasTree's SemaCompleteSmoke has it.)
+  LPatched := TFile.ReadAllText(LUnitFile)
+    .Replace('implementation', 'implementation uses Demo.Dotted;')
+    .Replace('''Hello, '' + AName;', '''Hello, '' + AName; Demo.;');
+  Check(LPatched.Contains('Demo.;') and LPatched.Contains('Demo.Dotted;'),
+    'unit-name fixture patch applied');
+  SendDidChange(LUnitFile, LPatched);
+  try
+    FindPosInText(LPatched, 'AName; Demo.;', '.;', LLine, LChar);
+    Check(Ask('textDocument/completion',
+      PositionParams(LUnitFile, LLine, LChar + 1)),
+      'completion answered after Demo.');
+    Check(GOk and GResultJson.Contains('"label":"Dotted","kind":9'),
+      'Demo. continues into the used unit under it, as a module');
+  finally
+    SendDidChange(LUnitFile, TFile.ReadAllText(LUnitFile));
+  end;
 end;
 
 { 5b-bis. What a generic class's member rows say after their name

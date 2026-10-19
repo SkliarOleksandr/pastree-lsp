@@ -516,6 +516,8 @@ type
     { Blocks until an up-to-date analysis is available, staying responsive
       to $/cancelRequest for ARequestIdJson. False = that request was
       cancelled while waiting (the caller answers -32800). }
+    function WaitHeldProject(const ARequestIdJson: string;
+      ABudgetMs: Cardinal): Boolean;
     function WaitAnalyzed(const APriorityFile,
       ARequestIdJson: string): Boolean;
     procedure PublishDiagnostics;
@@ -637,6 +639,10 @@ function MemoryLine: string; forward;
   builtins (sfBuiltin / skBuiltinType) - a unit under a library path would be
   the natural extension, but the navigator keeps that test private today. }
 const
+  // How long completion and signature help wait for an analysis holding the
+  // project (WaitHeldProject): a module session's few hundred ms with room,
+  // not a full rebuild's seconds - the list must still come while typing.
+  cHeldProjectBudgetMs = 1500;
   // The `begin` titles of the two kinds of analysis run. Part of the
   // protocol: the IDE plugin tells them apart by the word "incremental"
   // (PasTreeIdePlugin.LspClient, ProgressKindOf) - see SPEC.md.
@@ -3313,6 +3319,47 @@ begin
   Result := True;
 end;
 
+{ For the requests that must not WaitAnalyzed (completion, signature help):
+  while an in-flight session HOLDS the project (ReleaseProject - FProject is
+  nil until it is taken back), wait for that session alone, up to ABudgetMs.
+  No pending edit is flushed and nothing is started, so the live text stays
+  the overlay's business as before. Without it a list asked during the
+  incremental rebuild that every keystroke starts was the overlay's own
+  names and the builtins - 189 rows where the project gives 25,474 (Alex,
+  2026-10-19, AVImark: "short list right after opening, full on reopen").
+  A module session takes a few hundred ms; past the budget the answer goes
+  standalone, as it always did. False only for a cancel or a gone client. }
+function TLspServer.WaitHeldProject(const ARequestIdJson: string;
+  ABudgetMs: Cardinal): Boolean;
+var
+  LStart, LWaited: UInt64;
+begin
+  Result := True;
+  if (FProject <> nil) or (FSession = nil) then
+    Exit;
+  LStart := GetTickCount64;
+  while (FProject = nil) and (FSession <> nil) and
+        (GetTickCount64 - LStart < ABudgetMs) do
+  begin
+    if (ARequestIdJson <> '') and FCancels.IsCancelled(ARequestIdJson) then
+      Exit(False);
+    if ClientGone then
+      Exit(False);
+    ReportProgress;
+    FinalizeAnalysisIfDone;
+    // As WaitAnalyzed: the progress and the diagnostics go out now, ahead
+    // of the reply.
+    if Assigned(FOnFlush) then
+      FOnFlush;
+    if (FProject = nil) and (FSession <> nil) then
+      TThread.Sleep(10);
+  end;
+  LWaited := GetTickCount64 - LStart;
+  if LWaited >= 50 then
+    Log(Format('  waited %d ms for the analysis holding the project (%s)',
+      [LWaited, IfThen(FProject <> nil, 'taken back', 'still held')]));
+end;
+
 // LSP DiagnosticSeverity from a PasTree diagnostic code. E/F are dcc's own
 // error classes; W maps to warning; everything else (PPIF/PPBAD/PPENC/PPINT,
 // our own "the ANALYZER could not decide" family) is information - calling
@@ -4073,6 +4120,7 @@ begin
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
       FDefines);
   SyncCompletionOverlays;
+  WaitHeldProject(AMsg.IdJson, cHeldProjectBudgetMs);   // as completion
   LMid := -1;
   if FNav <> nil then
     LMid := FNav.ModelIdOf(LPath);
@@ -4385,6 +4433,9 @@ begin
     // unsaved edits must be preprocessed from its live text, exactly as the
     // analysis session sees it.
     SyncCompletionOverlays;
+    // A session holding the project gives it back first, if it is quick
+    // about it (a cancel just answers standalone, as before).
+    WaitHeldProject(AMsg.IdJson, cHeldProjectBudgetMs);
     // Bridge only when the last-good analysis actually holds this file;
     // otherwise standalone - a half-bridge (project without a model id)
     // has nothing to anchor cross-unit answers to.

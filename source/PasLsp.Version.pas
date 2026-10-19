@@ -350,7 +350,11 @@ const
   /// property's overrides demand that no longer loses its class, and the
   /// hierarchy demands asking type heritages rather than every word. An older
   /// library does not compile.
-  cMinPasTreeVersion = '0.122.0';
+  /// 0.122.1 (2026-10-19): completion lists a used unit under its full dotted
+  /// name (`System.SysUtils` for `uses SysUtils`) and continues a unit
+  /// qualifier into the used units under it (`System.` offers SysUtils). An
+  /// older library compiles and silently lists the short names only.
+  cMinPasTreeVersion = '0.122.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and
