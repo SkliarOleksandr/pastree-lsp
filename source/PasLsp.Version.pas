@@ -344,7 +344,13 @@ const
   /// An older library does not compile; 0.118.0-0.119.0's demands under it
   /// are what make each light answer the full analysis's (0.119.0: every
   /// query family has its demand).
-  cMinPasTreeVersion = '0.121.0';
+  /// 0.122.0 (2026-10-19): TPasWorkspace.FindUnitReferences / PlanUnitRename
+  /// (a unit's references were "none needed" and missed the `uses` entries of
+  /// units only library bodies use and the qualifiers in library bodies), a
+  /// property's overrides demand that no longer loses its class, and the
+  /// hierarchy demands asking type heritages rather than every word. An older
+  /// library does not compile.
+  cMinPasTreeVersion = '0.122.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

@@ -252,7 +252,7 @@ IDE plugin first, VS Code second), not by protocol order.
 | `pastree/optionsAt` | OURS, not LSP: the compiler options IN EFFECT at a position (PasTree 0.112.0, `TPasNavigator.OptionsAt`) - what an `$IFOPT` written there would see, one row per option (25; E, F, K and N have no switch), base first: dcc's defaults (`origin` `default`), the project's switches (`project`), then the ones a live directive set (`unit`, by file/line/col; `$PUSHOPT`/`$POPOPT` replayed, so a popped value names the directive that set it before the push). A row has the define rows' shape - `uri`/`filePath`/`line`/`col`, `snippet`, `hiFrom`/`hiTo` - plus `option` (the long name), `letter` (`""` for SCOPEDENUMS, RTTI, VARPROPSETTER) and `value` (`ON`/`OFF`, the byte count of ALIGN and MINENUMSIZE, the RTTI clause); `name` is the row's text, `$R- RANGECHECKS OFF`. A `unit` row's snippet is the directive's line, the directive highlighted; a base row's is its text, highlighted whole, placed at the main module's header. A file with no model of its own gets the project's start state |
 | `pastree/outline` | OURS, not LSP: the Go To picker's lists (RAD Studio client, Ctrl+G - PasTree's demo dialog). `scope` `module` with `textDocument.uri`: `PasTree.Outline.PasModuleOutline` over the analyzed tree - every declaration AND routine body in source order plus the `unit`/`interface`/`uses`/`implementation`/`include` landmarks, each row with its position; `scope` `project`: `TPasNavigator.ProjectOutline` over the project's own units (the .dproj list plus the main source, never library units), from the retained symbol tables, so demoted units cost nothing - these rows carry `unitId`/`sym`/`node` and NO position. The answer is a TABLE, not an object per row: `kinds`, `heads`, `sections`, `owners` (arrays of words, `TPasOutlineEntry`'s values interned once) and `files` (`[uri, unitName, unitId]` per distinct file) come first, then `rows`, each a positional array `[kind, head, owner, name, detail, section, isImpl, file, sym, node, line, col]` whose kind/head/owner/section/file are indices into those tables (isImpl 0/1; line/col 1-based, PasTree's own, 0 on a project row). Since 0.46.0: as objects the project list of a 1553-unit project was 33 MB and two seconds of System.JSON on the client's main thread; the table is ~8 MB and read in one pass by `PasTreeIdePlugin.OutlineRows`, handed the text by `TLspClient.RequestRaw` without a DOM. Kinds and sections are still WORDS - once each - so the client needs no PasTree enum. `documentSymbol` cannot carry this (no head word, no detail, no bodies, no landmarks). Both scopes are asked of the file's owning project alone - a group-wide Go To tab existed until 0.47.23 and was withdrawn |
 | `pastree/outlineTarget` | OURS, not LSP: where a `project` row of `pastree/outline` lands - `kind`, `unitId`, `sym`, `node` handed back. A `module` row goes to the unit header (`UnitHeaderTarget`), an `include` row to the directive (`IncludeSiteTarget`), anything else to the declared name (`DeclHit`); each hydrates the one unit it needs, which is why the list carried no positions. A Location, or `null` when the row cannot be placed - the picker then stays open |
-| `pastree/units` | OURS, not LSP: the list behind the RAD Studio client's View Unit / Use Unit (0.54.0). `scope` `project` = the main source and the `.dproj`'s units, answered WITHOUT WaitAnalyzed when the `.dproj` listed them (a bare `.dpr` waits and takes the models under its directory, as `pastree/outline` does); `closure` = every model the analysis reached, library and `.dcu`-only units included. Rows are `[name, uri, flags]`, flags 1 project unit, 2 `.dcu`, 4 used by `textDocument`, 8 is `textDocument`. "Used" is read from the document's LIVE text, parse only, matching a uses item by name or behind one of the project's unit-scope prefixes - never by bare suffix, which would let `Types` hide `Vcl.Types` too. `document` says what the file is (`unit`/`program`/`library`/`package`) |
+| `pastree/units` | OURS, not LSP: the list behind the RAD Studio client's View Unit / Use Unit (0.54.0). `scope` `project` = the main source and the `.dproj`'s units, answered WITHOUT WaitAnalyzed when the `.dproj` listed them (a bare `.dpr` waits and takes the models under its directory, as `pastree/outline` does); `closure` = every model the analysis reached, library and `.dcu`-only units included - since 0.73.0 without the units only a library unit's implementation `uses` reaches, in both modes ("Light libraries", "Closure lists"). Rows are `[name, uri, flags]`, flags 1 project unit, 2 `.dcu`, 4 used by `textDocument`, 8 is `textDocument`. "Used" is read from the document's LIVE text, parse only, matching a uses item by name or behind one of the project's unit-scope prefixes - never by bare suffix, which would let `Types` hide `Vcl.Types` too. `document` says what the file is (`unit`/`program`/`library`/`package`) |
 | `pastree/useUnit` | OURS, not LSP: Use Unit's write - `unit` added to the `section` (`interface`/`implementation`, ignored for a program or library) uses clause of the live buffer, as one zero-length insertion. The name goes in front of the clause's `;`, outside any `{$IFDEF}` block around the last item. It wraps onto its own line past `options.rightMargin`; a section with no clause gets `uses` + the name after its keyword, in the file's own line break. Refusals name themselves in `provider`: already used (prefix-insensitive), the file itself, a package, a clause the parser had to repair, no `;`, an `$I` include ([PasLsp.UseUnit](source/PasLsp.UseUnit.pas)). No WaitAnalyzed, for classComplete's reason |
 | `pastree/dcuSource` | OURS, not LSP: the interface text PasTree generates for a COMPILED unit (PasTree 0.37.0 `PasTree.Dcu` / `PasTree.Dcu.Source`), for a host that has to SHOW the file a navigation answer landed in when that file is a `.dcu`. Since PasTree 0.37.0 the analysis reads a unit with no `.pas` on any path from its `.dcu` (`TPasSourceManager` lists them on the search paths and tries them last - a `.pas` anywhere beats a `.dcu` anywhere), so every Location into such a unit names the `.dcu` and a line of that text. `textDocument.uri` in, an object with `uri`, `unitName` and `text` out - the text through the very routine the analysis reads the unit with (`LoadFileTolerant`), so a Location's line is a line of what the host shows; no second generator. A `.dcu` the reader refuses (a compiler before Delphi 11, a platform other than Win32/Win64, a truncated file) is an ERROR carrying the reader's own words (`Foo.dcu could not be read: Delphi 10.4 is not supported (Delphi 11 to 13 are)`), the twin of the importer's `F1027`, so the host can put the reason where the user looks. A `didOpen` under the `.dcu` URI with that text is the host's generated tab and rebuilds nothing - the disk text of a `.dcu` IS the generated text. Needs PasTree 0.38.0 (`cMinPasTreeVersion`) |
 | `$/pastree.hostEvent` | OURS, not LSP: a NOTIFICATION carrying a line for the server's own log (`params.message`, prefixed `host:` on the way in so a line that did not come from the server says so). It exists because reopening the SAME project restarts nothing here - the configuration is identical - so without it one session's requests run straight into the next's with no boundary between them, which is exactly the confusion it was added for (2026-08-29). `$/`-prefixed so any other server drops it silently rather than treating it as a violation. |
@@ -944,7 +944,12 @@ workspace query is the navigator's own call.
   built-in and conditional-symbol identities), `pastree/findOverrides`,
   `findImplementations` (method and interface), `findDescendants`,
   `findAssignments` / `findCreations` / `findDestructions`,
-  `pastree/findDefines`, rename (`PlanRename` with the inactive uses), and
+  `pastree/findDefines`, rename (`PlanRename` with the inactive uses), a
+  UNIT's references and rename (`FindUnitReferences` / `PlanUnitRename` by
+  the unit's file, 0.73.0 - PasTree had them as "none needed" and missed the
+  `uses` entries of units only library bodies use and the qualifiers in
+  library bodies: Find References on `Vcl.Controls` lost 139 of 1,708 rows
+  on a 3,782-unit closure), and
   the uses lint (`pastree/unusedUses`, `pastree/unreferencedUnits`, with
   `loHideGlobalInit` as before). A symbol travels as a `TPasSymbolKey`
   (file, name, declaration site), which survives the promotions and the
@@ -954,7 +959,11 @@ workspace query is the navigator's own call.
   position request stands in is made full first when it is a light
   document - `definition`, `implementation` / `declaration`,
   `typeDefinition`, `hover`, `documentHighlight`, `semanticTokens`,
-  rename's identity, the Find All gates, `definesAt`, `optionsAt`.
+  `documentSymbol` and `pastree/outline` of a module (0.73.0: a refused
+  background promotion left them interface-only), rename's identity, the
+  Find All gates, `definesAt`, `optionsAt`. `pastree/findAllAt` never waits,
+  so it does not make a file full: on a document still light it answers
+  `null`, "cannot say" (every gate read inside a body would be False).
   `definition`'s redirect to a ROUTINE's body asks for the target's file
   the same way. `documentHighlight` stays on the file on purpose: its rows
   are all in that file, so the file is the whole demand - the references
@@ -962,6 +971,22 @@ workspace query is the navigator's own call.
   library) on every caret move. Hover makes the hovered file full, not the
   hovered name's unit: the card needs the declaration, which a light unit
   has.
+- **Closure lists, one rule for both modes** (0.73.0): `workspace/symbol`
+  and `pastree/units`' `closure` list the units reached from the program,
+  the listed units and the open documents WITHOUT passing through a library
+  unit's implementation `uses` (`LibraryReach`; a library unit is one under
+  the trees `LibraryTreesFor` names - `FLightPaths` in light mode, the same
+  trees computed in full mode), and of a library unit only its interface
+  declarations; own units first, then by path, so the 20,000 cap of
+  `workspace/symbol` cuts the same rows. That is exactly what a light
+  analysis has before any promotion. Making light match the old full answer
+  instead would have meant analyzing every library implementation (the
+  helpers `System.pas` declares there) and loading the ~700 units only
+  library bodies use - for lists whose extra rows the project cannot name.
+  Full mode therefore lists less than before 0.73.0: on the 3,782-unit
+  closure, 696 units and the library implementation sections' declarations.
+  A `uses` clause's completion list is sorted by name for the same reason
+  (it followed the model numbering, which the two modes do not share).
 - **Opened** (`didOpen`, Ctrl+Click into a library file): still promoted in
   the background, as a module session (`TPasAsyncSession.CreateForPromotion`,
   `StartPromotion`), so the editor stays responsive; the workspace hands the

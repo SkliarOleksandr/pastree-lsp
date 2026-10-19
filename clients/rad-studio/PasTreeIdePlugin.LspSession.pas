@@ -6704,6 +6704,8 @@ end;
 function LspSourceTextOf(const AFileName: string): string;
 var
   LSession: TLspSession;
+  LHeld: Integer;
+  LFirst: string;
 begin
   Result := '';
   // A compiled unit's text is generated, not on disk - reading the .dcu's
@@ -6716,12 +6718,39 @@ begin
     Exit;
   // The session that HOLDS this file is the one whose overlay is the text the
   // answer was computed from; the active one may never have been sent it.
+  // Asked of every session's sent texts first, a dictionary each: finding
+  // the owner (SessionForFile -> IOTAProjectGroup.FindProject) for a file no
+  // session was sent - a library unit, most rows of a big reference list -
+  // was a ToolsAPI search per file, and a unit's references list a
+  // thousand files (2026-10-19). Only when two sessions hold the file does
+  // the owner decide.
   if Assigned(GPool) then
-    LSession := GPool.SessionForFile(AFileName, False)
-  else
-    LSession := nil;
-  if Assigned(LSession) and LSession.TryGetSentText(AFileName, Result) then
-    Exit;
+  begin
+    LHeld := 0;
+    LFirst := '';
+    GPool.ForEach(
+      procedure(ASession: TLspSession)
+      var
+        LText: string;
+      begin
+        if ASession.TryGetSentText(AFileName, LText) then
+        begin
+          Inc(LHeld);
+          if LHeld = 1 then
+            LFirst := LText;
+        end;
+      end);
+    if LHeld = 1 then
+      Exit(LFirst);
+    if LHeld > 1 then
+    begin
+      LSession := GPool.SessionForFile(AFileName, False);
+      if Assigned(LSession) and LSession.TryGetSentText(AFileName, Result)
+      then
+        Exit;
+      Exit(LFirst);
+    end;
+  end;
   // Never opened in an editor, so disk IS what the server read. Unreadable
   // yields '' and callers degrade to no snippet - see TryReadTextNoBom.
   if not TryReadTextNoBom(AFileName, Result) then

@@ -213,6 +213,20 @@ type
     // emptied and LightTreesFor answers nothing - so the next rebuild does
     // not go back to light and pay for the same bodies again.
     FLightEscalated: Boolean;
+    // THE LIBRARY TREES WHATEVER THE MODE (LibraryTreesFor; FLightPaths is
+    // them in light mode) and what the closure lists derive from them
+    // (LibraryReach, cached per workspace generation in FReach / FReachGen):
+    // the units a full analysis reaches WITHOUT passing through a library
+    // unit's implementation `uses` - exactly what a light analysis loads.
+    // workspace/symbol and pastree/units' closure list only those, and only a
+    // library unit's interface declarations, in BOTH modes (0.73.0): a light
+    // analysis has nothing else, and the rest - the implementation helpers
+    // of the RTL, the units only library bodies use - is nothing the project
+    // can name.
+    FLibTrees: TArray<string>;
+    FReach: TArray<Boolean>;
+    FReachLib: TArray<Boolean>;
+    FReachGen: Integer;
     // A light unit OPENED in the editor is made full in the background
     // (PromoteUnit through TPasAsyncSession.CreateForPromotion), so the
     // editor stays responsive while it runs; the queries make the units they
@@ -293,6 +307,11 @@ type
     // spans every result row carries (LineTypeSpansJson). Dropped with the
     // outline cache: both are views of one analysis.
     FLineTokenCache: TDictionary<string, TArray<TSemanticToken>>;
+    // Path -> how many lines of a file were asked for while it had no whole
+    // entry in FLineTokenCache: the first few are collected for their line
+    // alone (key 'path#line'), the next one collects the file (0.73.0).
+    // Freed with FLineTokenCache.
+    FLineMisses: TDictionary<string, Integer>;
     // The completion seam's engine (PasLsp.Completion) - configuration-
     // derived, so created lazily once and kept for the session.
     FCompletion: TLspCompletionEngine;
@@ -427,6 +446,7 @@ type
     procedure LogTakenIn;
     function TryStartModuleAnalysis: Boolean;
     function LightTreesFor: TArray<string>;
+    function LibraryTreesFor(ALog: Boolean): TArray<string>;
     function StartPromotion(const APath, AWhy: string): Boolean;
     function TakeBackPromotion: Boolean;
     function NotePromotion(const APath, AWhy: string; AAccepted: Boolean;
@@ -459,6 +479,13 @@ type
       full first. Answers False only when the request was cancelled. A busy
       workspace (a session holds the project) leaves the answer partial. }
     function EnsureFileFull(const APath, AWhat: string): Boolean;
+    { FReach / FReachLib for the current project (see FLibTrees): per model,
+      reached without a library unit's implementation `uses`, and under a
+      library tree. }
+    procedure LibraryReach;
+    { The reached models, own units first, then by path - the same order in
+      both modes, whatever the model numbering. }
+    function ReachedMidsOrdered: TArray<Integer>;
     procedure QueryProgress(const AProgress: TPasQueryProgress);
     procedure EndQueryProgress;
     procedure StartProgress(const ATitle: string);
@@ -509,7 +536,7 @@ type
     function HandleDocumentHighlight(const AMsg: TLspIncoming): string;
     function HandleSemanticTokens(const AMsg: TLspIncoming): string;
     function CollectSemanticTokens(const APath: string;
-      AInactive: Boolean): TArray<TSemanticToken>;
+      AInactive: Boolean; AOnlyLine: Integer = 0): TArray<TSemanticToken>;
     function LineTypeSpansJson(const APath: string; ALine: Integer): string;
     function LocationWithTypes(const AFilePath: string;
       APasLine, APasCol, ALen: Integer): string;
@@ -728,6 +755,7 @@ begin
   FPromoteRefused.Free;
   FPromoteRebuilt.Free;
   FLineTokenCache.Free;
+  FLineMisses.Free;
   inherited;
 end;
 
@@ -1238,6 +1266,8 @@ begin
   // After the project's directory and files are known: they are what the
   // light trees exclude.
   FLightPaths := LightTreesFor;
+  FLibTrees := LibraryTreesFor(False);
+  FReachGen := -2;
   if Length(FLightPaths) > 0 then
     LogHeader(Format('light libraries: on - %d trees analyzed interface-only'
       + ' (a unit is made full when opened, or when an answer needs its'
@@ -2553,6 +2583,7 @@ begin
   FNav := nil;
   FOutlineCache := '';
   FreeAndNil(FLineTokenCache);
+  FreeAndNil(FLineMisses);
 end;
 
 procedure TLspServer.EndDonorLend;
@@ -2580,7 +2611,9 @@ begin
   // A new project or new models: the outline table and the type spans are
   // views of the old ones.
   FOutlineCache := '';
+  FReachLib := nil;
   FreeAndNil(FLineTokenCache);
+  FreeAndNil(FLineMisses);
   // Every project swap passes through here, so this is where an open
   // document demoted in the project being swapped in gets its text back -
   // see HydrateOpenDoc.
@@ -2662,6 +2695,118 @@ begin
   end;
   WsDone(AWhat);
   Result := not FWS.Status.Cancelled;
+end;
+
+procedure TLspServer.LibraryReach;
+var
+  LN, LHead, LTail, LMid, LT: Integer;
+  LQueue: TArray<Integer>;
+  LM: TPasSemaModel;
+
+  procedure Root(const APath: string);
+  var
+    LR: Integer;
+  begin
+    if APath = '' then
+      Exit;
+    LR := FProject.ModelIdOf(APath);
+    if (LR >= 0) and (LR < LN) and not FReach[LR] and
+       (FProject.Model(LR) <> nil) then
+    begin
+      FReach[LR] := True;
+      LQueue[LTail] := LR;
+      Inc(LTail);
+    end;
+  end;
+
+begin
+  if FProject = nil then
+  begin
+    FReach := nil;
+    FReachLib := nil;
+    Exit;
+  end;
+  LN := FProject.ModelCount;
+  // Which models are library units: per generation. The walk itself is
+  // cheap and runs every time - the open documents are roots too.
+  if (FReachGen <> FWsGen) or (Length(FReachLib) <> LN) then
+  begin
+    FReachLib := nil;
+    SetLength(FReachLib, LN);
+    for LMid := 0 to LN - 1 do
+      FReachLib[LMid] := (FProject.Model(LMid) <> nil) and
+        (Length(FLibTrees) > 0) and
+        PasUnderDirTrees(FProject.ModelFile(LMid), FLibTrees);
+    FReachGen := FWsGen;
+  end;
+  FReach := nil;
+  SetLength(FReach, LN);
+  SetLength(LQueue, LN);
+  LHead := 0;
+  LTail := 0;
+  // Every unit uses System and SysInit without naming them.
+  for LMid := 0 to LN - 1 do
+    if (FProject.Model(LMid) <> nil) and
+       ((FProject.Model(LMid).UnitNameLower = 'system') or
+        (FProject.Model(LMid).UnitNameLower = 'sysinit')) then
+      Root(FProject.ModelFile(LMid));
+  // The analysis' roots: the program, the units the project lists, and the
+  // open documents (a buffer opened before the analysis is one of its roots
+  // in either mode).
+  Root(FMainSource);
+  for var LFile in FProjectFiles do
+    Root(LFile);
+  for var LDoc in FDocs.All do
+    Root(LDoc.Path);
+  while LHead < LTail do
+  begin
+    LMid := LQueue[LHead];
+    Inc(LHead);
+    LM := FProject.Model(LMid);
+    for var LU := 0 to High(LM.UsesList) do
+    begin
+      LT := LM.UsesList[LU].UnitId;
+      if (LT < 0) or (LT >= LN) or FReach[LT] or (FProject.Model(LT) = nil) then
+        Continue;
+      // A library unit's implementation `uses`: what a light analysis does
+      // not load (UNIT_NOT_LOADED) - and does not follow here in full mode.
+      if FReachLib[LMid] and LM.UsesList[LU].InImpl then
+        Continue;
+      FReach[LT] := True;
+      LQueue[LTail] := LT;
+      Inc(LTail);
+    end;
+  end;
+end;
+
+function TLspServer.ReachedMidsOrdered: TArray<Integer>;
+var
+  LMids: TList<Integer>;
+  LKeys: TArray<string>;
+begin
+  Result := nil;
+  LibraryReach;
+  if FProject = nil then
+    Exit;
+  SetLength(LKeys, Length(FReach));
+  LMids := TList<Integer>.Create;
+  try
+    for var LMid := 0 to High(FReach) do
+      if FReach[LMid] then
+      begin
+        LKeys[LMid] := IfThen(FReachLib[LMid], '1', '0') +
+          LowerCase(FProject.ModelFile(LMid));
+        LMids.Add(LMid);
+      end;
+    LMids.Sort(TComparer<Integer>.Construct(
+      function(const A, B: Integer): Integer
+      begin
+        Result := CompareStr(LKeys[A], LKeys[B]);
+      end));
+    Result := LMids.ToArray;
+  finally
+    LMids.Free;
+  end;
 end;
 
 { $/progress for a workspace query that has to make library bodies full or
@@ -2866,14 +3011,24 @@ end;
   light own unit answers wrongly with no error. Empty when the option is off
   or the client sent no libraryPaths. }
 function TLspServer.LightTreesFor: TArray<string>;
+begin
+  Result := nil;
+  // After an escalation the session stays full (FLightEscalated).
+  if not FLightLibraries or FLightEscalated then
+    Exit;
+  Result := LibraryTreesFor(True);
+end;
+
+{ The trees LightTreesFor makes light, whatever the mode - FLibTrees, what
+  the closure lists are cut by in both modes. }
+function TLspServer.LibraryTreesFor(ALog: Boolean): TArray<string>;
 var
   LTrees, LOwn: TArray<string>;
   LTree, LOwnFile, LBds: string;
   LKeep: Boolean;
 begin
   Result := nil;
-  // After an escalation the session stays full (FLightEscalated).
-  if not FLightLibraries or FLightEscalated or (Length(FLibraryPaths) = 0) then
+  if Length(FLibraryPaths) = 0 then
     Exit;
   LTrees := FLibraryPaths;
   // $(BDS): the IDE sets it for the processes it starts, rsvars.bat for a
@@ -2892,8 +3047,9 @@ begin
     for LOwnFile in LOwn do
       if PasUnderDirTrees(LOwnFile, [LTree]) then
       begin
-        Log(Format('  light libraries: %s holds %s - analyzed in full',
-          [LTree, LOwnFile]));
+        if ALog then
+          Log(Format('  light libraries: %s holds %s - analyzed in full',
+            [LTree, LOwnFile]));
         LKeep := False;
         Break;
       end;
@@ -3994,6 +4150,23 @@ end;
   scope and stay out. Empty query legitimately means "everything" - the RAD
   client prefetches on it and filters locally in the IDE Insight dialog -
   so the cap is high and NEVER silent (the log carries the drop count). }
+{ AScope or a scope above it is an implementation section - a declaration
+  there, or a member of a type declared there. }
+function InImplementationScope(AModel: TPasSemaModel; AScope: Integer): Boolean;
+begin
+  Result := False;
+  while (AScope >= 0) and (AScope < AModel.Scopes.Count) do
+  begin
+    case AModel.Scopes[AScope].Kind of
+      sckImplementation:
+        Exit(True);
+      sckUnit, sckSystem:
+        Exit(False);
+    end;
+    AScope := AModel.Scopes[AScope].Parent;
+  end;
+end;
+
 function TLspServer.HandleWorkspaceSymbol(const AMsg: TLspIncoming): string;
 const
   cMaxResults = 20000;
@@ -4004,6 +4177,7 @@ var
   LHit: TPasRefHit;
   LSB: TStringBuilder;
   LStart: UInt64;
+  LLib: Boolean;
 begin
   LQuery := '';
   if AMsg.Params <> nil then
@@ -4019,11 +4193,14 @@ begin
   LDropped := 0;
   LSB := TStringBuilder.Create;
   try
-    for LMid := 0 to FProject.ModelCount - 1 do
+    // The closure as both modes have it (LibraryReach), own units first:
+    // the cap then cuts the same rows in both.
+    for LMid in ReachedMidsOrdered do
     begin
       LModel := FProject.Model(LMid);
       if LModel = nil then
         Continue;
+      LLib := FReachLib[LMid];
       LFile := TPath.GetFileName(FProject.ModelFile(LMid));
       for LIdx := 0 to LModel.SymCount - 1 do
         with LModel.Symbols[LIdx] do
@@ -4036,6 +4213,11 @@ begin
           if (Scope < 0) or (Scope >= LModel.Scopes.Count) or
              not (LModel.Scopes[Scope].Kind in
                [sckUnit, sckImplementation, sckStruct, sckEnum]) then
+            Continue;
+          // A library unit's interface alone: its implementation is what a
+          // light analysis does not have, promoted or not - and what no
+          // other unit can name.
+          if LLib and InImplementationScope(LModel, Scope) then
             Continue;
           if (LQuery <> '') and (Pos(LQuery, NameLower) = 0) then
             Continue;
@@ -4403,7 +4585,8 @@ end;
   that navigates to the component rather than to a line of text. }
 function TLspServer.HandleReferences(const AMsg: TLspIncoming): string;
 var
-  LPath, LName: string;
+  LRowsStart: UInt64;
+  LPath, LName, LUnitFile: string;
   LLine, LChar, LPasLine, LPasCol, LMid, LTMid, LSym, LRawTok: Integer;
   LInclDecl, LImplHeaders: Boolean;
   LHits: TArray<TPasRefHit>;
@@ -4454,8 +4637,17 @@ begin
   if FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) then
   begin
     LKind := 'unit';
-    LHits := FNav.FindUnitReferences(LTMid);
-    if LInclDecl and FNav.UnitDeclHit(LTMid, LDecl) then
+    // Through the workspace too (PasTree 0.122.0): the `uses` entries of the
+    // units only library bodies use, and the qualifiers written in library
+    // bodies, are rows once those units are loaded / made full.
+    LUnitFile := FProject.ModelFile(LTMid);
+    LHits := FWS.FindUnitReferences(LUnitFile);
+    LNotSearched := WsDone(AMsg.Method);
+    if FWS.Status.Cancelled then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
+        'request cancelled'));
+    LTMid := FNav.ModelIdOf(LUnitFile);
+    if LInclDecl and (LTMid >= 0) and FNav.UnitDeclHit(LTMid, LDecl) then
       LHits := [LDecl] + LHits;
   end
   else if FNav.SymbolAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
@@ -4517,6 +4709,7 @@ begin
        Format(' + %d in form files', [Length(LForms)]), ''),
      IfThen(LNotSearched > 0,
        Format(', %d library units not searched', [LNotSearched]), '')]));
+  LRowsStart := GetTickCount64;
   LSB := TStringBuilder.Create;
   try
     LSB.Append('[');
@@ -4540,6 +4733,12 @@ begin
     end;
     LSB.Append(']');
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
+    // The rows' type spans read every hit's file: on a unit's references
+    // across a library that is seconds of its own (2026-10-19), and the log
+    // must say which half of a slow answer it was.
+    Log(Format('  %d rows with their type spans in %d ms, %dK chars',
+      [Length(LHits) + Length(LForms), GetTickCount64 - LRowsStart,
+       Length(Result) div 1024]));
   finally
     LSB.Free;
   end;
@@ -4669,8 +4868,16 @@ begin
       APlan.UnitPath := LDecl.FilePath;
     if ANewName = '' then
       Exit(True);
-    Result := FNav.PlanUnitRename(LTMid, ANewName, {out} APlan.Edits,
-      {out} APlan.RequiredFileName, {out} APlan.Inactive, {out} AError);
+    // Through the workspace (PasTree 0.122.0): its references first.
+    Result := FWS.PlanUnitRename(FProject.ModelFile(LTMid), ANewName,
+      {out} APlan.Edits, {out} APlan.RequiredFileName, {out} APlan.Inactive,
+      {out} AError);
+    WsDone('rename');
+    if Result and FWS.Status.Cancelled then
+    begin
+      Result := False;
+      AError := 'The rename was cancelled.';
+    end;
     if not Result then
     begin
       APlan.Edits := nil;
@@ -5520,6 +5727,17 @@ begin
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
+  // A LIGHT document - opened, its promotion not started, refused, or
+  // between two sessions: its bodies are not analyzed, and every gate
+  // inside one would read False, greying commands a full analysis offers.
+  // Making it full would wait, which this request never does: "cannot say",
+  // as for an analysis in flight (the commands are their own gates).
+  if FProject.IsLight(LMid) then
+  begin
+    Log('findAllAt: cannot say - ' + TPath.GetFileName(LPath) +
+      ' is analyzed interface-only yet');
+    Exit(BuildResponse(AMsg.IdJson, 'null'));
+  end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
   // The same four identities HandleReferences tries, in its order.
   LRefs := FNav.UnitAt(LMid, LPasLine, LPasCol, LTMid, LName) or
@@ -6101,6 +6319,11 @@ begin
         'outline: textDocument.uri required for scope "module"'));
   end;
   if not WaitAnalyzed(LPath, AMsg.IdJson) then
+    Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+  // A light library file's outline has its implementation once it is full
+  // (PasTree's "one library file" family): a refused background promotion
+  // no longer leaves it interface-only. Free for any other file.
+  if (LScope = 'module') and not EnsureFileFull(LPath, 'pastree/outline') then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if (FNav = nil) or (FProject = nil) then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -7015,10 +7238,12 @@ begin
                True) then
             AddProjectPath(LItem);
         end;
+    // The closure as both modes have it (LibraryReach): a unit only a
+    // library unit's implementation uses is not in it - light mode never
+    // loads one, and the project cannot name it through its own `uses`.
     if (LScope = 'closure') and (FProject <> nil) then
-      for LMid := 0 to FProject.ModelCount - 1 do
-        if FProject.Model(LMid) <> nil then
-          LPaths.Add(TPath.GetFullPath(FProject.ModelFile(LMid)));
+      for LMid in ReachedMidsOrdered do
+        LPaths.Add(TPath.GetFullPath(FProject.ModelFile(LMid)));
 
     LBuf.Init(LPaths.Count * 160 + 256);
     LBuf.Add('{"scope":');
@@ -7642,7 +7867,10 @@ begin
   if LPath = '' then
     Exit(BuildError(AMsg.IdJson, LSP_INVALID_PARAMS,
       'documentSymbol: textDocument.uri required'));
-  if not WaitAnalyzed(LPath, AMsg.IdJson) then
+  // A light library file: its implementation's symbols once it is full, as
+  // pastree/outline.
+  if not WaitAnalyzed(LPath, AMsg.IdJson) or
+     not EnsureFileFull(LPath, AMsg.Method) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if FNav = nil then
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -8407,8 +8635,12 @@ end;
   wants them, a line's type spans do not. Shared by HandleSemanticTokens and
   LineTypeSpansJson (the result surfaces' type colouring). }
 function TLspServer.CollectSemanticTokens(const APath: string;
-  AInactive: Boolean): TArray<TSemanticToken>;
+  AInactive: Boolean; AOnlyLine: Integer): TArray<TSemanticToken>;
+type
+  PStream = ^TPasTokenStream;
 var
+  LLineFrom, LLineTo: Integer;
+  LLineToks: TArray<TPasToken>;
   LPath: string;
   LMid, LFileId, LIdx, LNode, LSymIdx, LResMid, LResSym, LCount: Integer;
   LModel: TPasSemaModel;
@@ -8418,10 +8650,12 @@ var
   LRegion: TPasSkippedRegion;
 
   // The model's stream for the document's own file - the node token
-  // positions are offsets into THIS text.
-  function Stream: TPasTokenStream;
+  // positions are offsets into THIS text. A POINTER: the stream is a record,
+  // and returning it copied every managed field, reference counts and all,
+  // on each of the several calls per node (0.73.0).
+  function Stream: PStream;
   begin
-    Result := LModel.Tree.Source.Files[LFileId];
+    Result := @LModel.Tree.Source.Files[LFileId];
   end;
 
   // One identifier token for ANode, if it lies in this file and its symbol
@@ -8486,6 +8720,34 @@ var
       Exit;
     Stream.OffsetToLineCol(Stream.Tokens[LVis.TokenIndex].Start, LLine, LCol);
     Result := FNav.SymbolAt(LMid, LLine, LCol, AMid, ASym, LName);
+  end;
+
+  // AOnlyLine > 0: ANode's token is in this file on that line. Asked before
+  // anything costly - NavResolve above all, a SymbolAt per name - so a row's
+  // type spans in a file met once do not cost the file's whole walk.
+  function OnLine(ANode: Integer): Boolean;
+  var
+    LVisIdx, LStart: Integer;
+    LVis: TPasVisibleToken;
+  begin
+    if AOnlyLine <= 0 then
+      Exit(True);
+    Result := False;
+    if (ANode < 0) or (ANode > High(LModel.Tree.Nodes)) then
+      Exit;
+    LVisIdx := LModel.Tree.Nodes[ANode].FirstToken;
+    if (LVisIdx < 0) or (LVisIdx > High(LModel.Tree.Source.Visible)) then
+      Exit;
+    LVis := LModel.Tree.Source.Visible[LVisIdx];
+    // LLineToks, not Stream.Tokens: Stream returns the stream RECORD, a
+    // copy with every managed field's reference counted, per call.
+    if (LVis.FileId <> LFileId) or (LVis.TokenIndex < 0) or
+       (LVis.TokenIndex > High(LLineToks)) then
+      Exit;
+    // The line's offsets, not OffsetToLineCol per node: a binary search for
+    // every node of a large library file was most of what this saves.
+    LStart := LLineToks[LVis.TokenIndex].Start;
+    Result := (LStart >= LLineFrom) and (LStart < LLineTo);
   end;
 
   // A skipped ($IFDEF'd-out) region as comment tokens, one per covered line,
@@ -8563,17 +8825,34 @@ begin
       Break;
     end;
 
+  // AOnlyLine's offsets in the stream: [LLineFrom, LLineTo).
+  LLineFrom := 0;
+  LLineTo := 0;
+  LLineToks := nil;
+  if AOnlyLine > 0 then
+  begin
+    LLineToks := Stream.Tokens;
+    if AOnlyLine > Length(Stream.LineStarts) then
+      Exit;
+    LLineFrom := Stream.LineStarts[AOnlyLine - 1];
+    if AOnlyLine < Length(Stream.LineStarts) then
+      LLineTo := Stream.LineStarts[AOnlyLine]
+    else
+      LLineTo := MaxInt;
+  end;
+
   LTokens := TList<TSemanticToken>.Create;
   try
     // 1. declarations
     for LSymIdx := 0 to LModel.SymCount - 1 do
       if (LModel.Symbols[LSymIdx].DeclNode <> NIL_NODE) and
-         (LModel.Symbols[LSymIdx].Name <> '') then
+         (LModel.Symbols[LSymIdx].Name <> '') and
+         OnLine(LModel.Symbols[LSymIdx].DeclNode) then
         AddIdent(LModel.Symbols[LSymIdx].DeclNode, LMid, LSymIdx, True);
     // 2. references
     for LNode := 0 to High(LModel.Tree.Nodes) do
     begin
-      if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
+      if (LModel.Tree.Nodes[LNode].Kind <> nkIdent) or not OnLine(LNode) then
         Continue;
       LSymIdx := NIL_SYM;
       if LNode <= High(LModel.RefMap) then
@@ -8594,7 +8873,7 @@ begin
     // them, merged where they touch - Skipped never holds a directive, so
     // a `{$DEFINE}` inside a dead branch was a coloured hole in the grey
     // (Alex, 2026-10-09, System.SysUtils' X86ASM on Win64).
-    if AInactive then
+    if AInactive and (AOnlyLine <= 0) then
       for LRegion in InactiveRegions(LModel.Tree.Source, LFileId) do
         AddInactive(LRegion);
 
@@ -8641,19 +8920,41 @@ end;
   replaced (InvalidateAnalysis) or refreshed (PublishDiagnostics). }
 function TLspServer.LineTypeSpansJson(const APath: string;
   ALine: Integer): string;
+const
+  cLinesAlone = 4;
 var
   LKey: string;
   LTokens: TArray<TSemanticToken>;
   LLo, LHi, LMid: Integer;
+  LMisses: Integer;
   LSB: TStringBuilder;
 begin
   LKey := LowerCase(TPath.GetFullPath(APath));
   if FLineTokenCache = nil then
     FLineTokenCache := TDictionary<string, TArray<TSemanticToken>>.Create;
-  if not FLineTokenCache.TryGetValue(LKey, LTokens) then
+  if FLineMisses = nil then
+    FLineMisses := TDictionary<string, Integer>.Create;
+  if not FLineTokenCache.TryGetValue(LKey, LTokens) and
+     not FLineTokenCache.TryGetValue(LKey + '#' + IntToStr(ALine), LTokens) then
   begin
-    LTokens := CollectSemanticTokens(APath, False);
-    FLineTokenCache.Add(LKey, LTokens);
+    // A FEW LINES OF A FILE: collected line by line. Find References on a
+    // unit lists a `uses` row in each of a thousand library files, and the
+    // whole-file walk of each (a SymbolAt per unresolved name) cost 2.7 s
+    // of a 6.5 s answer on a 3,782-unit closure (2026-10-19); a file met
+    // more often than cLinesAlone gets its whole walk, once, as before.
+    FLineMisses.TryGetValue(LKey, LMisses);
+    Inc(LMisses);
+    FLineMisses.AddOrSetValue(LKey, LMisses);
+    if LMisses <= cLinesAlone then
+    begin
+      LTokens := CollectSemanticTokens(APath, False, ALine);
+      FLineTokenCache.Add(LKey + '#' + IntToStr(ALine), LTokens);
+    end
+    else
+    begin
+      LTokens := CollectSemanticTokens(APath, False);
+      FLineTokenCache.Add(LKey, LTokens);
+    end;
   end;
   // The first token of ALine, by binary search on the sorted array.
   LLo := 0;

@@ -230,6 +230,8 @@ implementation
 uses
   System.SysUtils,
   System.Math,
+  System.Generics.Collections,
+  System.Generics.Defaults,
   PasTree.Parser,
   PasTree.Ast,
   PasTree.Sema.Model,
@@ -1771,6 +1773,18 @@ begin
       // carries the milliseconds - if a real project proves this expensive,
       // the fix is lazy resolve, not a cliff that silently strips the list.
       LWithTypes := AProject <> nil;
+      // A `uses` clause's list: unit names only, in the closure's model
+      // order - which a light analysis numbers differently from a full one.
+      // By name, so both answer the same list (0.73.0).
+      if (Length(LItems) > 0) and (LItems[0].Bucket = cbUnitName) and
+         (LItems[High(LItems)].Bucket = cbUnitName) then
+        TArray.Sort<TPasComplItem>(LItems, TComparer<TPasComplItem>.Construct(
+          function(const A, B: TPasComplItem): Integer
+          begin
+            Result := CompareText(A.Name, B.Name);
+            if Result = 0 then
+              Result := CompareStr(A.Name, B.Name);
+          end));
       SetLength(Result.Items, Length(LItems));
       for LIdx := 0 to High(LItems) do
       begin

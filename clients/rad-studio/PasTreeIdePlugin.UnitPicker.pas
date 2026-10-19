@@ -342,7 +342,15 @@ end;
   personality, which may register after a designtime package loads; an
   action not there at startup is looked for again on a timer, a few times. }
 type
-  TActionHook = class
+  { A component for one reason: the IDE frees its actions BEFORE it unloads
+    the wizard, and FinalizeUnitPicker then read OnExecute of a freed action
+    - an access violation at every IDE exit (2026-10-19, UnhookIdeActions).
+    FreeNotification clears Action instead, and there is nothing to put
+    back. }
+  TActionHook = class(TComponent)
+  protected
+    procedure Notification(AComponent: TComponent;
+      AOperation: TOperation); override;
   public
     Action: TContainedAction;
     Original: TNotifyEvent;
@@ -384,6 +392,14 @@ begin
     Exit;
   if LspLogToServer('unitpicker menu hooks: ' + GHookReport) then
     GHookReported := True;
+end;
+
+procedure TActionHook.Notification(AComponent: TComponent;
+  AOperation: TOperation);
+begin
+  inherited;
+  if (AOperation = opRemove) and (AComponent = Action) then
+    Action := nil;
 end;
 
 procedure TActionHook.Execute(ASender: TObject);
@@ -439,8 +455,9 @@ begin
       Result := False;
       Continue;
     end;
-    LHook := TActionHook.Create;
+    LHook := TActionHook.Create(nil);
     LHook.Action := LAction;
+    LAction.FreeNotification(LHook);
     LHook.Original := LAction.OnExecute;
     LHook.Mode := LMode;
     LAction.OnExecute := LHook.Execute;
@@ -489,6 +506,12 @@ begin
     if not Assigned(LHook) then
       Continue;
     GHooks[LMode] := nil;
+    // The IDE freed the action already (it does at exit): nothing to restore.
+    if LHook.Action = nil then
+    begin
+      LHook.Free;
+      Continue;
+    end;
     LOurs := LHook.Execute;
     if (TMethod(LHook.Action.OnExecute).Code = TMethod(LOurs).Code) and
        (TMethod(LHook.Action.OnExecute).Data = TMethod(LOurs).Data) then
@@ -500,7 +523,11 @@ begin
     begin
       // Someone repointed it after us and may call ours as their previous:
       // leave the chain alone. The object stays allocated (it is tiny) so a
-      // late call finds valid memory while the package is still mapped.
+      // late call finds valid memory while the package is still mapped -
+      // with no free notification left that would call into an unloaded
+      // package.
+      LHook.Action.RemoveFreeNotification(LHook);
+      LHook.Action := nil;
       LspLogToServer('unitpicker: ' + cHookedActions[LMode] + ' was '
         + 'repointed after us - left as it is');
     end;

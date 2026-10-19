@@ -73,8 +73,8 @@ procedure CloseFindReferencesResults;
 implementation
 
 uses
-  System.SysUtils, System.Character, System.Generics.Collections,
-  Vcl.Dialogs, Vcl.Forms,
+  Winapi.Windows, System.SysUtils, System.Character,
+  System.Generics.Collections, Vcl.Dialogs, Vcl.Forms,
   ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.RenameToolbar;
@@ -219,43 +219,94 @@ type
   /// </summary>
   TSnippetCache = class
   private
-    FLines: TDictionary<string, TArray<string>>;
+    // Per file its text and where each line starts, found as far as a row
+    // asked for - not a string per line: a unit's references are a row or
+    // two in each of a thousand files, many of them the RTL's largest, and
+    // splitting each whole was seconds of a frozen IDE (2026-10-19).
+    FTexts: TDictionary<string, string>;
+    FStarts: TDictionary<string, TList<Integer>>;
   public
+    TextMs: UInt64;
     constructor Create;
     destructor Destroy; override;
     function LineAt(const AFilePath: string; ARow: Integer): string;
+    function FileCount: Integer;
   end;
 
 constructor TSnippetCache.Create;
 begin
   inherited Create;
-  FLines := TDictionary<string, TArray<string>>.Create;
+  FTexts := TDictionary<string, string>.Create;
+  FStarts := TObjectDictionary<string, TList<Integer>>.Create([doOwnsValues]);
 end;
 
 destructor TSnippetCache.Destroy;
 begin
-  FLines.Free;
+  FStarts.Free;
+  FTexts.Free;
   inherited;
+end;
+
+function TSnippetCache.FileCount: Integer;
+begin
+  Result := FTexts.Count;
 end;
 
 function TSnippetCache.LineAt(const AFilePath: string; ARow: Integer): string;
 var
-  LKey: string;
-  LLines: TArray<string>;
+  LKey, LText: string;
+  LStarts: TList<Integer>;
+  LPos, LEnd, LLen: Integer;
+  LT0: UInt64;
 begin
   Result := '';
   LKey := LowerCase(AFilePath);
-  if not FLines.TryGetValue(LKey, LLines) then
+  if not FTexts.TryGetValue(LKey, LText) then
   begin
-    LLines := LspSourceTextOf(AFilePath).Replace(#13#10, #10).Split([#10]);
-    FLines.Add(LKey, LLines);
-  end;
+    LT0 := GetTickCount64;
+    LText := LspSourceTextOf(AFilePath);
+    Inc(TextMs, GetTickCount64 - LT0);
+    FTexts.Add(LKey, LText);
+    LStarts := TList<Integer>.Create;
+    LStarts.Add(1);
+    FStarts.Add(LKey, LStarts);
+  end
+  else
+    LStarts := FStarts[LKey];
   // ARow is 1-based, and a stale row against a file we could not read must
   // degrade to an empty snippet rather than raise. The line comes back RAW
   // (untrimmed): the caller maps the hit's column into the display text, so
   // it must be the one deciding how much leading whitespace went away.
-  if (ARow >= 1) and (ARow <= Length(LLines)) then
-    Result := LLines[ARow - 1];
+  if ARow < 1 then
+    Exit;
+  LLen := Length(LText);
+  // Line starts as far as ARow (a line ends at CR LF, LF or a lone CR, as
+  // the Replace + Split this replaces read CR LF and LF).
+  while LStarts.Count < ARow do
+  begin
+    LPos := LStarts[LStarts.Count - 1];
+    if LPos > LLen + 1 then
+      Exit;
+    while (LPos <= LLen) and (LText[LPos] <> #10) do
+      Inc(LPos);
+    if LPos > LLen then
+    begin
+      // The last line has no break: no line after it.
+      LStarts.Add(LLen + 2);
+      Exit;
+    end;
+    LStarts.Add(LPos + 1);
+  end;
+  LPos := LStarts[ARow - 1];
+  if LPos > LLen + 1 then
+    Exit;
+  LEnd := LPos;
+  while (LEnd <= LLen) and (LText[LEnd] <> #10) do
+    Inc(LEnd);
+  // CR LF: the CR is the break's, as the old Replace(#13#10, #10) had it.
+  if (LEnd <= LLen) and (LEnd > LPos) and (LText[LEnd - 1] = #13) then
+    Dec(LEnd);
+  Result := Copy(LText, LPos, LEnd - LPos);
 end;
 
 /// <summary>
@@ -271,6 +322,53 @@ end;
 /// AddCustomMessage(row, Parent) (hits) - the custom-message parallel of
 /// the AddToolMessage Parent/LineRef mechanism used before.
 /// </summary>
+{ The length of the dotted name at AStart in ALine (`System.Classes`,
+  spaces around the dots allowed as the compiler allows them) when one of its
+  segments is AIdent; 0 otherwise. }
+function DottedMatchLen(const ALine: string; AStart: Integer;
+  const AIdent: string): Integer;
+const
+  cWord = ['A'..'Z', 'a'..'z', '0'..'9', '_'];
+var
+  LPos, LSegStart, LEnd: Integer;
+  LFound: Boolean;
+begin
+  Result := 0;
+  if (AIdent = '') or (AStart < 1) or (AStart > Length(ALine)) then
+    Exit;
+  LPos := AStart;
+  LEnd := 0;
+  LFound := False;
+  while LPos <= Length(ALine) do
+  begin
+    if ALine[LPos] = '&' then
+      Inc(LPos);
+    LSegStart := LPos;
+    while (LPos <= Length(ALine)) and CharInSet(ALine[LPos], cWord) do
+      Inc(LPos);
+    if LPos = LSegStart then
+      Break;
+    // Up to the segment clicked: `System.Classes.toString` highlights
+    // `System.Classes`.
+    if SameText(Copy(ALine, LSegStart, LPos - LSegStart), AIdent) then
+    begin
+      LFound := True;
+      LEnd := LPos;
+      Break;
+    end;
+    // Another segment only after a dot.
+    while (LPos <= Length(ALine)) and (ALine[LPos] = ' ') do
+      Inc(LPos);
+    if (LPos > Length(ALine)) or (ALine[LPos] <> '.') then
+      Break;
+    Inc(LPos);
+    while (LPos <= Length(ALine)) and (ALine[LPos] = ' ') do
+      Inc(LPos);
+  end;
+  if LFound then
+    Result := LEnd - AStart;
+end;
+
 procedure ReportHits(const AIdentifier: string;
   AProjectsSearched, AProjectsInGroup: Integer; AImplHeaders, AHasDecl: Boolean;
   const ADeclHit: TLspHit; const AHits: TArray<TLspHit>);
@@ -284,6 +382,8 @@ var
   LHit: TLspHit;
   LSnippets: TSnippetCache;
   LTitleHead, LTitleCount: string;
+  LT0, LTick, LAt, LHeaderMs, LRowMs: UInt64;
+  LIdx: Integer;
 
   procedure CountFile(const AFilePath: string);
   var
@@ -304,8 +404,10 @@ var
     if not LFileHeaders.TryGetValue(LKey, Result) then
     begin
       LFileCounts.TryGetValue(LKey, LFileCount);
+      LAt := GetTickCount64;
       Result := LMessageServices.AddCustomMessagePtr(
         NewFileHeaderRow(AFilePath, LFileCount), LGroup);
+      Inc(LHeaderMs, GetTickCount64 - LAt);
       LFileHeaders.Add(LKey, Result);
     end;
   end;
@@ -328,13 +430,17 @@ var
     if (LMatchLen = 0) or (LMatchStart < 1) or
        (LMatchStart + LMatchLen - 1 > Length(LDisplay)) or
        not SameText(Copy(LDisplay, LMatchStart, LMatchLen), AIdentifier) then
-    begin
+      // A DOTTED NAME - a unit's `System.Classes`, as a `uses` entry or a
+      // qualifier: the hit starts at its first segment and the identifier
+      // clicked is one of the others. The whole name is the match.
+      LMatchLen := DottedMatchLen(LDisplay, LMatchStart, AIdentifier);
+    if LMatchLen = 0 then
       LMatchStart := 0;
-      LMatchLen := 0;
-    end;
+    LAt := GetTickCount64;
     LMessageServices.AddCustomMessage(
       NewSnippetRow(AHit.FilePath, AHit.Row, AHit.Col, LDisplay,
         LMatchStart, LMatchLen, ATag, AHit.TypeSpans), AParent);
+    Inc(LRowMs, GetTickCount64 - LAt);
   end;
 
 begin
@@ -370,6 +476,9 @@ begin
     NewTitleRow(LTitleHead + LTitleCount + ' reference(s)' + LImplHeaders +
       LScope, Length(LTitleHead) + 1, Length(LTitleCount)), LGroup);
 
+  LT0 := GetTickCount64;
+  LHeaderMs := 0;
+  LRowMs := 0;
   LFileCounts := TDictionary<string, Integer>.Create;
   LFileHeaders := TDictionary<string, Pointer>.Create;
   LSnippets := TSnippetCache.Create;
@@ -385,11 +494,31 @@ begin
       AddSnippetRow(ADeclHit, 'declaration', LParentRef);
     end;
 
-    for LHit in AHits do
+    LTick := GetTickCount64;
+    for LIdx := 0 to High(AHits) do
     begin
+      LHit := AHits[LIdx];
       LParentRef := GetOrCreateFileHeader(LHit.FilePath);
       AddSnippetRow(LHit, '', LParentRef);
+      // How far the list is, on the wait dialog it is filled under
+      // (ReportUnderWaitDialog) - a few times a second, not per row.
+      if GetTickCount64 - LTick >= 200 then
+      begin
+        UpdateWaitDialogWork(Format('Listing results: %d of %d',
+          [LIdx + 1, Length(AHits)]));
+        LTick := GetTickCount64;
+      end;
     end;
+    // Where a long report's time went: the texts (LspSourceTextOf) or the
+    // Messages view's rows. Measured 2026-10-19 on 3,123 rows in 2,974
+    // files: the panel's own add is ~1 ms per file header (a top-level row)
+    // and ~0.4 ms per row under one, flat - neither its BeginUpdate nor a
+    // cheaper CalcRect moved it, so a list that long shows its progress on
+    // the wait dialog instead.
+    LspLogToServer(Format('refs: report of %d rows in %d files in %d ms, '
+      + 'texts %d ms, adds: headers %d ms, rows %d ms', [Length(AHits),
+      LSnippets.FileCount, GetTickCount64 - LT0, LSnippets.TextMs, LHeaderMs,
+      LRowMs]));
   finally
     LSnippets.Free;
     LFileHeaders.Free;
