@@ -138,10 +138,14 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   System.StrUtils,
+  System.Math,
   System.Variants,
   System.Win.Registry,
   Winapi.Windows,
+  Winapi.Messages,
   Vcl.Graphics,
+  Vcl.Controls,
+  Vcl.Forms,
   Vcl.Themes,
   ToolsAPI,
   ToolsAPI.UI,
@@ -299,6 +303,375 @@ begin
     Result.StartsFirst);
   Result.Shortest := ReadBool('CodeInsightShorterSymbols', Result.Shortest);
   Result.Underline := ReadBool('CodeInsightFilterUnderline', Result.Underline);
+end;
+
+{ ---------------------------------------------------------------------------
+  The row count under the Code Completion list
+  --------------------------------------------------------------------------- }
+
+type
+  { A status strip at the bottom of the IDE's Code Completion window, in its
+    NON-CLIENT area (Alex, 2026-10-19: "a status bar with the row count").
+    The window is one control - TCodeCompleteListView "KibitzWindow", a popup
+    whose VCL Parent is the main form, with no child controls (the 0.73.2
+    probe) - so there is no panel to dock a TStatusBar into, and a child
+    window over its client area would hide the last row from its scrolling.
+    Taking the strip out of the client area in WM_NCCALCSIZE makes the list
+    lay itself out above it; WM_NCPAINT paints it as the IDE style's status
+    bar. Hooked through the control's WindowProc, which outlives a handle
+    recreation; FreeNotification drops the hook's target if the IDE frees
+    the window first. Active only while OUR list is shown - a hide turns it
+    off, so the native manager's list, should it be selected, is untouched. }
+  TCompletionStatusStrip = class(TComponent)
+  private
+    FTarget: TWinControl;
+    FOldProc: TWndMethod;
+    FActive: Boolean;   // the strip is wanted (our list is the one shown)
+    FShrunk: Boolean;   // the last WM_NCCALCSIZE took the strip's room
+    FText: string;
+    procedure Hook(ATarget: TWinControl);
+    procedure Unhook;
+    procedure WndProc(var AMsg: TMessage);
+    procedure SetActive(AValue: Boolean);
+    procedure QueueFrame;
+    function StripHeight: Integer;
+    function StripRectInWindow(out ARect: TRect): Boolean;
+    procedure PaintStrip;
+  protected
+    procedure Notification(AComponent: TComponent;
+      Operation: TOperation); override;
+  public
+    destructor Destroy; override;
+    procedure ShowCounts(AVisible, ATotal: Integer; const AFilter: string);
+  end;
+
+var
+  GStatusStrip: TCompletionStatusStrip = nil;
+  // The posted frame recompute (TCompletionStatusStrip.SetActive).
+  GStripFrameMsg: Cardinal = 0;
+
+// The Code Completion window: a child of the main form's control list, by
+// the name and class the probe saw. nil before the IDE created it.
+function FindCompletionWindow: TWinControl;
+var
+  LMain: TForm;
+  LIdx: Integer;
+  LControl: TControl;
+begin
+  Result := nil;
+  LMain := Application.MainForm;
+  if LMain = nil then
+    Exit;
+  for LIdx := 0 to LMain.ControlCount - 1 do
+  begin
+    LControl := LMain.Controls[LIdx];
+    if (LControl is TWinControl) and (SameText(LControl.Name, 'KibitzWindow')
+       or SameText(LControl.ClassName, 'TCodeCompleteListView')) then
+      Exit(TWinControl(LControl));
+  end;
+end;
+
+destructor TCompletionStatusStrip.Destroy;
+begin
+  Unhook;
+  inherited;
+end;
+
+procedure TCompletionStatusStrip.Notification(AComponent: TComponent;
+  Operation: TOperation);
+begin
+  inherited;
+  // The window is going: its WindowProc goes with it, nothing to restore.
+  if (Operation = opRemove) and (AComponent = FTarget) then
+  begin
+    FTarget := nil;
+    FActive := False;
+  end;
+end;
+
+procedure TCompletionStatusStrip.Hook(ATarget: TWinControl);
+begin
+  FTarget := ATarget;
+  FOldProc := ATarget.WindowProc;
+  ATarget.WindowProc := WndProc;
+  ATarget.FreeNotification(Self);
+  LspLogToServer('code insight: row count strip hooked to ' +
+    ATarget.ClassName + ' "' + ATarget.Name + '"');
+end;
+
+procedure TCompletionStatusStrip.Unhook;
+var
+  LMine: TWndMethod;
+begin
+  if FTarget = nil then
+    Exit;
+  FActive := False;
+  LMine := WndProc;
+  // Restored only while the chain still ends in us. Someone who hooked
+  // after us holds our method as THEIR old one; putting ours back over
+  // theirs would cut them off, and that is logged instead.
+  if (TMethod(FTarget.WindowProc).Code = TMethod(LMine).Code) and
+     (TMethod(FTarget.WindowProc).Data = TMethod(LMine).Data) then
+    FTarget.WindowProc := FOldProc
+  else
+    LspLogToServer('code insight: the completion window''s WindowProc was ' +
+      'hooked after ours - left as it is');
+  // Unloading: a list on screen gets its whole client area back now (the
+  // queue would deliver to a WindowProc that is no longer ours); a hidden
+  // one is left alone, as everywhere here.
+  if FShrunk and FTarget.HandleAllocated and
+     IsWindowVisible(FTarget.Handle) then
+    SetWindowPos(FTarget.Handle, 0, 0, 0, 0, 0, SWP_FRAMECHANGED or
+      SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE);
+  FTarget.RemoveFreeNotification(Self);
+  FTarget := nil;
+end;
+
+{ THE FRAME IS RECOMPUTED ONLY FROM THE QUEUE, AND ONLY ON A VISIBLE WINDOW.
+  Twice on 2026-10-19 a synchronous SetWindowPos(SWP_FRAMECHANGED) did harm:
+  inside SetFilter or a hide it made the list repaint rows while the viewer
+  was mid-update (AVs in the Code Templates manager's DrawLine, scrolling
+  and resizing), and on the HIDDEN window it made the IDE style's scroll bar
+  - a separate window TScrollingStyleHook keeps beside the list - show
+  itself and stay on screen after the list closed. So SetActive only records
+  the wish and posts; the posted message applies it when the window is
+  shown, and a hidden window is left alone until its next show. }
+procedure TCompletionStatusStrip.SetActive(AValue: Boolean);
+begin
+  if FActive = AValue then
+    Exit;
+  FActive := AValue;
+  if FActive <> FShrunk then
+    QueueFrame;
+end;
+
+procedure TCompletionStatusStrip.QueueFrame;
+begin
+  if (FTarget = nil) or not FTarget.HandleAllocated then
+    Exit;
+  if GStripFrameMsg = 0 then
+    GStripFrameMsg := RegisterWindowMessage('PasTreeCompletionStripFrame');
+  PostMessage(FTarget.Handle, GStripFrameMsg, 0, 0);
+end;
+
+// One line of the main form's font plus a status bar's padding, at the
+// window's own DPI.
+function TCompletionStatusStrip.StripHeight: Integer;
+var
+  LPPI, LFontHeight: Integer;
+begin
+  LPPI := FTarget.CurrentPPI;
+  if (Application.MainForm <> nil) and (Application.MainForm.Font <> nil) then
+    LFontHeight := MulDiv(Abs(Application.MainForm.Font.Height), LPPI,
+      Application.MainForm.Font.PixelsPerInch)
+  else
+    LFontHeight := MulDiv(12, LPPI, 72);
+  Result := LFontHeight + MulDiv(8, LPPI, 96);
+end;
+
+{ The strip in window coordinates: from the bottom of the client area down
+  over the frame's bottom band to the window's 1-pixel outline, and across
+  the whole inner width - under the scroll bar column too. Directly under
+  the client area alone it floated above a band of empty frame (Alex,
+  2026-10-19: "drawn a little higher than it should be"). }
+function TCompletionStatusStrip.StripRectInWindow(out ARect: TRect): Boolean;
+var
+  LWindow, LClient: TRect;
+  LOrigin: TPoint;
+begin
+  Result := (FTarget <> nil) and FTarget.HandleAllocated and
+    Winapi.Windows.GetWindowRect(FTarget.Handle, LWindow) and
+    Winapi.Windows.GetClientRect(FTarget.Handle, LClient);
+  if not Result then
+    Exit;
+  LOrigin := Point(0, 0);
+  Winapi.Windows.ClientToScreen(FTarget.Handle, LOrigin);
+  ARect.Left := 1;
+  ARect.Right := LWindow.Width - 1;
+  ARect.Top := LOrigin.Y - LWindow.Top + LClient.Bottom;
+  ARect.Bottom := LWindow.Height - 1;
+  Result := ARect.Bottom > ARect.Top;
+end;
+
+procedure TCompletionStatusStrip.PaintStrip;
+var
+  LDC: HDC;
+  LRect, LText, LWindow: TRect;
+  LOrigin: TPoint;
+  LCanvas: TCanvas;
+  LStyle: TCustomStyleServices;
+begin
+  if not StripRectInWindow(LRect) then
+    Exit;
+  LDC := GetWindowDC(FTarget.Handle);
+  if LDC = 0 then
+    Exit;
+  LCanvas := TCanvas.Create;
+  try
+    LCanvas.Handle := LDC;
+    if Application.MainForm <> nil then
+    begin
+      LCanvas.Font.Assign(Application.MainForm.Font);
+      LCanvas.Font.Height := -MulDiv(Abs(Application.MainForm.Font.Height),
+        FTarget.CurrentPPI, Application.MainForm.Font.PixelsPerInch);
+    end;
+    // The IDE style's own status bar: its background element and its panel
+    // text colour, so a dark theme gets the dark strip without a table here.
+    LStyle := StyleServices(FTarget);
+    if LStyle.Enabled and not LStyle.IsSystemStyle then
+    begin
+      LStyle.DrawElement(LDC, LStyle.GetElementDetails(tsStatusRoot), LRect);
+      LCanvas.Font.Color := LStyle.GetStyleFontColor(sfStatusPanelTextNormal);
+    end
+    else
+    begin
+      LCanvas.Brush.Color := clBtnFace;
+      LCanvas.FillRect(LRect);
+      LCanvas.Font.Color := clBtnText;
+    end;
+    LCanvas.Brush.Style := bsClear;
+    // The text starts where the rows do: past the frame's left band.
+    LText := LRect;
+    LOrigin := Point(0, 0);
+    Winapi.Windows.ClientToScreen(FTarget.Handle, LOrigin);
+    Winapi.Windows.GetWindowRect(FTarget.Handle, LWindow);
+    LText.Left := LOrigin.X - LWindow.Left + MulDiv(4, FTarget.CurrentPPI, 96);
+    LText.Right := LText.Right - MulDiv(4, FTarget.CurrentPPI, 96);
+    // Through the canvas, which selects its font into the DC first.
+    LCanvas.TextRect(LText, FText, [tfSingleLine, tfVerticalCenter, tfLeft,
+      tfNoPrefix, tfEndEllipsis]);
+  finally
+    LCanvas.Handle := 0;
+    LCanvas.Free;
+    ReleaseDC(FTarget.Handle, LDC);
+  end;
+end;
+
+procedure TCompletionStatusStrip.WndProc(var AMsg: TMessage);
+var
+  LStrip, LWindow: TRect;
+  LPoint: TPoint;
+  LRect: PRect;
+  LWindowBottom: Integer;
+begin
+  case AMsg.Msg of
+    WM_NCCALCSIZE:
+      begin
+        // Both shapes of the message: with wParam the rect is rgrc[0],
+        // without it lParam is the rect itself - the window rect in, the
+        // client rect out.
+        if AMsg.WParam <> 0 then
+          LRect := @PNCCalcSizeParams(AMsg.LParam).rgrc[0]
+        else
+          LRect := PRect(AMsg.LParam);
+        LWindowBottom := LRect.Bottom;
+        FOldProc(AMsg);
+        // One line in all: the frame's bottom band already is part of the
+        // strip (StripRectInWindow), so the client area gives up only what
+        // the band lacks of a line - all of it, it was three lines tall
+        // (Alex, 2026-10-19: "one line high, not three").
+        FShrunk := FActive;
+        if FActive then
+          Dec(LRect.Bottom, Max(0, StripHeight -
+            (LWindowBottom - LRect.Bottom)));
+      end;
+    WM_NCPAINT:
+      begin
+        FOldProc(AMsg);
+        if FActive and FShrunk then
+          PaintStrip;
+      end;
+    WM_NCHITTEST:
+      begin
+        FOldProc(AMsg);
+        // A click on the strip is nobody's - not a row, it is below the
+        // client area - except where the frame under it is a resize edge,
+        // which keeps resizing the window.
+        if FActive and StripRectInWindow(LStrip) and
+           Winapi.Windows.GetWindowRect(FTarget.Handle, LWindow) and
+           (AMsg.Result <> HTLEFT) and (AMsg.Result <> HTRIGHT) and
+           (AMsg.Result <> HTBOTTOM) and (AMsg.Result <> HTBOTTOMLEFT) and
+           (AMsg.Result <> HTBOTTOMRIGHT) then
+        begin
+          LPoint := Point(SmallInt(AMsg.LParamLo) - LWindow.Left,
+            SmallInt(AMsg.LParamHi) - LWindow.Top);
+          if PtInRect(LStrip, LPoint) then
+            AMsg.Result := HTBORDER;
+        end;
+      end;
+    // A hide only marks the strip unwanted - the frame of a hidden window is
+    // never touched (see SetActive). A show settles whatever is pending:
+    // the strip wanted and missing, or a list not ours on a shrunk client.
+    WM_SHOWWINDOW:
+      begin
+        FOldProc(AMsg);
+        if AMsg.WParam = 0 then
+          FActive := False
+        else if FActive <> FShrunk then
+          QueueFrame;
+      end;
+    WM_WINDOWPOSCHANGED:
+      begin
+        FOldProc(AMsg);
+        if PWindowPos(AMsg.LParam).flags and SWP_HIDEWINDOW <> 0 then
+          FActive := False
+        else if (PWindowPos(AMsg.LParam).flags and SWP_SHOWWINDOW <> 0) and
+                (FActive <> FShrunk) then
+          QueueFrame;
+      end;
+  else
+    if (GStripFrameMsg <> 0) and (AMsg.Msg = GStripFrameMsg) then
+    begin
+      // From the queue, visible, and still out of step: recompute now.
+      if (FActive <> FShrunk) and FTarget.HandleAllocated and
+         IsWindowVisible(FTarget.Handle) then
+        SetWindowPos(FTarget.Handle, 0, 0, 0, 0, 0, SWP_FRAMECHANGED or
+          SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE);
+    end
+    else
+      FOldProc(AMsg);
+  end;
+end;
+
+{ Called by our list on every SetFilter - the viewer refilters on each
+  keystroke, so this is the count as the user sees it. }
+procedure TCompletionStatusStrip.ShowCounts(AVisible, ATotal: Integer;
+  const AFilter: string);
+var
+  LWindow: TWinControl;
+begin
+  if FTarget = nil then
+  begin
+    LWindow := FindCompletionWindow;
+    if LWindow = nil then
+      Exit;
+    Hook(LWindow);
+  end;
+  if AFilter = '' then
+    FText := Format('%d items', [ATotal])
+  else
+    FText := Format('%d of %d items', [AVisible, ATotal]);
+  SetActive(True);
+  // Only the strip, and only on screen: an invalidation, painted when the
+  // queue gets to it.
+  if FTarget.HandleAllocated and IsWindowVisible(FTarget.Handle) then
+    RedrawWindow(FTarget.Handle, nil, 0, RDW_FRAME or RDW_INVALIDATE);
+end;
+
+procedure ShowCompletionCounts(AVisible, ATotal: Integer;
+  const AFilter: string);
+begin
+  if not GAlive then
+    Exit;
+  try
+    if GStatusStrip = nil then
+      GStatusStrip := TCompletionStatusStrip.Create(nil);
+    GStatusStrip.ShowCounts(AVisible, ATotal, AFilter);
+  except
+    // A strip that cannot be drawn must never cost the list itself.
+    on E: Exception do
+      LspLogToServer('code insight: row count strip failed: ' + E.Message);
+  end;
 end;
 
 type
@@ -568,6 +941,7 @@ begin
   Rebuild(FilterText);
   TraceList(Format('SetFilter("%s") -> %d of %d', [FilterText,
     Length(FVisible), Length(FAll)]));
+  ShowCompletionCounts(Length(FVisible), Length(FAll), FilterText);
 end;
 
 function TPasSymbolList.GetSymbolText(Index: Integer): string;
@@ -2254,6 +2628,9 @@ begin
   if Assigned(GManager) then
     RestoreProviderAtUnload;
   GAlive := False;
+  // The completion window outlives this package: its WindowProc must stop
+  // pointing into our code before the code goes.
+  FreeAndNil(GStatusStrip);
   if GManagerIndex >= 0 then
   begin
     if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
