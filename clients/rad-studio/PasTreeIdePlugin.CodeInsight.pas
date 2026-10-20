@@ -223,6 +223,10 @@ type
     StartsFirst: Boolean;   // CodeInsightFilterStartsWith - prefix matches first
     Shortest: Boolean;      // CodeInsightShorterSymbols - select the shortest
     Underline: Boolean;     // CodeInsightFilterUnderline
+    // CodeInsightShowReservedWords - "Show reserved words", kept visible for
+    // our provider (IsCodeCompleteShowReservedWordsVisible), obeyed since
+    // 0.73.6: unticked, the list has no keyword rows.
+    ReservedWords: Boolean;
   end;
 
 var
@@ -276,6 +280,7 @@ begin
   Result.StartsFirst := True;
   Result.Shortest := False;
   Result.Underline := True;
+  Result.ReservedWords := True;
   LOptions := nil;
   if Supports(BorlandIDEServices, IOTAServices, LServices) then
     LOptions := LServices.GetEnvironmentOptions;
@@ -304,6 +309,8 @@ begin
     Result.StartsFirst);
   Result.Shortest := ReadBool('CodeInsightShorterSymbols', Result.Shortest);
   Result.Underline := ReadBool('CodeInsightFilterUnderline', Result.Underline);
+  Result.ReservedWords := ReadBool('CodeInsightShowReservedWords',
+    Result.ReservedWords);
 end;
 
 { ---------------------------------------------------------------------------
@@ -1314,7 +1321,7 @@ type
     IOTACodeInsightManager, IOTACodeInsightSelection,
     IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
     IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer,
-    IOTAPrimaryCodeInsightManager)
+    IOTAPrimaryCodeInsightManager, IOTACodeInsightManagerEnvOptions)
   private
     FEnabled: Boolean;
     // GetContext's first call this session went to the log - see there.
@@ -1347,6 +1354,10 @@ type
     FNextId: Integer;
     FActiveId: Integer;
     FActiveHintId: Integer;
+    // The newest browse (Ctrl+Click): a superseded or cancelled one must not
+    // call back - with an error, as it did until 0.73.6, the IDE reported a
+    // failed browse for a gesture it had already replaced.
+    FActiveBrowseId: Integer;
     function CurrentView: IOTAEditView;
   public
     constructor Create;
@@ -1401,6 +1412,21 @@ type
       ALine, ACharIndex: Integer; ACallBack: TOTAParamIndexCallBack);
     procedure AsyncOperationCanceled(AId: Integer);
     function ShowCalculating: Boolean;
+    { IOTACodeInsightManagerEnvOptions - see IsCodeCompleteHistoryVisible }
+    function IsEnableErrorInsightVisible: Boolean;
+    function IsCodeCompleteAutoParensVisible: Boolean;
+    function IsCodeCompleteAutoInvokeVisible: Boolean;
+    function IsCodeCompleteHistoryVisible: Boolean;
+    function IsCodeCompleteShowReservedWordsVisible: Boolean;
+    function IsCodeParametersVisible: Boolean;
+    function IsEvalHintsVisible: Boolean;
+    function IsDeclInfoVisible: Boolean;
+    function IsToolTipHelpInsightVisible: Boolean;
+    function IsEnableAutoCompletionVisible: Boolean;
+    function IsBlockWrapStyleVisible: Boolean;
+    function GetCodeInsightUIName: string;
+    procedure ManagerDisabled;
+    procedure ManagerEnabled;
     { IOTAAsyncCodeInsightManager290 }
     function AsyncGotoDefinitionEx(const AFileName: string;
       ALine, ACharIndex: Integer;
@@ -1654,21 +1680,41 @@ begin
   Result := False;
 end;
 
-{ The option set's "Auto-parenthesis" box (Tools > Options > Editor > Language >
-  Code Insight), which the auto-parenthesis in Done obeys since 0.73.5 - it
-  inserted `()` whatever the box said. Read from the registry, where the IDE
-  keeps it per option set (GetOptionSetName) as "True"/"False"; ticked when
-  absent or unreadable, the IDE's default. Per accept, not cached: a change
-  on the options page holds from the next accept on. }
-function AutoParensEnabled(const AOptionSet: string): Boolean;
+{ AItems without the keyword rows (LSP kind 14) when ADrop - the Show
+  Reserved Words box unticked. }
+function WithoutKeywords(const AItems: TArray<TLspCompletionItem>;
+  ADrop: Boolean): TArray<TLspCompletionItem>;
+var
+  LIdx, LCount: Integer;
+begin
+  if not ADrop then
+    Exit(AItems);
+  SetLength(Result, Length(AItems));
+  LCount := 0;
+  for LIdx := 0 to High(AItems) do
+    if AItems[LIdx].Kind <> 14 then
+    begin
+      Result[LCount] := AItems[LIdx];
+      Inc(LCount);
+    end;
+  SetLength(Result, LCount);
+end;
+
+{ A box of our option set's Code Insight page (Tools > Options > Editor >
+  Language > Code Insight) that is no environment option - Auto-parenthesis
+  (CodeCompleteAutoParens), which Done obeys since 0.73.5; the boxes that are
+  one go through ReadInsightFilterOptions. Read from the registry, where the IDE keeps it
+  per option set (GetOptionSetName) as "True"/"False"; ADefault when absent
+  or unreadable. Per use, not cached: a change on the options page holds
+  from the next list or accept on. }
+function OptionSetBool(const AOptionSet, AValue: string;
+  ADefault: Boolean): Boolean;
 var
   LServices: IOTAServices;
   LReg: TRegistry;
   LKey: string;
-const
-  cValue = 'CodeCompleteAutoParens';
 begin
-  Result := True;
+  Result := ADefault;
   if not Supports(BorlandIDEServices, IOTAServices, LServices) then
     Exit;
   LKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey) +
@@ -1677,16 +1723,16 @@ begin
   try
     try
       LReg.RootKey := HKEY_CURRENT_USER;
-      if LReg.OpenKeyReadOnly(LKey) and LReg.ValueExists(cValue) then
-        case LReg.GetDataType(cValue) of
+      if LReg.OpenKeyReadOnly(LKey) and LReg.ValueExists(AValue) then
+        case LReg.GetDataType(AValue) of
           rdString, rdExpandString:
-            Result := not SameText(LReg.ReadString(cValue), 'False') and
-              (LReg.ReadString(cValue) <> '0');
+            Result := not SameText(LReg.ReadString(AValue), 'False') and
+              (LReg.ReadString(AValue) <> '0');
           rdInteger:
-            Result := LReg.ReadInteger(cValue) <> 0;
+            Result := LReg.ReadInteger(AValue) <> 0;
         end;
     except
-      Result := True;
+      Result := ADefault;
     end;
   finally
     LReg.Free;
@@ -1792,7 +1838,7 @@ begin
   // a word kept by an insert-mode accept: `()` there would split it.
   if (LSuffix = '') and Assigned(FShownObj) and
      FShownObj.TryGetByName(LSelected, LItem) and LItem.HasParams and
-     AutoParensEnabled(GetOptionSetName) then
+     OptionSetBool(GetOptionSetName, 'CodeCompleteAutoParens', True) then
   begin
     // The completed name may sit in an EXISTING call - caret inside the
     // identifier of `LoadSettings(True);` - where appending `()` would
@@ -1938,7 +1984,8 @@ begin
       FActiveId := 0;
       if ASuccess then
       begin
-        FSymbolsObj := TPasSymbolList.Create(AItems, LOptions);
+        FSymbolsObj := TPasSymbolList.Create(WithoutKeywords(AItems,
+          not LOptions.ReservedWords), LOptions);
         FSymbols := FSymbolsObj;
       end
       else
@@ -2136,6 +2183,7 @@ var
 begin
   Inc(FNextId);
   LId := FNextId;
+  FActiveBrowseId := LId;
   LInInvoke := True;
   LspDefinition(AFileName, ALine, ACharIndex + 1,
     procedure(ASuccess: Boolean; const AHits: TArray<TLspHit>;
@@ -2146,8 +2194,11 @@ begin
       DeliverToIde(LInInvoke,
         procedure
         begin
-          if not (GAlive and Assigned(ACallBack)) then
+          // Superseded or cancelled since: the IDE has moved on.
+          if not (GAlive and Assigned(ACallBack)) or
+             (FActiveBrowseId <> LId) then
             Exit;
+          FActiveBrowseId := 0;
           if ASuccess and (Length(AHits) > 0) then
             ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row, False, '')
           else
@@ -2166,6 +2217,7 @@ var
 begin
   Inc(FNextId);
   LId := FNextId;
+  FActiveBrowseId := LId;
   LInInvoke := True;
   // Browse parameters CONFIRMED live (2026-08-21): 1-based line, 0-based
   // char index - the +1 below landed the jump exactly. (Completion's
@@ -2179,7 +2231,10 @@ begin
       DeliverToIde(LInInvoke,
         procedure
         begin
-          if not (GAlive and Assigned(ACallBack)) then
+          // Superseded or cancelled since: the IDE has moved on. Checked
+          // again after the .dcu hop, which a newer browse can overtake.
+          if not (GAlive and Assigned(ACallBack)) or
+             (FActiveBrowseId <> LId) then
             Exit;
           if ASuccess and (Length(AHits) > 0) then
           begin
@@ -2193,8 +2248,10 @@ begin
               EnsureDcuModule(AHits[0].FilePath,
                 procedure(AModuleName: string)
                 begin
-                  if not (GAlive and Assigned(ACallBack)) then
+                  if not (GAlive and Assigned(ACallBack)) or
+                     (FActiveBrowseId <> LId) then
                     Exit;
+                  FActiveBrowseId := 0;
                   if AModuleName <> '' then
                     ACallBack(Self, LId, AModuleName, AHits[0].Row,
                       AHits[0].Col - 1, False, '')
@@ -2204,12 +2261,16 @@ begin
                 end);
               Exit;
             end;
+            FActiveBrowseId := 0;
             // Col back to the 0-based char index the callback expects.
             ACallBack(Self, LId, AHits[0].FilePath, AHits[0].Row,
               AHits[0].Col - 1, False, '');
           end
           else
+          begin
+            FActiveBrowseId := 0;
             ACallBack(Self, LId, '', 0, 0, True, AError);
+          end;
         end);
     end);
   LInInvoke := False;
@@ -2491,6 +2552,8 @@ begin
     FActiveId := 0;
   if FActiveHintId = AId then
     FActiveHintId := 0;
+  if FActiveBrowseId = AId then
+    FActiveBrowseId := 0;
   if FActiveParamId = AId then
     FActiveParamId := 0;
 end;
@@ -2541,6 +2604,102 @@ function TPasCodeInsightManager.Invoke(DispID: Integer; const IID: TGUID;
   ArgErr: Pointer): HResult;
 begin
   Result := E_NOTIMPL;
+end;
+
+{ ---------------------------------------------------------------------------
+  IOTACodeInsightManagerEnvOptions: what the Code Insight options page shows
+  while PasTree is the provider, and the select/deselect notifications
+  --------------------------------------------------------------------------- }
+
+{ Every box stays, but one: each is either the IDE's own behaviour around the
+  list and hints (auto-invoke, its delay, parameter and evaluation hints,
+  Help Insight, block completion, the block wrap style), or a choice this
+  manager reads - Error Insight (ErrorInsightLevel), Auto-parenthesis (Done),
+  Show Reserved Words (the list), Declaration Information (the Tooltip symbol
+  insight switch). History - the native list's recently-used ordering - is
+  the one nothing here implements, so ticking it did nothing; hidden since
+  0.73.6. }
+function TPasCodeInsightManager.IsEnableErrorInsightVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsCodeCompleteAutoParensVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsCodeCompleteAutoInvokeVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsCodeCompleteHistoryVisible: Boolean;
+begin
+  Result := False;
+end;
+
+function TPasCodeInsightManager.IsCodeCompleteShowReservedWordsVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsCodeParametersVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsEvalHintsVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsDeclInfoVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsToolTipHelpInsightVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsEnableAutoCompletionVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.IsBlockWrapStyleVisible: Boolean;
+begin
+  Result := True;
+end;
+
+function TPasCodeInsightManager.GetCodeInsightUIName: string;
+begin
+  Result := GetDisplayName;
+end;
+
+procedure FollowIdeProviderChoice; forward;
+
+{ The IDE's word that PasTree was selected or deselected as the Insight
+  Provider - until 0.73.6 learned only by asking GetCurrentCodeInsightManager,
+  which follows a switch lazily. Logged, a deselection re-arms the "PasTree
+  is not selected" line (CheckInsightProviderSelected), and our own Code
+  Insight Manager setting follows the choice (FollowIdeProviderChoice). }
+procedure TPasCodeInsightManager.ManagerEnabled;
+begin
+  GInsightWarned := False;
+  LspLogToServer('code insight: the IDE selected PasTree as the Insight '
+    + 'Provider (ManagerEnabled)');
+  FollowIdeProviderChoice;
+end;
+
+procedure TPasCodeInsightManager.ManagerDisabled;
+begin
+  GInsightWarned := False;
+  LspLogToServer('code insight: the IDE deselected PasTree as the Insight '
+    + 'Provider (ManagerDisabled)');
+  FollowIdeProviderChoice;
 end;
 
 function TPasCodeInsightManager.ShowCalculating: Boolean;
@@ -2764,6 +2923,57 @@ begin
     on E: Exception do
       ProviderFailure(E.ClassName + ': ' + E.Message);
   end;
+end;
+
+{ OUR SETTING FOLLOWS A PROVIDER PICKED IN TOOLS > OPTIONS. Until 0.73.6 a
+  provider chosen in the IDE's own combobox left the PasTree settings' Code
+  Insight Manager on PasTree (Alex, 2026-10-20: DelphiLSP selected, our page
+  still said PasTree) - and the next start's ApplyInsightManagerChoice put
+  PasTree back over the user's pick. So on the IDE's ManagerEnabled /
+  ManagerDisabled the setting is made to agree with the option InsightManager,
+  the value the IDE persists: ours = PasTree, anything else = RAD Studio.
+
+  Queued, never inline: the notification arrives inside the IDE's own switch,
+  and saving the settings re-applies every choice they hold. By the time the
+  queue runs, an unload (FinalizeCodeInsight, whose RestoreProviderAtUnload
+  writes DelphiLSP back over ours and so deselects us) has cleared GAlive, so
+  our own restore never turns the setting off. Our other own writes agree
+  with the setting by construction - ApplyInsightManagerChoice writes what it
+  says - and leave nothing to follow. }
+procedure FollowIdeProviderChoice;
+begin
+  TThread.ForceQueue(nil,
+    procedure
+    var
+      LOptions: IOTAEnvironmentOptions;
+      LNow: string;
+      LOurs: Boolean;
+      LSettings: TPasTreeSettings;
+    begin
+      if not GAlive or not Assigned(GManager) then
+        Exit;
+      try
+        LOptions := EnvOptions;
+        if not Assigned(LOptions) then
+          Exit;
+        LNow := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
+        if LNow = '' then
+          Exit;   // unreadable: nothing to follow
+        LOurs := SameText(LNow, cOurManagerId);
+        if LOurs = PasTreeInsightManagerEnabled then
+          Exit;
+        LSettings := LoadSettings;
+        LSettings.PasTreeInsightManager := LOurs;
+        ProviderLog('chosen in Tools > Options: "' + LNow
+          + '" - the Code Insight Manager setting follows ('
+          + IfThen(LOurs, 'PasTree', 'RAD Studio') + ')');
+        SaveSettings(LSettings);
+      except
+        on E: Exception do
+          ProviderLog('following the IDE''s choice failed: ' + E.ClassName
+            + ': ' + E.Message);
+      end;
+    end);
 end;
 
 procedure SyncInsightManagerChoice;
