@@ -138,6 +138,7 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   System.StrUtils,
+  System.Character,   // TCharHelper.IsLetterOrDigit - WordAroundCaret
   System.Math,
   System.Variants,
   System.Win.Registry,
@@ -1653,14 +1654,95 @@ begin
   Result := False;
 end;
 
+{ The option set's "Auto-parenthesis" box (Tools > Options > Editor > Language >
+  Code Insight), which the auto-parenthesis in Done obeys since 0.73.5 - it
+  inserted `()` whatever the box said. Read from the registry, where the IDE
+  keeps it per option set (GetOptionSetName) as "True"/"False"; ticked when
+  absent or unreadable, the IDE's default. Per accept, not cached: a change
+  on the options page holds from the next accept on. }
+function AutoParensEnabled(const AOptionSet: string): Boolean;
+var
+  LServices: IOTAServices;
+  LReg: TRegistry;
+  LKey: string;
+const
+  cValue = 'CodeCompleteAutoParens';
+begin
+  Result := True;
+  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
+    Exit;
+  LKey := IncludeTrailingPathDelimiter(LServices.GetBaseRegistryKey) +
+    'Code Insight\' + AOptionSet;
+  LReg := TRegistry.Create(KEY_READ);
+  try
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+      if LReg.OpenKeyReadOnly(LKey) and LReg.ValueExists(cValue) then
+        case LReg.GetDataType(cValue) of
+          rdString, rdExpandString:
+            Result := not SameText(LReg.ReadString(cValue), 'False') and
+              (LReg.ReadString(cValue) <> '0');
+          rdInteger:
+            Result := LReg.ReadInteger(cValue) <> 0;
+        end;
+    except
+      Result := True;
+    end;
+  finally
+    LReg.Free;
+  end;
+end;
+
+{ The identifier characters either side of the caret, without moving it:
+  how many the typed prefix holds, and the text of the rest of the word.
+  Walked through IOTAEditPosition rather than read as a line, so a column
+  is always the editor's own - an identifier holds no tab. }
+procedure WordAroundCaret(const APos: IOTAEditPosition; out APrefixLen: Integer;
+  out ASuffix: string);
+
+  function IsIdentChar(C: Char): Boolean;
+  begin
+    Result := (C = '_') or C.IsLetterOrDigit;
+  end;
+
+var
+  LRow, LCol, LIdx: Integer;
+  LAhead: string;
+begin
+  APrefixLen := 0;
+  ASuffix := '';
+  LRow := APos.Row;
+  LCol := APos.Column;
+  try
+    LAhead := APos.Read(256);
+    APos.Move(LRow, LCol);
+    LIdx := 1;
+    while (LIdx <= Length(LAhead)) and IsIdentChar(LAhead[LIdx]) do
+      Inc(LIdx);
+    ASuffix := Copy(LAhead, 1, LIdx - 1);
+    while APos.Column > 1 do
+    begin
+      APos.MoveRelative(0, -1);
+      if not IsIdentChar(APos.Character) then
+        Break;
+      Inc(APrefixLen);
+    end;
+  finally
+    APos.Move(LRow, LCol);
+  end;
+end;
+
 procedure TPasCodeInsightManager.Done(Accepted: Boolean;
   out DisplayParams: Boolean);
 var
   LServices: IOTACodeInsightServices;
   LViewer: IOTACodeInsightViewer;
-  LSelected: string;
+  LViewer290: IOTACodeInsightViewer290;
+  LSelected, LSuffix: string;
   LItem: TLspCompletionItem;
   LView: IOTAEditView;
+  LPrefixLen: Integer;
+  LInsertMode: Boolean;
 begin
   DisplayParams := False;
   if not Accepted then
@@ -1678,7 +1760,26 @@ begin
   LSelected := LViewer.GetSelectedString;
   if LSelected = '' then
     Exit;
-  LServices.InsertText(LSelected, True);
+  LView := CurrentView;
+  // INSERT OR OVERWRITE, as the viewer says the user accepted (Tools >
+  // Options: Enter and Tab each have a mode). Overwrite is the IDE's own
+  // InsertText over the whole word under the caret, as it always was here;
+  // insert replaces only the typed prefix and keeps the rest of the word
+  // after the new name - until 0.73.5 every accept overwrote, so completing
+  // `Fo|oBar` in insert mode lost `oBar`.
+  LInsertMode := Supports(LViewer, IOTACodeInsightViewer290, LViewer290) and
+    (LViewer290.CompletionAcceptMode = camInsert) and Assigned(LView);
+  LSuffix := '';
+  if LInsertMode then
+  begin
+    WordAroundCaret(LView.Buffer.EditPosition, LPrefixLen, LSuffix);
+    if LPrefixLen > 0 then
+      LView.Buffer.EditPosition.BackspaceDelete(LPrefixLen);
+    LView.Buffer.EditPosition.InsertText(LSelected);
+    LView.Paint;
+  end
+  else
+    LServices.InsertText(LSelected, True);
   // AUTO-PARENTHESIS: a routine WITH parameters gets `()` and the caret
   // lands between them, mirroring the native behavior. hasParams came from
   // the server (the declaration's real nkParams), so a parameterless
@@ -1687,10 +1788,12 @@ begin
   // future '(' close-key accept must not double the paren. Judged against
   // the list the VIEWER displayed (FShownObj), not the newest answer - a
   // late re-invoke may have replaced FSymbolsObj under the open popup.
-  if Assigned(FShownObj) and FShownObj.TryGetByName(LSelected, LItem) and
-     LItem.HasParams then
+  // Only with the option set's Auto-parenthesis ticked, and not in front of
+  // a word kept by an insert-mode accept: `()` there would split it.
+  if (LSuffix = '') and Assigned(FShownObj) and
+     FShownObj.TryGetByName(LSelected, LItem) and LItem.HasParams and
+     AutoParensEnabled(GetOptionSetName) then
   begin
-    LView := CurrentView;
     // The completed name may sit in an EXISTING call - caret inside the
     // identifier of `LoadSettings(True);` - where appending `()` would
     // produce `LoadSettings()(True)`. If a paren already follows the
