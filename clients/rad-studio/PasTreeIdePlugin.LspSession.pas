@@ -1128,10 +1128,14 @@ function LspOwningProjectFile(const AFileName: string): string;
 /// <summary>
 /// Asks which call encloses an IDE position and for its target's
 /// signature(s) - the parameter-insight question (Ctrl+Shift+Space). A new
-/// request supersedes an unanswered one, same as every other feature here.
+/// request supersedes an unanswered one OF THE SAME KIND, same as every other
+/// feature here: AIndexOnly is the active-argument recount the IDE asks per
+/// keystroke while the hint is up, and it has its own slot - in one slot a
+/// recount cancelled the invocation that opens the hint, and each cancelled
+/// recount told the IDE "reinvoke", which cancelled the next recount.
 /// </summary>
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
-  const AOnDone: TLspSignatureHelpProc);
+  const AOnDone: TLspSignatureHelpProc; AIndexOnly: Boolean = False);
 
 /// <summary>
 /// Asks what is under an IDE position - the declaration's source line plus a
@@ -1525,6 +1529,7 @@ type
     FPendingHover: Int64;
     FPendingHoverInfo: Int64;
     FPendingSignature: Int64;
+    FPendingSignatureIndex: Int64;   // the recount - see LspSignatureHelp
     FPendingWorkspace: Int64;
     FPendingDocSymbols: Int64;
     // Path (lower-cased, full) -> the server's last publishDiagnostics for
@@ -1583,7 +1588,7 @@ type
     procedure Hover(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspHoverProc);
     procedure SignatureHelp(const AFileName: string; ARow, ACol: Integer;
-      const AOnDone: TLspSignatureHelpProc);
+      const AOnDone: TLspSignatureHelpProc; AIndexOnly: Boolean);
     procedure ClassComplete(const AFileName: string; ARow, ACol: Integer;
       const AOnDone: TLspClassCompleteProc);
     procedure SyncPrototypes(const AFileName: string; ARow, ACol: Integer;
@@ -4324,7 +4329,8 @@ begin
 end;
 
 procedure TLspSession.SignatureHelp(const AFileName: string;
-  ARow, ACol: Integer; const AOnDone: TLspSignatureHelpProc);
+  ARow, ACol: Integer; const AOnDone: TLspSignatureHelpProc;
+  AIndexOnly: Boolean);
 var
   LParams, LDoc, LPos: TJSONObject;
   LLine, LChar: Integer;
@@ -4337,7 +4343,12 @@ begin
   end;
 
   FDocs.Sync;
-  if FPendingSignature <> 0 then
+  if AIndexOnly then
+  begin
+    if FPendingSignatureIndex <> 0 then
+      FClient.Cancel(FPendingSignatureIndex);
+  end
+  else if FPendingSignature <> 0 then
     FClient.Cancel(FPendingSignature);
 
   IdeToLsp(ARow, ACol, LLine, LChar);
@@ -4356,12 +4367,17 @@ begin
     begin
       if FPendingSignature = LIssuedId then
         FPendingSignature := 0;
+      if FPendingSignatureIndex = LIssuedId then
+        FPendingSignatureIndex := 0;
       if ASuccess then
         AOnDone(True, ParseSignatureHelp(AResult), '')
       else
         AOnDone(False, Default(TLspSignatureHelp), AError);
     end);
-  FPendingSignature := LIssuedId;
+  if AIndexOnly then
+    FPendingSignatureIndex := LIssuedId
+  else
+    FPendingSignature := LIssuedId;
 end;
 
 // LSP SymbolKind -> the display vocabulary the whole plugin words kinds in.
@@ -6672,7 +6688,7 @@ begin
 end;
 
 procedure LspSignatureHelp(const AFileName: string; ARow, ACol: Integer;
-  const AOnDone: TLspSignatureHelpProc);
+  const AOnDone: TLspSignatureHelpProc; AIndexOnly: Boolean);
 var
   LSession: TLspSession;
 begin
@@ -6682,7 +6698,7 @@ begin
     AOnDone(False, Default(TLspSignatureHelp), 'LSP session not initialized');
     Exit;
   end;
-  LSession.SignatureHelp(AFileName, ARow, ACol, AOnDone);
+  LSession.SignatureHelp(AFileName, ARow, ACol, AOnDone, AIndexOnly);
 end;
 
 function LspAnsweringProject(const AFileName: string): string;

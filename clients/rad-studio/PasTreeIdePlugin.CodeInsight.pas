@@ -1314,6 +1314,10 @@ type
     FParamList: IOTACodeInsightParameterList;
     FParamListObj: TPasParameterList;
     FActiveParamId: Integer;
+    // The newest active-argument recount (AsyncParameterCodeInsightParamIndex)
+    // - the callback has no id for the IDE to tell them apart, so a
+    // superseded recount must not answer at all.
+    FParamIndexSeq: Integer;
     // The one in-flight async completion; a later invocation supersedes it
     // (LspSession cancels the LSP request, this id gate drops the callback).
     FNextId: Integer;
@@ -1530,6 +1534,23 @@ procedure TPasCodeInsightManager.GetCodeInsightType(AChar: Char;
   out InvokeType: TOTAInvokeType);
 begin
   InvokeType := itManual;
+  // NOT IN A COMMENT OR A STRING, for what opens by itself or asks for a
+  // list: '.' typed in `// e.g.` or in a string literal started a timed
+  // completion request, '(' and ',' in a string a parameter request, and a
+  // float's '.' (`1.5`) another - the ToolsAPI's own example of this method
+  // vetoes exactly these. Parameter insight (#1), browse (#2) and the hint
+  // (#3) are explicit gestures and keep working where they did.
+  if ((AElement = atComment) or (AElement = atString)) and
+     CharInSet(AChar, [#0, '.', '(', ',']) then
+  begin
+    CodeInsightType := citNone;
+    Exit;
+  end;
+  if (AElement = atNumber) and (AChar = '.') then
+  begin
+    CodeInsightType := citNone;
+    Exit;
+  end;
   case AChar of
     #0: CodeInsightType := citCodeInsight;
     #2: CodeInsightType := citBrowseCodeInsight;
@@ -1658,6 +1679,11 @@ begin
       // Repaint now rather than on the next natural refresh: the insertion
       // came from a popup, and a stale caret is visibly wrong.
       LView.Paint;
+      // And the parameter hint opens between the parens, as after the native
+      // list's accept - DisplayParams is the interface's "requery me for
+      // parameter insight". Not when a paren already followed: the caret
+      // then sits before it, outside the call.
+      DisplayParams := True;
     end;
   end;
 end;
@@ -1840,8 +1866,14 @@ begin
       DeliverToIde(LInInvoke,
         procedure
         begin
+          // ASelectIndex is the ARGUMENT to highlight, not the overload: the
+          // sync twin of this call documents its SelectedIndex as "the
+          // index of the current parameter for the method/proc". Until
+          // 0.73.3 this passed ActiveSignature - 0 for any call without
+          // overloads, so the first parameter lit up whatever the caret's
+          // argument until the first recount.
           if GAlive and Assigned(ACallback) then
-            ACallback(Self, LId, AHelp.ActiveSignature,
+            ACallback(Self, LId, AHelp.ActiveParam,
               not (ASuccess and AHelp.Valid), AError);
         end);
     end);
@@ -2164,6 +2196,12 @@ begin
     Canvas.Font.Style := [];
     Inc(LX, Canvas.TextWidth(LTail));
     Rect.Right := Rect.Left + LColWidth + LX + 3 * cPad;
+    // The hint of a row too wide for the list (DrawingHintText) is sized by
+    // THIS rect, both ways: given the width alone it came up a few pixels
+    // tall (Alex, 2026-10-20). One row's height, as the list draws it.
+    if DrawingHintText then
+      Rect.Bottom := Rect.Top + Max(Rect.Height,
+        Canvas.TextHeight('Ag') + 2 * cPad);
     Exit;
   end;
 
@@ -2281,10 +2319,20 @@ procedure TPasCodeInsightManager.AsyncParameterCodeInsightParamIndex(
   ACallBack: TOTAParamIndexCallBack);
 var
   LInInvoke: Boolean;
+  LSeq: Integer;
 begin
   // The IDE asks this while the hint is up and the user types: recount the
   // active argument from the live text - a fresh signatureHelp round trip,
   // which the overlay pipeline answers in milliseconds.
+  //
+  // In its own supersede slot (AIndexOnly), and gated by sequence: until
+  // 0.73.3 a recount shared the invocation's slot, so it cancelled the
+  // invocation that opens the hint, and a recount cancelled by the next
+  // keystroke answered -1 - "reinvoke" - whose invocation cancelled the next
+  // recount in turn. A superseded recount now says nothing; only the newest
+  // one answers, -1 included when it really failed.
+  Inc(FParamIndexSeq);
+  LSeq := FParamIndexSeq;
   LInInvoke := True;
   LspSignatureHelp(AFileName, ALine, ACharIndex + 1,
     procedure(ASuccess: Boolean; const AHelp: TLspSignatureHelp;
@@ -2292,6 +2340,8 @@ begin
     begin
       if not GAlive then
         Exit;
+      if FParamIndexSeq <> LSeq then
+        Exit;   // superseded by a newer recount
       DeliverToIde(LInInvoke,
         procedure
         begin
@@ -2301,7 +2351,7 @@ begin
             else
               ACallBack(Self, -1);
         end);
-    end);
+    end, True);
   LInInvoke := False;
 end;
 
