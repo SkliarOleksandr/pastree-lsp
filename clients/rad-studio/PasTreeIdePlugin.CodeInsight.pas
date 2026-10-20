@@ -321,7 +321,9 @@ type
     bar. Hooked through the control's WindowProc, which outlives a handle
     recreation; FreeNotification drops the hook's target if the IDE frees
     the window first. Active only while OUR list is shown - a hide turns it
-    off, so the native manager's list, should it be selected, is untouched. }
+    off, so the native manager's list, should it be selected, is untouched.
+    The same hook shortens the pause before a long row's hint
+    (CM_HINTSHOWPAUSE, see WndProc). }
   TCompletionStatusStrip = class(TComponent)
   private
     FTarget: TWinControl;
@@ -344,6 +346,12 @@ type
     destructor Destroy; override;
     procedure ShowCounts(AVisible, ATotal: Integer; const AFilter: string);
   end;
+
+const
+  // The pause before the hint of a row too wide for the list (WndProc,
+  // CM_HINTSHOWPAUSE): long enough not to flash a hint on every long row the
+  // mouse crosses, a fifth of the IDE's default.
+  cListHintPauseMs = 100;
 
 var
   GStatusStrip: TCompletionStatusStrip = nil;
@@ -598,6 +606,21 @@ begin
           if PtInRect(LStrip, LPoint) then
             AMsg.Result := HTBORDER;
         end;
+      end;
+    // The hint of a row too wide for the list is the VCL's own Application
+    // hint (the list answers CM_HINTSHOW with TPopupHintWindow), so it waited
+    // Application.HintPause - 500 ms by default - like every hint in the IDE
+    // (Alex, 2026-10-20: "can it come sooner?"). TApplication asks the hint
+    // control itself first, through CM_HINTSHOWPAUSE with the pause by
+    // reference: answered here, the list's hint comes sooner and no other
+    // hint of the IDE changes. Only the first hint's pause - moving on from a
+    // shown one already takes HintShortPause.
+    CM_HINTSHOWPAUSE:
+      begin
+        FOldProc(AMsg);
+        if FActive and (AMsg.WParam = 0) and (AMsg.LParam <> 0) then
+          PInteger(AMsg.LParam)^ := Min(PInteger(AMsg.LParam)^,
+            cListHintPauseMs);
       end;
     // A hide only marks the strip unwanted - the frame of a hidden window is
     // never touched (see SetActive). A show settles whatever is pending:
@@ -2196,12 +2219,14 @@ begin
     Canvas.Font.Style := [];
     Inc(LX, Canvas.TextWidth(LTail));
     Rect.Right := Rect.Left + LColWidth + LX + 3 * cPad;
-    // The hint of a row too wide for the list (DrawingHintText) is sized by
-    // THIS rect, both ways: given the width alone it came up a few pixels
-    // tall (Alex, 2026-10-20). One row's height, as the list draws it.
-    if DrawingHintText then
-      Rect.Bottom := Rect.Top + Max(Rect.Height,
-        Canvas.TextHeight('Ag') + 2 * cPad);
+    // "The rectangle should be returned by the 'Rect' out parameter" - the
+    // whole rectangle (ToolsAPI, INTACustomDrawCodeInsightViewer). The hint
+    // of a row too wide for the list is sized by this pass, which arrives
+    // with DrawingHintText FALSE and a zero-height rect, (0,0)-(1,0) (logged
+    // 2026-10-20): given the width alone, the hint came up a few pixels tall.
+    // One row's height, as the list draws it.
+    Rect.Bottom := Rect.Top + Max(Rect.Height,
+      Canvas.TextHeight('Ag') + 2 * cPad);
     Exit;
   end;
 
