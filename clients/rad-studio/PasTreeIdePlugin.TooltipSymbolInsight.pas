@@ -47,6 +47,16 @@ unit PasTreeIdePlugin.TooltipSymbolInsight;
   option turning True again while we hold it off - the IDE, or the user,
   having put it back.
 
+  NOT THROUGH PasTreeIdePlugin.OptionSets, ON PURPOSE (checked 2026-10-21 in
+  coreide370). DeclarationInformation is per set too, but of the CODE
+  INSIGHT sets (Code Insight\Borland.EditOptions.<set>), a property set of
+  its own: the IDE makes one of them current by the editor's set
+  (SetCodeInsightOptions) and by the current manager's GetOptionSetName, so
+  a write reaches DelphiLSP's set or the Pascal one, whichever is current.
+  Those sets have no field naming the set, so there is nothing to probe -
+  and nothing in them takes part in the provider gate that the editor
+  option sets feed, so a write here cannot cost DelphiLSP its units.
+
   PROBLEMS UNDER THE POINTER come first in the hint, one line each, drawn as
   the IDE's own error hint draws them (Alex, 2026-10-08): a disc with a `!`
   in the colour of the underline, the compiler's code (`E2003`) in that
@@ -91,7 +101,8 @@ uses
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.DirectiveText,
   PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings,
-  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.CodeInsight;
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.CodeInsight,
+  PasTreeIdePlugin.OptionSets;
 
 const
   // The native hint's measured timing (2026-10-07): its first window comes
@@ -1077,10 +1088,15 @@ begin
   // Not ours, but this is the package's one cheap, late, always-on editor
   // event: the Error Insight level that could not be read at package load is
   // retried here - see PasTreeIdePlugin.Settings. The Insight Provider
-  // likewise, see PasTreeIdePlugin.CodeInsight.
+  // likewise, see PasTreeIdePlugin.CodeInsight. And the provider gate is
+  // checked when the Pascal option set becomes current - see
+  // PasTreeIdePlugin.OptionSets.
+  SyncOptionSets;
   SyncErrorInsightChoice;
   SyncInsightManagerChoice;
-  if not TooltipSymbolInsightEnabled then
+  // Off, the hint still explains OUR underlines (StartHover's problems-only
+  // mode) - nothing else would: the IDE's Error Insight is None for them.
+  if not TooltipSymbolInsightEnabled and not PasTreeErrorSquigglesEnabled then
   begin
     CancelHover;
     Exit;
@@ -1152,7 +1168,18 @@ begin
   LProblems := ProblemsOnRow(LLineState.LogicalLineNum);
   LAsk := IdentRunAt(LText, LColumn, LFrom, LTo) or
     DirectiveNameAt(LText, LColumn, LFrom, LTo);
-  if LAsk then
+  // PROBLEMS ONLY with Tooltip symbol insight off (0.73.7): the underlines
+  // are ours, so the text over them is ours to show or nobody's - until
+  // 0.73.7 an underline drawn with the hint off could not be read at all.
+  // No card and no request; over a name, its problems, as below.
+  if LAsk and not TooltipSymbolInsightEnabled then
+  begin
+    FErrors := ProblemsOver(LProblems, LFrom, LTo);
+    if Length(FErrors) = 0 then
+      Exit;
+    LAsk := False;
+  end
+  else if LAsk then
   begin
     FErrors := ProblemsOver(LProblems, LFrom, LTo);
     // An ERROR here makes the card beside the point - a redeclared `X`
@@ -1238,7 +1265,9 @@ begin
   for LSev := 1 to 3 do
     for LIdx := 0 to High(LAll) do
     begin
-      if LAll[LIdx].Row <> ARow then
+      // Only what is underlined: the user's Error Insight level.
+      if (LAll[LIdx].Row <> ARow) or
+         (LAll[LIdx].Severity > PasTreeErrorMaxSeverity) then
         Continue;
       if (LSev < 3) and (LAll[LIdx].Severity <> LSev) then
         Continue;

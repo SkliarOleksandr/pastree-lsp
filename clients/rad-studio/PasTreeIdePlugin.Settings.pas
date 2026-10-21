@@ -251,9 +251,27 @@ function LogAllIdeCrashes: Boolean;
 /// 0.52.4, and labelled experimental in the dialog (Alex, 2026-09-24): the
 /// Code Insight manager is withdrawn and DelphiLSP owns the insight
 /// features, so the native underlines are the expected ones.
+///
+/// FORCED ON WHILE PASTREE IS THE CODE INSIGHT MANAGER (0.73.7): the IDE's
+/// Error Insight takes its errors from the selected provider alone, through
+/// a private interface (clients/rad-studio/SPEC.md, the 2026-10-20 spike),
+/// so with PasTree selected the IDE underlines nothing and ours are the only
+/// ones there can be. The stored choice is kept for when the manager is
+/// RAD Studio again; the dialog greys it meanwhile.
 /// Read per paint run, from the cache.
 /// </summary>
 function PasTreeErrorSquigglesEnabled: Boolean;
+
+/// <summary>
+/// The highest LSP severity our underlines and their hint show (1 error,
+/// 2 warning, 3 information, 4 hint): the Error Insight level the user had
+/// before PasTree took the underlines over - the level ApplyErrorInsightChoice
+/// remembered when it set the IDE's to None. "Errors" is 1, "Errors and
+/// Warnings" 2, "Errors, Warnings and Hints" and "Everything" 4. Nothing
+/// remembered (the IDE's level was None already) shows everything. Until
+/// 0.73.7 everything was drawn whatever the user's level had been.
+/// </summary>
+function PasTreeErrorMaxSeverity: Integer;
 
 /// <summary>
 /// Code Insight tab (0.68.0, labelled experimental): whether PasTree's Code
@@ -299,7 +317,9 @@ type
 /// Asked per paint run, so the read is THROTTLED rather than cached for the
 /// session: at most one read a second, which is what lets a change in Tools >
 /// Options show on the next repaint. Unreadable is Classic, the IDE's own
-/// default.
+/// default. The Pascal option set's style (0.73.8): while the IDE has another
+/// language's set current the last answer stands - see
+/// PasTreeIdePlugin.OptionSets.
 /// </summary>
 function IdeErrorMarkStyle: TErrorMarkStyle;
 
@@ -309,8 +329,10 @@ function IdeErrorMarkStyle: TErrorMarkStyle;
 /// under our key and the IDE's is set to None. The IDE's: the remembered
 /// level is put back - only a level WE replaced, so a None the user chose in
 /// Tools > Options stays theirs. Idempotent; called after the dialog saves and
-/// once at package load (a level changed in Tools > Options while ours is
-/// selected is remembered and switched off again at the next start).
+/// once at package load. A level raised in Tools > Options while ours is
+/// selected is the user's choice of the IDE's underlines: since 0.73.7 the
+/// setting follows it (SyncErrorInsightChoice), where before it was switched
+/// off again at the next start.
 ///
 /// THROUGH THE IDE'S LIVE OPTIONS, NOT THE REGISTRY (since 0.63.4): the
 /// environment option ErrorInsightLevel (IOTAEnvironmentOptions.Values), the
@@ -329,13 +351,23 @@ function IdeErrorMarkStyle: TErrorMarkStyle;
 /// given up on for the session. Now it stays pending, and
 /// SyncErrorInsightChoice asks again, at most once a second. What was read
 /// and done goes to the LSP log.
+///
+/// THE PASCAL OPTION SET'S LEVEL ONLY (0.73.8). ErrorInsightLevel is a field
+/// of the IDE's per-language editor option sets, and Values reaches whichever
+/// is current - none at package load, where the call used to read the
+/// field's default and write into no set at all, and Default on other
+/// occasions (2026-10-20: "Errors" written into Default). Through the door of
+/// PasTreeIdePlugin.OptionSets now, which makes the Pascal set current for the
+/// read and the writes when it is not and puts back the set that was; a door
+/// that does not open leaves the call pending like an unreadable level.
 /// </summary>
 procedure ApplyErrorInsightChoice;
 
 /// <summary>
-/// Retries an ApplyErrorInsightChoice whose level did not read, and hands
-/// its log line to the LSP log once a session can take it. Cheap when there
-/// is nothing to do; called on every editor mouse move (from
+/// Retries an ApplyErrorInsightChoice whose level did not read, hands its
+/// log line to the LSP log once a session can take it, and makes the setting
+/// follow a level raised in Tools > Options (at most one read a second).
+/// Cheap when there is nothing to do; called on every editor mouse move (from
 /// PasTreeIdePlugin.TooltipSymbolInsight).
 /// </summary>
 procedure SyncErrorInsightChoice;
@@ -450,6 +482,7 @@ procedure SetSettingsSavedListener(const AListener: TProc);
 implementation
 
 uses
+  System.TypInfo,   // GetEnumName - OptionKindText
   System.Classes,
   System.Variants,
   System.Win.Registry,
@@ -467,6 +500,9 @@ uses
   // ApplyInsightManagerChoice after a save - the same implementation-only
   // cycle as the form's.
   PasTreeIdePlugin.CodeInsight,
+  // ErrorInsightLevel and ErrorInsightMarks are fields of the editor option
+  // sets: read and written in the Pascal set only.
+  PasTreeIdePlugin.OptionSets,
   // LspLogToServer only, for SyncErrorInsightChoice's line.
   PasTreeIdePlugin.LspSession;
 
@@ -536,8 +572,25 @@ var
   GErrorInsightPending: Boolean = False;
   GErrorInsightRetryAt: UInt64 = 0;
   GErrorInsightUnreadableNoted: Boolean = False;
+  // A door to the Pascal option set that did not open, said once per wait.
+  GErrorInsightDeferNoted: Boolean = False;
+  // ApplyErrorInsightChoice left the IDE's level at None for our underlines
+  // this session - what makes a level other than None, read later, the
+  // user's own change in Tools > Options (SyncErrorInsightChoice). Never set
+  // before Apply has read the level, so the level a start finds is not
+  // taken for one.
+  GErrorInsightNoneByUs: Boolean = False;
+  // The level remembered for PasTreeErrorMaxSeverity, as an index into
+  // cErrorInsightLevelNames; -1 = none remembered. Kept in step with the
+  // SavedErrorInsightLevel marker by ApplyErrorInsightChoice.
+  GErrorInsightSavedLevel: Integer = -1;
+  GErrorInsightKindLogged: Boolean = False;
+  GErrorInsightFollowAt: UInt64 = 0;
   // The last line for the LSP log, until a session takes it.
-  GErrorInsightLogLine: string = '';
+  // Every line until a session can take it - the package-load call runs
+  // before any project is open. Until 0.73.7 only the LAST line was kept,
+  // and what a start did to the level never reached the log.
+  GErrorInsightLogLines: TArray<string> = nil;
   // The two menu items we own: the "PasTree" submenu parent and its one
   // child. Held so FinalizeSettings can take them back out of the IDE's menu
   // - freeing the parent frees the child with it.
@@ -751,6 +804,7 @@ procedure SaveSettings(const ASettings: TPasTreeSettings);
 var
   LReg: TRegistry;
   LKey: string;
+  LApply: TProc;
 begin
   // The cache is updated FIRST and unconditionally: a registry that cannot be
   // written (a locked-down machine, a policy) must still leave the dialog's
@@ -822,8 +876,18 @@ begin
   finally
     LReg.Free;
   end;
-  ApplyErrorInsightChoice;
-  ApplyInsightManagerChoice;
+  // One door of PasTreeIdePlugin.OptionSets for both: each would open its
+  // own, and each door the Pascal set had to be made current for ends in a
+  // save of every option. Inside, both find Pascal current; a door that does
+  // not open lets each ask on its own, and wait.
+  LApply :=
+    procedure
+    begin
+      ApplyErrorInsightChoice;
+      ApplyInsightManagerChoice;
+    end;
+  if not WithPascalOptionSet(LApply) then
+    LApply();
   SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
   SetDfmStyleElementsFix(ASettings.DfmNoDefaultStyleElems);
   SetCrashLogAll(ASettings.LogAllIdeCrashes);
@@ -975,7 +1039,18 @@ end;
 
 function PasTreeErrorSquigglesEnabled: Boolean;
 begin
-  Result := CurrentSettings.PasTreeErrorSquiggles;
+  Result := CurrentSettings.PasTreeErrorSquiggles or
+    CurrentSettings.PasTreeInsightManager;
+end;
+
+function PasTreeErrorMaxSeverity: Integer;
+begin
+  case GErrorInsightSavedLevel of
+    1: Result := 1;   // Errors
+    2: Result := 2;   // Errors and Warnings
+  else
+    Result := 4;      // hints and everything, or nothing remembered
+  end;
 end;
 
 function PasTreeInsightManagerEnabled: Boolean;
@@ -1029,6 +1104,63 @@ end;
   it gave a number, the name otherwise - so a write never hands the IDE a
   kind of value it did not give us. }
 function ValueNameLike(const ACurrent: Variant; AIndex: Integer;
+  const ANames: array of string): Variant; forward;
+procedure ErrorInsightLog(const AText: string); forward;
+function VariantForLog(const AValue: Variant): string; forward;
+
+{ Writes level AIndex into the option ACurrent was read from and reads it
+  back. The form the option answered in comes first (ValueNameLike); when
+  that does not read back, the index as an Integer, as a string and the name
+  in turn. Until 0.73.7 one form was written and not read back: the level
+  that read as Integer 1 at the start read as the STRING "0" after our
+  None, the Integer 1 written back over it did not hold, and the log said
+  "put back" while Tools > Options still showed None (Alex, 2026-10-20).
+  Each write and read through PasTreeIdePlugin.OptionSets (0.73.8): the
+  level is a field of the editor option sets, and only Pascal's is ours to
+  touch - another set current stops the loop with nothing written. }
+function WriteLevelVerified(const AName: string; const ACurrent: Variant;
+  AIndex: Integer; const ANames: array of string; out AReads: string): Boolean;
+var
+  LForms: array[0..3] of Variant;
+  LRead: Variant;
+  LIdx: Integer;
+begin
+  LForms[0] := ValueNameLike(ACurrent, AIndex, ANames);
+  LForms[1] := AIndex;
+  LForms[2] := IntToStr(AIndex);
+  LForms[3] := ANames[AIndex];
+  Result := False;
+  AReads := '';
+  for LIdx := 0 to High(LForms) do
+  begin
+    try
+      if not WritePascalSetOption(AName, LForms[LIdx]) then
+      begin
+        AReads := 'the IDE''s current editor option set is '
+          + OptionSetText(CurrentOptionSet) + ', not Pascal - not written';
+        Exit;
+      end;
+      if not ReadPascalSetOption(AName, LRead) then
+      begin
+        AReads := 'wrote ' + VariantForLog(LForms[LIdx]) + ', and the'
+          + ' current option set was ' + OptionSetText(CurrentOptionSet)
+          + ' at the read-back';
+        Exit;
+      end;
+      AReads := 'wrote ' + VariantForLog(LForms[LIdx]) + ', reads '
+        + VariantForLog(LRead);
+      if ValueNameIndex(LRead, ANames) = AIndex then
+        Exit(True);
+      ErrorInsightLog(AName + ': ' + AReads + ' - not ' + ANames[AIndex]
+        + ', next form');
+    except
+      on E: Exception do
+        AReads := E.ClassName + ': ' + E.Message;
+    end;
+  end;
+end;
+
+function ValueNameLike(const ACurrent: Variant; AIndex: Integer;
   const ANames: array of string): Variant;
 begin
   if StrToIntDef(Trim(VarToStrDef(ACurrent, '')), -1) >= 0 then
@@ -1037,18 +1169,22 @@ begin
     Result := ANames[AIndex];
 end;
 
-function ReadIdeErrorMarkStyle: TErrorMarkStyle;
+{ The Pascal set's style, or AKept while another option set is current -
+  ErrorInsightMarks is a field of the editor option sets, and another
+  language's style is not the one Pascal's underlines take (0.73.8). A peek,
+  not the door: asked from the paint path, which must not pay for a save of
+  every option. }
+function ReadIdeErrorMarkStyle(AKept: TErrorMarkStyle): TErrorMarkStyle;
 var
-  LOptions: IOTAEnvironmentOptions;
+  LValue: Variant;
   LIndex: Integer;
 begin
-  Result := emsClassic;
+  Result := AKept;
   try
-    LOptions := IdeEnvironmentOptions;
-    if not Assigned(LOptions) then
+    if not PeekPascalSetOption(cEnvErrorInsightMarks, LValue) then
       Exit;
-    LIndex := ValueNameIndex(LOptions.Values[cEnvErrorInsightMarks],
-      cMarkStyleNames);
+    Result := emsClassic;
+    LIndex := ValueNameIndex(LValue, cMarkStyleNames);
     if LIndex >= 0 then
       Result := TErrorMarkStyle(LIndex);
   except
@@ -1063,46 +1199,111 @@ begin
   LNow := GetTickCount64;
   if (not GMarkStyleRead) or (LNow - GMarkStyleReadAt >= cMarkStyleRereadMs) then
   begin
-    GMarkStyle := ReadIdeErrorMarkStyle;
+    GMarkStyle := ReadIdeErrorMarkStyle(GMarkStyle);
     GMarkStyleReadAt := LNow;
     GMarkStyleRead := True;
   end;
   Result := GMarkStyle;
 end;
 
-procedure ErrorInsightLog(const AText: string);
+procedure FlushErrorInsightLog;
+var
+  LIdx: Integer;
 begin
-  GErrorInsightLogLine := 'error insight: ' + AText;
-  if LspLogToServer(GErrorInsightLogLine) then
-    GErrorInsightLogLine := '';
+  for LIdx := 0 to High(GErrorInsightLogLines) do
+    if not LspLogToServer(GErrorInsightLogLines[LIdx]) then
+    begin
+      Delete(GErrorInsightLogLines, 0, LIdx);
+      Exit;
+    end;
+  GErrorInsightLogLines := nil;
 end;
 
-procedure ApplyErrorInsightChoice;
+procedure ErrorInsightLog(const AText: string);
+begin
+  if Length(GErrorInsightLogLines) < 50 then
+    GErrorInsightLogLines := GErrorInsightLogLines +
+      ['error insight: ' + AText];
+  FlushErrorInsightLog;
+end;
+
+{ An option value as the log should show it: the text and the Variant type -
+  the IDE answered the level as Integer at a start and as UnicodeString after
+  our writes (2026-10-20), and which form the Options dialog understands is
+  the open question. }
+function VariantForLog(const AValue: Variant): string;
+begin
+  Result := '"' + VarToStrDef(AValue, '') + '" ('
+    + VarTypeAsText(VarType(AValue)) + ')';
+end;
+
+{ Once per session: the type the IDE DECLARES for an option, from
+  GetOptionNames - tkEnumeration, tkInteger or a string kind decides which
+  Variant a write should carry. }
+function OptionKindText(const AOptions: IOTAEnvironmentOptions;
+  const AName: string): string;
+var
+  LNames: TOTAOptionNameArray;
+  LIdx: Integer;
+begin
+  Result := 'not listed';
+  try
+    LNames := AOptions.GetOptionNames;
+    for LIdx := 0 to High(LNames) do
+      if SameText(LNames[LIdx].Name, AName) then
+        Exit(GetEnumName(TypeInfo(TTypeKind), Ord(LNames[LIdx].Kind)));
+  except
+    on E: Exception do
+      Result := 'unreadable: ' + E.Message;
+  end;
+end;
+
+{ Not now: the Pascal option set could not be made current (the door of
+  PasTreeIdePlugin.OptionSets did not open). Asked again by
+  SyncErrorInsightChoice, like a level that does not read. }
+procedure DeferErrorInsightChoice;
+begin
+  GErrorInsightPending := True;
+  GErrorInsightRetryAt := GetTickCount64 + cErrorInsightRetryMs;
+  if GErrorInsightDeferNoted then
+    Exit;
+  GErrorInsightDeferNoted := True;
+  ErrorInsightLog('the Pascal option set could not be made current (the'
+    + ' current one is ' + OptionSetText(CurrentOptionSet) + ') - the level is'
+    + ' read and set later');
+end;
+
+{ The level, inside the door of PasTreeIdePlugin.OptionSets: the read and
+  every write below reach the Pascal set and no other. }
+procedure ApplyErrorInsightInPascal;
 var
   LOptions: IOTAEnvironmentOptions;
   LOurs: TRegistry;
   LCurrent: Variant;
   LLevel, LSaved: Integer;
-  LRead: string;
+  LRead, LReads: string;
 begin
-  GErrorInsightPending := False;
   LOptions := IdeEnvironmentOptions;
-  if not Assigned(LOptions) then
-  begin
-    GErrorInsightPending := True;
-    GErrorInsightRetryAt := GetTickCount64 + cErrorInsightRetryMs;
-    Exit;
-  end;
   LOurs := TRegistry.Create(KEY_READ or KEY_WRITE);
   try
     try
       LOurs.RootKey := HKEY_CURRENT_USER;
       if not LOurs.OpenKey(SettingsRegistryKey, True) then
         Exit;
-      LCurrent := LOptions.Values[cEnvErrorInsightLevel];
+      if not ReadPascalSetOption(cEnvErrorInsightLevel, LCurrent) then
+      begin
+        DeferErrorInsightChoice;
+        Exit;
+      end;
+      GErrorInsightDeferNoted := False;
       LLevel := ValueNameIndex(LCurrent, cErrorInsightLevelNames);
-      LRead := 'the IDE''s level read as "' + VarToStrDef(LCurrent, '')
-        + '" (' + VarTypeAsText(VarType(LCurrent)) + ')';
+      LRead := 'the IDE''s level read as ' + VariantForLog(LCurrent);
+      if not GErrorInsightKindLogged then
+      begin
+        GErrorInsightKindLogged := True;
+        LRead := LRead + ', declared ' + OptionKindText(LOptions,
+          cEnvErrorInsightLevel);
+      end;
       if LLevel < 0 then
       begin
         // A value we cannot read is one we cannot put back either: leave the
@@ -1116,12 +1317,18 @@ begin
         end;
         Exit;
       end;
-      if CurrentSettings.PasTreeErrorSquiggles then
+      if PasTreeErrorSquigglesEnabled then
       begin
         // Already off: nothing to remember, and a level remembered earlier
         // must survive rather than be overwritten with None.
         if LLevel = cLevelNone then
         begin
+          GErrorInsightNoneByUs := True;
+          GErrorInsightSavedLevel := -1;
+          if LOurs.ValueExists(cValueSavedErrorInsightLevel) then
+            GErrorInsightSavedLevel := ValueNameIndex(
+              LOurs.ReadString(cValueSavedErrorInsightLevel),
+              cErrorInsightLevelNames);
           ErrorInsightLog(LRead + ' - PasTree draws the underlines, already None');
           Exit;
         end;
@@ -1129,14 +1336,22 @@ begin
         // loses the user's level for good.
         LOurs.WriteString(cValueSavedErrorInsightLevel,
           cErrorInsightLevelNames[LLevel]);
-        LOptions.Values[cEnvErrorInsightLevel] :=
-          ValueNameLike(LCurrent, cLevelNone, cErrorInsightLevelNames);
-        ErrorInsightLog(LRead + ' - PasTree draws the underlines, set to None,'
-          + ' reads now as "'
-          + VarToStrDef(LOptions.Values[cEnvErrorInsightLevel], '') + '"');
+        GErrorInsightSavedLevel := LLevel;
+        if WriteLevelVerified(cEnvErrorInsightLevel, LCurrent,
+          cLevelNone, cErrorInsightLevelNames, LReads) then
+        begin
+          GErrorInsightNoneByUs := True;
+          ErrorInsightLog(LRead + ' - PasTree draws the underlines, set to'
+            + ' None: ' + LReads);
+        end
+        else
+          LogDiagnostic('could not set the IDE''s Error Insight level to None'
+            + ' - it reads "' + LReads + '"; both underlines may show');
       end
       else
       begin
+        GErrorInsightNoneByUs := False;
+        GErrorInsightSavedLevel := -1;
         if not LOurs.ValueExists(cValueSavedErrorInsightLevel) then
         begin
           ErrorInsightLog(LRead + ' - the IDE draws the underlines, nothing'
@@ -1153,10 +1368,18 @@ begin
         // Options is theirs, and wins.
         if LLevel = cLevelNone then
         begin
-          LOptions.Values[cEnvErrorInsightLevel] :=
-            ValueNameLike(LCurrent, LSaved, cErrorInsightLevelNames);
-          ErrorInsightLog(LRead + ' - the IDE draws the underlines, put back "'
-            + cErrorInsightLevelNames[LSaved] + '"');
+          if WriteLevelVerified(cEnvErrorInsightLevel, LCurrent,
+            LSaved, cErrorInsightLevelNames, LReads) then
+            ErrorInsightLog(LRead + ' - the IDE draws the underlines, put'
+              + ' back "' + cErrorInsightLevelNames[LSaved] + '": ' + LReads)
+          else
+          begin
+            // Kept: the marker is what a later attempt puts back.
+            LogDiagnostic('could not put the IDE''s Error Insight level back'
+              + ' to "' + cErrorInsightLevelNames[LSaved] + '" - it reads "'
+              + LReads + '"; set it in Tools > Options > Editor > Language');
+            Exit;
+          end;
         end
         else
           ErrorInsightLog(LRead + ' - the IDE draws the underlines, the'
@@ -1175,12 +1398,105 @@ begin
   end;
 end;
 
+procedure ApplyErrorInsightChoice;
+var
+  LOptions: IOTAEnvironmentOptions;
+begin
+  GErrorInsightPending := False;
+  LOptions := IdeEnvironmentOptions;
+  if not Assigned(LOptions) then
+  begin
+    GErrorInsightPending := True;
+    GErrorInsightRetryAt := GetTickCount64 + cErrorInsightRetryMs;
+    Exit;
+  end;
+  // ONLY THE PASCAL SET'S LEVEL (0.73.8) - a field of the editor option sets,
+  // and Values reaches whichever is current: until 0.73.8 the load-time call
+  // read and wrote Default's (2026-10-20). One door for the read and the
+  // writes - each door the Pascal set had to be made current for ends in a
+  // save of every option.
+  if not WithPascalOptionSet(ApplyErrorInsightInPascal) then
+    DeferErrorInsightChoice;
+end;
+
+{ OUR SETTING FOLLOWS A LEVEL RAISED IN TOOLS > OPTIONS - the same rule as the
+  Insight Provider's (PasTreeIdePlugin.CodeInsight, FollowIdeProviderChoice).
+  With PasTree drawing the underlines the IDE's level is our None; a level
+  other than None read later was set by the user, who wants the IDE's
+  underlines. Until 0.73.7 both layers drew until the next start, and that
+  start's ApplyErrorInsightChoice switched the user's level off again. Now
+  the setting turns to the IDE's underlines and our marker goes - the level
+  is the user's, nothing of ours is left to put back. The IDE sends no
+  notification for an option, so this is a read, at most once a second, on
+  the mouse-move path SyncErrorInsightChoice already runs on. }
+procedure FollowIdeErrorInsightLevel;
+var
+  LCurrent: Variant;
+  LLevel: Integer;
+  LReg: TRegistry;
+  LSettings: TPasTreeSettings;
+begin
+  if not GErrorInsightNoneByUs or GErrorInsightPending or
+     (GetTickCount64 < GErrorInsightFollowAt) then
+    Exit;
+  GErrorInsightFollowAt := GetTickCount64 + cErrorInsightRetryMs;
+  if not PasTreeErrorSquigglesEnabled then
+  begin
+    GErrorInsightNoneByUs := False;
+    Exit;
+  end;
+  // Forced by PasTree as the Code Insight Manager: a level raised there
+  // draws nothing (PasTreeErrorSquigglesEnabled), so there is no choice of
+  // the IDE's underlines to follow - and turning ours off would leave none.
+  if CurrentSettings.PasTreeInsightManager then
+    Exit;
+  try
+    // The Pascal set's level only: another set's is not the one we set to
+    // None, and anything but None there is not the user raising ours. A
+    // peek, not the door: this runs once a second, and a door the Pascal
+    // set had to be made current for ends in a save of every option.
+    if not PeekPascalSetOption(cEnvErrorInsightLevel, LCurrent) then
+      Exit;
+    LLevel := ValueNameIndex(LCurrent, cErrorInsightLevelNames);
+    if (LLevel < 0) or (LLevel = cLevelNone) then
+      Exit;
+    GErrorInsightNoneByUs := False;
+    GErrorInsightSavedLevel := -1;
+    // The marker first: SaveSettings re-applies the choice, and with no
+    // marker that leaves the user's level as it is.
+    LReg := TRegistry.Create(KEY_READ or KEY_WRITE);
+    try
+      LReg.RootKey := HKEY_CURRENT_USER;
+      if LReg.OpenKey(SettingsRegistryKey, False) and
+         LReg.ValueExists(cValueSavedErrorInsightLevel) then
+        LReg.DeleteValue(cValueSavedErrorInsightLevel);
+    finally
+      LReg.Free;
+    end;
+    ErrorInsightLog('the IDE''s level was set to "'
+      + cErrorInsightLevelNames[LLevel] + '" in Tools > Options - the IDE'
+      + ' draws the underlines, the setting follows');
+    LSettings := CurrentSettings;
+    LSettings.PasTreeErrorSquiggles := False;
+    SaveSettings(LSettings);
+  except
+    on E: Exception do
+      ErrorInsightLog('following the IDE''s level failed: ' + E.ClassName
+        + ': ' + E.Message);
+  end;
+end;
+
 procedure SyncErrorInsightChoice;
 begin
-  if (GErrorInsightLogLine <> '') and LspLogToServer(GErrorInsightLogLine) then
-    GErrorInsightLogLine := '';
-  if GErrorInsightPending and (GetTickCount64 >= GErrorInsightRetryAt) then
+  if GErrorInsightLogLines <> nil then
+    FlushErrorInsightLog;
+  // Retried only while the Pascal set is current by itself: a retry that had
+  // to make it current would save every option once a second
+  // (PasTreeIdePlugin.OptionSets).
+  if GErrorInsightPending and (GetTickCount64 >= GErrorInsightRetryAt) and
+     PascalOptionSetIsCurrent then
     ApplyErrorInsightChoice;
+  FollowIdeErrorInsightLevel;
 end;
 
 function TypeHighlightEnabled: Boolean;

@@ -87,6 +87,10 @@ contains
   PasTreeIdePlugin.DcuNames in 'PasTreeIdePlugin.DcuNames.pas',
   PasTreeIdePlugin.DcuSource in 'PasTreeIdePlugin.DcuSource.pas',
   PasTreeIdePlugin.CodeInsight in 'PasTreeIdePlugin.CodeInsight.pas',
+  { The IDE's per-language editor option sets: the one door to the
+    environment options that live in them, and the health check of the
+    provider gate they feed. See the unit's header. }
+  PasTreeIdePlugin.OptionSets in 'PasTreeIdePlugin.OptionSets.pas',
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
   PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',
   PasTreeIdePlugin.SemanticPaint in 'PasTreeIdePlugin.SemanticPaint.pas',

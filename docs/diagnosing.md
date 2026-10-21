@@ -302,6 +302,59 @@ built against**, not the resolver. `cMinPasTreeVersion` is pinned at or past
 the version where the fix landed, so an older sibling should fail loudly rather
 than quietly shift columns - a failure here means something got past that gate.
 
+## DelphiLSP gets no unit: no completion, no Error Insight, an empty Structure view
+
+DelphiLSP is the Insight Provider and nothing works: Ctrl+Space shows nothing,
+Ctrl+Click does nothing, no Error Insight underline, the Structure view shows
+its root alone. Classic works; a fresh profile (`bds -r SomeName`) works. The
+Projects window's `CodeInsight: Stopped` means nothing - a working profile
+shows it too. DelphiLSP's own log (`HKCU\Software\Embarcadero\BDS\<version>\LSP`,
+DWORD `DelphiLSPLog` = 255; files in `%TEMP%\DelphiLSP`) shows `initialize`,
+`didChangeConfiguration` and a `documentSymbol` of the .dpr - and never a
+`didOpen`: the IDE hands it the project and no unit.
+
+That is the IDE's gate (`clients/rad-studio/SPEC.md`, "The editor option sets,
+and the gate that hands DelphiLSP its units"): an editor option set the IDE
+asks before Pascal's - Default, C, C#, HTML, IDL, INI, JavaScript, JSON,
+ObjectiveC++ - names DelphiLSP as its provider. One call answers it:
+
+```
+(BorlandIDEServices as IOTACodeInsightServices).HandlesFile('x.pas', 'Borland.CodeInsight.LSP.Pascal')
+```
+
+False while DelphiLSP is Pascal's provider is this fault and nothing else. The
+plugin asks it itself since 0.73.8 (`CheckInsightGate`, when a Pascal editor
+becomes current, every 10 s, after the provider choice is applied) and logs
+only changes of state: the first `option sets:` line of an IDE session lands
+in the log of the project open at that moment, not necessarily the one you
+read. When it fails, a `[pastree] DelphiLSP ...` line in the Build tab names
+the set at fault and the remedy - Tools > Options > Editor > Language, that
+language, its Code insight manager. The plugin repairs nothing itself.
+
+Default cannot be fixed on that page: its Code insight manager box is greyed
+(`InsightChangable` is False for it). Nor in the registry: editing
+`Editor\Source Options\<set>\Insight Manager` changed nothing at the next
+start (2026-10-21). The repair is a write through the API with that set
+current, and the IDE saves it at once:
+
+```pascal
+LDefault := (BorlandIDEServices as IOTAEditorServices).GetEditOptions('Borland.EditOptions.Default');
+LDefault.BeginUpdate;   // makes Default current, remembering the set that was
+try
+  if (BorlandIDEServices as IOTAServices).GetEnvironmentOptions.Values['SourceOptionIDString'] = 'Borland.EditOptions.Default' then
+    (BorlandIDEServices as IOTAServices).GetEnvironmentOptions.Values['InsightManager'] := '';
+finally
+  LDefault.EndUpdate;   // puts the remembered set back; saves every option
+end;
+```
+
+`Values` always reaches the set that is current - the check of
+`SourceOptionIDString` says which one that is - and nothing else of `LDefault`
+may be touched inside the pair (it switches through the same slot). The
+2026-10-20 breakage was PasTree's own put-back, written while Default was
+current; since 0.73.8 PasTree reads and writes these options in the Pascal
+set only.
+
 ## The server works from `build.bat` but not from the IDE
 
 The IDE's stock Debug configuration sets `DCC_IntegerOverflowCheck` and

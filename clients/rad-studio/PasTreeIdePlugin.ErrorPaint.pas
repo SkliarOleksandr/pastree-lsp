@@ -317,7 +317,7 @@ procedure TPasErrorPaintNotifier.HandlePaintText(const ARect: TRect;
   const AContext: INTACodeEditorPaintContext);
 var
   LDiags: TArray<TLspDiagnostic>;
-  LIdx, LRow, LFrom, LTo, LColTo, LXFrom, LXTo, LXAnchor: Integer;
+  LIdx, LRow, LFrom, LTo, LColTo, LXFrom, LXTo, LXAnchor, LMaxSev: Integer;
 begin
   // AFTER the IDE painted the run - underlining is an overlay, never a
   // replacement (AllowDefaultPainting stays untouched).
@@ -334,9 +334,11 @@ begin
   if not LspTryGetDiagnostics(AContext.FileName, LDiags) then
     Exit;
   LRow := AContext.LogicalLineNum;
+  // The level the user had chosen for Error Insight, now ours to honour.
+  LMaxSev := PasTreeErrorMaxSeverity;
   for LIdx := 0 to High(LDiags) do
   begin
-    if LDiags[LIdx].Row <> LRow then
+    if (LDiags[LIdx].Row <> LRow) or (LDiags[LIdx].Severity > LMaxSev) then
       Continue;
     // ColTo is exclusive; a zero-width diagnostic degrades to one cell -
     // the same rule the retired trait code applied.

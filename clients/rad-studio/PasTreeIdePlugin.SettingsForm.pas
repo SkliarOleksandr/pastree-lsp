@@ -155,7 +155,12 @@ type
     procedure chkHighlightTypesClick(Sender: TObject);
     procedure TypeStyleChanged(Sender: TObject);
     procedure pbxPreviewPaint(Sender: TObject);
+    procedure cbxInsightManagerChange(Sender: TObject);
   private
+    // The Errors Insight choice the user made, kept while PasTree as the
+    // Code Insight Manager forces it - see cbxInsightManagerChange.
+    FErrorSquigglesOwn: Boolean;
+    FErrorSquigglesHint: string;
     // cbxThreads' values, parallel to its items: 0 = Auto, else a count.
     FThreadChoices: TArray<Integer>;
     FBenchmarkStart: UInt64;
@@ -231,6 +236,37 @@ procedure TPasTreeSettingsForm.chkClassCompleteClick(Sender: TObject);
 begin
   lblClassCompleteOrder.Enabled := chkClassComplete.Checked;
   cbxClassCompleteOrder.Enabled := chkClassComplete.Checked;
+end;
+
+{ PASTREE AS THE CODE INSIGHT MANAGER FORCES PASTREE'S UNDERLINES: the IDE's
+  Error Insight takes its errors from the selected provider alone (SPEC.md,
+  the 2026-10-20 spike), so beside PasTree it underlines nothing. The Errors
+  Insight choice then shows PasTree, greyed, with the reason in its hint
+  line; the user's own choice is kept and comes back with RAD Studio. }
+procedure TPasTreeSettingsForm.cbxInsightManagerChange(Sender: TObject);
+var
+  LForced: Boolean;
+begin
+  LForced := cbxInsightManager.ItemIndex = 1;
+  if FErrorSquigglesHint = '' then
+    FErrorSquigglesHint := lblErrorSquigglesHint.Caption;
+  // Leaving the editable state: what it showed is the user's choice.
+  if LForced and cbxErrorSquiggles.Enabled then
+    FErrorSquigglesOwn := cbxErrorSquiggles.ItemIndex = 1;
+  lblErrorSquiggles.Enabled := not LForced;
+  cbxErrorSquiggles.Enabled := not LForced;
+  if LForced then
+  begin
+    cbxErrorSquiggles.ItemIndex := 1;
+    lblErrorSquigglesHint.Caption := 'PasTree draws them while it is the'
+      + ' Code Insight Manager: the IDE''s Error Insight takes its errors'
+      + ' from DelphiLSP alone, and beside PasTree it underlines nothing.';
+  end
+  else
+  begin
+    cbxErrorSquiggles.ItemIndex := Ord(FErrorSquigglesOwn);
+    lblErrorSquigglesHint.Caption := FErrorSquigglesHint;
+  end;
 end;
 
 { Find References lives in the Find All submenu and nowhere else, so its
@@ -525,6 +561,7 @@ begin
     LForm.chkTypeUnderline.Checked := fsUnderline in LSettings.TypeFontStyle;
     LForm.chkHighlightInactive.Checked := LSettings.HighlightInactive;
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
+    LForm.FErrorSquigglesOwn := LSettings.PasTreeErrorSquiggles;
     LForm.cbxInsightManager.ItemIndex := Ord(LSettings.PasTreeInsightManager);
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
@@ -533,6 +570,7 @@ begin
     // Assigning Checked only fires OnClick when the value CHANGES, so the
     // dependent state is set here rather than relied upon above.
     LForm.chkLoggingClick(nil);
+    LForm.cbxInsightManagerChange(nil);
     LForm.chkClassCompleteClick(nil);
     LForm.chkFindAllClick(nil);
     LForm.chkHighlightTypesClick(nil);
@@ -560,7 +598,11 @@ begin
     LSettings.TypeColor := LForm.cbxTypeColor.Selected;
     LSettings.TypeFontStyle := LForm.TypeStyles;
     LSettings.HighlightInactive := LForm.chkHighlightInactive.Checked;
-    LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1;
+    // Forced, the combo shows PasTree; what is stored is the user's own.
+    if LForm.cbxErrorSquiggles.Enabled then
+      LSettings.PasTreeErrorSquiggles := LForm.cbxErrorSquiggles.ItemIndex = 1
+    else
+      LSettings.PasTreeErrorSquiggles := LForm.FErrorSquigglesOwn;
     LSettings.PasTreeInsightManager := LForm.cbxInsightManager.ItemIndex = 1;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;

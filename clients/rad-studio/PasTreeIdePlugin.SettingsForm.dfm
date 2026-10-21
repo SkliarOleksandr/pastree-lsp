@@ -396,6 +396,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Height = 23
         Style = csDropDownList
         TabOrder = 2
+        OnChange = cbxInsightManagerChange
         Items.Strings = (
           'RAD Studio (DelphiLSP)'
           'PasTree (experimental)')

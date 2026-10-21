@@ -101,12 +101,22 @@ function PasTreeIsActiveInsightProvider: Boolean;
 /// Values), the live switch DeclarationInformation and ErrorInsightLevel are
 /// flipped with. Measured on 37.0 (2026-10-13, AVImark): a string option
 /// (tkLString) holding the selected manager's IDString - "Borland.CodeInsight.
-/// LSP.Pascal" for DelphiLSP. A write reads back at once and is written
-/// through to the registry (`Insight Manager` under Editor\Source Options\
-/// Borland.EditOptions.Pascal) at once; the IDE's CURRENT manager follows
-/// lazily, at the editor's next Code Insight turn - 1 s after the write it
-/// still answered DelphiLSP, at 5 s PasTree, both ways. So "the current
-/// manager is not ours right after the switch" is not a failure.
+/// LSP.Pascal" for DelphiLSP. A write reads back at once and the IDE saves it
+/// at once; the IDE's CURRENT manager follows lazily, at the editor's next
+/// Code Insight turn - 1 s after the write it still answered DelphiLSP, at 5 s
+/// PasTree, both ways. So "the current manager is not ours right after the
+/// switch" is not a failure.
+///
+/// ONLY WHILE THE PASCAL OPTION SET IS CURRENT (0.73.8). The option is a field
+/// of the IDE's per-language editor option sets, and Values reaches whichever
+/// set the IDE made current - the set of the last file type the editor
+/// touched, Default for a type no set claims, none at package load. Until
+/// 0.73.8 the put-back of DelphiLSP landed in Default, which the IDE asks
+/// before Pascal, and DelphiLSP was handed no unit for good (2026-10-20). Now
+/// every read and write goes through the door of PasTreeIdePlugin.OptionSets,
+/// which makes the Pascal set current for them when it is not and puts the
+/// set that was back after; a door that does not open leaves the choice
+/// pending for SyncInsightManagerChoice.
 ///
 /// PasTree: registers the manager (InitializeCodeInsight) if it is not yet,
 /// remembers the IDE's value under our key (SavedInsightManager) BEFORE writing
@@ -155,6 +165,7 @@ uses
   PasTreeIdePlugin.DcuNames,
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.ResultRows,   // PaintSyntaxTextTyped, EditorSyntaxColor
+  PasTreeIdePlugin.OptionSets,   // the InsightManager reads and writes
   PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled, the type colour
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
@@ -2771,15 +2782,37 @@ var
   GProviderPending: Boolean = False;
   GProviderRetryAt: UInt64 = 0;
   GProviderUnreadableNoted: Boolean = False;
+  // A door to the Pascal option set that did not open, said once per wait.
+  GProviderDeferNoted: Boolean = False;
+  // A FollowIdeProviderChoice that could not read the Pascal set yet: asked
+  // again by SyncInsightManagerChoice, as GProviderPending is.
+  GFollowPending: Boolean = False;
+  GFollowRetryAt: UInt64 = 0;
   // The last line for the LSP log, until a session takes it - the call at
   // package load runs before any project is open.
-  GProviderLogLine: string = '';
+  // Every line, not the last one only (until 0.73.7): what a start did is
+  // said before any session exists.
+  GProviderLogLines: TArray<string> = nil;
+  GProviderKindLogged: Boolean = False;
+
+procedure FlushProviderLog;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GProviderLogLines) do
+    if not LspLogToServer(GProviderLogLines[LIdx]) then
+    begin
+      Delete(GProviderLogLines, 0, LIdx);
+      Exit;
+    end;
+  GProviderLogLines := nil;
+end;
 
 procedure ProviderLog(const AText: string);
 begin
-  GProviderLogLine := 'insight provider: ' + AText;
-  if LspLogToServer(GProviderLogLine) then
-    GProviderLogLine := '';
+  if Length(GProviderLogLines) < 50 then
+    GProviderLogLines := GProviderLogLines + ['insight provider: ' + AText];
+  FlushProviderLog;
 end;
 
 { A failure: the provider the IDE uses now disagrees with the settings, so
@@ -2792,15 +2825,6 @@ begin
     LMessages.AddTitleMessage('[pastree] could not set the Insight Provider: '
       + AText);
   ProviderLog('FAILED: ' + AText);
-end;
-
-function EnvOptions: IOTAEnvironmentOptions;
-var
-  LServices: IOTAServices;
-begin
-  Result := nil;
-  if Supports(BorlandIDEServices, IOTAServices, LServices) then
-    Result := LServices.GetEnvironmentOptions;
 end;
 
 function OpenOurKey(AReg: TRegistry): Boolean;
@@ -2854,71 +2878,144 @@ begin
     Result := cDelphiLspManagerId;
 end;
 
-procedure ApplyInsightManagerChoice;
+{ Not now: the Pascal option set could not be made current (the door of
+  PasTreeIdePlugin.OptionSets did not open), and a read or write without it
+  would reach another set - the 2026-10-20 break. Asked again by
+  SyncInsightManagerChoice; once a Pascal editor is current by itself the
+  door opens without a bracket. }
+procedure DeferProviderChoice;
+begin
+  GProviderPending := True;
+  GProviderRetryAt := GetTickCount64 + cApplyRetryMs;
+  if GProviderDeferNoted then
+    Exit;
+  GProviderDeferNoted := True;
+  ProviderLog('the Pascal option set could not be made current (the current'
+    + ' one is ' + OptionSetText(CurrentOptionSet) + ') - the provider is read'
+    + ' and set later');
+end;
+
+function ReadProvider(out AValue: string): Boolean;
+var
+  LValue: Variant;
+begin
+  Result := ReadPascalSetOption(cEnvInsightManager, LValue);
+  AValue := Trim(VarToStrDef(LValue, ''));
+  if Result and not GProviderKindLogged and (AValue <> '') then
+  begin
+    GProviderKindLogged := True;
+    ProviderLog('the IDE''s ' + cEnvInsightManager + ' reads "' + AValue
+      + '" (' + VarTypeAsText(VarType(LValue)) + ') in the Pascal set');
+  end;
+end;
+
+{ The choice, inside the door of PasTreeIdePlugin.OptionSets: every read and
+  write below reaches the Pascal set and no other. }
+procedure ApplyProviderInPascal;
 var
   LWant: Boolean;
-  LOptions: IOTAEnvironmentOptions;
   LBefore, LAfter, LRestore: string;
+begin
+  LWant := PasTreeInsightManagerEnabled;
+  // NOT "nothing of ours anywhere, nothing to do" any more (until 0.73.7):
+  // the IDE's option can name our manager with none of ours registered -
+  // a start after a put-back that landed in another option set (0.73.7 and
+  // before). So the option is always read; with the setting off and the
+  // option not ours, the RAD Studio branch below says nothing unless a
+  // marker of ours is left to clear.
+  if not ReadProvider(LBefore) then
+  begin
+    DeferProviderChoice;
+    Exit;
+  end;
+  GProviderDeferNoted := False;
+  if LBefore = '' then
+  begin
+    // A value we cannot read is one we cannot put back: leave the IDE's
+    // provider alone for now and ask again - it may not be loaded yet.
+    // (Until 0.73.8 this was the read at package load, where no option set
+    // is current; the door makes Pascal's current for it now.)
+    GProviderPending := True;
+    GProviderRetryAt := GetTickCount64 + cApplyRetryMs;
+    if not GProviderUnreadableNoted then
+    begin
+      GProviderUnreadableNoted := True;
+      ProviderLog('the IDE''s ' + cEnvInsightManager
+        + ' does not read yet - asked again');
+    end;
+    Exit;
+  end;
+  if LWant then
+  begin
+    if SameText(LBefore, cOurManagerId) then
+    begin
+      ProviderLog('PasTree, already selected');
+      Exit;
+    end;
+    // Remembered BEFORE the switch: the other order, interrupted, loses
+    // the user's provider.
+    WriteSavedManager(LBefore);
+    if not WritePascalSetOption(cEnvInsightManager, cOurManagerId) then
+    begin
+      DeferProviderChoice;
+      Exit;
+    end;
+    ReadProvider(LAfter);
+    if SameText(LAfter, cOurManagerId) then
+      ProviderLog('PasTree selected in place of "' + LBefore + '"')
+    else
+      ProviderFailure('"' + cOurManagerId + '" was written over "' + LBefore
+        + '" and the option reads "' + LAfter + '" (option set '
+        + OptionSetText(CurrentOptionSet) + ')');
+  end
+  else
+  begin
+    // Only over OUR value: a provider the user has picked since in
+    // Tools > Options is theirs, and wins.
+    if SameText(LBefore, cOurManagerId) then
+    begin
+      LRestore := ManagerToRestore;
+      if not WritePascalSetOption(cEnvInsightManager, LRestore) then
+      begin
+        DeferProviderChoice;
+        Exit;
+      end;
+      ReadProvider(LAfter);
+      if SameText(LAfter, LRestore) then
+        ProviderLog('RAD Studio - put back "' + LRestore + '"'
+          + IfThen(Assigned(GManager), '; PasTree stays registered until'
+          + ' the IDE restarts', ' over a PasTree selection with no PasTree'
+          + ' manager registered'))
+      else
+        ProviderFailure('"' + LRestore + '" was written over "' + LBefore
+          + '" and the option reads "' + LAfter + '" (option set '
+          + OptionSetText(CurrentOptionSet) + ')');
+    end
+    else if ReadSavedManager <> '' then
+      ProviderLog('RAD Studio - "' + LBefore + '" is the user''s, kept')
+    else
+      Exit;   // nothing of ours, nothing to say
+    WriteSavedManager('');
+  end;
+end;
+
+procedure ApplyInsightManagerChoice;
 begin
   GProviderPending := False;
   try
-    LWant := PasTreeInsightManagerEnabled;
-    // Nothing of ours anywhere: nothing to do or say.
-    if not LWant and not Assigned(GManager) and (ReadSavedManager = '') then
-      Exit;
-    if LWant and not Assigned(GManager) then
+    // Registration is no option of a set: done as it was, before the door.
+    if PasTreeInsightManagerEnabled and not Assigned(GManager) then
       InitializeCodeInsight;
-    LOptions := EnvOptions;
-    LBefore := '';
-    if Assigned(LOptions) then
-      LBefore := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
-    if LBefore = '' then
-    begin
-      // A value we cannot read is one we cannot put back: leave the IDE's
-      // provider alone for now and ask again - it may not be loaded yet.
-      GProviderPending := True;
-      GProviderRetryAt := GetTickCount64 + cApplyRetryMs;
-      if not GProviderUnreadableNoted then
+    // One door for the reads, the writes and the gate check after them - each
+    // door the Pascal set had to be made current for ends in a save of every
+    // option (PasTreeIdePlugin.OptionSets).
+    if not WithPascalOptionSet(
+      procedure
       begin
-        GProviderUnreadableNoted := True;
-        ProviderLog('the IDE''s ' + cEnvInsightManager
-          + ' does not read yet - asked again');
-      end;
-      Exit;
-    end;
-    if LWant then
-    begin
-      if SameText(LBefore, cOurManagerId) then
-      begin
-        ProviderLog('PasTree, already selected');
-        Exit;
-      end;
-      // Remembered BEFORE the switch: the other order, interrupted, loses
-      // the user's provider.
-      WriteSavedManager(LBefore);
-      LOptions.Values[cEnvInsightManager] := cOurManagerId;
-      LAfter := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
-      if SameText(LAfter, cOurManagerId) then
-        ProviderLog('PasTree selected in place of "' + LBefore + '"')
-      else
-        ProviderFailure('"' + cOurManagerId + '" was written over "' + LBefore
-          + '" and the option reads "' + LAfter + '"');
-    end
-    else
-    begin
-      // Only over OUR value: a provider the user has picked since in
-      // Tools > Options is theirs, and wins.
-      if SameText(LBefore, cOurManagerId) then
-      begin
-        LRestore := ManagerToRestore;
-        LOptions.Values[cEnvInsightManager] := LRestore;
-        ProviderLog('RAD Studio - put back "' + LRestore + '"; PasTree stays'
-          + ' registered until the IDE restarts');
-      end
-      else
-        ProviderLog('RAD Studio - "' + LBefore + '" is the user''s, kept');
-      WriteSavedManager('');
-    end;
+        ApplyProviderInPascal;
+        CheckInsightGate('the provider choice applied');
+      end) then
+      DeferProviderChoice;
   except
     on E: Exception do
       ProviderFailure(E.ClassName + ': ' + E.Message);
@@ -2939,68 +3036,106 @@ end;
   writes DelphiLSP back over ours and so deselects us) has cleared GAlive, so
   our own restore never turns the setting off. Our other own writes agree
   with the setting by construction - ApplyInsightManagerChoice writes what it
-  says - and leave nothing to follow. }
+  says - and leave nothing to follow.
+
+  Read in the Pascal option set (0.73.8), made current for it: after Tools >
+  Options the set current is whichever language its page showed last, and
+  that set's provider is not the one picked for Delphi. The save it leads to
+  runs inside the same door, so it costs no second one. }
+procedure FollowProviderInPascal;
+var
+  LNow: string;
+  LOurs: Boolean;
+  LSettings: TPasTreeSettings;
+begin
+  if not ReadProvider(LNow) or (LNow = '') then
+    Exit;   // unreadable: nothing to follow
+  LOurs := SameText(LNow, cOurManagerId);
+  if LOurs = PasTreeInsightManagerEnabled then
+    Exit;
+  LSettings := LoadSettings;
+  LSettings.PasTreeInsightManager := LOurs;
+  ProviderLog('chosen in Tools > Options: "' + LNow
+    + '" - the Code Insight Manager setting follows ('
+    + IfThen(LOurs, 'PasTree', 'RAD Studio') + ')');
+  SaveSettings(LSettings);
+end;
+
+procedure FollowIdeProviderNow;
+begin
+  GFollowPending := False;
+  if not GAlive or not Assigned(GManager) then
+    Exit;
+  try
+    if not WithPascalOptionSet(FollowProviderInPascal) then
+    begin
+      GFollowPending := True;
+      GFollowRetryAt := GetTickCount64 + cApplyRetryMs;
+    end;
+  except
+    on E: Exception do
+      ProviderLog('following the IDE''s choice failed: ' + E.ClassName
+        + ': ' + E.Message);
+  end;
+end;
+
 procedure FollowIdeProviderChoice;
 begin
   TThread.ForceQueue(nil,
     procedure
-    var
-      LOptions: IOTAEnvironmentOptions;
-      LNow: string;
-      LOurs: Boolean;
-      LSettings: TPasTreeSettings;
     begin
-      if not GAlive or not Assigned(GManager) then
-        Exit;
-      try
-        LOptions := EnvOptions;
-        if not Assigned(LOptions) then
-          Exit;
-        LNow := Trim(VarToStrDef(LOptions.Values[cEnvInsightManager], ''));
-        if LNow = '' then
-          Exit;   // unreadable: nothing to follow
-        LOurs := SameText(LNow, cOurManagerId);
-        if LOurs = PasTreeInsightManagerEnabled then
-          Exit;
-        LSettings := LoadSettings;
-        LSettings.PasTreeInsightManager := LOurs;
-        ProviderLog('chosen in Tools > Options: "' + LNow
-          + '" - the Code Insight Manager setting follows ('
-          + IfThen(LOurs, 'PasTree', 'RAD Studio') + ')');
-        SaveSettings(LSettings);
-      except
-        on E: Exception do
-          ProviderLog('following the IDE''s choice failed: ' + E.ClassName
-            + ': ' + E.Message);
-      end;
+      FollowIdeProviderNow;
     end);
 end;
 
 procedure SyncInsightManagerChoice;
 begin
-  if (GProviderLogLine <> '') and LspLogToServer(GProviderLogLine) then
-    GProviderLogLine := '';
+  if GProviderLogLines <> nil then
+    FlushProviderLog;
+  // Retries only while the Pascal set is current by itself: one that had to
+  // make it current would save every option once a second
+  // (PasTreeIdePlugin.OptionSets). The user's pick in Tools > Options first:
+  // following it re-applies the choice, which a pending apply would
+  // otherwise contradict.
+  if not (GFollowPending and (GetTickCount64 >= GFollowRetryAt)) and
+     not (GProviderPending and (GetTickCount64 >= GProviderRetryAt)) or
+     not PascalOptionSetIsCurrent then
+    Exit;
+  if GFollowPending and (GetTickCount64 >= GFollowRetryAt) then
+    FollowIdeProviderNow;
   if GProviderPending and (GetTickCount64 >= GProviderRetryAt) then
     ApplyInsightManagerChoice;
 end;
 
 { At unload: the IDE's own provider back over ours, the marker kept. The
-  option writes through to the registry at once (measured 2026-10-13), so
-  without this an IDE started without the package would find a provider that
-  does not exist; with it, the next start selects PasTree again. }
-procedure RestoreProviderAtUnload;
+  write is saved at once, so without this an IDE started without the package
+  would find a provider that does not exist; with it, the next start selects
+  PasTree again.
+
+  In the Pascal option set, made current for the read and the write and the
+  set that was current put back (PasTreeIdePlugin.OptionSets) - never the
+  set that happens to be current, which until 0.73.8 put DelphiLSP's id into
+  Default and DelphiLSP out of work. }
+procedure RestoreProviderInPascal;
 var
-  LOptions: IOTAEnvironmentOptions;
-  LRestore: string;
+  LNow, LRestore: string;
+begin
+  if not ReadProvider(LNow) or not SameText(LNow, cOurManagerId) then
+    Exit;
+  LRestore := ManagerToRestore;
+  if not WritePascalSetOption(cEnvInsightManager, LRestore) then
+    Exit;
+  LspLogToServer('insight provider: unload - put back "' + LRestore + '"');
+  CheckInsightGate('unload');
+end;
+
+procedure RestoreProviderAtUnload;
 begin
   try
-    LOptions := EnvOptions;
-    if not Assigned(LOptions) or not SameText(Trim(VarToStrDef(
-      LOptions.Values[cEnvInsightManager], '')), cOurManagerId) then
-      Exit;
-    LRestore := ManagerToRestore;
-    LOptions.Values[cEnvInsightManager] := LRestore;
-    LspLogToServer('insight provider: unload - put back "' + LRestore + '"');
+    if not WithPascalOptionSet(RestoreProviderInPascal) then
+      LspLogToServer('insight provider: unload - the Pascal option set could'
+        + ' not be made current (the current one is '
+        + OptionSetText(CurrentOptionSet) + '); the provider is left as it is');
   except
     // Unload: nobody to tell, and nothing worth an exception into the IDE.
   end;
@@ -3010,11 +3145,14 @@ procedure FinalizeCodeInsight;
 var
   LServices: IOTACodeInsightServices;
 begin
-  GProviderPending := False;
   // Before the unregister: the IDE must not be left selecting a manager that
-  // is about to be gone.
-  if Assigned(GManager) then
+  // is about to be gone. With none registered as well while a choice is
+  // still pending - the put-back of a stale PasTree selection may be what it
+  // was to do.
+  if Assigned(GManager) or GProviderPending then
     RestoreProviderAtUnload;
+  GProviderPending := False;
+  GFollowPending := False;
   GAlive := False;
   // The completion window outlives this package: its WindowProc must stop
   // pointing into our code before the code goes.

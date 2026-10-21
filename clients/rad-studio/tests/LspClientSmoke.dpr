@@ -1848,8 +1848,13 @@ begin
   Check(LRow.Contains('"detail":" = TBox.CSlots') and
     LRow.Contains('"typeSpans":[4,4]'),
     'a type qualifying a constant''s value is a type span (got ' + LRow + ')');
-  Check(GOk and GResultJson.Contains('(const S: <string|array>): Integer'),
-    'the Length builtin shows params AND the curated result type');
+  // No result type: Length's depends on its argument - NativeInt for a
+  // dynamic array, Int64 on dcc64 - so since PasTree 0.100.0 (one intrinsic
+  // table, the display result derived from the result shape) it shows none,
+  // as High does. The check asked for ': Integer' until 0.73.7.
+  Check(GOk and GResultJson.Contains(
+    '"label":"Length","kind":3,"detail":"(const S: <string|array>)"'),
+    'the Length builtin shows its params and no fixed result type');
   Check(GOk and GResultJson.Contains(
     Format('"start":{"line":%d,"character":%d}', [LLine, LChar])),
     'the textEdit range starts where the word starts');
@@ -2025,8 +2030,9 @@ const
     // with its constraints, as written
     ('const AKept: TKept): TMade;', 'TMade', 'type TMade: class, constructor'),
     ('const AKept: TKept): TMade;', 'TKept', 'type TKept: TInferItem'),
+    // no fixed result - see the completion check on Length
     ('IInt := Length(', 'Length',
-     'function System.Length(const S: <string|array>): Integer'),
+     'function System.Length(const S: <string|array>)'),
     ('Inc(IInt)', 'Inc', 'procedure System.Inc(var X[; N])'),
     ('IInt := High(', 'High',
      'function System.High(const X: <type|array|string>)'),

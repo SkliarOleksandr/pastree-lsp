@@ -2173,8 +2173,10 @@ end;
 
 { publishDiagnostics params -> the per-file cache: uri, then per diagnostic
   range.start/end (LSP 0-based) and severity/message. Diagnostics never span
-  lines in this server; one that somehow did would degrade to its first
-  line's tail. }
+  lines in this server (PasLsp.Server.PublishDiagnosticsFor: an identifier's
+  span or one character). One that did is drawn as one cell at its start -
+  until 0.73.7 its END column, read off another line, gave it a width that
+  meant nothing on this one. }
 procedure TLspSession.StoreDiagnostics(AParams: TJSONValue);
 var
   LUri, LPath: string;
@@ -2203,6 +2205,8 @@ begin
       Continue;
     LspToIde(LLine, LChar, LDiag.Row, LDiag.ColFrom);
     LChar := LValue.GetValue<Integer>('range.end.character', LChar);
+    if LValue.GetValue<Integer>('range.end.line', LLine) <> LLine then
+      LChar := LValue.GetValue<Integer>('range.start.character', 0) + 1;
     LspToIde(LLine, LChar, LDummyRow, LDiag.ColTo);
     if LDiag.ColTo < LDiag.ColFrom then
       LDiag.ColTo := LDiag.ColFrom;

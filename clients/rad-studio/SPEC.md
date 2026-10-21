@@ -364,13 +364,15 @@ implementer does not re-derive it:
   37.0 with AVImark): the Insight Provider combobox is the environment option
   `InsightManager` (`IOTAEnvironmentOptions.Values`), a `tkLString` holding the
   selected manager's `IDString` (`Borland.CodeInsight.LSP.Pascal` for
-  DelphiLSP). Writing it reads back at once and is written through to the
-  registry (`Insight Manager` under `Editor\Source Options\
-  Borland.EditOptions.Pascal`) at once; `GetCurrentCodeInsightManager` follows
-  lazily, at the editor's next Code Insight turn - still the old manager 1 s
-  after the write, the new one at 5 s, in both directions. The settings' Code
-  Insight Manager choice does this (`ApplyInsightManagerChoice`), remembering
-  the replaced value and putting it back on the way out and at unload.
+  DelphiLSP). Writing it reads back at once and is saved at once;
+  `GetCurrentCodeInsightManager` follows lazily, at the editor's next Code
+  Insight turn - still the old manager 1 s after the write, the new one at
+  5 s, in both directions. The settings' Code Insight Manager choice does this
+  (`ApplyInsightManagerChoice`), remembering the replaced value and putting it
+  back on the way out and at unload. The option belongs to the CURRENT editor
+  option set, not to Pascal's as such - see "The editor option sets" below:
+  until 0.73.8 a put-back made with another set current cost DelphiLSP every
+  unit.
 
 ## The open experiment - CLOSED 2026-08-22, verdict NEGATIVE
 
@@ -392,6 +394,134 @@ delivered the same day), and the same wall stands for `IOTAModuleRegions`
 module answers those natively too and plan the custom-draw route for each.
 The original reasoning follows, kept because the catch it names is now a
 measured fact.
+
+## Error Insight comes from the selected provider - measured 2026-10-20
+
+A second spike asked the question the first could not: with PasTree as the
+Insight Provider, does the IDE ask the PROVIDER for Error Insight's errors?
+The manager implemented `IOTAModuleErrors` with two hand-built errors and
+logged every interface the IDE queried it for (37.0, AVImark, Error Insight
+level Errors). Verdict NEGATIVE for the public route:
+
+- `IOTAModuleErrors` was never queried on the manager and `GetErrors` never
+  ran; no underline appeared.
+- What the IDE did query, besides the documented `IOTACodeInsightSelection`,
+  `IOTACodeInsightManager`, `IOTAAsyncCodeInsightManager` and
+  `IOTACodeInsightUIOverride`, were two interfaces in no shipped source:
+  `{CF888043-8F6A-4172-8A16-6C155F378FEA}` and
+  `{A84C137A-F375-478E-AD0C-479B707A22EB}`. Their RTTI in `coreide370.bpl`
+  (unit `CodCmplt`) names them `IInternalSupportErrorInsight` and
+  `IOTAAutoCodeCompletionTrait`; both GUIDs also sit in `IDELSP370.bpl`, so
+  DelphiLSP implements them.
+
+So Error Insight is fed by the selected provider through a private interface
+whose methods are undocumented. With any provider but DelphiLSP the IDE's
+Error Insight underlines nothing and its Structure View Errors folder stays
+empty - measured: PasTree selected, level Errors, an error typed, nothing.
+Implementing `IInternalSupportErrorInsight` would mean reverse-engineering a
+vtable that any IDE update may reorder; not taken. Consequence in the
+settings (0.73.7): while PasTree is the Code Insight Manager, PasTree draws
+the underlines whatever the Errors Insight choice says
+(`PasTreeErrorSquigglesEnabled`), and the dialog greys that choice.
+
+## The editor option sets, and the gate that hands DelphiLSP its units - read 2026-10-21
+
+On 2026-10-20 DelphiLSP went silent in Alex's main profile - no completion, no
+Error Insight, an empty Structure view, nothing in any log - while Classic and
+a fresh profile worked. The cause was PasTree's own writes, through a mechanism
+no ToolsAPI document mentions. Read with `bin64\llvm-objdump.exe` in
+`coreide370`, `vclide370`, `delphicoreide370` and `IDELSP370` (37.0.57242.3601,
+32-bit) and proven in the IDE with a throwaway diagnostic package.
+
+**Some environment options are fields of the editor option sets.** Tools >
+Options > Editor > Language keeps one set per language
+(`Borland.EditOptions.Pascal`, `.Default`, `.C`, ... - ToolsAPI's `cDefEd*`):
+one `TRegistryPropSet`, `EditorSourceOptions`, with a current key.
+`InsightManager`, `ErrorInsightLevel`, `ErrorInsightMarks` and
+`SourceOptionIDString` (the set's "Source Opt Internal ID") are its fields, and
+`IOTAEnvironmentOptions.Values` reads and writes the field of the CURRENT key -
+the call cannot name a set. The IDE moves the current key itself, as a side
+effect of editor work: `TEnvironmentOptions.MoveToOptionsForFileType` runs when
+a view or a buffer is created, a gutter laid out, a highlighter checked, error
+marks updated, and inside `IOTAEditorServices.GetEditOptionsForFile` and
+`GetEditOptionsIDString`; a file no set claims makes Default current. At
+package load no key is current (index -1) and the reads answer the fields'
+defaults.
+
+**A write is saved at once.** The `Values` setter is `TPropField.SetValue`
+followed by `TPropSet.SavePropValues` (the save itself puts the current key
+back), so a write into the wrong set survives restarts. Editing
+`Editor\Source Options\<set>\Insight Manager` in the registry did not take
+effect - markers placed there were not read by the next start, and where the
+start does read these fields from was not pinned down. The API write is the
+route seen to work, in both directions.
+
+**The gate.** DelphiLSP gets a unit only when
+`IOTACodeInsightServices.HandlesFile(File, 'Borland.CodeInsight.LSP.Pascal')`
+is True (`TLSPPascalManager.HandlesFile`, which `TLSPKibitzManager.HandlesFile`
+calls). That walks the sets in the list's order - C, C#, Default, HTML, IDL,
+INI, JavaScript, JSON, ObjectiveC++, Pascal, ... - takes the FIRST whose
+`Insight Manager` is the id and answers by that set's extensions alone, while
+`HandlesProject` finds the Pascal set by name. A set ahead of Pascal holding
+the id therefore gives exactly the symptom: initialize,
+didChangeConfiguration and a documentSymbol of the .dpr reach DelphiLSP, a
+didOpen never does. Classic (`Borland.CodeInsight.Pascal`) is gated the same
+way by its own id. In the broken profile it was Default, which has no
+extensions: PasTree's put-back (`ApplyInsightManagerChoice`,
+`RestoreProviderAtUnload`) had written DelphiLSP's id while Default was
+current, and its Error Insight writes had left `Errors` there too. Writing ''
+into Default through the same `Values`, with Default current, repaired it at
+once and for good. Tools > Options can break it as well: the Language page's
+`TNewEditorSourceOptionsPg.CodeInsightManagerComboSelect` writes the provider
+combobox's item into whichever language the page shows (`None` when the item
+is no provider), and OK saves it.
+
+**What the plugin does since 0.73.8** (`PasTreeIdePlugin.OptionSets`):
+
+- **One door, `WithPascalOptionSet`.** Every read and write of such a field
+  runs with the Pascal set current: as it is when it already is, otherwise
+  between `BeginUpdate` and `EndUpdate` of the Pascal set's `IOTAEditOptions`
+  (`IOTAEditorServices.GetEditOptions('Borland.EditOptions.Pascal')`). In
+  `coreide370` the wrapper's `BeginUpdate` remembers the current key and makes
+  its own current, and `EndUpdate` puts the remembered one back - none, at
+  package load. The probe `SourceOptionIDString` - a field of the same sets,
+  read through the same `Values`, so it names exactly the set an access
+  reaches - must read Pascal before anything runs; an IDE whose `BeginUpdate`
+  does not switch gets nothing written, and the caller asks again later.
+  Inside the door nothing else of that `IOTAEditOptions` object is touched:
+  its other properties switch and put back the key through the same
+  remembered slot.
+- **The price of a door.** The last `EndUpdate` does what any change through
+  `IOTAEditOptions` does: `TEnvironmentOptions.SendModified` and
+  `SaveOptions`, a save of every environment option. So the door is for the
+  one-off moments - package load, the settings dialog's OK (one door for the
+  provider and the level), a provider picked in Tools > Options, unload -
+  and what is asked often only peeks (`PeekPascalSetOption`: reads while
+  Pascal is current by itself): the mark style per paint, the level follow,
+  the gate recheck, and the once-a-second retry of a choice whose door did
+  not open or whose value did not read.
+- **`CheckInsightGate`**: while Pascal's provider is DelphiLSP or Classic,
+  `HandlesFile` on a `.pas` name must be True - asked when a Pascal editor
+  becomes current, every 10 s while one is, and after the provider choice is
+  applied. False: the set at fault is named read-only - `HandlesFile` answers
+  by the extensions of the first set holding the id, so the set ahead of
+  Pascal whose own extension it answers True for is that set, and a set
+  without extensions (Default) when none does - and said in the Build tab
+  with the remedy. It repairs nothing, by Alex's call: PasTree writes no other
+  set now, so what it can find is the IDE's own doing, and that is reported,
+  not overwritten. Default's provider box is greyed on the Language page
+  (`InsightChangable` False, read in `cmbxSourceFileTypeSelect`), so its
+  remedy is the API one in `docs/diagnosing.md`.
+- The 0.73.7 direct registry write of `Insight Manager` is gone: it answered
+  a put-back that "did not reach the registry", which was the put-back
+  landing in Default.
+
+`DeclarationInformation` (Tooltip symbol insight) is per set too, but of the
+Code Insight sets (`Code Insight\Borland.EditOptions.<set>`, the `CodeInsight`
+property set), whose current key follows the editor's set
+(`SetCodeInsightOptions`) and the current manager's `GetOptionSetName`. They
+have no field naming the set and no part in the gate; that switch is left as
+it was.
 
 ## What the experiment was (historical)
 
@@ -450,7 +580,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Squiggles, native | **DEAD** (spike NEGATIVE 2026-08-22) | - | the module answers `IOTAModuleErrors` natively and `FindFileTrait` never saw our registration; see the closed experiment above |
+| Squiggles, native | **DEAD** (spikes NEGATIVE 2026-08-22 and 2026-10-20) | - | the module answers `IOTAModuleErrors` natively and `FindFileTrait` never saw our registration; Error Insight is fed by the selected provider through the private `IInternalSupportErrorInsight`, never through `IOTAModuleErrors` on the manager - see both closed experiments above |
 | Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity, in the shape the IDE's Error Insight "Editor rendering style" names (`ErrorInsight Marks`, `0..3` = Classic/Smooth Wave/Solid Line/Dots, read at most once a second - `IdeErrorMarkStyle`, since 0.52.5), each shape measured off the IDE's own and drawn anti-aliased through a premultiplied DIB + `AlphaBlend`, errors in the IDE's crimson; repaint via the session's diagnostics-changed listener. Since 0.52.4 an experimental choice, off by default: selecting it sets the IDE's `ErrorInsightLevel` (`Editor\Source Options\Borland.EditOptions.Pascal`) to `None` and remembers the old level (`ApplyErrorInsightChoice`) |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |

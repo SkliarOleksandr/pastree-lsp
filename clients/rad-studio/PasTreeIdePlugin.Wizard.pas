@@ -847,6 +847,9 @@ begin
   // Since 0.68.0 registered again when the settings' Code Insight Manager is
   // PasTree, which also selects it through the environment option
   // InsightManager - see ApplyInsightManagerChoice. A no-op when it is not.
+  // At package load no editor option set is current: the Pascal one is made
+  // current for the read and the write, and the IDE left with none again
+  // after (PasTreeIdePlugin.OptionSets).
   ApplyInsightManagerChoice;
   // Ctrl+Click in the editor, as a mouse override independent of the Insight
   // Provider selection - for the users who cannot give that combobox up (RAD
@@ -861,7 +864,8 @@ begin
   // the module answers that interface natively; SPEC.md, closed
   // experiment.) Drawn only when the settings choose them over the IDE's
   // Error Insight - and the IDE's level is put in step with that choice here,
-  // once per start, in case Tools > Options changed it since.
+  // once per start, in case Tools > Options changed it since (in the Pascal
+  // option set, like the provider above).
   InitializeErrorPaint;
   ApplyErrorInsightChoice;
   // IDE Fixes: the form designer stops writing Explicit* into form files - a
