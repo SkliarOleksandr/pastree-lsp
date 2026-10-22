@@ -320,16 +320,25 @@ begin
   end;
 end;
 
+const
+  // A safety net, not a layout: the Code Completion list cuts a row at its
+  // own width with an ellipsis, as the native list does, and a row too wide
+  // shows whole in its hint. Until 0.74.1 this was 100, so a row was cut at
+  // the same character however wide the list was dragged (Alex, 2026-10-22).
+  cDetailCap = 400;
+  // The hover hint's declaration line is one unwrapped line as wide as its
+  // text, so it stays capped: 100 for the parameter list was the old cap,
+  // and a result type or a value came after it uncapped.
+  cHoverDetailCap = 150;
+
 { Display cap for a Detail column - the engine hands back the declaration's
   full span and leaves any length cap to the host (its words). One line
   (JoinLines) before it is capped, so the cap counts what is shown. }
-function CapDisplay(const AText: string): string;
-const
-  cCap = 100;
+function CapDisplay(const AText: string; ACap: Integer = cDetailCap): string;
 begin
   Result := JoinLines(AText);
-  if Length(Result) > cCap then
-    Result := Copy(Result, 1, cCap - 3) + '...';
+  if Length(Result) > ACap then
+    Result := Copy(Result, 1, ACap - 3) + '...';
 end;
 
 { ---- bare-row fallbacks (user ask, 2026-08-22) -----------------------------
@@ -1610,8 +1619,8 @@ begin
     end;
     // One line whatever path composed it - a routine's parameters come from
     // the engine, written over as many lines as the source has them.
-    LDetail := JoinLines(ItemDetailText(LCompletion, AProject, LModel, LItem,
-      True));
+    LDetail := CapDisplay(ItemDetailText(LCompletion, AProject, LModel, LItem,
+      True), cHoverDetailCap);
   finally
     LCompletion.Free;
   end;

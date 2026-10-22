@@ -158,6 +158,7 @@ uses
   Vcl.Controls,
   Vcl.Forms,
   Vcl.Themes,
+  Vcl.StdCtrls,   // TCustomListBox - the completion window's ancestor
   ToolsAPI,
   ToolsAPI.UI,
   PasTreeIdePlugin.LspSession,
@@ -238,6 +239,11 @@ type
     // our provider (IsCodeCompleteShowReservedWordsVisible), obeyed since
     // 0.73.6: unticked, the list has no keyword rows.
     ReservedWords: Boolean;
+    // CodeInsightUseEditorFontPropField - "Use editor font" (Insight Options,
+    // off by default): ticked, our rows are in the editor's font and the
+    // list's rows sized for it (FitRows); unticked, the list's own font and
+    // row height, as before 0.74.1 (Alex, 2026-10-22).
+    EditorFont: Boolean;
   end;
 
 var
@@ -294,6 +300,7 @@ begin
   Result.Shortest := False;
   Result.Underline := True;
   Result.ReservedWords := True;
+  Result.EditorFont := False;
   LOptions := nil;
   if Supports(BorlandIDEServices, IOTAServices, LServices) then
     LOptions := LServices.GetEnvironmentOptions;
@@ -324,6 +331,8 @@ begin
   Result.Underline := ReadBool('CodeInsightFilterUnderline', Result.Underline);
   Result.ReservedWords := ReadBool('CodeInsightShowReservedWords',
     Result.ReservedWords);
+  Result.EditorFont := ReadBool('CodeInsightUseEditorFontPropField',
+    Result.EditorFont);
 end;
 
 { ---------------------------------------------------------------------------
@@ -344,7 +353,8 @@ type
     the window first. Active only while OUR list is shown - a hide turns it
     off, so the native manager's list, should it be selected, is untouched.
     The same hook shortens the pause before a long row's hint
-    (CM_HINTSHOWPAUSE, see WndProc). }
+    (CM_HINTSHOWPAUSE, see WndProc) and gives our rows the editor's font
+    size (FitRows). }
   TCompletionStatusStrip = class(TComponent)
   private
     FTarget: TWinControl;
@@ -352,9 +362,15 @@ type
     FActive: Boolean;   // the strip is wanted (our list is the one shown)
     FShrunk: Boolean;   // the last WM_NCCALCSIZE took the strip's room
     FText: string;
+    // FitRows: the row height the IDE gave the list, and the one we set
+    // over it (0 while ours is not on the window).
+    FIdeRowHeight: Integer;
+    FOurRowHeight: Integer;
     procedure Hook(ATarget: TWinControl);
     procedure Unhook;
     procedure WndProc(var AMsg: TMessage);
+    procedure FitRows;
+    procedure RestoreRows;
     procedure SetActive(AValue: Boolean);
     procedure QueueFrame;
     function StripHeight: Integer;
@@ -365,7 +381,8 @@ type
       Operation: TOperation); override;
   public
     destructor Destroy; override;
-    procedure ShowCounts(AVisible, ATotal: Integer; const AFilter: string);
+    procedure ShowCounts(AVisible, ATotal: Integer; const AFilter: string;
+      AEditorFont: Boolean);
   end;
 
 const
@@ -373,9 +390,22 @@ const
   // CM_HINTSHOWPAUSE): long enough not to flash a hint on every long row the
   // mouse crosses, a fifth of the IDE's default.
   cListHintPauseMs = 100;
+  // DrawLine's padding before the class word and around a long row's hint.
+  // Not the list's row spacing, which FitRows sets.
+  cRowPad = 4;
+
+type
+  // TControl.Font is protected; the completion window is a TCustomListBox
+  // (TCodeCompleteListView <- TIDEPopupListBox <- TCustomListBox, read off
+  // coreide370.bpl's RTTI on 2026-10-22).
+  TListBoxAccess = class(TCustomListBox);
 
 var
   GStatusStrip: TCompletionStatusStrip = nil;
+  // The font DrawLine paints our rows in - the editor's face, and its size
+  // at the list's DPI (FitRows); 0 / '' keep the font the viewer prepared.
+  GRowFontHeight: Integer = 0;
+  GRowFontName: string = '';
   // The posted frame recompute (TCompletionStatusStrip.SetActive).
   GStripFrameMsg: Cardinal = 0;
 
@@ -452,6 +482,7 @@ begin
      IsWindowVisible(FTarget.Handle) then
     SetWindowPos(FTarget.Handle, 0, 0, 0, 0, 0, SWP_FRAMECHANGED or
       SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE);
+  RestoreRows;
   FTarget.RemoveFreeNotification(Self);
   FTarget := nil;
 end;
@@ -646,22 +677,42 @@ begin
     // A hide only marks the strip unwanted - the frame of a hidden window is
     // never touched (see SetActive). A show settles whatever is pending:
     // the strip wanted and missing, or a list not ours on a shrunk client.
+    // A list not ours gets the IDE's row height back on its show, not on our
+    // hide: a hide and show between two of our filters would otherwise leave
+    // our taller font in the IDE's rows.
     WM_SHOWWINDOW:
       begin
         FOldProc(AMsg);
         if AMsg.WParam = 0 then
           FActive := False
-        else if FActive <> FShrunk then
-          QueueFrame;
+        else
+        begin
+          if not FActive then
+            RestoreRows;
+          if FActive <> FShrunk then
+            QueueFrame;
+        end;
       end;
     WM_WINDOWPOSCHANGED:
       begin
         FOldProc(AMsg);
         if PWindowPos(AMsg.LParam).flags and SWP_HIDEWINDOW <> 0 then
           FActive := False
-        else if (PWindowPos(AMsg.LParam).flags and SWP_SHOWWINDOW <> 0) and
-                (FActive <> FShrunk) then
-          QueueFrame;
+        else if PWindowPos(AMsg.LParam).flags and SWP_SHOWWINDOW <> 0 then
+        begin
+          if not FActive then
+            RestoreRows;
+          if FActive <> FShrunk then
+            QueueFrame;
+        end;
+      end;
+    // Our rows are cut at the list's width (DrawLine): a list dragged wider or
+    // narrower repaints them whole, or a row keeps the cut of its old width.
+    WM_SIZE:
+      begin
+        FOldProc(AMsg);
+        if FActive and FTarget.HandleAllocated then
+          InvalidateRect(FTarget.Handle, nil, False);
       end;
   else
     if (GStripFrameMsg <> 0) and (AMsg.Msg = GStripFrameMsg) then
@@ -677,10 +728,83 @@ begin
   end;
 end;
 
+{ Our rows in the editor's font, as the hover hint paints its declaration
+  line (Alex, 2026-10-22). The face as well as the size: the first build
+  took the size alone, and the list's Segoe UI at the editor's 11 pt read a
+  size larger than the code beside it ("double scaling?" - it was not, the
+  em was the same 22 px). DrawLine paints in GRowFontName and
+  GRowFontHeight; the list's row height is set to fit it with
+  LB_SETITEMHEIGHT - not through the VCL's ItemHeight, whose setter
+  recreates the window under the IDE. The row is the editor's line - the
+  font's height - and 2 px at 96 dpi: with 4 unscaled pixels above and
+  below, and the IDE's own height as a floor, a row was 34 px against the
+  editor's 26 and the same glyphs read a size larger (Alex, 2026-10-22,
+  "compare it yourself": 11.8 px a character in both).
+  Checked on every SetFilter, so a height the IDE reset or a window it
+  recreated is fitted again. A list that is not owner-drawn with fixed rows
+  is left alone, and GRowFontHeight with it - a bigger font in rows the
+  same height would be cut. }
+procedure TCompletionStatusStrip.FitRows;
+var
+  LEditor: IOTAEditorServices;
+  LSize, LHave, LWanted: Integer;
+  LName: string;
+  LBmp: TBitmap;
+begin
+  if not (FTarget is TCustomListBox) or not FTarget.HandleAllocated or
+     (GetWindowLong(FTarget.Handle, GWL_STYLE) and LBS_OWNERDRAWFIXED = 0) then
+    Exit;
+  LSize := 0;
+  LName := '';
+  if Supports(BorlandIDEServices, IOTAEditorServices, LEditor) and
+     Assigned(LEditor.EditOptions) then
+  begin
+    LSize := LEditor.EditOptions.FontSize;
+    LName := LEditor.EditOptions.FontName;
+  end;
+  if (LSize <= 0) or (LName = '') then
+    Exit;
+  GRowFontHeight := -MulDiv(LSize, FTarget.CurrentPPI, 72);
+  GRowFontName := LName;
+  // Measured as DrawLine paints: the list's font, which TCustomListBox puts
+  // on its canvas for every row, in the editor's face and size.
+  LBmp := TBitmap.Create;
+  try
+    LBmp.Canvas.Font.Assign(TListBoxAccess(FTarget).Font);
+    LBmp.Canvas.Font.Name := GRowFontName;
+    LBmp.Canvas.Font.Height := GRowFontHeight;
+    LWanted := LBmp.Canvas.TextHeight('Ag') +
+      MulDiv(2, FTarget.CurrentPPI, 96);
+  finally
+    LBmp.Free;
+  end;
+  LHave := SendMessage(FTarget.Handle, LB_GETITEMHEIGHT, 0, 0);
+  if (LHave > 0) and (LHave <> FOurRowHeight) then
+    FIdeRowHeight := LHave;
+  if LHave <> LWanted then
+  begin
+    SendMessage(FTarget.Handle, LB_SETITEMHEIGHT, 0, LWanted);
+    LspLogDetail(Format('code insight: rows %d px for the editor''s %s ' +
+      '%d pt at %d dpi (the IDE''s %d)', [LWanted, LName, LSize,
+      FTarget.CurrentPPI, FIdeRowHeight]));
+  end;
+  FOurRowHeight := LWanted;
+end;
+
+{ The IDE's row height back, while the window still has ours. }
+procedure TCompletionStatusStrip.RestoreRows;
+begin
+  if (FOurRowHeight <> 0) and (FTarget <> nil) and FTarget.HandleAllocated and
+     (FIdeRowHeight > 0) and (FOurRowHeight <> FIdeRowHeight) and
+     (SendMessage(FTarget.Handle, LB_GETITEMHEIGHT, 0, 0) = FOurRowHeight) then
+    SendMessage(FTarget.Handle, LB_SETITEMHEIGHT, 0, FIdeRowHeight);
+  FOurRowHeight := 0;
+end;
+
 { Called by our list on every SetFilter - the viewer refilters on each
   keystroke, so this is the count as the user sees it. }
 procedure TCompletionStatusStrip.ShowCounts(AVisible, ATotal: Integer;
-  const AFilter: string);
+  const AFilter: string; AEditorFont: Boolean);
 var
   LWindow: TWinControl;
 begin
@@ -695,6 +819,15 @@ begin
     FText := Format('%d items', [ATotal])
   else
     FText := Format('%d of %d items', [AVisible, ATotal]);
+  // "Use editor font" unticked: the font and rows the viewer gives the list.
+  if AEditorFont then
+    FitRows
+  else
+  begin
+    GRowFontHeight := 0;
+    GRowFontName := '';
+    RestoreRows;
+  end;
   SetActive(True);
   // Only the strip, and only on screen: an invalidation, painted when the
   // queue gets to it.
@@ -703,14 +836,14 @@ begin
 end;
 
 procedure ShowCompletionCounts(AVisible, ATotal: Integer;
-  const AFilter: string);
+  const AFilter: string; AEditorFont: Boolean);
 begin
   if not GAlive then
     Exit;
   try
     if GStatusStrip = nil then
       GStatusStrip := TCompletionStatusStrip.Create(nil);
-    GStatusStrip.ShowCounts(AVisible, ATotal, AFilter);
+    GStatusStrip.ShowCounts(AVisible, ATotal, AFilter, AEditorFont);
   except
     // A strip that cannot be drawn must never cost the list itself.
     on E: Exception do
@@ -985,7 +1118,8 @@ begin
   Rebuild(FilterText);
   TraceList(Format('SetFilter("%s") -> %d of %d', [FilterText,
     Length(FVisible), Length(FAll)]));
-  ShowCompletionCounts(Length(FVisible), Length(FAll), FilterText);
+  ShowCompletionCounts(Length(FVisible), Length(FAll), FilterText,
+    FOptions.EditorFont);
 end;
 
 function TPasSymbolList.GetSymbolText(Index: Integer): string;
@@ -2342,16 +2476,26 @@ procedure TPasCodeInsightManager.DrawLine(Index: Integer; Canvas: TCanvas;
   var Rect: TRect; DrawingHintText: Boolean; DoDraw: Boolean;
   var DefaultDraw: Boolean);
 const
-  cPad = 4;
+  cPad = cRowPad;
+  cEllipsis = '...';
 var
-  LClass, LName, LDetail, LTail: string;
-  LColWidth, LX, LTop, LMatch: Integer;
+  LClass, LName, LDetail, LTail, LOldName: string;
+  LColWidth, LX, LTop, LMatch, LOldHeight, LLimit, LLo, LHi, LMid: Integer;
   LRun: string;
   LBase, LDim, LTypeColor, LForce, LBar, LOldBrush: TColor;
   LOldBrushStyle: TBrushStyle;
   LTypeStyle: TFontStyles;
   LSpans: TArray<Integer>;
-  LSelected: Boolean;
+  LSelected, LCut: Boolean;
+
+  // The width of the detail's first AChars as they are painted.
+  function DetailWidth(AChars: Integer): Integer;
+  begin
+    Result := 0;
+    PaintSyntaxTextTyped(Canvas, Result, 0, Copy(LDetail, 1, AChars), LBase,
+      LSpans, LTypeColor, LTypeStyle, False, clNone, True);
+  end;
+
 begin
   // FShownSymbols, NOT FSymbols - the list the viewer is actually painting,
   // for the same reason Done and GetHelpInsightHtml read it: a late async
@@ -2375,6 +2519,15 @@ begin
     Exit;
   end;
   DefaultDraw := False;
+  // The editor's font (FitRows); the viewer's own goes back on the canvas at
+  // both ends below.
+  LOldHeight := Canvas.Font.Height;
+  LOldName := Canvas.Font.Name;
+  if (GRowFontHeight <> 0) and (GRowFontName <> '') then
+  begin
+    Canvas.Font.Name := GRowFontName;
+    Canvas.Font.Height := GRowFontHeight;
+  end;
   LClass := FShownSymbols.SymbolClassText[Index];
   LName := FShownSymbols.SymbolText[Index];
   LDetail := FShownSymbols.SymbolTypeText[Index];
@@ -2389,13 +2542,13 @@ begin
 
   if not DoDraw then
   begin
-    // Measured with the runs' own styles - a bold `const` in a parameter
-    // list is wider than a plain TextWidth of the detail.
+    // Measured as painted: the name bold, the detail's runs at regular
+    // weight (colours only, see below).
     Canvas.Font.Style := [TFontStyle.fsBold];
     LX := Canvas.TextWidth(LName);
     SplitOverloadTail(LDetail, LTail);
     PaintSyntaxTextTyped(Canvas, LX, 0, LDetail, Canvas.Font.Color,
-      LSpans, TypeHighlightColor, TypeHighlightStyle, False);
+      LSpans, TypeHighlightColor, TypeHighlightStyle, False, clNone, True);
     Canvas.Font.Style := [];
     Inc(LX, Canvas.TextWidth(LTail));
     Rect.Right := Rect.Left + LColWidth + LX + 3 * cPad;
@@ -2407,6 +2560,8 @@ begin
     // One row's height, as the list draws it.
     Rect.Bottom := Rect.Top + Max(Rect.Height,
       Canvas.TextHeight('Ag') + 2 * cPad);
+    Canvas.Font.Name := LOldName;
+    Canvas.Font.Height := LOldHeight;
     Exit;
   end;
 
@@ -2501,8 +2656,49 @@ begin
   if LDetail <> '' then
   begin
     SplitOverloadTail(LDetail, LTail);
+    // Cut at the list's width with an ellipsis, as the native list does: the
+    // longest start of the detail that leaves room for it, found by halving.
+    // The server sends the whole detail for this (Completion's cDetailCap);
+    // the hint of a row too wide shows it whole, sized by the measuring pass
+    // above, which is never cut - nor is the hint's own paint.
+    LCut := False;
+    LLimit := Rect.Right - cPad;
+    LMid := 0;
+    if not DrawingHintText then
+      LMid := DetailWidth(MaxInt);
+    // The tail and the ellipsis are plain text (the measure left a run's
+    // style on the canvas).
+    Canvas.Font.Style := [];
+    if not DrawingHintText and
+       (LX + LMid + Canvas.TextWidth(LTail) > LLimit) then
+    begin
+      LCut := True;
+      Dec(LLimit, Canvas.TextWidth(cEllipsis));
+      LLo := 0;
+      LHi := Length(LDetail);
+      while LLo < LHi do
+      begin
+        LMid := (LLo + LHi + 1) div 2;
+        if LX + DetailWidth(LMid) <= LLimit then
+          LLo := LMid
+        else
+          LHi := LMid - 1;
+      end;
+      LDetail := TrimRight(Copy(LDetail, 1, LLo));
+      LTail := '';
+    end;
+    // Colours only: bold is the name's alone (Alex, 2026-10-22) - keywords,
+    // parameters and types in the palette's colours at regular weight.
     PaintSyntaxTextTyped(Canvas, LX, LTop, LDetail, LBase, LSpans,
-      LTypeColor, LTypeStyle, True, LForce);
+      LTypeColor, LTypeStyle, True, LForce, True);
+    if LCut then
+    begin
+      Canvas.Font.Color := LBase;
+      if LForce <> clNone then
+        Canvas.Font.Color := LForce;
+      Canvas.Font.Style := [];
+      Canvas.TextOut(LX, LTop, cEllipsis);
+    end;
     if LTail <> '' then
     begin
       Canvas.Font.Color := LDim;   // '(+N)' is ours, not code - stays dim
@@ -2515,6 +2711,8 @@ begin
   // Leave the canvas the way the viewer set it.
   Canvas.Font.Color := LBase;
   Canvas.Font.Style := [];
+  Canvas.Font.Name := LOldName;
+  Canvas.Font.Height := LOldHeight;
   Canvas.Brush.Color := LOldBrush;
   Canvas.Brush.Style := LOldBrushStyle;
 end;

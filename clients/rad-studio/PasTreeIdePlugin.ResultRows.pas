@@ -176,12 +176,14 @@ procedure PaintSyntaxText(ACanvas: TCanvas; var AX: Integer; AY: Integer;
 /// it lays the window out (the hover hint): the runs' widths depend on their
 /// styles, so a plain TextWidth of the whole line would be short.
 /// AForceColor, when not clNone, replaces every run's colour (a selected
-/// row); the styles still follow the palette and the type spans.
+/// row); the styles still follow the palette and the type spans - unless
+/// AColorsOnly, where every run is regular weight and only its colour
+/// follows them (the Code Completion list, where bold is the name's alone).
 /// </summary>
 procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
   ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean;
-  AForceColor: TColor = clNone);
+  AForceColor: TColor = clNone; AColorsOnly: Boolean = False);
 
 /// <summary>
 /// The editor's "Marked block" colours (Tools > Options > Editor > Colors) -
@@ -629,8 +631,12 @@ begin
     // `X: T absolute Y`.
     else if (WordAt(I) = 'absolute') and IsIdent(I - 1) and IsIdent(I + 1) then
       Promote(I)
-    // `(out X` / `; out X` in a routine heading.
-    else if LHasRoutine and (WordAt(I) = 'out') and IsIdent(I + 1) and
+    // `(out X` / `; out X` in a routine heading - or in a parameter list
+    // standing alone, the line opening with its `(`: a Code Completion row's
+    // detail is `(out X: T): Boolean` with no routine word, and its `out`
+    // stayed an identifier beside a coloured `var` (Alex, 2026-10-22).
+    else if (LHasRoutine or StartsWith(0, '(')) and (WordAt(I) = 'out') and
+            IsIdent(I + 1) and
             (EndsWith(I - 1, '(') or EndsWith(I - 1, ';')) then
       Promote(I)
     // A trailing hint directive on any declaration: `= Integer deprecated;`
@@ -881,7 +887,7 @@ end;
 procedure PaintSyntaxTextTyped(ACanvas: TCanvas; var AX: Integer; AY: Integer;
   const AText: string; ADefault: TColor; const ATypeSpans: TArray<Integer>;
   ATypeColor: TColor; ATypeStyle: TFontStyles; ADoDraw: Boolean;
-  AForceColor: TColor);
+  AForceColor: TColor; AColorsOnly: Boolean);
 var
   LOptions: INTACodeEditorOptions;
   LHavePalette: Boolean;
@@ -910,6 +916,8 @@ begin
     end;
     if AForceColor <> clNone then
       LColor := AForceColor;
+    if AColorsOnly then
+      LStyle := [];
     ACanvas.Font.Color := LColor;
     ACanvas.Font.Style := LStyle;
     LText := Copy(AText, LRun.Start, LRun.Len);
