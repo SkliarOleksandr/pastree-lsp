@@ -1756,6 +1756,10 @@ begin
   try
     LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
     try
+      // A row per overload, each with its own parameters, as the native Code
+      // Completion list has them (Alex, 2026-10-22) - until 0.74.3 one row a
+      // name and ' (+N)' after its first signature.
+      LCompletion.SplitOverloads := True;
       // One caret pass: the engine hands its own classification back, span
       // included - a host must not re-derive tokenization (its words).
       if not LCompletion.CompleteAt(APasLine, APasCol, LInfo, LContext,

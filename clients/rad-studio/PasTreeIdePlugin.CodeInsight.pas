@@ -889,6 +889,10 @@ type
       viewer's selected string exists regardless of the current filter. }
     function TryGetByName(const AName: string;
       out AItem: TLspCompletionItem): Boolean;
+    { The item of visible row AIndex when that row is named AName - which of
+      several overloads of one name the user selected - else TryGetByName. }
+    function TryGetSelected(AIndex: Integer; const AName: string;
+      out AItem: TLspCompletionItem): Boolean;
     function GetSymbolText(Index: Integer): string;
     function GetSymbolTypeText(Index: Integer): string;
     function GetSymbolClassText(I: Integer): string;
@@ -914,6 +918,10 @@ begin
       function(const A, B: TLspCompletionItem): Integer
       begin
         Result := CompareText(A.ItemLabel, B.ItemLabel);
+        // A name's overloads, each a row since 0.74.3, in one order from
+        // one invocation to the next - the sort is not stable.
+        if Result = 0 then
+          Result := CompareText(A.Detail, B.Detail);
       end));
   SetLength(FUpper, Length(FAll));
   for LIdx := 0 to High(FAll) do
@@ -1182,6 +1190,18 @@ begin
       Exit(True);
     end;
   Result := False;
+end;
+
+function TPasSymbolList.TryGetSelected(AIndex: Integer; const AName: string;
+  out AItem: TLspCompletionItem): Boolean;
+begin
+  if (AIndex >= 0) and (AIndex <= High(FVisible)) and
+     SameText(FAll[FVisible[AIndex]].ItemLabel, AName) then
+  begin
+    AItem := FAll[FVisible[AIndex]];
+    Exit(True);
+  end;
+  Result := TryGetByName(AName, AItem);
 end;
 
 function TPasSymbolList.GetSymbolDocumentation(I: Integer): string;
@@ -1983,8 +2003,11 @@ begin
   // late re-invoke may have replaced FSymbolsObj under the open popup.
   // Only with the option set's Auto-parenthesis ticked, and not in front of
   // a word kept by an insert-mode accept: `()` there would split it.
+  // The selected ROW, not the first of its name: `Foo` and `Foo(X)` are two
+  // rows since 0.74.3, and only the second takes `()`.
   if (LSuffix = '') and Assigned(FShownObj) and
-     FShownObj.TryGetByName(LSelected, LItem) and LItem.HasParams and
+     FShownObj.TryGetSelected(LViewer.GetManagerSelectedIndex(Self),
+       LSelected, LItem) and LItem.HasParams and
      OptionSetBool(GetOptionSetName, 'CodeCompleteAutoParens', True) then
   begin
     // The completed name may sit in an EXISTING call - caret inside the
@@ -2032,7 +2055,9 @@ begin
   if not Assigned(LViewer) then
     Exit;
   LSelected := LViewer.GetSelectedString;
-  if (LSelected = '') or not FShownObj.TryGetByName(LSelected, LItem) then
+  // The selected row's documentation - each overload has its own.
+  if (LSelected = '') or not FShownObj.TryGetSelected(
+       LViewer.GetManagerSelectedIndex(Self), LSelected, LItem) then
     Exit;
   if LItem.DocHtml <> '' then
     Result := LItem.DocHtml
