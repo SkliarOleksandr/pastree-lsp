@@ -160,10 +160,21 @@ type
     // Log one line per unit in the closure? Off by default - see
     // LogParseRecord's header for what stays on regardless.
     FLogUnits: Boolean;
-    // Log the configuration inventory - the paths, defines, namespaces and
-    // aliases behind the "configured:" summary? On by default; a client that
-    // does not want hundreds of lines per configuration sends logDetail=false.
+    // THE DETAIL LOG (LogDetail): the configuration inventory behind the
+    // "configured:" summary, an echo of every background request (semantic
+    // tokens, highlight, completion, the context-menu probe), the stages and
+    // memory of an analysis, the closure's diagnostics one by one. On by
+    // default; the RAD Studio package sends logDetail=false unless Advanced
+    // Logging is on, which leaves the log at its plain shape - a short header,
+    // the analysis status, one or two lines per command the user ran, the
+    // document notifications, and every failure (2026-10-22, Alex's rule).
     FLogDetail: Boolean;
+    // Set by StartClientWatchdog for the header's host line, which is
+    // written after it - see ApplyInitOptions.
+    FWatchNote: string;
+    // When the request being handled reached the dispatcher - LogCommand's
+    // time.
+    FRequestStart: UInt64;
     FLogPath: string;
     FLogStarted: Boolean;
     // THE HEADER, KEPT FOR A LOG EMPTIED UNDER US. The IDE package empties the
@@ -430,6 +441,9 @@ type
     { Log, and remembered as one of the header lines AppendLog repeats in a
       log that was emptied (FHeaderLines). }
     procedure LogHeader(const AMsg: string);
+    { Log only with logDetail on - see FLogDetail for what belongs here. }
+    procedure LogDetail(const AMsg: string);
+    procedure LogCommand(const AMethod, AText: string);
     procedure LogBlock(const ALines: TArray<string>);
     procedure LogParseRecord;
     procedure Notify(const AJson: string);
@@ -865,6 +879,34 @@ begin
   FHeaderLines := FHeaderLines + [AMsg];
 end;
 
+procedure TLspServer.LogDetail(const AMsg: string);
+begin
+  if FLogDetail then
+    Log(AMsg);
+end;
+
+{ THE PLAIN LOG'S LINE FOR A COMMAND, one shape for all of them:
+  "<name>: <where> '<symbol>' -> <result>, <N> ms" - the name without its
+  protocol namespace, the time since the request reached the dispatcher
+  (FRequestStart; the wait for an analysis is part of what the user waited).
+  pastree/declarationAt is the second half of Find References, the client's
+  look-up of the row to head the list with, not a command of its own: it
+  goes to the detail log. }
+procedure TLspServer.LogCommand(const AMethod, AText: string);
+var
+  LName, LLine: string;
+begin
+  LName := AMethod;
+  if LName.LastIndexOf('/') >= 0 then
+    LName := LName.Substring(LName.LastIndexOf('/') + 1);
+  LLine := Format('%s: %s, %d ms', [LName, AText,
+    GetTickCount64 - FRequestStart]);
+  if SameText(AMethod, 'pastree/declarationAt') then
+    LogDetail(LLine)
+  else
+    Log(LLine);
+end;
+
 procedure TLspServer.Log(const AMsg: string);
 var
   LLine: string;
@@ -1122,20 +1164,23 @@ begin
   LogHeader(PasLspHardwareBanner);
   // THIRD line, next to the build that produced the log: the pair "which exe"
   // and "which IDE ran it" is what a report from someone else's machine has to
-  // answer before anything else is worth reading.
-  if LHost <> '' then
-    LogHeader('host: ' + LHost);
-  // How long this process lived before initialize reached it. The version
-  // line above is the log's first, and it waits for initialize (the log path
-  // comes in it), so without this a slow start - the exe loading, a virus
-  // scan of a freshly built exe, a starved machine - cannot be told from a
-  // client that sent initialize late (AVImark, 2026-10-01: 20 s between the
-  // restart and the first line, nothing to say where they went).
-  Log(ProcessStartLine);
-  Log(Format('analysis threads: %d (%s)', [FPoolWidth,
-    IfThen(FAnalysisThreads = 0, 'auto, one per logical core',
-      IfThen(FPoolWidth = 1, 'set by the client, sequential',
-        'set by the client'))]));
+  // answer before anything else is worth reading. The rest of the process's
+  // own facts ride on it, so the header stays four lines (2026-10-22):
+  // - the client pid the watchdog follows (FWatchNote);
+  // - how long this process lived before initialize reached it. The version
+  //   line above is the log's first, and it waits for initialize (the log
+  //   path comes in it), so without this a slow start - the exe loading, a
+  //   virus scan of a freshly built exe, a starved machine - cannot be told
+  //   from a client that sent initialize late (AVImark, 2026-10-01: 20 s
+  //   between the restart and the first line, nothing to say where they
+  //   went);
+  // - the analysis threads.
+  LogHeader(Format('host: %s; %s; %s; %d analysis threads (%s)',
+    [IfThen(LHost = '', '(the client did not name itself)', LHost),
+     FWatchNote, ProcessStartLine, FPoolWidth,
+     IfThen(FAnalysisThreads = 0, 'auto, one per logical core',
+       IfThen(FPoolWidth = 1, 'set by the client, sequential',
+         'set by the client'))]));
 
   FInitProjectFile := LProjectFile;
   FInitPlatform := LPlatformStr;
@@ -1251,39 +1296,35 @@ begin
         + ' - ignored, so rename will not refuse library sources', True);
   end;
   FSwitchStart := PasStartOptState(FSwitches);
-  // The switches as dcc gets them, on one line: "why is this {$IFOPT D+}
-  // branch dead" is answered by the config the .dproj evaluated to.
-  LogHeader(Format('switches: %s; console target %s',
-    [IfThen(Length(FSwitches) = 0, '(dcc defaults)',
-       string.Join(' ', FSwitches)),
-     IfThen(FConsoleTarget, 'on (-CC)', 'off')]));
-  LogHeader(Format('configured: platform=%s main=%s paths=%d defines=%d'
-    + ' libraryPaths=%d projectFiles=%d projectDir=%s',
-    [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
-     Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
-     FProjectDir]));
-  // A ZERO HERE IS A REAL CONDITION, not a quiet default, so it says so on
-  // the summary line rather than only in the detail block: with no library
-  // trees declared, a rename that reaches into the RTL is planned and applied
-  // instead of refused, and nothing else in the log would hint at why.
-  if Length(FLibraryPaths) = 0 then
-    Log('  no libraryPaths declared - rename will not refuse RTL/VCL or'
-      + ' third-party sources on the grounds of where they live');
   // After the project's directory and files are known: they are what the
   // light trees exclude.
   FLightPaths := LightTreesFor;
   FLibTrees := LibraryTreesFor(False);
   FReachGen := -2;
-  if Length(FLightPaths) > 0 then
-    LogHeader(Format('light libraries: on - %d trees analyzed interface-only'
-      + ' (a unit is made full when opened, or when an answer needs its'
-      + ' bodies)',
-      [Length(FLightPaths)]))
-  else if not FLightLibraries then
-    LogHeader('light libraries: off (lightLibraries=false) - every unit'
-      + ' analyzed in full')
-  else
-    LogHeader('light libraries: off - no library trees outside the project');
+  // FOURTH and last header line: the configuration in counts, the switches
+  // as dcc gets them ("why is this {$IFOPT D+} branch dead" is answered by
+  // the config the .dproj evaluated to), and the light mode.
+  LogHeader(Format('configured: platform=%s main=%s paths=%d defines=%d'
+    + ' libraryPaths=%d projectFiles=%d projectDir=%s; switches %s, console'
+    + ' target %s; light libraries %s',
+    [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
+     Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
+     FProjectDir,
+     IfThen(Length(FSwitches) = 0, '(dcc defaults)',
+       string.Join(' ', FSwitches)),
+     IfThen(FConsoleTarget, 'on (-CC)', 'off'),
+     IfThen(Length(FLightPaths) > 0,
+       Format('on, %d trees interface-only until a unit is opened or an'
+         + ' answer needs its bodies', [Length(FLightPaths)]),
+       IfThen(not FLightLibraries, 'off (lightLibraries=false)',
+         'off, no library trees outside the project'))]));
+  // A ZERO HERE IS A REAL CONDITION, not a quiet default, so it says so in
+  // the plain log rather than only in the detail block: with no library
+  // trees declared, a rename that reaches into the RTL is planned and applied
+  // instead of refused, and nothing else in the log would hint at why.
+  if Length(FLibraryPaths) = 0 then
+    Log('  no libraryPaths declared - rename will not refuse RTL/VCL or'
+      + ' third-party sources on the grounds of where they live');
   // THE PATHS THEMSELVES, not just how many. A count tells you nothing about
   // the failure this actually has: a plausible-looking number of paths that
   // happen to be the wrong directories (the IDE plugin sent three that did not
@@ -1418,8 +1459,10 @@ begin
   // down and every tick retries. That is exactly the shape of the 2026-09-02
   // report, and the hour it cost was spent deciding whether StartAnalysis had
   // even been reached. This line answers that; the pair of lines brackets the
-  // setup, and only "analysis started" means the session is running.
-  Log(Format('building the analysis session: %d roots, %d paths, %d overlays',
+  // setup, and only "analysis started" means the session is running. Detail
+  // only since 2026-10-22: with it off, "analysis started" missing after the
+  // header still says the setup is where it stopped.
+  LogDetail(Format('building the analysis session: %d roots, %d paths, %d overlays',
     [Length(LRoots), Length(FSearchPaths), FDocs.Count]));
   FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
     LRoots, LPriority);
@@ -1505,6 +1548,8 @@ begin
   // full rebuild from the incremental one TryStartModuleAnalysis logs, which
   // is the first question a "the analysis got slow while typing" report asks
   // (see CLAUDE.md).
+  // The plain log's opening line of a full build: it takes seconds, and a
+  // build that never ends is told by this line with no "analysis done".
   Log(Format('analysis started: full rebuild, %d roots, %d overlays',
     [Length(LRoots), FDocs.Count]));
   FSession.Start;
@@ -1605,7 +1650,13 @@ end;
   inventory back on for the one question it exists for ("which file won for
   this unit name?") with the `logUnits` initialization option, or
   PASTREE_LSP_LOG_UNITS=1 in the environment for a session where no client
-  passes options. Both are read once, at initialize. }
+  passes options. Both are read once, at initialize.
+
+  THE WHOLE BLOCK IS THE DETAIL LOG'S since 2026-10-22, also at the user's
+  call: the plain log keeps the count on its "analysis done" line, which is
+  what says a list is worth asking for, and a project with missing search
+  paths put 580 diagnostic lines per rebuild into it. A report that needs
+  the list is a report with Advanced Logging on. }
 procedure TLspServer.LogParseRecord;
 var
   LLines: TArray<string>;
@@ -1613,7 +1664,7 @@ var
   LModel: TPasSemaModel;
   LFile: string;
 begin
-  if FProject = nil then
+  if (FProject = nil) or not FLogDetail then
     Exit;
   LLines := ['parsed closure: ' + IntToStr(FProject.ModelCount) + ' units'];
   LTotal := 0;
@@ -1775,19 +1826,23 @@ begin
     Inc(LDiagTotal, Length(FProject.Model(LMi).Diags));
   EndProgress(Format('%d units in %d ms',
     [FProject.ModelCount, GetTickCount64 - FBuildStart]));
-  Log(Format('analysis %s: %d units in %d ms, %d diagnostics in closure;'
-    + ' stages %s %s',
-    [IfThen(LWasModule, 'done (incremental)', 'done'), FProject.ModelCount,
-     GetTickCount64 - FBuildStart, LDiagTotal, FProject.StageTimings,
-     MemoryLine]));
-  // How many units are interface-only and how many were made full - after a
-  // full build only, like the parse record: an incremental run changes
-  // neither count.
+  // ONE LINE PER RUN in the plain log: which run, how many units, how long,
+  // how many diagnostics, and after a full build how many units are
+  // interface-only and how many were made full (an incremental run changes
+  // neither). The stages and the memory are the detail log's - they answer
+  // "where did the time go", asked only once a run was slow.
+  var LLight := '';
   if not LWasModule and (Length(FLightPaths) > 0) then
-    Log(Format('light libraries: %d of %d units analyzed interface-only, %d'
-      + ' promoted to a full analysis',
-      [FProject.LightCount, FProject.ModelCount,
-       Length(FProject.PromotedFiles)]));
+    LLight := Format(' (%d interface-only, %d promoted)',
+      [FProject.LightCount, Length(FProject.PromotedFiles)]);
+  var LDone := Format('analysis done: %s, %d units%s in %d ms, %d diagnostics',
+    [IfThen(LWasModule, 'incremental ' + TPath.GetFileName(FModuleFile),
+       'full rebuild'), FProject.ModelCount, LLight,
+     GetTickCount64 - FBuildStart, LDiagTotal]);
+  if FLogDetail then
+    LDone := LDone + Format('; stages %s %s',
+      [FProject.StageTimings, MemoryLine]);
+  Log(LDone);
   // A benchmark's run is the full one it started (StartAnalysis from
   // HandleBenchmark); an incremental one cannot be in between, since the
   // benchmark freed the project the incremental path needs.
@@ -2224,7 +2279,9 @@ begin
     Exit;
   LLines := [Format('taken in by the incremental run: %d units',
     [FProject.ModelCount - FModuleBaseCount])];
-  for LMi := FModuleBaseCount to FProject.ModelCount - 1 do
+  // The count in the plain log, the units and their diagnostics in the
+  // detail log - as LogParseRecord.
+  for LMi := FModuleBaseCount to IfThen(FLogDetail, FProject.ModelCount, 0) - 1 do
   begin
     LModel := FProject.Model(LMi);
     LLines := LLines + [Format('  unit %s <- %s%s',
@@ -2343,7 +2400,9 @@ begin
   // (the IDE's status panel waits 250 ms). The title is what tells the two
   // kinds apart - see SPEC.md, "$/progress".
   StartProgress(cProgressTitleIncremental);
-  Log(Format('analysis started: incremental, one module (%s)%s',
+  // Detail only: the plain log has one line per incremental run, its
+  // "analysis done".
+  LogDetail(Format('analysis started: incremental, one module (%s)%s',
     [LPath, LTakeInNote]));
   FSession.Start;
   Result := True;
@@ -2441,10 +2500,11 @@ end;
 
 procedure TLspServer.StartClientWatchdog(APid: Integer);
 begin
+  // Not logged here: called before ApplyInitOptions, which knows the log
+  // path, and puts this on the header's host line.
   if APid <= 0 then
   begin
-    Log('no client processId in initialize - liveness watchdog disabled'
-      + ' (stdin EOF is still the normal exit path)');
+    FWatchNote := 'no client pid, watchdog off (stdin EOF still exits)';
     Exit;
   end;
   FClientHandle := OpenProcess(SYNCHRONIZE, False, APid);
@@ -2452,10 +2512,10 @@ begin
     // Do not guess: a failure here (access denied, or a pid that already
     // vanished between spawn and initialize) is not evidence the client is
     // gone, and exiting on it would kill a healthy session.
-    Log(Format('cannot watch client pid %d (error %d) - watchdog disabled',
-      [APid, GetLastError]))
+    FWatchNote := Format('client pid %d not watchable (error %d), watchdog'
+      + ' off', [APid, GetLastError])
   else
-    LogHeader(Format('watching client pid %d', [APid]));
+    FWatchNote := Format('client pid %d', [APid]);
 end;
 
 function TLspServer.ClientGone: Boolean;
@@ -2829,7 +2889,7 @@ var
   LNow: UInt64;
   LTitle: string;
 begin
-  Log('  ' + AProgress.Text);
+  LogDetail('  ' + AProgress.Text);
   if not FClientProgress then
     Exit;
   LNow := GetTickCount64;
@@ -2944,7 +3004,7 @@ begin
     LKeep.Free;
   end;
   LAfter := DemotedCount;
-  Log(Format('library text demoted: %d of %d units (%d newly) in %d ms',
+  LogDetail(Format('library text demoted: %d of %d units (%d newly) in %d ms',
     [LAfter, FProject.ModelCount, LAfter - LBefore,
      GetTickCount64 - LStart]));
 end;
@@ -3054,7 +3114,7 @@ begin
       if PasUnderDirTrees(LOwnFile, [LTree]) then
       begin
         if ALog then
-          Log(Format('  light libraries: %s holds %s - analyzed in full',
+          LogDetail(Format('  light libraries: %s holds %s - analyzed in full',
             [LTree, LOwnFile]));
         LKeep := False;
         Break;
@@ -3356,7 +3416,7 @@ begin
   end;
   LWaited := GetTickCount64 - LStart;
   if LWaited >= 50 then
-    Log(Format('  waited %d ms for the analysis holding the project (%s)',
+    LogDetail(Format('  waited %d ms for the analysis holding the project (%s)',
       [LWaited, IfThen(FProject <> nil, 'taken back', 'still held')]));
 end;
 
@@ -3596,6 +3656,11 @@ end;
 
 function TLspServer.HandleInitialize(const AMsg: TLspIncoming): string;
 begin
+  // The watchdog first: its outcome is part of the header's host line.
+  if AMsg.Params <> nil then
+    StartClientWatchdog(AMsg.Params.GetValue<Integer>('processId', 0))
+  else
+    StartClientWatchdog(0);
   if AMsg.Params <> nil then
     ApplyInitOptions(AMsg.Params.FindValue('initializationOptions'))
   else
@@ -3605,7 +3670,6 @@ begin
     FClientProgress := AMsg.Params.GetValue<Boolean>(
       'capabilities.window.workDoneProgress', False);
     FClientRenamesFiles := ClientRenamesFiles(AMsg.Params);
-    StartClientWatchdog(AMsg.Params.GetValue<Integer>('processId', 0));
   end;
   FInitialized := True;
   Result := BuildResponse(AMsg.IdJson,
@@ -3910,7 +3974,7 @@ begin
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
   begin
-    Log(AMsg.Method + ': file not in the analyzed closure: ' + LPath);
+    LogCommand(AMsg.Method, 'file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LspToPasTree(LLine, LChar, LPasLine, LPasCol);
@@ -3923,7 +3987,7 @@ begin
   begin
     if FNav.GotoDefine(LMid, LPasLine, LPasCol, LTarget) then
     begin
-      Log(Format(AMsg.Method + ': %s define ''%s'' -> %s',
+      LogCommand(AMsg.Method, Format('%s define ''%s'' -> %s',
         [PosTag(LPath, LPasLine, LPasCol), LDefName,
          PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
       Exit(BuildResponse(AMsg.IdJson,
@@ -3931,11 +3995,11 @@ begin
           Length(LTarget.Name))));
     end;
     if FNav.IsProjectDefined(LDefName) then
-      Log(Format(AMsg.Method + ': %s define ''%s'' comes from the project '
+      LogCommand(AMsg.Method, Format('%s define ''%s'' comes from the project '
         + 'or platform - no source site to go to',
         [PosTag(LPath, LPasLine, LPasCol), LDefName]))
     else
-      Log(Format(AMsg.Method + ': %s define ''%s'' has no preceding active '
+      LogCommand(AMsg.Method, Format('%s define ''%s'' has no preceding active '
         + '$DEFINE in this unit', [PosTag(LPath, LPasLine, LPasCol), LDefName]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -3954,11 +4018,11 @@ begin
         LResolved := FNav.DeclHit(LIfMid, LIfSym, LIfHit);
     if not LResolved then
     begin
-      Log(Format(AMsg.Method + ': %s ''%s'' in a $IF names no declaration',
+      LogCommand(AMsg.Method, Format('%s ''%s'' in a $IF names no declaration',
         [PosTag(LPath, LPasLine, LPasCol), LDefName]));
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
-    Log(Format(AMsg.Method + ': %s $IF name ''%s'' -> %s',
+    LogCommand(AMsg.Method, Format('%s $IF name ''%s'' -> %s',
       [PosTag(LPath, LPasLine, LPasCol), LDefName,
        PosTag(LIfHit.FilePath, LIfHit.Line, LIfHit.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
@@ -3977,7 +4041,7 @@ begin
     // Anything else that is not an identifier is a genuine miss.
     if not FNav.GotoBareInherited(LMid, LPasLine, LPasCol, LTarget) then
     begin
-      Log(Format(AMsg.Method + ': %s no identifier at that position',
+      LogCommand(AMsg.Method, Format('%s no identifier at that position',
         [PosTag(LPath, LPasLine, LPasCol)]));
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
@@ -4003,7 +4067,7 @@ begin
   end;
   if not LResolved then
   begin
-    Log(Format(AMsg.Method + ': %s ''%s'' did not resolve to a source'
+    LogCommand(AMsg.Method, Format('%s ''%s'' did not resolve to a source'
       + ' declaration (unresolved name, or a builtin with none)',
       [PosTag(LPath, LPasLine, LPasCol), LIdent.Name]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
@@ -4059,7 +4123,7 @@ begin
     if LFound then
       LTarget := LImplTarget;
   end;
-  Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
+  LogCommand(AMsg.Method, Format('%s ''%s'' -> %s',
     [PosTag(LPath, LPasLine, LPasCol), LIdent.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
@@ -4131,7 +4195,7 @@ begin
     LAnswer := FCompletion.SignatureHelpAt(LPath, LText, LPasLine, LPasCol,
       nil, -1);
 
-  Log(Format('signatureHelp: %s -> %d signatures, arg %d in %d ms (%s)',
+  LogDetail(Format('signatureHelp: %s -> %d signatures, arg %d in %d ms (%s)',
     [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Signatures),
      LAnswer.ActiveParam, GetTickCount64 - LStart, LAnswer.Provider]));
   if Length(LAnswer.Signatures) = 0 then
@@ -4288,7 +4352,7 @@ begin
           Inc(LCount);
         end;
     end;
-    Log(Format('workspace/symbol "%s" -> %d symbols in %d ms%s',
+    LogDetail(Format('workspace/symbol "%s" -> %d symbols in %d ms%s',
       [LQuery, LCount, GetTickCount64 - LStart,
        IfThen(LDropped > 0,
          Format(' (%d MORE dropped by the %d cap)', [LDropped, cMaxResults]),
@@ -4477,7 +4541,7 @@ begin
          CompletionDocJson(LAnswer.Items[LIdx]),
          CompletionDataJson(LAnswer.Items[LIdx])]));
     end;
-    Log(Format('completion: %s -> %d items in %d ms (%s)',
+    LogDetail(Format('completion: %s -> %d items in %d ms (%s)',
       [PosTag(LPath, LPasLine, LPasCol), Length(LAnswer.Items),
        GetTickCount64 - LStart, LAnswer.Provider]));
     Result := BuildResponse(AMsg.IdJson,
@@ -4645,13 +4709,14 @@ var
   LDecl: TPasRefHit;
   LSB: TStringBuilder;
   LIdx: Integer;
-  LKind, LRow: string;
+  LKind, LRow, LSummary: string;
   LKey: TPasSymbolKey;
   LNotSearched: Integer;
+  LFiles: TStringList;
 begin
   LNotSearched := 0;
   LPath := DocPathOf(AMsg.Params);
-  Log('textDocument/references: ' + LPath);
+  LogDetail('textDocument/references: ' + LPath);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
      not AMsg.Params.TryGetValue<Integer>('position.character', LChar) then
@@ -4749,17 +4814,30 @@ begin
   end
   else
   begin
-    Log(Format('textDocument/references: %s -> no identity',
+    LogCommand('textDocument/references', Format('%s -> no identity',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
 
-  Log(Format(AMsg.Method + '(%s): %s ''%s'' -> %d hits%s%s',
-    [LKind, PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits),
-     IfThen(Length(LForms) > 0,
-       Format(' + %d in form files', [Length(LForms)]), ''),
-     IfThen(LNotSearched > 0,
-       Format(', %d library units not searched', [LNotSearched]), '')]));
+  // Written once the rows are built (below), so its time is the whole
+  // answer; the files are counted here, from the hits.
+  LFiles := TStringList.Create;
+  try
+    LFiles.CaseSensitive := False;
+    LFiles.Sorted := True;
+    LFiles.Duplicates := dupIgnore;
+    for LIdx := 0 to High(LHits) do
+      LFiles.Add(LHits[LIdx].FilePath);
+    LSummary := Format('%s ''%s'' -> %d hits in %d files%s%s (%s)',
+      [PosTag(LPath, LPasLine, LPasCol), LName, Length(LHits), LFiles.Count,
+       IfThen(Length(LForms) > 0,
+         Format(' + %d in form files', [Length(LForms)]), ''),
+       IfThen(LNotSearched > 0,
+         Format(', %d library units not searched', [LNotSearched]), ''),
+       LKind]);
+  finally
+    LFiles.Free;
+  end;
   LRowsStart := GetTickCount64;
   LSB := TStringBuilder.Create;
   try
@@ -4787,7 +4865,8 @@ begin
     // The rows' type spans read every hit's file: on a unit's references
     // across a library that is seconds of its own (2026-10-19), and the log
     // must say which half of a slow answer it was.
-    Log(Format('  %d rows with their type spans in %d ms, %dK chars',
+    LogCommand(AMsg.Method, LSummary);
+    LogDetail(Format('  %d rows with their type spans in %d ms, %dK chars',
       [Length(LHits) + Length(LForms), GetTickCount64 - LRowsStart,
        Length(Result) div 1024]));
   finally
@@ -5037,7 +5116,7 @@ begin
   if not FNav.IdentAt(LMid, LPasLine, LPasCol, LIdent) then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
       'There is nothing renameable at that position.'));
-  Log(Format('prepareRename: %s %s ''%s'' ok',
+  LogDetail(Format('prepareRename: %s %s ''%s'' ok',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName]));
   Result := BuildResponse(AMsg.IdJson, Format('{"range":%s,"placeholder":%s}',
@@ -5102,7 +5181,7 @@ begin
   if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LPlan,
     {out} LError) then
   begin
-    Log(Format('rename: %s -> ''%s'' refused - %s',
+    LogCommand('rename', Format('%s -> ''%s'' refused - %s',
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
@@ -5110,7 +5189,7 @@ begin
   // RequiredFileName is '' and the plan is text edits alone.
   if LPlan.IsUnit and (LPlan.NewFilePath <> '') and not FClientRenamesFiles then
   begin
-    Log('rename: unit rename refused - the client advertised no rename '
+    LogCommand('rename', 'unit rename refused - the client advertised no rename '
       + 'resource operation');
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, Format(
       'Renaming unit %s also renames its file to %s, and this editor did ' +
@@ -5119,7 +5198,7 @@ begin
   end;
   // textDocument/rename has nowhere to show the inactive places - a
   // WorkspaceEdit is edits only - so they are in the log alone.
-  Log(Format('rename: %s %s ''%s'' -> ''%s'': %d edits%s%s',
+  LogCommand('rename', Format('%s %s ''%s'' -> ''%s'': %d edits%s%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName, LNewName, Length(LPlan.Edits),
      IfThen(LPlan.RequiredFileName <> '', ' + file -> ' +
@@ -5219,11 +5298,11 @@ begin
   if not PlanRenameAt(LPath, LPasLine, LPasCol, LNewName, {out} LPlan,
     {out} LError) then
   begin
-    Log(Format('renamePlan: %s -> ''%s'' refused - %s',
+    LogCommand('renamePlan', Format('%s -> ''%s'' refused - %s',
       [PosTag(LPath, LPasLine, LPasCol), LNewName, LError]));
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED, LError));
   end;
-  Log(Format('renamePlan: %s %s ''%s'' -> ''%s'': %d edits%s%s%s%s',
+  LogCommand('renamePlan', Format('%s %s ''%s'' -> ''%s'': %d edits%s%s%s%s',
     [PosTag(LPath, LPasLine, LPasCol), RenameKindWord(LPlan.IsUnit),
      LPlan.OldName, LNewName, Length(LPlan.Edits),
      IfThen(LPlan.RequiredFileName <> '', ' + file -> ' +
@@ -5453,7 +5532,7 @@ begin
     Exit;
   if not FNav.MethodAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
   begin
-    Log(Format('findOverrides: %s -> not a class method or property',
+    LogCommand('findOverrides', Format('%s -> not a class method or property',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -5471,7 +5550,7 @@ begin
   end
   else
     LRows := FNav.FindOverrides(LTMid, LSym);
-  Log(Format('findOverrides: %s ''%s'' -> %d rows',
+  LogCommand('findOverrides', Format('%s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
@@ -5532,7 +5611,7 @@ begin
     LWhat := 'interface'
   else
   begin
-    Log(Format('findImplementations: %s -> not an interface or interface method',
+    LogCommand('findImplementations', Format('%s -> not an interface or interface method',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -5559,7 +5638,7 @@ begin
       Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
         'request cancelled'));
   end;
-  Log(Format('findImplementations: %s %s ''%s'' -> %d rows',
+  LogCommand('findImplementations', Format('%s %s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LWhat, LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
@@ -5602,7 +5681,7 @@ begin
     Exit;
   if not FNav.TypeAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName) then
   begin
-    Log(Format('findDescendants: %s -> not a class or interface type',
+    LogCommand('findDescendants', Format('%s -> not a class or interface type',
       [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -5622,7 +5701,7 @@ begin
   end
   else
     LRows := FNav.FindDescendants(LTMid, LSym);
-  Log(Format('findDescendants: %s ''%s'' -> %d rows',
+  LogCommand('findDescendants', Format('%s ''%s'' -> %d rows',
     [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   SetLength(LJson, Length(LRows));
   for LIdx := 0 to High(LRows) do
@@ -5690,8 +5769,8 @@ begin
     LGate := FNav.ClassAt(LMid, LPasLine, LPasCol, LTMid, LSym, LName);
   if not LGate then
   begin
-    Log(Format('%s: %s -> %s',
-      [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), cNotSubject[AKind]]));
+    LogCommand(cTag[AKind], Format('%s -> %s',
+      [PosTag(LPath, LPasLine, LPasCol), cNotSubject[AKind]]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   // Through the workspace: the writes, creations and frees inside library
@@ -5719,8 +5798,8 @@ begin
       fskCreations:    LRows := FNav.FindCreations(LTMid, LSym);
       fskDestructions: LRows := FNav.FindDestructions(LTMid, LSym);
     end;
-  Log(Format('%s: %s ''%s'' -> %d rows',
-    [cTag[AKind], PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
+  LogCommand(cTag[AKind], Format('%s ''%s'' -> %d rows',
+    [PosTag(LPath, LPasLine, LPasCol), LName, Length(LRows)]));
   LJson := nil;
   if (LTMid >= 0) and FNav.DeclHit(LTMid, LSym, LDecl) then
     LJson := LJson + [WithTypeSpans(
@@ -5772,7 +5851,7 @@ begin
       'findAllAt: textDocument.uri and position required'));
   if (FSession <> nil) or (FNav = nil) then
   begin
-    Log('findAllAt: cannot say - analysis in flight or none');
+    LogDetail('findAllAt: cannot say - analysis in flight or none');
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LMid := FNav.ModelIdOf(LPath);
@@ -5785,7 +5864,7 @@ begin
   // as for an analysis in flight (the commands are their own gates).
   if FProject.IsLight(LMid) then
   begin
-    Log('findAllAt: cannot say - ' + TPath.GetFileName(LPath) +
+    LogDetail('findAllAt: cannot say - ' + TPath.GetFileName(LPath) +
       ' is analyzed interface-only yet');
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -5807,7 +5886,7 @@ begin
   // captions its item from it; the command re-asks and applies.
   LAnnotate := AnnotateArgsAtPath(LPath, LPasLine, LPasCol,
     DefaultAnnotateOptions).Scope;
-  Log(Format('findAllAt: %s -> refs=%s ovr=%s impl=%s desc=%s asg=%s cls=%s '
+  LogDetail(Format('findAllAt: %s -> refs=%s ovr=%s impl=%s desc=%s asg=%s cls=%s '
     + 'annotate=%s',
     [PosTag(LPath, LPasLine, LPasCol), JsonBool(LRefs), JsonBool(LOverrides),
      JsonBool(LImpls), JsonBool(LDesc), JsonBool(LAssign), JsonBool(LClass),
@@ -5884,7 +5963,7 @@ begin
   LNotSearched := WsDone('pastree/findDefines');
   if FWS.Status.Cancelled then
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
-  Log(Format('pastree/findDefines: %d rows%s', [Length(LSites),
+  LogCommand('pastree/findDefines', Format('%d rows%s', [Length(LSites),
     IfThen(LNotSearched > 0,
       Format(', %d library units not searched', [LNotSearched]), '')]));
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
@@ -5931,7 +6010,7 @@ begin
       Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED,
         'request cancelled'));
   end;
-  Log(Format('pastree/definesAt: %s -> %d names',
+  LogCommand('pastree/definesAt', Format('%s -> %d names',
     [PosTag(LPath, LPasLine, LPasCol), Length(LSites)]));
   Result := BuildResponse(AMsg.IdJson, DefineSitesJson(LSites));
 end;
@@ -6046,7 +6125,7 @@ begin
     if LSites[LIdx].Origin = ooUnit then
       Inc(LUnitRows);
   end;
-  Log(Format('pastree/optionsAt: %s -> %d options, %d set in units',
+  LogCommand('pastree/optionsAt', Format('%s -> %d options, %d set in units',
     [PosTag(LPath, LPasLine, LPasCol), Length(LSites), LUnitRows]));
   Result := BuildResponse(AMsg.IdJson, '[' + string.Join(',', LJson) + ']');
 end;
@@ -6089,7 +6168,7 @@ begin
       'dcuSource: not a .dcu path: ' + LPath));
   if not TFile.Exists(LPath) then
   begin
-    Log('pastree/dcuSource: no such file: ' + LPath);
+    LogCommand('pastree/dcuSource', 'no such file: ' + LPath);
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
       TPath.GetFileName(LPath) + ': the file does not exist'));
   end;
@@ -6098,14 +6177,14 @@ begin
   except
     on E: Exception do
     begin
-      Log(Format('pastree/dcuSource: %s could not be read: %s',
+      LogCommand('pastree/dcuSource', Format('%s could not be read: %s',
         [LPath, E.Message]));
       Exit(BuildError(AMsg.IdJson, LSP_REQUEST_FAILED,
         Format('%s could not be read: %s',
           [TPath.GetFileName(LPath), E.Message])));
     end;
   end;
-  Log(Format('pastree/dcuSource: %s -> %d chars', [LPath, Length(LText)]));
+  LogCommand('pastree/dcuSource', Format('%s -> %d chars', [LPath, Length(LText)]));
   Result := BuildResponse(AMsg.IdJson,
     Format('{"uri":%s,"unitName":%s,"text":%s}',
       [JsonQuote(PathToUri(LPath)),
@@ -6268,12 +6347,12 @@ begin
       end;
   if LWhat = '' then
   begin
-    Log(Format('pastree/projectChanged: %s re-read in %d ms - same '
+    Log(Format('projectChanged: %s re-read in %d ms - same '
       + 'configuration, nothing to restart for',
       [TPath.GetFileName(FInitProjectFile), GetTickCount64 - LStart]));
     Exit(BuildResponse(AMsg.IdJson, '{"changed":false}'));
   end;
-  Log(Format('pastree/projectChanged: %s re-read in %d ms - changed: %s',
+  Log(Format('projectChanged: %s re-read in %d ms - changed: %s',
     [TPath.GetFileName(FInitProjectFile), GetTickCount64 - LStart, LWhat]));
   Result := BuildResponse(AMsg.IdJson,
     Format('{"changed":true,"what":%s}', [JsonQuote(LWhat)]));
@@ -6380,7 +6459,7 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   if (LScope = 'project') and (FOutlineCache <> '') then
   begin
-    Log('pastree/outline project -> cached');
+    Log('outline project -> cached');
     Exit(BuildResponse(AMsg.IdJson, FOutlineCache));
   end;
 
@@ -6390,12 +6469,12 @@ begin
     LMid := FNav.ModelIdOf(LPath);
     if LMid < 0 then
     begin
-      Log('pastree/outline: file not in the analyzed closure: ' + LPath);
+      Log('outline: file not in the analyzed closure: ' + LPath);
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
     if not FProject.EnsureHydrated(LMid) then
     begin
-      Log('pastree/outline: could not rehydrate ' + LPath);
+      Log('outline: could not rehydrate ' + LPath);
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
     LEntries := PasModuleOutline(FProject.Model(LMid).Tree);
@@ -6555,7 +6634,7 @@ begin
     LBuf.Add(']}');
     // Two times, because they are two different problems: the list is
     // PasTree's walk over the symbol tables, the JSON is this unit's.
-    Log(Format('pastree/outline %s%s -> %d rows: list %d ms, json %d ms, %dK chars',
+    Log(Format('outline %s%s -> %d rows: list %d ms, json %d ms, %dK chars',
       [LScope, IfThen(LPath <> '', ' ' + TPath.GetFileName(LPath), ''),
        Length(LEntries), LListed - LStart, GetTickCount64 - LListed,
        LBuf.Length div 1024]));
@@ -6643,11 +6722,11 @@ begin
   end;
   if not LFound then
   begin
-    Log(Format('pastree/outlineTarget: %s unit %d sym %d node %d -> not placed',
+    LogCommand('pastree/outlineTarget', Format('%s unit %d sym %d node %d -> not placed',
       [LKind, LUnitId, LSym, LNode]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  Log(Format('pastree/outlineTarget: %s unit %d sym %d -> %s',
+  LogCommand('pastree/outlineTarget', Format('%s unit %d sym %d -> %s',
     [LKind, LUnitId, LSym, PosTag(LFile, LLine, LCol)]));
   Result := BuildResponse(AMsg.IdJson, LocationJson(LFile, LLine, LCol, LLen));
 end;
@@ -6708,7 +6787,7 @@ begin
     Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
   if (FNav = nil) or (FNav.ModelIdOf(LPath) < 0) then
   begin
-    Log(LWhat + ': file not in the analyzed closure: ' + LPath);
+    LogCommand(LWhat, 'file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   if not LFound then
@@ -6716,12 +6795,12 @@ begin
     // Not an error: the cursor is simply not on a routine that HAS another
     // half (a plain procedure defined once has no separate header). Said in
     // the log because "the command did nothing" needs a reason.
-    Log(Format('%s: %s nothing to toggle to at that position',
-      [LWhat, PosTag(LPath, LPasLine, LPasCol)]));
+    LogCommand(LWhat, Format('%s nothing to toggle to at that position',
+      [PosTag(LPath, LPasLine, LPasCol)]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
-  Log(Format('%s: %s ''%s'' -> %s',
-    [LWhat, PosTag(LPath, LPasLine, LPasCol), LTarget.Name,
+  LogCommand(LWhat, Format('%s ''%s'' -> %s',
+    [PosTag(LPath, LPasLine, LPasCol), LTarget.Name,
      PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
   Result := BuildResponse(AMsg.IdJson,
     LocationWithTypes(LTarget.FilePath, LTarget.Line, LTarget.Col,
@@ -6824,7 +6903,7 @@ begin
   if not PlanBlockClose(LText, LLine, LTabSize, LInsertSpaces, LEdits) then
   begin
     if FTrace then
-      Log(Format('onTypeFormatting: %s line %d -> nothing',
+      LogDetail(Format('onTypeFormatting: %s line %d -> nothing',
         [TPath.GetFileName(LPath), LLine]));
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
@@ -6841,7 +6920,7 @@ begin
        LEdits[LIdx].Line, LEdits[LIdx].EndChar,
        JsonQuote(LEdits[LIdx].Text)]);
   end;
-  Log(Format('onTypeFormatting: %s line %d -> %d edit(s), closer %s in %d ms',
+  LogDetail(Format('onTypeFormatting: %s line %d -> %d edit(s), closer %s in %d ms',
     [TPath.GetFileName(LPath), LLine, Length(LEdits),
      JsonQuote(Trim(LEdits[High(LEdits)].Text)), GetTickCount64 - LStart]));
   Result := BuildResponse(AMsg.IdJson, '[' + LJson + ']');
@@ -7338,7 +7417,7 @@ begin
       LBuf.AddChar(']');
     end;
     LBuf.Add(']}');
-    Log(Format('pastree/units %s for %s -> %d rows, the document uses %d, '
+    Log(Format('units %s for %s -> %d rows, the document uses %d, '
       + 'in %d ms', [LScope, ExtractFileName(LDocPath), LPaths.Count,
        Length(LInfo.Items), GetTickCount64 - LStart]));
     Result := BuildResponse(AMsg.IdJson, LBuf.ToString);
@@ -7405,7 +7484,7 @@ begin
       + '"end":{"line":%d,"character":%d}},"newText":%s}',
       [LLine, LChar, LLine, LChar, JsonQuote(LAnswer.Text)]);
   end;
-  Log(Format('useUnit: %s + %s (%s) -> %s',
+  LogCommand('useUnit', Format('%s + %s (%s) -> %s',
     [ExtractFileName(LPath), LUnit, IfThen(LImpl, 'implementation',
      'interface'), LAnswer.Provider]));
   Result := BuildResponse(AMsg.IdJson, Format(
@@ -7633,7 +7712,7 @@ begin
     for var LRow in LRows do
       if LRow.Doubts <> nil then
         Inc(LMid);
-    Log(Format('pastree/unusedUses %s: %d units checked -> %d entries, %d ' +
+    Log(Format('unusedUses %s: %d units checked -> %d entries, %d ' +
       'with a doubt, in %d ms', [LScope, Length(LMids), Length(LRows), LMid,
       GetTickCount64 - LStart]));
     Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']' +
@@ -7736,7 +7815,7 @@ begin
         [JsonQuote(LRows[LIdx].UnitName), StringsJson(LRows[LIdx].Doubts),
          LListed.ToString])));
     end;
-    Log(Format('pastree/unreferencedUnits: %d units checked -> %d nobody ' +
+    Log(Format('unreferencedUnits: %d units checked -> %d nobody ' +
       'uses, in %d ms', [Length(LMids), Length(LRows),
       GetTickCount64 - LStart]));
     Result := BuildResponse(AMsg.IdJson, '{"rows":[' + LSB.ToString + ']' +
@@ -7814,11 +7893,11 @@ begin
         Inc(LCount);
       end;
     end;
-    Log(Format('pastree/usesRemoval: %d file(s) -> %d edit(s), %d refused, ' +
+    Log(Format('usesRemoval: %d file(s) -> %d edit(s), %d refused, ' +
       '%d missing', [LFiles.Count, LCount, Length(LAllRefused),
       Length(LAllMissing)]));
     for var LS in LAllRefused do
-      Log('pastree/usesRemoval: refused ' + LS);
+      Log('usesRemoval: refused ' + LS);
     Result := BuildResponse(AMsg.IdJson, '{"edits":[' + LSB.ToString +
       '],"refused":' + StringsJson(LAllRefused) + ',"missing":' +
       StringsJson(LAllMissing) + '}');
@@ -7928,7 +8007,7 @@ begin
   LMid := FNav.ModelIdOf(LPath);
   if LMid < 0 then
   begin
-    Log('documentSymbol: file not in the analyzed closure: ' + LPath);
+    LogDetail('documentSymbol: file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LPath := TPath.GetFullPath(LPath);
@@ -7943,7 +8022,7 @@ begin
   for LScopeIdx := 0 to LModel.Scopes.Count - 1 do
     if LModel.Scopes[LScopeIdx].Kind = sckImplementation then
       AddScope(LScopeIdx);
-  Log(Format(AMsg.Method + ': %s -> %d bytes of outline',
+  LogDetail(Format(AMsg.Method + ': %s -> %d bytes of outline',
     [TPath.GetFileName(LPath), Length(LItems)]));
   Result := BuildResponse(AMsg.IdJson, '[' + LItems + ']');
 end;
@@ -8466,7 +8545,7 @@ begin
       if FileMatches(LPath, LDoc.Text, LDisk) then
         LDisk := LDoc.Text;   // see FileMatches: a decode difference is not an edit
       FDocs.SetDiskText(LPath, LDisk);
-      Log('watched: ' + TPath.GetFileName(LPath) +
+      LogDetail('watched: ' + TPath.GetFileName(LPath) +
         ' changed on disk but is open here - overlay still wins');
     end
     else if (LItem.GetValue<Integer>('type', 0) = 2) and
@@ -8476,7 +8555,7 @@ begin
       // cannot know which projects compile the file), and a group of nine
       // must not answer with nine full rebuilds. Created and deleted files
       // still rebuild: either can change how a unit name resolves.
-      Log('watched: ' + TPath.GetFileName(LPath) +
+      LogDetail('watched: ' + TPath.GetFileName(LPath) +
         ' changed on disk, outside this closure - no rebuild')
     else
       LRebuild := True;
@@ -8535,7 +8614,7 @@ begin
   if (LSym.TypeNode <> NIL_NODE) and
      FNav.ResolveDecl(LTMid, LSym.TypeNode, LTarget) then
   begin
-    Log(Format(AMsg.Method + ': %s ''%s'' -> %s',
+    LogCommand(AMsg.Method, Format('%s ''%s'' -> %s',
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LTarget.FilePath, LTarget.Line, LTarget.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
@@ -8549,7 +8628,7 @@ begin
   if (LSym.Kind <> skType) and (LSym.TypeSym <> NIL_SYM) and
      FNav.DeclHit(LTMid, LSym.TypeSym, LHit) then
   begin
-    Log(Format(AMsg.Method + ': %s ''%s'' -> %s via the resolved type symbol',
+    LogCommand(AMsg.Method, Format('%s ''%s'' -> %s via the resolved type symbol',
       [PosTag(LPath, LPasLine, LPasCol), LName,
        PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
     Exit(BuildResponse(AMsg.IdJson,
@@ -8584,7 +8663,7 @@ begin
     if (LX.UnitId <> NIL_SYM) and (LX.Sym <> NIL_SYM) and
        FNav.DeclHit(LX.UnitId, LX.Sym, LHit) then
     begin
-      Log(Format(AMsg.Method + ': %s ''%s'' -> %s via the cross type pass',
+      LogCommand(AMsg.Method, Format('%s ''%s'' -> %s via the cross type pass',
         [PosTag(LPath, LPasLine, LPasCol), LName,
          PosTag(LHit.FilePath, LHit.Line, LHit.Col)]));
       Exit(BuildResponse(AMsg.IdJson,
@@ -8593,7 +8672,7 @@ begin
     end;
   end;
 
-  Log(Format(AMsg.Method + ': %s no type declaration reachable for ''%s''',
+  LogCommand(AMsg.Method, Format('%s no type declaration reachable for ''%s''',
     [PosTag(LPath, LPasLine, LPasCol), LName]));
   Result := BuildResponse(AMsg.IdJson, 'null');
 end;
@@ -9085,7 +9164,7 @@ begin
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   if FNav.ModelIdOf(LPath) < 0 then
   begin
-    Log('semanticTokens: file not in the analyzed closure: ' + LPath);
+    LogDetail('semanticTokens: file not in the analyzed closure: ' + LPath);
     Exit(BuildResponse(AMsg.IdJson, 'null'));
   end;
   LTokens := CollectSemanticTokens(LPath, True);
@@ -9116,7 +9195,7 @@ begin
       Inc(LCount);
     end;
     LSB.Append(']}');
-    Log(Format(AMsg.Method + ': %s -> %d tokens, %d ms',
+    LogDetail(Format(AMsg.Method + ': %s -> %d tokens, %d ms',
       [TPath.GetFileName(LPath), LCount, GetTickCount64 - LStart]));
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
@@ -9211,7 +9290,7 @@ begin
           LHits[LIdx].HiTo - LHits[LIdx].HiFrom)]));
     end;
     LSB.Append(']');
-    Log(Format(AMsg.Method + ': %s ''%s'' -> %d in this file',
+    LogDetail(Format(AMsg.Method + ': %s ''%s'' -> %d in this file',
       [PosTag(LPath, LPasLine, LPasCol), LName, LCount]));
     Result := BuildResponse(AMsg.IdJson, LSB.ToString);
   finally
@@ -9258,6 +9337,7 @@ begin
       // token the client may have handed over for it.
       FQueryId := '';
       FQueryToken := '';
+      FRequestStart := GetTickCount64;
       if LMsg.IsRequest then
       begin
         FQueryId := LMsg.IdJson;
@@ -9311,7 +9391,7 @@ begin
       begin
         if (FMainSource <> '') and (FProject = nil) and (FSession = nil) then
         begin
-          Log('project configured - starting the initial analysis');
+          LogDetail('project configured - starting the initial analysis');
           ScheduleAnalysis('');
         end;
         Exit;

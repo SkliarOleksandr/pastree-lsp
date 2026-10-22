@@ -155,7 +155,7 @@ begin
   if not ExecuteAnnotateArgsDialog(AGateScope <> 'all', LOptions) then
     Exit;
   LLenAtRequest := BufferByteLength(AView);
-  LspLogToServer(Format('annotateArgs: asking %s(%d,%d) mode=%s byRef=%s '
+  LspLogDetail(Format('annotateArgs: asking %s(%d,%d) mode=%s byRef=%s '
     + 'multiline=%s', [ExtractFileName(LFileName), LRow, LCol, LOptions.Mode,
     BoolToStr(LOptions.MarkByRef, True),
     BoolToStr(LOptions.OneArgPerLine, True)]));
@@ -187,7 +187,7 @@ begin
         Exit;
       end;
       ApplyAnnotateEdits(AView, AAnswer);
-      LspLogToServer(Format('annotateArgs: %d edit(s) written for %s (%s)',
+      LspLogDetail(Format('annotateArgs: %d edit(s) written for %s (%s)',
         [Length(AAnswer.Edits), AAnswer.Routine, AAnswer.Scope]));
     end);
 end;

@@ -94,12 +94,13 @@ begin
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
-{ The routine outcomes: into the log, never into the panel. A no-op when no
+{ The routine outcomes: into the log under Advanced Logging (the server's
+  syncPrototypes line is the plain log's), never into the panel. A no-op when no
   server is up, which is correct - there is nothing to report about a feature
   that could not have run. }
 procedure LogTrace(const AMessage: string);
 begin
-  LspLogToServer(AMessage);
+  LspLogDetail(AMessage);
 end;
 
 { The answer, applied to the buffer.

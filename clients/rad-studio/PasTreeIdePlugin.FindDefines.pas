@@ -386,12 +386,12 @@ begin
       Exit;
     LCursorFile := AView.Buffer.FileName;
     ShowWaitDialog('Searching defines...');
-    LspLogToServer('findDefines: asking ' + ExtractFileName(LCursorFile));
+    LspLogDetail('findDefines: asking ' + ExtractFileName(LCursorFile));
     LspFindDefines(LCursorFile,
       procedure(ASuccess: Boolean; const ARows: TArray<TLspDefineRow>;
         const AError: string)
       begin
-        LspLogToServer(Format('findDefines: answer ok=%s rows=%d err=%s',
+        LspLogDetail(Format('findDefines: answer ok=%s rows=%d err=%s',
           [BoolToStr(ASuccess, True), Length(ARows), AError]));
         if not GAlive then
           Exit;
@@ -429,13 +429,13 @@ begin
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
     ShowWaitDialog('Finding defines at cursor...');
-    LspLogToServer(Format('definesAt: asking %s(%d,%d)',
+    LspLogDetail(Format('definesAt: asking %s(%d,%d)',
       [ExtractFileName(LCursorFile), LRow, LCol]));
     LspDefinesAt(LCursorFile, LRow, LCol,
       procedure(ASuccess: Boolean; const ARows: TArray<TLspDefineRow>;
         const AError: string)
       begin
-        LspLogToServer(Format('definesAt: answer ok=%s rows=%d err=%s',
+        LspLogDetail(Format('definesAt: answer ok=%s rows=%d err=%s',
           [BoolToStr(ASuccess, True), Length(ARows), AError]));
         if not GAlive then
           Exit;
@@ -473,13 +473,13 @@ begin
     LRow := AView.Buffer.EditPosition.Row;
     LCol := AView.Buffer.EditPosition.Column;
     ShowWaitDialog('Finding options at cursor...');
-    LspLogToServer(Format('optionsAt: asking %s(%d,%d)',
+    LspLogDetail(Format('optionsAt: asking %s(%d,%d)',
       [ExtractFileName(LCursorFile), LRow, LCol]));
     LspOptionsAt(LCursorFile, LRow, LCol,
       procedure(ASuccess: Boolean; const ARows: TArray<TLspDefineRow>;
         const AError: string)
       begin
-        LspLogToServer(Format('optionsAt: answer ok=%s rows=%d err=%s',
+        LspLogDetail(Format('optionsAt: answer ok=%s rows=%d err=%s',
           [BoolToStr(ASuccess, True), Length(ARows), AError]));
         if not GAlive then
           Exit;

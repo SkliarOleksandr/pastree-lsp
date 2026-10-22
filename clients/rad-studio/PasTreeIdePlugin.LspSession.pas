@@ -1318,6 +1318,16 @@ procedure LspSyncDocuments;
 function LspLogToServer(const AText: string): Boolean;
 
 /// <summary>
+/// LspLogToServer under Advanced Logging only. THE PLAIN LOG'S RULE
+/// (2026-10-22, Alex): one or two lines per command the user ran, saying
+/// what it was, what it found and how long it took - the server writes
+/// those - plus every failure. A step-by-step trace, an asking/answer pair
+/// around a request the server already logs, a toolbar's construction, a
+/// probe left from an investigation: all of that comes through here.
+/// </summary>
+function LspLogDetail(const AText: string): Boolean;
+
+/// <summary>
 /// WHICH PROJECT'S ANALYSIS ANSWERS FOR AFileName, as a bare name, or '' when
 /// there is nothing to disambiguate (no group, or a group of one).
 ///
@@ -1436,6 +1446,15 @@ var
 begin
   if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
     LMessageServices.AddTitleMessage('[pastree-lsp] ' + AMessage);
+end;
+
+{ Why the server is being restarted: the Build tab, and the log file the new
+  server will write to - directly, since the old server is on its way out
+  and the new one is not up (2026-10-22, like TLspClient.Log). }
+procedure LogRestart(const ALogFile, AMessage: string);
+begin
+  LogDiagnostic(AMessage);
+  AppendIdeLogLine(ALogFile, AMessage);
 end;
 
 type
@@ -2724,21 +2743,22 @@ begin
     begin
       if (FRestartWhy <> '') and
          SameText(FStartedProject, LOptions.ProjectFile) then
-        LogDiagnostic(Format('%s was saved and changed (%s) - restarting'
-          + ' the server to read it again.',
+        LogRestart(LOptions.LogFile, Format('%s was saved and changed (%s)'
+          + ' - restarting the server to read it again.',
           [ExtractFileName(LOptions.ProjectFile), FRestartWhy]))
       else if FStartedThreads <> LOptions.AnalysisThreads then
-        LogDiagnostic(Format('analysis threads changed (%s) - restarting'
-          + ' the server for %s.', [ThreadsText(LOptions.AnalysisThreads),
+        LogRestart(LOptions.LogFile, Format('analysis threads changed (%s)'
+          + ' - restarting the server for %s.',
+          [ThreadsText(LOptions.AnalysisThreads),
           ExtractFileName(LOptions.ProjectFile)]))
       else if FStartedNoLight <> LOptions.NoLightLibraries then
-        LogDiagnostic(Format('parsing mode changed (%s) -'
+        LogRestart(LOptions.LogFile, Format('parsing mode changed (%s) -'
           + ' restarting the server for %s.',
           [cParseMode[not LOptions.NoLightLibraries],
           ExtractFileName(LOptions.ProjectFile)]))
       else
-        LogDiagnostic(Format('project configuration changed (%s %s %s) - '
-          + 'restarting the server.',
+        LogRestart(LOptions.LogFile, Format('project configuration changed'
+          + ' (%s %s %s) - restarting the server.',
           [ExtractFileName(LOptions.ProjectFile), LPlatform, LConfig]));
     end;
     FStartedProjectStamp := LStamp;
@@ -2986,7 +3006,9 @@ begin
         AOnDone(False, nil, AError);
     end);
   APendingId := LIssuedId;
-  LogToServer(Format('ask %s id=%d', [AMethod, LIssuedId]));
+  // Advanced Logging only: the server logs the request's own line.
+  if AdvancedLoggingEnabled then
+    LogToServer(Format('ask %s id=%d', [AMethod, LIssuedId]));
 end;
 
 /// <summary>
@@ -5537,6 +5559,11 @@ begin
   for LSession in GPool.ReadySessions do
     if LSession.LogToServer(AText) then
       Exit(True);
+end;
+
+function LspLogDetail(const AText: string): Boolean;
+begin
+  Result := AdvancedLoggingEnabled and LspLogToServer(AText);
 end;
 
 procedure LspPrewarm;

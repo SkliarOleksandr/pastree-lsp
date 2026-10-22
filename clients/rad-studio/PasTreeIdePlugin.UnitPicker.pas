@@ -146,7 +146,7 @@ begin
         Exit;
       end;
       ApplyUseUnitEdit(AView, AAnswer.Edits[0]);
-      LspLogToServer(Format('useUnit: %s written into the %s uses of %s',
+      LspLogDetail(Format('useUnit: %s written into the %s uses of %s',
         [ARow.Name, AAnswer.Section, ExtractFileName(AFileName)]));
     end);
 end;

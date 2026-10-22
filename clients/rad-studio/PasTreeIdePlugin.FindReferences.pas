@@ -515,7 +515,7 @@ begin
     // and ~0.4 ms per row under one, flat - neither its BeginUpdate nor a
     // cheaper CalcRect moved it, so a list that long shows its progress on
     // the wait dialog instead.
-    LspLogToServer(Format('refs: report of %d rows in %d files in %d ms, '
+    LspLogDetail(Format('refs: report of %d rows in %d files in %d ms, '
       + 'texts %d ms, adds: headers %d ms, rows %d ms', [Length(AHits),
       LSnippets.FileCount, GetTickCount64 - LT0, LSnippets.TextMs, LHeaderMs,
       LRowMs]));
@@ -620,7 +620,7 @@ begin
     // Short on purpose: the wait dialog does not grow for its text and a
     // long line is clipped (user, 2026-08-31).
     ShowWaitDialog('Searching references...');
-    LspLogToServer(Format('refs: asking %s(%d,%d)',
+    LspLogDetail(Format('refs: asking %s(%d,%d)',
       [ExtractFileName(LCursorFile), LRow, LCol]));
     // ACROSS THE GROUP, not just the project owning the file: a unit two
     // projects compile has its uses counted in both closures, and each server
@@ -635,7 +635,7 @@ begin
         LName: string;
         LRefs: TArray<TLspHit>;
       begin
-        LspLogToServer(Format('refs: answer ok=%s hits=%d searched=%d err=%s',
+        LspLogDetail(Format('refs: answer ok=%s hits=%d searched=%d err=%s',
           [BoolToStr(ASuccess, True), Length(AHits), AProjectsSearched, AError]));
         if not GAlive then
           Exit;   // package unloading - nothing here may touch the IDE

@@ -206,17 +206,21 @@ function TooltipSymbolInsightEnabled: Boolean;
 function LoggingEnabled: Boolean;
 
 /// <summary>
-/// Whether that log carries the configuration inventory - every search path,
-/// define, namespace and unit alias the analysis was handed. Meaningful only
-/// while LoggingEnabled; the dialog greys it out otherwise.
+/// Whether that log carries the DETAIL - the configuration inventory (every
+/// search path, define, namespace and unit alias), the closure's diagnostics,
+/// an analysis's stages, every background request, the IDE's asking/answer
+/// pairs, Rename's steps, the toolbar's construction, the timing lines.
+/// Without it the log is one or two lines per command the user ran, the
+/// analysis status, the document notifications and every failure (2026-10-22,
+/// Alex; LspLogDetail and the server's logDetail). Meaningful only while
+/// LoggingEnabled; the dialog greys it out otherwise.
 ///
 /// OFF BY DEFAULT, unlike every other switch here, and deliberately: this one
-/// does not turn a FEATURE off, it turns a diagnostic on. The inventory is
-/// hundreds of lines per configuration on a real project and it answers one
-/// question - "which directories did it actually search?" - which is a
-/// question you go looking for rather than one you want answered every time.
-/// The one-line summary (`configured: platform=... paths=N defines=N`) is
-/// logged either way, so the counts never disappear.
+/// does not turn a FEATURE off, it turns a diagnostic on. The detail is
+/// hundreds of lines per configuration and a line per keystroke, and it
+/// answers questions you go looking for rather than ones you want answered
+/// every time. The counts (`configured: platform=... paths=N defines=N`,
+/// `N diagnostics`) are logged either way, so they never disappear.
 /// </summary>
 function AdvancedLoggingEnabled: Boolean;
 
@@ -1151,8 +1155,9 @@ begin
         + VariantForLog(LRead);
       if ValueNameIndex(LRead, ANames) = AIndex then
         Exit(True);
-      ErrorInsightLog(AName + ': ' + AReads + ' - not ' + ANames[AIndex]
-        + ', next form');
+      if AdvancedLoggingEnabled then
+        ErrorInsightLog(AName + ': ' + AReads + ' - not ' + ANames[AIndex]
+          + ', next form');
     except
       on E: Exception do
         AReads := E.ClassName + ': ' + E.Message;

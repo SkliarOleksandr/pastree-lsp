@@ -348,7 +348,8 @@ begin
     'pastree-lsp-projectsmoke' + IfThen(ALight, '-light', '') + '.log');
   GLogPath := Result.LogFile;
   // The Performance page's count, sent as analysisThreads - checked in the
-  // log's "analysis threads:" line. 1, PasTree's SingleThreaded mode: every
+  // header's host line, "analysis threads". 1, PasTree's SingleThreaded
+  // mode: every
   // other harness runs the default width, so this is the one that covers
   // the sequential path - every check below answers from it.
   Result.AnalysisThreads := 1;
@@ -497,13 +498,13 @@ begin
   Writeln('=== light libraries: ' + IfThen(ALight, 'on', 'off') + ' ===');
   if ALight then
   begin
-    Check(LogContains('light libraries: on - '),
+    Check(LogContains('; light libraries on, '),
       'the library trees are analyzed interface-only');
-    Check(LogContains(' units analyzed interface-only, '),
+    Check(LogContains(' interface-only, '),
       'and the analysis says how many units are light');
   end
   else
-    Check(LogContains('light libraries: off (lightLibraries=false)'),
+    Check(LogContains('; light libraries off (lightLibraries=false)'),
       'lightLibraries=false analyzes every unit in full');
 
   // Ctrl+Click on a library ROUTINE goes to its body - which a light unit
@@ -638,14 +639,14 @@ begin
   // notification - after the answer, which says only that it started.
   Writeln;
   Writeln('=== analysisThreads and pastree/benchmark ===');
-  Check(LogContains('analysis threads: 1 (set by the client, sequential)'),
+  Check(LogContains('; 1 analysis threads (set by the client, sequential)'),
     'the server runs the analysis on the 1 thread asked for');
   // 0.69.0: the .dproj's DCC_* switches reach the analysis as dcc's
   // command-line switches (PasTree 0.106.0). The Debug config of this
   // package's .dproj sets DCC_Optimize false - $O- first, in msbuild's order.
-  Check(LogContains('switches: $O- '),
+  Check(LogContains('; switches $O- '),
     'the Debug config''s switches are taken from the .dproj');
-  Check(LogContains('; console target off'),
+  Check(LogContains(', console target off;'),
     'and a package is no console target');
   GBenchmarkJson := '';
   GClient.OnNotification :=

@@ -324,16 +324,33 @@ end;
   Into the SERVER'S log rather than the Build tab: the Build tab is where
   the user's own compiler output lives and a step-by-step trace would bury
   it, while the log is already the place this product answers "what actually
-  happened" from. Failures still go to the Build tab through LogDiagnostic. }
+  happened" from. Failures still go to the Build tab through LogDiagnostic.
+
+  THE STEPS ARE ADVANCED LOGGING'S since 2026-10-22 (LspLogDetail), at
+  Alex's call: the plain log keeps one or two lines per command. What stays
+  in it goes through Outcome - the outcome of an apply or a Revert, and every
+  refusal and failure, which is what "which step did that" starts from; the
+  steps are one switch away when that is not enough. }
 procedure Trace(const AWhat: string);
 begin
-  LspLogToServer('rename: ' + AWhat);
+  LspLogDetail('rename: ' + AWhat);
 end;
 
 { The same, formatted - saves every caller a Format call. }
 procedure TraceFmt(const AFormat: string; const AArgs: array of const);
 begin
   Trace(Format(AFormat, AArgs));
+end;
+
+{ A line the plain log keeps - see Trace. }
+procedure Outcome(const AWhat: string);
+begin
+  LspLogToServer('rename: ' + AWhat);
+end;
+
+procedure OutcomeFmt(const AFormat: string; const AArgs: array of const);
+begin
+  Outcome(Format(AFormat, AArgs));
 end;
 
 /// <summary>
@@ -667,7 +684,7 @@ begin
       if not TryReadSourceForEdit(LEdit.FilePath, {out} LFile.Text,
         {out} LFile.Encoding) then
       begin
-        TraceFmt('  %s: form file not readable - refusing',
+        OutcomeFmt('  %s: form file not readable - refusing',
           [ExtractFileName(LEdit.FilePath)]);
         AError := Format('%s could not be read.'#13#10#13#10'Nothing was ' +
           'renamed.', [LEdit.FilePath]);
@@ -702,7 +719,7 @@ begin
       if not TryReadSourceForEdit(LEdit.FilePath, {out} LFile.Text,
         {out} LFile.Encoding) then
       begin
-        TraceFmt('  %s: not open and not readable - refusing',
+        OutcomeFmt('  %s: not open and not readable - refusing',
           [ExtractFileName(LEdit.FilePath)]);
         AError := Format('%s is not open in the IDE and could not be ' +
           'read.'#13#10#13#10'Nothing was renamed.', [LEdit.FilePath]);
@@ -986,7 +1003,7 @@ begin
       ASpots[LIdx].Row := UniqueRowReading(LText, LEdit.Snippet, LCount);
       if ASpots[LIdx].Row = 0 then
       begin
-        TraceFmt('  %s: line %d not where it was and its text matches %d ' +
+        OutcomeFmt('  %s: line %d not where it was and its text matches %d ' +
           'line(s)', [ExtractFileName(LEdit.FilePath), LEdit.Row, LCount]);
         AError := Format('%s line %d no longer reads "%s" - the file has ' +
           'been edited since the rename.'#13#10#13#10 +
@@ -1772,7 +1789,7 @@ begin
   Trace('  undoing the designer''s change: ' +
     DescribeAction(AAction, Opposite(ADirection)));
   if not RunDesignerAction(AAction, Opposite(ADirection), LUndoError) then
-    Trace('  undo FAILED: ' + LUndoError);
+    Outcome('  undo FAILED: ' + LUndoError);
   LNow := ReadBuffers(AFiles);
   try
     LDiffers := '';
@@ -1787,7 +1804,7 @@ begin
       'Nothing was renamed.'
   else
   begin
-    Trace('  after the undo these still differ:' + LDiffers);
+    Outcome('  after the undo these still differ:' + LDiffers);
     AError := AError + #13#10#13#10'The form designer''s change could NOT be ' +
       'undone completely - these files differ from before:' + LDiffers +
       '. Check them (Ctrl+Z there) before saving.';
@@ -1839,7 +1856,7 @@ begin
     if not VerifySites(APlan, AFiles, LTexts, ADirection, False, {out} LSpots,
       {out} AError) then
     begin
-      Trace('verify FAILED: ' + AError);
+      Outcome('verify FAILED: ' + AError);
       Exit;
     end;
     if AAction.Kind <> dakNone then
@@ -1851,12 +1868,12 @@ begin
           AAction.Relinks)]);
       if not CheckDesignerReady(AAction, ADirection, {out} AError) then
       begin
-        Trace('designer not ready: ' + AError);
+        Outcome('designer not ready: ' + AError);
         Exit;
       end;
       if not RunDesignerAction(AAction, ADirection, {out} AError) then
       begin
-        Trace('designer FAILED: ' + AError);
+        Outcome('designer FAILED: ' + AError);
         UndoDesigner(AAction, ADirection, AFiles, LTexts, AError);
         Exit;
       end;
@@ -1867,7 +1884,7 @@ begin
            {out} AError) or
          not CheckDesignerResult(AAction, ADirection, {out} AError) then
       begin
-        Trace('designer result REJECTED: ' + AError);
+        Outcome('designer result REJECTED: ' + AError);
         UndoDesigner(AAction, ADirection, AFiles, LTexts, AError);
         Exit;
       end;
@@ -1991,7 +2008,7 @@ var
     else
     begin
       Inc(AFailed);
-      TraceFmt('  %s: could not be saved', [ExtractFileName(APath)]);
+      OutcomeFmt('  %s: could not be saved', [ExtractFileName(APath)]);
     end;
   end;
 
@@ -2087,7 +2104,7 @@ begin
       begin
         Result := Result + [Format('%s line %d: not confirmed to read "%s"',
           [ExtractFileName(LEdit.FilePath), LEdit.Row, LWant])];
-        TraceFmt('  %s line %d: after the save it does not read "%s" at ' +
+        OutcomeFmt('  %s line %d: after the save it does not read "%s" at ' +
           'column %d: [%s]', [ExtractFileName(LEdit.FilePath), LEdit.Row,
           LWant, LEdit.Col + LShift, LineText(LText, LEdit.Row)]);
       end;
@@ -2151,7 +2168,7 @@ begin
         {out} LDiskPaths);
       LUnconfirmed := ConfirmLiveForms(GApplied.Plan, LFiles, adBackward);
       CloseWaitDialog;
-      TraceFmt('reverted %d site(s) in %d file(s); saved %d, %d failed, %d ' +
+      OutcomeFmt('reverted %d site(s) in %d file(s); saved %d, %d failed, %d ' +
         'form-file site(s) not confirmed', [LReverted, LFileCount, LSaved,
         LFailed, Length(LUnconfirmed)]);
       ReportOutcome(Format('Reverted - %d site(s) in %d file(s) read "%s" ' +
@@ -2268,7 +2285,7 @@ begin
           there is nothing to undo. }
         if APlan.IsUnit then
         begin
-          Trace('declined: a unit rename is not applied from the IDE');
+          Outcome('declined: a unit rename is not applied from the IDE');
           CloseWaitDialog;
           TellUser(Format('"%s" is a unit.'#13#10#13#10 +
             'Renaming a unit also renames its file, and the IDE performs a ' +
@@ -2298,7 +2315,7 @@ begin
         if not ApplyPlan(APlan, {out} LDiskCount, {out} LFiles,
           {out} LAction) then
         begin
-          Trace('apply refused - nothing was changed');
+          Outcome('apply refused - nothing was changed');
           Exit;   // ApplyPlan has already said why, and changed nothing
         end;
         try
@@ -2315,7 +2332,7 @@ begin
         CloseWaitDialog;
         DropApplied;
         GApplied := TAppliedRename.Create(APlan);
-        TraceFmt('applied %d site(s); saved %d file(s), %d failed, %d of them ' +
+        OutcomeFmt('applied %d site(s); saved %d file(s), %d failed, %d of them ' +
           'on disk, %d form-file site(s) not confirmed', [Length(APlan.Edits),
           LSaved, LFailed, Length(LDiskPaths), Length(LUnconfirmed)]);
         ReportRename(APlan, LDiskCount, LFileCount, LFailed, LUnconfirmed);

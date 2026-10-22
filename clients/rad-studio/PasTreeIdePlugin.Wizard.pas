@@ -484,7 +484,7 @@ procedure TMenuManager.OnFindDeclarationExecute(Sender: TObject);
 begin
   // Logged like the Find All items: the one way to tell from a log that OUR
   // item ran and not the native one (the takeover is decided at load).
-  LspLogToServer(Format('menu: execute PasTreeFindDeclaration, TopView %s',
+  LspLogDetail(Format('menu: execute PasTreeFindDeclaration, TopView %s',
     [IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
   ExecuteGotoDeclaration(FEditorServices.TopView);
 end;
@@ -528,7 +528,7 @@ begin
      (FGateCol = LCol) and SameText(FGateFile, LFile) then
     Exit(FGate.Known);
   FGate := LspFindAllAt(LFile, LRow, LCol, cGateBudgetMs);
-  LspLogToServer(Format('menu: gate at %s(%d,%d) known=%s',
+  LspLogDetail(Format('menu: gate at %s(%d,%d) known=%s',
     [ExtractFileName(LFile), LRow, LCol, BoolToStr(FGate.Known, True)]));
   FGateTick := GetTickCount;
   FGateFile := LFile;
@@ -641,7 +641,7 @@ begin
   LAction := ActionOf(Sender);
   if (LAction = nil) or not ItemOf(LAction, LItem) then
     Exit;
-  LspLogToServer(Format('menu: execute %s, TopView %s', [LAction.Name,
+  LspLogDetail(Format('menu: execute %s, TopView %s', [LAction.Name,
     IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
   try
     case LItem of
@@ -706,7 +706,7 @@ procedure TMenuManager.OnAnnotateArgsExecute(Sender: TObject);
 var
   LScope: string;
 begin
-  LspLogToServer(Format('menu: execute PasTreeAnnotateArgs, TopView %s',
+  LspLogDetail(Format('menu: execute PasTreeAnnotateArgs, TopView %s',
     [IfThen(FEditorServices.TopView <> nil, 'present', 'NIL')]));
   try
     // The verdict the popup was drawn on, re-taken if the caret moved since

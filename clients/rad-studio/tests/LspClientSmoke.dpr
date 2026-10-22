@@ -1679,7 +1679,7 @@ end;
     edit 2  an edit on top of an edit: same path, different hash.
 
   Both must log `analysis started: incremental, one module`. What is NOT
-  asserted is acceptance by PasTree's guards - `analysis done (incremental)`
+  asserted is acceptance by PasTree's guards - `analysis done: incremental`
   is checked, but a refusal here would be a library decision about a fixture,
   not a server bug, and pinning it would make this test fail for the wrong
   reason. What the server owns is CHOOSING the module path, and that is what
@@ -1735,7 +1735,7 @@ begin
   LAfter := AppendedSince(LBefore);
   Check(LAfter.Contains('analysis started: incremental, one module'),
     'an edit on top of an edit takes it too');
-  Check(LAfter.Contains('analysis done (incremental)'),
+  Check(LAfter.Contains('analysis done: incremental '),
     'and PasTree accepted it - the module was reanalyzed in place');
   // The identity of the re-analyzed module must survive the swap. The first
   // version of this handed PasTree the signature's LOWERCASED path, and the

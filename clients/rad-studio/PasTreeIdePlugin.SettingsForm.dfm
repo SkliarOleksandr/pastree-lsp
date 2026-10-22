@@ -422,8 +422,8 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Width = 380
         Height = 30
         Caption = 
-          'Adds every search path, define, namespace and unit alias to the ' +
-          'log. Off keeps the one-line summary with the counts.'
+          'Adds background requests, step traces, timings and search paths.' +
+          ' Off: one or two lines per command, and every failure.'
         WordWrap = True
       end
       object lblClearLogOnOpenHint: TLabel
@@ -464,7 +464,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         Top = 90
         Width = 430
         Height = 17
-        Caption = 'Advanced logging (paths, defines, namespaces, aliases)'
+        Caption = 'Advanced logging (every request, step and path)'
         TabOrder = 1
       end
       object chkClearLogOnOpen: TCheckBox

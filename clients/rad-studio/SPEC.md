@@ -1291,11 +1291,24 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    discarded. The IDE-side crash record is deliberately NOT gated by it: a
    fault nobody recorded is worse than a log nobody reads.
    **Advanced logging** (default OFF, the one switch here that is) maps to a
-   new `logDetail` initialization option and controls the configuration
-   inventory - every search path, define, namespace and alias. The one-line
-   `configured: platform=... paths=N defines=N` summary is logged either way,
-   deliberately: turning the detail off must cost the list, never the counts
-   that say the list is worth asking for. Both are part of the server's
+   new `logDetail` initialization option. Since 0.74.0 it splits the whole
+   log in two (Alex's rule, 2026-10-22). Off, the log is a four-line header
+   (version, hardware, host with the client pid, process start and threads,
+   and the `configured:` line with the counts, the switches and the light
+   mode), the analysis status (a full build's start and end, one `analysis
+   done` line per incremental run), one or two lines per command the user
+   ran - `<command>: <where> '<name>' -> <result>, <N> ms` - the document
+   notifications (didOpen/didChange/didClose), the server's life seen from
+   the IDE (ready with its version, a mismatch, a restart and why, a lost
+   connection) and every failure. On adds the rest: the configuration
+   inventory (every search path, define, namespace and alias), the closure's
+   diagnostics one by one, an analysis's stages and memory, every background
+   request (semantic tokens, highlight, completion, signature help, the
+   context-menu probe), the IDE's asking/answer pairs and its `ask` lines,
+   Rename's steps, the Messages toolbar's construction and the IDE-side
+   timing lines. The counts are logged either way, deliberately: turning
+   the detail off must cost the list, never the numbers that say the list
+   is worth asking for. Both are part of the server's
    configuration for restart purposes (like platform and build config), so
    changing either takes effect on the next gesture rather than at the next
    IDE start. `pastree.logDetail` is the VS Code equivalent.

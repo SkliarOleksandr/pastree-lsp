@@ -1169,7 +1169,7 @@ begin
     for var LSlot := 0 to High(LChain[LDepth]) do
       if GTab.RowNode.TryGetValue(LChain[LDepth][LSlot], Result) then
       begin
-        LspLogToServer(Format('unused units: the selected row told by ' +
+        LspLogDetail(Format('unused units: the selected row told by ' +
           'pointer %d at depth %d - %d node(s)', [LSlot, LDepth,
           Length(Result)]));
         Exit;
@@ -1177,7 +1177,7 @@ begin
   if (LTop >= 0) and (LTop < Length(GTab.TopNode)) and
      ((Length(LChain) = 1) or (Length(GTab.TopNode[LTop]) = 1)) then
     Result := GTab.TopNode[LTop];
-  LspLogToServer(Format('unused units: the selected row is not one of ours ' +
+  LspLogDetail(Format('unused units: the selected row is not one of ours ' +
     'by pointer - depth %d, top index %d, %d node(s)', [High(LChain), LTop,
     Length(Result)]));
 end;

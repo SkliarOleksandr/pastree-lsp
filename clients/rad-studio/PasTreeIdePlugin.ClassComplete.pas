@@ -80,10 +80,12 @@ begin
     LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
-{ The routine outcomes: into the server's pastree-lsp.log, never the panel. }
+{ The routine outcomes: into the server's pastree-lsp.log under Advanced
+  Logging, never the panel - the server's own classComplete line is the
+  plain log's. }
 procedure LogTrace(const AMessage: string);
 begin
-  LspLogToServer(AMessage);
+  LspLogDetail(AMessage);
 end;
 
 { Where the caret the key was pressed at, (ARow, ACol) in the buffer the

@@ -202,9 +202,18 @@ begin
     GHosts.TryGetValue(LowerCase(ACaption), Result);
 end;
 
+{ Trace is for what went wrong - a missing control, an exception - and goes
+  into the plain log; TraceDetail for how the toolbar was built and shown,
+  which is Advanced Logging's: the build runs on every Rename result and
+  every Unused Units report, eight lines each time (2026-10-22). }
 procedure Trace(const AWhat: string);
 begin
   LspLogToServer('rename toolbar: ' + AWhat);
+end;
+
+procedure TraceDetail(const AWhat: string);
+begin
+  LspLogDetail('rename toolbar: ' + AWhat);
 end;
 
 { The Build tab, tagged like every other line this package puts there - see
@@ -296,7 +305,7 @@ begin
   // nil before touching them.
   if AComponent = FToolbar then
   begin
-    Trace('the IDE destroyed the toolbar''s form');
+    TraceDetail('the IDE destroyed the toolbar''s form');
     FToolbar := nil;
     FButtons := nil;
     if Assigned(FTimer) then
@@ -335,7 +344,7 @@ begin
       FToolbar.BringToFront;
     // Every flip, with what the toolbar then measures: this is the line
     // that says whether "not visible" means hidden or means zero-sized.
-    Trace(Format('visible=%s (tab %d "%s") bounds=%d,%d %dx%d parent=%s',
+    TraceDetail(Format('visible=%s (tab %d "%s") bounds=%d,%d %dx%d parent=%s',
       [BoolToStr(LVisible, True), FTabs.TabIndex,
        IfThen(FTabs.TabIndex >= 0, FTabs.Tabs[FTabs.TabIndex], ''),
        FToolbar.Left, FToolbar.Top, FToolbar.Width, FToolbar.Height,
@@ -427,7 +436,7 @@ begin
   Result.AutoSize := True;
   Result.OnClick := AOnClick;
   Result.Parent := AToolbar;
-  Trace(Format('button %s: image %d from %s',
+  TraceDetail(Format('button %s: image %d from %s',
     [ACaption, Result.ImageIndex, AIdeAction]));
 end;
 
@@ -464,7 +473,7 @@ begin
       'Messages window - its control tree is in the pastree-lsp.log');
     Exit;
   end;
-  Trace(Format('tab set: %s "%s", %d tab(s), selected %d, tabs: %s',
+  TraceDetail(Format('tab set: %s "%s", %d tab(s), selected %d, tabs: %s',
     [LTabs.ClassName, LTabs.Name, LTabs.Tabs.Count, LTabs.TabIndex,
      LTabs.Tabs.CommaText]));
 
@@ -484,7 +493,7 @@ begin
   // raised EInvalidOperation "has no parent window" in a live run
   // (2026-09-11, twice - once for the buttons, once for Images).
   LHost.FToolbar.Parent := LForm;
-  Trace('toolbar parented');
+  TraceDetail('toolbar parented');
   LHost.FToolbar.ShowCaptions := True;
   // Caption beside the glyph rather than under it: one row, like the IDE's
   // own toolbars with captions on.
@@ -510,7 +519,7 @@ begin
     LHost.FButtons[LIdx] := LButton;
     LHost.FHandlers[LIdx] := AButtons[LIdx].OnClick;
   end;
-  Trace('toolbar buttons added');
+  TraceDetail('toolbar buttons added');
   if Supports(BorlandIDEServices, IOTAIDEThemingServices, LTheming) and
      LTheming.IDEThemingEnabled then
     try
@@ -519,7 +528,7 @@ begin
       // Colours. An unthemed toolbar is a blemish; a result that fails to
       // report because of one would be a bug.
     end;
-  Trace('toolbar themed');
+  TraceDetail('toolbar themed');
   LHost.SyncVisible;
   LHost.FTimer := TTimer.Create(LHost);
   LHost.FTimer.Interval := cPollMs;
@@ -678,7 +687,7 @@ begin
     LNode := PPointer(LValue.GetReferenceToRawData)^;
     if LNode = nil then
     begin
-      Trace(Format('focused row: nothing focused in %s', [LTree.Name]));
+      TraceDetail(Format('focused row: nothing focused in %s', [LTree.Name]));
       Exit;
     end;
     AChain := [RowCandidates(LTree, LGetData, LNode)];
@@ -694,9 +703,9 @@ begin
       ATopIndex := Integer(PCardinal(LNode)^);
     end
     else
-      Trace('focused row: no NodeParent in the RTTI - the focused row only');
+      TraceDetail('focused row: no NodeParent in the RTTI - the focused row only');
     if AdvancedLoggingEnabled then
-      Trace(Format('focused row: %s, depth %d, top index %d, GetNodeData ' +
+      TraceDetail(Format('focused row: %s, depth %d, top index %d, GetNodeData ' +
         '%s', [LTree.Name, Length(AChain) - 1, ATopIndex,
         IfThen(Assigned(LGetData), 'found', 'not in the RTTI')]));
     Result := True;

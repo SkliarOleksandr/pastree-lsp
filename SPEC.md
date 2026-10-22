@@ -1048,9 +1048,27 @@ open documents' (those are what `publishDiagnostics` sends, which is the right
 scope for squiggles and the wrong one for debugging: an `F1027` on a unit
 nobody has open is exactly what breaks navigation in the file they do have
 open). The configuration block lists the search paths themselves, not just how
-many - it is on by default, and `logDetail: false` (`pastree.logDetail` in
-VS Code, the "Advanced logging" box in the RAD Studio dialog) drops it to the
-one-line `configured: platform=... paths=N defines=N` summary.
+many.
+
+Both are the **detail log**, on by default; `logDetail: false`
+(`pastree.logDetail` in VS Code, the "Advanced logging" box in the RAD Studio
+dialog, which sends false unless it is ticked) leaves the plain log (0.74.0):
+
+- a four-line header - the version, the hardware, `host:` with the client pid,
+  the process start and the analysis threads, and `configured:` with the
+  counts, the switches and the light mode;
+- the analysis status - `analysis started: full rebuild`, and one `analysis
+  done: full rebuild|incremental <file>, N units in N ms, N diagnostics` per
+  run;
+- one line per command, in one shape - `<command>: <where> '<name>' ->
+  <result>, <N> ms` (`LogCommand`), a miss saying why;
+- `didOpen`, `didChange`, `didClose`;
+- every refusal, failure and exception.
+
+The detail log adds the parse record, the configuration block, an analysis's
+stages and memory, and the echo of every background request: semantic tokens,
+document highlight, document symbols, completion, signature help, workspace
+symbols, `pastree/findAllAt`, `pastree/declarationAt`, on-type formatting.
 
 The full **unit inventory** - one `unit x <- path` line per unit, which answers
 "which of several copies on the search path won for this name?" - is off by

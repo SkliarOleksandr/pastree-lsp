@@ -2,7 +2,7 @@
   "name": "pastree-vscode",
   "displayName": "PasTree LSP (dev client)",
   "description": "Development client for the PasTree LSP server",
-  "version": "0.73.8",
+  "version": "0.74.0",
   "publisher": "pastree",
   "private": true,
   "engines": { "vscode": "^1.75.0" },
@@ -81,7 +81,7 @@
         "pastree.logDetail": {
           "type": "boolean",
           "default": true,
-          "description": "Log the configuration inventory - every search path, define, namespace and unit alias handed to the analysis. Off keeps the one-line summary with the counts."
+          "description": "The detail log: the configuration inventory (every search path, define, namespace and unit alias), the closure's diagnostics, each analysis's stages and memory, and a line per background request (semantic tokens, highlight, completion, signature help). Off keeps a short header, the analysis status, one line per command, the document notifications and every failure."
         },
         "pastree.moduleRedoLimit": {
           "type": "integer",

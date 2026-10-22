@@ -251,7 +251,9 @@ var
 
 procedure TraceList(const AText: string);
 begin
-  if GListTraces >= 40 then
+  // Advanced Logging only: a probe from the 2026-10-19 investigation, not a
+  // line the plain log keeps (2026-10-22).
+  if (GListTraces >= 40) or not AdvancedLoggingEnabled then
     Exit;
   Inc(GListTraces);
   LspLogToServer('code insight list: ' + AText);
@@ -422,7 +424,7 @@ begin
   FOldProc := ATarget.WindowProc;
   ATarget.WindowProc := WndProc;
   ATarget.FreeNotification(Self);
-  LspLogToServer('code insight: row count strip hooked to ' +
+  LspLogDetail('code insight: row count strip hooked to ' +
     ATarget.ClassName + ' "' + ATarget.Name + '"');
 end;
 
@@ -2088,7 +2090,9 @@ var
   // 2026-08-29 - and the same call retired two other lines that day).
   procedure Readout(const AText: string);
   begin
-    if not LspLogToServer('IOTAHelpInsight probe: ' + AText) then
+    // Advanced Logging only (2026-10-22); with it off the probe is done.
+    if AdvancedLoggingEnabled and
+       not LspLogToServer('IOTAHelpInsight probe: ' + AText) then
       // No server yet, so this went nowhere: unmark, and the next hover asks
       // again. A readout that reports into the void is not a readout.
       GHelpInsightProbed := False;
@@ -2314,7 +2318,8 @@ var
 procedure LogSelectionProbe(AIndex: Integer; ABrush: TColor;
   ASelected: Boolean);
 begin
-  if GSelectionProbes >= 12 then
+  // Advanced Logging only, like TraceList.
+  if (GSelectionProbes >= 12) or not AdvancedLoggingEnabled then
     Exit;
   Inc(GSelectionProbes);
   LspLogToServer(Format('code insight: row %d brush $%.6x (style highlight '
@@ -2586,7 +2591,7 @@ begin
   if not FContextAsked then
   begin
     FContextAsked := True;
-    LspLogToServer('code insight: an alternate manager asked the invocation'
+    LspLogDetail('code insight: an alternate manager asked the invocation'
       + ' context (IOTAPrimaryCodeInsightManager), answered ccAny');
   end;
 end;

@@ -656,6 +656,14 @@ procedure TLspClient.Log(const AText: string);
 begin
   if Assigned(FOnLog) then
     FOnLog(AText);
+  // INTO THE LOG FILE AS WELL, directly (2026-10-22): every line here is the
+  // server's life seen from the IDE - started, ready with its version, a
+  // version mismatch, a restart, a failed start, a lost connection, a frame
+  // it could not read. Until then they reached only the Build tab, which is
+  // gone with the IDE session, and a log sent in said nothing of them. Not
+  // through the server: the lines that matter most are written when there is
+  // none to write through. Rare by nature, so not gated on Advanced Logging.
+  AppendIdeLogLine(FOptions.LogFile, AText);
 end;
 
 function TLspClient.StdErrPath: string;
@@ -1510,17 +1518,11 @@ begin
 
   FState := lcsFailed;
   ClearActivity;
-  Log(Format('server connection lost: %s (stderr: %s)',
-    [AReason, StdErrWhere]));
-  // INTO THE SERVER'S LOG FILE AS WELL, directly - the server that would have
-  // written it is the thing that just died, and the Build tab line above is
-  // gone with the IDE session. Without this line a log shows a fresh server
-  // start with nothing between it and the previous one's last quiet line,
-  // and the death is invisible (AVImark report, 2026-09-22). Unconditional on
-  // the advanced switch: one line per death is not volume.
-  AppendIdeLogLine(FOptions.LogFile,
-    'server connection lost: ' + AReason
-    + ' - the next request starts a new server');
+  // Into the log file too (Log does that): without this line a log shows a
+  // fresh server start with nothing between it and the previous one's last
+  // quiet line, and the death is invisible (AVImark report, 2026-09-22).
+  Log(Format('server connection lost: %s (stderr: %s) - the next request'
+    + ' starts a new server', [AReason, StdErrWhere]));
   FOutbox.Clear;
   FailAllPending('server connection lost: ' + AReason);
   // FConn is deliberately NOT freed here - see EnsureStarted for why.
