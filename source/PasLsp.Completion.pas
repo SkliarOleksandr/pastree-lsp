@@ -1750,7 +1750,10 @@ begin
   // The fresh overlay: mid-keystroke text, parsed error-tolerantly. Parse
   // diagnostics are EXPECTED here (the buffer is invalid by definition) and
   // deliberately discarded - the pushed diagnostics stay the analysis's.
-  LPre := FPreprocessor.ProcessText(AFileName, AText);
+  // Through CaretSource: a caret between a dot and the `)` the editor typed
+  // with the `(` must not lex as the legacy `.)` bracket (2026-10-22).
+  LPre := FPreprocessor.ProcessText(AFileName,
+    TPasCompletion.CaretSource(AText, APasLine, APasCol));
   LTree := TPasParser.ParseFile(LPre, LDiags);
   LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   try

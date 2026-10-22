@@ -354,7 +354,11 @@ const
   /// name (`System.SysUtils` for `uses SysUtils`) and continues a unit
   /// qualifier into the used units under it (`System.` offers SysUtils). An
   /// older library compiles and silently lists the short names only.
-  cMinPasTreeVersion = '0.122.1';
+  /// 0.126.0 (2026-10-22): completion lists types alone after a
+  /// declaration's colon and the types a heritage list can name in it - an
+  /// older library compiles and silently lists constants and records there.
+  /// (TPasCompletion.CaretSource, from the same release, is a compile error.)
+  cMinPasTreeVersion = '0.126.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

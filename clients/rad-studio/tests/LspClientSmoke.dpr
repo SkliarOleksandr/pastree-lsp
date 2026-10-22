@@ -1916,6 +1916,48 @@ begin
   finally
     SendDidChange(LUnitFile, TFile.ReadAllText(LUnitFile));
   end;
+
+  // A dot right before the `)` the editor typed with the `(` lists the
+  // members (Alex, 2026-10-22: `Assigned(Decl.|)` listed every global - `.)`
+  // is the legacy `]` to the lexer, and the dot was gone); a declaration's
+  // colon lists types and no constants; a heritage list no record.
+  LPatched := TFile.ReadAllText(LUnitFile)
+    .Replace('begin', 'var LBox: TBox; LSlot: ; begin')
+    .Replace('''Hello, '' + AName;', '''Hello, '' + AName; Greet(LBox.);')
+    .Replace('TBox = record', 'TKid = class(); TBox = record');
+  Check(LPatched.Contains('Greet(LBox.);') and LPatched.Contains('LSlot: ;')
+    and LPatched.Contains('class();'), 'context fixture patch applied');
+  SendDidChange(LUnitFile, LPatched);
+  try
+    FindPosInText(LPatched, 'Greet(LBox.);', '.);', LLine, LChar);
+    Check(Ask('textDocument/completion',
+      PositionParams(LUnitFile, LLine, LChar + 1)),
+      'completion answered after LBox. inside a call''s parentheses');
+    Check(GOk and GResultJson.Contains('"label":"Value"') and
+      not GResultJson.Contains('"label":"Greet"') and
+      not GResultJson.Contains('"label":"CAnswer"'),
+      'LBox.) lists the record''s members and nothing of the scope');
+
+    FindPosInText(LPatched, 'LSlot: ;', ' ;', LLine, LChar);
+    Check(Ask('textDocument/completion',
+      PositionParams(LUnitFile, LLine, LChar + 1)),
+      'completion answered after a variable''s colon');
+    Check(GOk and GResultJson.Contains('"label":"TBox"') and
+      not GResultJson.Contains('"label":"CAnswer"') and
+      not GResultJson.Contains('"label":"Greet"'),
+      'a variable''s type lists types, no constant and no routine');
+
+    FindPosInText(LPatched, 'class();', ');', LLine, LChar);
+    Check(Ask('textDocument/completion',
+      PositionParams(LUnitFile, LLine, LChar)),
+      'completion answered in a heritage list');
+    Check(GOk and not GResultJson.Contains('"label":"TBox"') and
+      not GResultJson.Contains('"label":"CAnswer"') and
+      not GResultJson.Contains('"label":"array"'),
+      'class( lists no record, no constant and no type constructor');
+  finally
+    SendDidChange(LUnitFile, TFile.ReadAllText(LUnitFile));
+  end;
 end;
 
 { 5b-bis. What a generic class's member rows say after their name
