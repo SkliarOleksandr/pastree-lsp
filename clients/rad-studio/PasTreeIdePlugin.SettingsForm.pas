@@ -104,6 +104,7 @@ type
     lblInsightManager: TLabel;
     cbxInsightManager: TComboBox;
     lblInsightManagerHint: TLabel;
+    chkCompletionBoldNames: TCheckBox;
     chkClassComplete: TCheckBox;
     lblClassCompleteHint: TLabel;
     lblClassCompleteOrder: TLabel;
@@ -267,6 +268,8 @@ begin
     cbxErrorSquiggles.ItemIndex := Ord(FErrorSquigglesOwn);
     lblErrorSquigglesHint.Caption := FErrorSquigglesHint;
   end;
+  // Our list's option, so greyed with RAD Studio's list - value kept.
+  chkCompletionBoldNames.Enabled := LForced;
 end;
 
 { Find References lives in the Find All submenu and nowhere else, so its
@@ -563,6 +566,7 @@ begin
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.FErrorSquigglesOwn := LSettings.PasTreeErrorSquiggles;
     LForm.cbxInsightManager.ItemIndex := Ord(LSettings.PasTreeInsightManager);
+    LForm.chkCompletionBoldNames.Checked := LSettings.CompletionBoldNames;
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
     LForm.chkNoDefaultStyleElements.Checked := LSettings.DfmNoDefaultStyleElems;
     LForm.FillThreads(LSettings.AnalysisThreads);
@@ -604,6 +608,7 @@ begin
     else
       LSettings.PasTreeErrorSquiggles := LForm.FErrorSquigglesOwn;
     LSettings.PasTreeInsightManager := LForm.cbxInsightManager.ItemIndex = 1;
+    LSettings.CompletionBoldNames := LForm.chkCompletionBoldNames.Checked;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;
     LSettings.AnalysisThreads := LForm.SelectedThreads;

@@ -196,6 +196,13 @@ function BlockCompletionEnabled: Boolean;
 function TooltipSymbolInsightEnabled: Boolean;
 
 /// <summary>
+/// Whether our Code Completion list draws a declaration's name in bold - the
+/// one bold run of a row, the detail being colours only. Default True;
+/// unticked, nothing in a row is bold (Alex, 2026-10-22).
+/// </summary>
+function CompletionBoldNames: Boolean;
+
+/// <summary>
 /// Whether the server writes pastree-lsp.log beside the project at all.
 /// False sends no logFile to the server, which is what "no log" means on its
 /// side - nothing is written rather than written and discarded, so a
@@ -410,6 +417,8 @@ type
     FindRefsImplHeaders: Boolean;
     EnableBlockCompletion: Boolean;
     EnableTooltipSymbolInsight: Boolean;
+    // See CompletionBoldNames. Default True.
+    CompletionBoldNames: Boolean;
     EnableClassComplete: Boolean;
     // Where Ctrl+Shift+C puts a new body among its type's existing ones:
     // False = alphabetically (the native command's order, the default),
@@ -520,6 +529,7 @@ const
   cValueFindRefsImplHeaders = 'FindReferencesImplHeaders';
   cValueBlockCompletion = 'EnableBlockCompletion';
   cValueTooltipSymbolInsight = 'EnableTooltipSymbolInsight';
+  cValueCompletionBoldNames = 'CompletionBoldNames';
   cValueClassComplete = 'EnableClassComplete';
   cValueClassCompleteOrder = 'ClassCompleteDeclarationOrder';
   cValueGoTo = 'EnableGoTo';
@@ -714,6 +724,7 @@ begin
   Result.FindRefsImplHeaders := False;
   Result.EnableBlockCompletion := True;
   Result.EnableTooltipSymbolInsight := True;
+  Result.CompletionBoldNames := True;
   Result.EnableClassComplete := True;
   Result.ClassCompleteDeclOrder := False;
   Result.EnableGoTo := True;
@@ -767,6 +778,8 @@ begin
         ReadFlag(LReg, cValueBlockCompletion, Result.EnableBlockCompletion);
       Result.EnableTooltipSymbolInsight :=
         ReadFlag(LReg, cValueTooltipSymbolInsight, Result.EnableTooltipSymbolInsight);
+      Result.CompletionBoldNames :=
+        ReadFlag(LReg, cValueCompletionBoldNames, Result.CompletionBoldNames);
       Result.EnableClassComplete :=
         ReadFlag(LReg, cValueClassComplete, Result.EnableClassComplete);
       Result.ClassCompleteDeclOrder := ReadFlag(LReg,
@@ -839,6 +852,8 @@ begin
         LReg.WriteInteger(cValueBlockCompletion,
           Ord(ASettings.EnableBlockCompletion));
         LReg.WriteInteger(cValueTooltipSymbolInsight, Ord(ASettings.EnableTooltipSymbolInsight));
+        LReg.WriteInteger(cValueCompletionBoldNames,
+          Ord(ASettings.CompletionBoldNames));
         LReg.WriteInteger(cValueClassComplete,
           Ord(ASettings.EnableClassComplete));
         LReg.WriteInteger(cValueClassCompleteOrder,
@@ -948,6 +963,11 @@ end;
 function TooltipSymbolInsightEnabled: Boolean;
 begin
   Result := CurrentSettings.EnableTooltipSymbolInsight;
+end;
+
+function CompletionBoldNames: Boolean;
+begin
+  Result := CurrentSettings.CompletionBoldNames;
 end;
 
 function ClassCompleteEnabled: Boolean;

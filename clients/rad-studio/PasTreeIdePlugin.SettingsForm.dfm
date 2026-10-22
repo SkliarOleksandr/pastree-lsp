@@ -401,6 +401,16 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'RAD Studio (DelphiLSP)'
           'PasTree (experimental)')
       end
+      object chkCompletionBoldNames: TCheckBox
+        Left = 35
+        Top = 272
+        Width = 405
+        Height = 17
+        Caption = 'Bold names in the Code Completion list'
+        Checked = True
+        State = cbChecked
+        TabOrder = 3
+      end
     end
     object tsDiagnostics: TTabSheet
       Caption = 'Diagnostics'

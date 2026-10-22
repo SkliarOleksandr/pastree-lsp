@@ -2484,7 +2484,7 @@ var
   LRun: string;
   LBase, LDim, LTypeColor, LForce, LBar, LOldBrush: TColor;
   LOldBrushStyle: TBrushStyle;
-  LTypeStyle: TFontStyles;
+  LTypeStyle, LNameStyle: TFontStyles;
   LSpans: TArray<Integer>;
   LSelected, LCut: Boolean;
 
@@ -2528,6 +2528,11 @@ begin
     Canvas.Font.Name := GRowFontName;
     Canvas.Font.Height := GRowFontHeight;
   end;
+  // The settings' Bold names (default on): unticked, nothing in a row is bold.
+  if CompletionBoldNames then
+    LNameStyle := [TFontStyle.fsBold]
+  else
+    LNameStyle := [];
   LClass := FShownSymbols.SymbolClassText[Index];
   LName := FShownSymbols.SymbolText[Index];
   LDetail := FShownSymbols.SymbolTypeText[Index];
@@ -2542,9 +2547,9 @@ begin
 
   if not DoDraw then
   begin
-    // Measured as painted: the name bold, the detail's runs at regular
-    // weight (colours only, see below).
-    Canvas.Font.Style := [TFontStyle.fsBold];
+    // Measured as painted: the name bold (unless Bold names is unticked),
+    // the detail's runs at regular weight (colours only, see below).
+    Canvas.Font.Style := LNameStyle;
     LX := Canvas.TextWidth(LName);
     SplitOverloadTail(LDetail, LTail);
     PaintSyntaxTextTyped(Canvas, LX, 0, LDetail, Canvas.Font.Color,
@@ -2627,7 +2632,7 @@ begin
   Canvas.Font.Color := LBase;
   if LForce <> clNone then
     Canvas.Font.Color := LForce;
-  Canvas.Font.Style := [TFontStyle.fsBold];
+  Canvas.Font.Style := LNameStyle;
   LMatch := 0;
   if Assigned(FShownObj) and (FShownObj.Filter <> '') and
      FShownObj.Options.Underline then
@@ -2638,10 +2643,10 @@ begin
     Canvas.TextOut(LX, LTop, LRun);
     Inc(LX, Canvas.TextWidth(LRun));
     LRun := Copy(LName, LMatch, Length(FShownObj.Filter));
-    Canvas.Font.Style := [TFontStyle.fsBold, TFontStyle.fsUnderline];
+    Canvas.Font.Style := LNameStyle + [TFontStyle.fsUnderline];
     Canvas.TextOut(LX, LTop, LRun);
     Inc(LX, Canvas.TextWidth(LRun));
-    Canvas.Font.Style := [TFontStyle.fsBold];
+    Canvas.Font.Style := LNameStyle;
     LRun := Copy(LName, LMatch + Length(FShownObj.Filter), MaxInt);
     Canvas.TextOut(LX, LTop, LRun);
     Inc(LX, Canvas.TextWidth(LRun));
