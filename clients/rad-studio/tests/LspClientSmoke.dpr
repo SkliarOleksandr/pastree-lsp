@@ -2290,6 +2290,15 @@ begin
     'with the kind word');
   Check(GOk and GResultJson.Contains('DemoUnit.pas","line":'),
     'and the declaration''s file and line for the link');
+  // A routine's parameters as rows of their own - name, type without the
+  // `const`, the `<param>` text - for the hint's Parameters block (Alex,
+  // 2026-10-23); the card's doc then leaves its own parameter section out.
+  Check(GOk and GResultJson.Contains(
+    '"params":[{"name":"AName","type":"string","doc":"the name to greet"}]'),
+    'the card lists the parameter, its type and its <param> text');
+  Check(GOk and GResultJson.Contains(
+    '"doc":"Greets a person by name.\n\nReturns: the greeting line"'),
+    'and the card''s doc has no Parameters section of its own');
   // The signature is composed, not the declaration line (Alex, 2026-10-07:
   // a variable showed `LName, LDetail, LKindWord: string;`): a member is
   // qualified by its type, as the native hint does it.
@@ -2298,6 +2307,8 @@ begin
     'hover on a record field answered');
   Check(GOk and GResultJson.Contains('"code":"var TBox.Value: string"'),
     'and reads var TBox.Value: string');
+  Check(GOk and GResultJson.Contains('"params":[]'),
+    'and a field has no parameters');
   Check(GOk and GResultJson.Contains('"typeSpans":[5,4'),
     'with the owner type among the type spans');
   FindPos(LUnitFile, 'TBox = record', 'TBox', LLine, LChar);

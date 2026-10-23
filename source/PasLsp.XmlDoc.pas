@@ -74,8 +74,11 @@ type
 function ParseXmlDoc(const ARaw: string): TXmlDocParts;
 
 { The `///` block as display text, or '' for an empty block. See the unit
-  header for the shape and for why it carries no markdown emphasis. }
-function XmlDocDisplayText(const ARaw: string): string;
+  header for the shape and for why it carries no markdown emphasis.
+  AWithParams=False leaves the Parameters section out - for a host that lists
+  the parameters itself, each with its `<param>` text (the RAD hover hint). }
+function XmlDocDisplayText(const ARaw: string;
+  AWithParams: Boolean = True): string;
 
 { The block as an HTML fragment - the sections only, no page around them.
   '' for an empty block. }
@@ -474,7 +477,7 @@ begin
     Result := AEntry.Name;
 end;
 
-function XmlDocDisplayText(const ARaw: string): string;
+function XmlDocDisplayText(const ARaw: string; AWithParams: Boolean): string;
 var
   LParts: TXmlDocParts;
   LOut: TStringBuilder;
@@ -499,7 +502,7 @@ begin
   try
     AddBlock(CollapseWs(LParts.Summary));
     AddBlock(CollapseWs(LParts.Remarks));
-    if Length(LParts.Params) > 0 then
+    if AWithParams and (Length(LParts.Params) > 0) then
     begin
       if LOut.Length > 0 then
         LOut.Append(#10#10);

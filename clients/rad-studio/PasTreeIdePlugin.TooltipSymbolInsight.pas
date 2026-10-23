@@ -118,6 +118,10 @@ const
   cDocGap = 6;
   cDocMinWidth = 360;
   cDocMaxWidth = 640;
+  // The Parameters block: a row's indent under its title, a description's
+  // under its row.
+  cParamIndent = 16;
+  cParamsTitle = 'Parameters';
   cEnvDeclInfo = 'DeclarationInformation';
   cValueSavedDeclInfo = 'SavedDeclarationInformation';
   // How soon an option that did not read as a Boolean is asked again.
@@ -145,6 +149,11 @@ type
     FNoteRect: TRect;
     // The grey lines under line one: a type's SizeOf, then the note.
     FNoteText: string;
+    // The Parameters block: its title's top (-1 without one), each row's top
+    // and each row's description rect (empty without one).
+    FParamsTop: Integer;
+    FParamTops: TArray<Integer>;
+    FParamDocRects: TArray<TRect>;
     FLineHeight: Integer;
     FCodeWidth: Integer;
     function S(AValue: Integer): Integer;
@@ -152,6 +161,8 @@ type
     procedure UseUiFont;
     procedure ReadColors;
     procedure PaintCode(var AX: Integer; AY: Integer; ADoDraw: Boolean);
+    procedure PaintParam(const AParam: TLspHoverParam; var AX: Integer;
+      AY: Integer; ADoDraw: Boolean);
     function Measure: TSize;
     procedure WMMouseActivate(var Message: TWMMouseActivate); message WM_MOUSEACTIVATE;
     procedure WMNCHitTest(var Message: TWMNCHitTest); message WM_NCHITTEST;
@@ -546,6 +557,35 @@ begin
     FTypeStyle, ADoDraw);
 end;
 
+{ One row of the Parameters block, in the UI font: the name in italics as the
+  native hint has it, then `: ` and the type in the editor's type colour and
+  style - an untyped parameter is its name alone. ADoDraw=False measures. }
+procedure TSymbolInsightWindow.PaintParam(const AParam: TLspHoverParam;
+  var AX: Integer; AY: Integer; ADoDraw: Boolean);
+begin
+  UseUiFont;
+  Canvas.Font.Style := [fsItalic];
+  if ADoDraw then
+    Canvas.TextOut(AX, AY, AParam.Name);
+  Inc(AX, Canvas.TextWidth(AParam.Name));
+  Canvas.Font.Style := [];
+  if AParam.TypeText = '' then
+    Exit;
+  if ADoDraw then
+    Canvas.TextOut(AX, AY, ': ');
+  Inc(AX, Canvas.TextWidth(': '));
+  if FTypeColor <> clNone then
+  begin
+    Canvas.Font.Color := FTypeColor;
+    Canvas.Font.Style := FTypeStyle;
+  end;
+  if ADoDraw then
+    Canvas.TextOut(AX, AY, AParam.TypeText);
+  Inc(AX, Canvas.TextWidth(AParam.TypeText));
+  Canvas.Font.Color := FText;
+  Canvas.Font.Style := [];
+end;
+
 { The card's size, and the rects the paint and the mouse use. First the
   problems under the pointer, one per line: "Error: " in the severity's
   colour, the message wrapped beside it. Then line one - the declaration in
@@ -692,6 +732,44 @@ begin
     LY := FDocRect.Bottom;
   end;
 
+  // A routine's parameters, after its documentation as the native hint has
+  // them: "Parameters", then a row a parameter - `name: type` - with its
+  // `<param>` text wrapped under it (Alex, 2026-10-23).
+  FParamsTop := -1;
+  FParamTops := nil;
+  FParamDocRects := nil;
+  if (FProgress = '') and (FInfo.Code <> '') and (Length(FInfo.Params) > 0) then
+  begin
+    UseUiFont;
+    FParamsTop := LY + S(cDocGap);
+    Canvas.Font.Style := [fsBold];
+    LWidth := Max(LWidth, Canvas.TextWidth(cParamsTitle));
+    Canvas.Font.Style := [];
+    LY := FParamsTop + LUiH;
+    SetLength(FParamTops, Length(FInfo.Params));
+    SetLength(FParamDocRects, Length(FInfo.Params));
+    for LIdx := 0 to High(FInfo.Params) do
+    begin
+      FParamTops[LIdx] := LY;
+      LX := S(cParamIndent);
+      PaintParam(FInfo.Params[LIdx], LX, 0, False);
+      LWidth := Max(LWidth, LX);
+      LY := LY + LUiH;
+      FParamDocRects[LIdx] := TRect.Empty;
+      if FInfo.Params[LIdx].Doc <> '' then
+      begin
+        UseUiFont;
+        LRect := Rect(0, 0, Max(LTextW - 2 * S(cParamIndent), S(120)), 0);
+        DrawText(Canvas.Handle, PChar(FInfo.Params[LIdx].Doc), -1, LRect,
+          DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
+        FParamDocRects[LIdx] := Rect(S(cPad) + 2 * S(cParamIndent), LY,
+          S(cPad) + 2 * S(cParamIndent) + LRect.Width, LY + LRect.Height);
+        LWidth := Max(LWidth, 2 * S(cParamIndent) + LRect.Width);
+        LY := FParamDocRects[LIdx].Bottom;
+      end;
+    end;
+  end;
+
   Result.cx := LWidth + 2 * S(cPad);
   Result.cy := LY + S(cPad);
 end;
@@ -828,6 +906,26 @@ begin
     LR := FDocRect;
     DrawText(Canvas.Handle, PChar(FInfo.Doc), -1, LR,
       DT_WORDBREAK or DT_NOPREFIX);
+  end;
+
+  if FParamsTop >= 0 then
+  begin
+    UseUiFont;
+    Canvas.Font.Style := [fsBold];
+    Canvas.TextOut(S(cPad), FParamsTop, cParamsTitle);
+    Canvas.Font.Style := [];
+    for LIdx := 0 to Min(High(FInfo.Params), High(FParamTops)) do
+    begin
+      LX := S(cPad) + S(cParamIndent);
+      PaintParam(FInfo.Params[LIdx], LX, FParamTops[LIdx], True);
+      if not FParamDocRects[LIdx].IsEmpty then
+      begin
+        UseUiFont;
+        LR := FParamDocRects[LIdx];
+        DrawText(Canvas.Handle, PChar(FInfo.Params[LIdx].Doc), -1, LR,
+          DT_WORDBREAK or DT_NOPREFIX);
+      end;
+    end;
   end;
 end;
 

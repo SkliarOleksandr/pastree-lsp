@@ -130,6 +130,21 @@ function BuiltinSignatureText(AProject: TPasSemaProject; AMid, ASym: Integer;
   out AKind: string): string;
 
 type
+  { One parameter of a routine, as the hover hint's Parameters block lists
+    it: the name, and its type as written ('' for an untyped `const X`). }
+  TLspRoutineParam = record
+    Name: string;
+    TypeText: string;
+  end;
+
+{ The parameters of a routine - declared or a compiler intrinsic - one per
+  name (`A, B: Integer` is two), without their `const`/`var`/`out` and their
+  default values: what the hint's Parameters block shows (Alex, 2026-10-23).
+  Empty for a parameterless routine and for anything that is not one. }
+function RoutineParams(AProject: TPasSemaProject; AMid,
+  ASym: Integer): TArray<TLspRoutineParam>;
+
+type
   { One per server session - the preprocessor stack (source manager, defines)
     is configuration-derived, and the server's configuration is fixed at
     initialize. CompleteAt itself is stateless across calls. }
@@ -1681,6 +1696,74 @@ begin
   ATypeSpans := LOwnerSpans + SignatureTypeSpans(Result, 0, LNameStart,
     Length(LItem.Name), LItem.Kind = skType, LKnownTypes,
     LItem.Kind = skConst);
+end;
+
+function RoutineParams(AProject: TPasSemaProject; AMid,
+  ASym: Integer): TArray<TLspRoutineParam>;
+var
+  LModel: TPasSemaModel;
+  LCompletion: TPasCompletion;
+  LItem: TPasComplItem;
+  LParamsText, LLabel, LWord: string;
+  LParam: TLspRoutineParam;
+  LIdx, LDepth, LColon, LEqual: Integer;
+begin
+  Result := nil;
+  if (AProject = nil) or (AMid < 0) or (AMid >= AProject.ModelCount) or
+     (ASym = NIL_SYM) then
+    Exit;
+  LModel := AProject.Model(AMid);
+  if (LModel = nil) or (LModel.Demoted and not AProject.EnsureHydrated(AMid)) or
+     (LModel.Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  LItem := Default(TPasComplItem);
+  LItem.Name := LModel.Symbols[ASym].Name;
+  LItem.Kind := skRoutine;
+  LItem.Bucket := cbUnitSym;
+  LItem.Mid := AMid;
+  LItem.Sym := ASym;
+  LItem.Ctx := NIL_INST;
+  LCompletion := TPasCompletion.Create(LModel, AProject, AMid);
+  try
+    LParamsText := LCompletion.ItemParamsText(LItem);
+  finally
+    LCompletion.Free;
+  end;
+  // One label a name - `const A: T = 5` - cut at its `:` and at a default's
+  // `=`, both outside brackets (a generic argument, a set default).
+  for LLabel in SplitParamLabels(LParamsText) do
+  begin
+    LParam := Default(TLspRoutineParam);
+    LColon := 0;
+    LEqual := 0;
+    LDepth := 0;
+    for LIdx := 1 to Length(LLabel) do
+      case LLabel[LIdx] of
+        '(', '[', '<': Inc(LDepth);
+        ')', ']', '>': Dec(LDepth);
+        ':': if (LDepth = 0) and (LColon = 0) then LColon := LIdx;
+        '=': if (LDepth = 0) and (LEqual = 0) then LEqual := LIdx;
+      end;
+    if LEqual = 0 then
+      LEqual := Length(LLabel) + 1;
+    if LColon > 0 then
+    begin
+      LParam.Name := Trim(Copy(LLabel, 1, LColon - 1));
+      LParam.TypeText := Trim(Copy(LLabel, LColon + 1, LEqual - LColon - 1));
+    end
+    else
+      LParam.Name := Trim(Copy(LLabel, 1, LEqual - 1));
+    // SplitParamLabels leads with the modifier, lower-cased.
+    LIdx := Pos(' ', LParam.Name);
+    if LIdx > 0 then
+    begin
+      LWord := Copy(LParam.Name, 1, LIdx - 1);
+      if (LWord = 'const') or (LWord = 'var') or (LWord = 'out') then
+        LParam.Name := Trim(Copy(LParam.Name, LIdx + 1, MaxInt));
+    end;
+    if LParam.Name <> '' then
+      Result := Result + [LParam];
+  end;
 end;
 
 { The type names in a completion row's detail, by the hover's own heuristic:

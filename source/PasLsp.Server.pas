@@ -8122,6 +8122,9 @@ var
   LIfStart, LIfLen, LIfMid, LIfSym, LBuiltinMid, LBuiltinSym: Integer;
   LSizeOf, LInstSize: Int64;
   LSizeMin, LInstMin: Boolean;
+  LParams: TArray<TLspRoutineParam>;
+  LParamDocs: TArray<TXmlDocEntry>;
+  LParamsJson, LParamDoc, LHoverDoc: string;
 begin
   LSizeOf := -1;
   LInstSize := -1;
@@ -8133,6 +8136,7 @@ begin
   LDirFunc := False;
   LHeadLen := 0;
   LSigSpans := nil;
+  LParams := nil;
   LPath := DocPathOf(AMsg.Params);
   if (LPath = '') or
      not AMsg.Params.TryGetValue<Integer>('position.line', LLine) or
@@ -8443,18 +8447,47 @@ begin
   // unit with no source to link to) only repeated it (Alex, 2026-10-09).
   if LKind = 'unit' then
     LHoverNote := '';
+  // `params`: a routine's parameters, one per name - `name`, `type` as
+  // written ('' untyped) and `doc`, its `<param>` text - which the hint lists
+  // under "Parameters" as the native one does (Alex, 2026-10-23). Where there
+  // are any, `doc` leaves its own Parameters section out: the hint shows
+  // each text beside its parameter, not twice.
+  if LIsSymbol then
+    LParams := RoutineParams(FProject, LTMid, LSymIdx)
+  else if LIsBuiltin and not LIsIfName then
+    LParams := RoutineParams(FProject, LBuiltinMid, LBuiltinSym);
+  LHoverDoc := LDoc;
+  LParamsJson := '';
+  if Length(LParams) > 0 then
+  begin
+    LHoverDoc := XmlDocDisplayText(LRawDoc, False);
+    LParamDocs := ParseXmlDoc(LRawDoc).Params;
+    for LIdx := 0 to High(LParams) do
+    begin
+      LParamDoc := '';
+      for var LEntry in LParamDocs do
+        if SameText(LEntry.Name, LParams[LIdx].Name) then
+          LParamDoc := CollapseWs(LEntry.Text);
+      if LParamsJson <> '' then
+        LParamsJson := LParamsJson + ',';
+      LParamsJson := LParamsJson + Format('{"name":%s,"type":%s,"doc":%s}',
+        [JsonQuote(LParams[LIdx].Name), JsonQuote(LParams[LIdx].TypeText),
+         JsonQuote(LParamDoc)]);
+    end;
+  end;
   // `sizeOf` is a type's SizeOf on the analyzed platform, `instanceSize` a
   // class's InstanceSize; -1 for anything else and where the layout walk
   // refuses (HoverSizes). `sizeOfMin` / `instanceSizeMin`: the number is a
   // generic declaration's minimum.
   LHoverJson := Format('{"code":%s,"typeSpans":%s,"headLen":%d,"doc":%s,' +
     '"kind":%s,"note":%s,"builtin":%s,"sizeOf":%d,"sizeOfMin":%s,' +
-    '"instanceSize":%d,"instanceSizeMin":%s,"file":%s,"line":%d,"col":%d}',
-    [JsonQuote(LHoverCode), LTypeSpans, LHeadLen, JsonQuote(LDoc),
+    '"instanceSize":%d,"instanceSizeMin":%s,"file":%s,"line":%d,"col":%d,' +
+    '"params":[%s]}',
+    [JsonQuote(LHoverCode), LTypeSpans, LHeadLen, JsonQuote(LHoverDoc),
      JsonQuote(LKind), JsonQuote(LHoverNote), BoolToStr(LIsBuiltin, True).ToLower,
      LSizeOf, BoolToStr(LSizeMin, True).ToLower,
      LInstSize, BoolToStr(LInstMin, True).ToLower,
-     JsonQuote(LDeclFile), LDeclLine, LDeclCol]);
+     JsonQuote(LDeclFile), LDeclLine, LDeclCol, LParamsJson]);
   { `pastreeHtml` is OURS, alongside the standard contents: the same card as a
     Help Insight page, in the shape the IDE's own HelpInsight.xsl emits (see
     PasLsp.XmlDoc). The RAD client hands it to the IDE where an HTML surface

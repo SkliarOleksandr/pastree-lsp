@@ -687,6 +687,14 @@ type
   /// sets). Row/ColFrom/ColTo is the hovered identifier's own span in the
   /// IDE's coordinates, ColTo exclusive - what the hint stays up over.
   /// </summary>
+  { One parameter of the hovered routine: its name, its type as written ('' if
+    untyped), its `<param>` documentation. }
+  TLspHoverParam = record
+    Name: string;
+    TypeText: string;
+    Doc: string;
+  end;
+
   TLspHoverInfo = record
     Code: string;
     TypeSpans: TArray<Integer>;
@@ -705,6 +713,9 @@ type
     // TypeSize / InstanceSize are a generic declaration's minimum (shown `56+`).
     TypeSizeMin: Boolean;
     InstanceSizeMin: Boolean;
+    // A routine's parameters, listed under "Parameters"; Doc then carries no
+    // parameter section of its own.
+    Params: TArray<TLspHoverParam>;
     FilePath: string;
     Line: Integer;
     Col: Integer;
@@ -4230,6 +4241,9 @@ function ParseHoverInfo(AResult: TJSONValue; out AInfo: TLspHoverInfo): Boolean;
 var
   LCard, LRoot: TJSONObject;
   LLine, LChar: Integer;
+  LParams: TJSONArray;
+  LParamVal: TJSONValue;
+  LParam: TLspHoverParam;
 begin
   AInfo := Default(TLspHoverInfo);
   Result := False;
@@ -4249,6 +4263,16 @@ begin
   AInfo.InstanceSize := LCard.GetValue<Int64>('instanceSize', -1);
   AInfo.TypeSizeMin := LCard.GetValue<Boolean>('sizeOfMin', False);
   AInfo.InstanceSizeMin := LCard.GetValue<Boolean>('instanceSizeMin', False);
+  if LCard.TryGetValue<TJSONArray>('params', LParams) then
+    for LParamVal in LParams do
+      if LParamVal is TJSONObject then
+      begin
+        LParam.Name := TJSONObject(LParamVal).GetValue<string>('name', '');
+        LParam.TypeText := TJSONObject(LParamVal).GetValue<string>('type', '');
+        LParam.Doc := TJSONObject(LParamVal).GetValue<string>('doc', '');
+        if LParam.Name <> '' then
+          AInfo.Params := AInfo.Params + [LParam];
+      end;
   AInfo.FilePath := LCard.GetValue<string>('file', '');
   AInfo.Line := LCard.GetValue<Integer>('line', 0);
   AInfo.Col := LCard.GetValue<Integer>('col', 0);
