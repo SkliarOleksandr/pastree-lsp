@@ -74,7 +74,8 @@ uses
   PasTreeIdePlugin.GotoDeclaration,
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
-  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.SemanticPaint,
+  PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.NativeErrorInsight,
+  PasTreeIdePlugin.SemanticPaint,
   PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.StatusPanel,
   PasTreeIdePlugin.Outline,
@@ -868,6 +869,10 @@ begin
   // option set, like the provider above).
   InitializeErrorPaint;
   ApplyErrorInsightChoice;
+  // The IDE's own Error Insight marks, Structure View Errors folder and
+  // status bar count, fed from the same diagnostics while PasTree is the
+  // Insight Provider - through coreide's private seams, see the unit.
+  InitializeNativeErrorInsight;
   // IDE Fixes: the form designer stops writing Explicit* into form files - a
   // patch of TControl.DefineProperties in the IDE's VCL, see the unit.
   SetDfmExplicitFix(DfmNoExplicitProperties);
@@ -992,6 +997,7 @@ begin
   FinalizeStatusPanel;
   FinalizeSemanticPaint;
   FinalizeErrorPaint;
+  FinalizeNativeErrorInsight;
   FinalizeRename;
   FinalizeFindReferencesMessageGroup;
   FinalizeFindHierarchyMessageGroups;

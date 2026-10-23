@@ -395,36 +395,188 @@ module answers those natively too and plan the custom-draw route for each.
 The original reasoning follows, kept because the catch it names is now a
 measured fact.
 
-## Error Insight comes from the selected provider - measured 2026-10-20
+## Error Insight
+
+Everything measured about the IDE's Error Insight - where its errors come
+from, which options steer it, how PasTree's own underlines stand beside it,
+and how to look inside DelphiLSP when it goes quiet. The 2026-08-22 trait
+spike (`IOTAModuleErrors` on the module) is the closed experiment above.
+
+### Where the errors come from: the selected provider - measured 2026-10-20
 
 A second spike asked the question the first could not: with PasTree as the
 Insight Provider, does the IDE ask the PROVIDER for Error Insight's errors?
-The manager implemented `IOTAModuleErrors` with two hand-built errors and
-logged every interface the IDE queried it for (37.0, AVImark, Error Insight
-level Errors). Verdict NEGATIVE for the public route:
+The manager implemented `IOTAModuleErrors` with two hand-built errors (an
+error over line 1, a warning over line 2) and logged every interface the IDE
+queried it for, once each, buffered until the log could take them (37.0,
+AVImark, Error Insight level Errors). Verdict NEGATIVE for the public route:
 
 - `IOTAModuleErrors` was never queried on the manager and `GetErrors` never
   ran; no underline appeared.
-- What the IDE did query, besides the documented `IOTACodeInsightSelection`,
-  `IOTACodeInsightManager`, `IOTAAsyncCodeInsightManager` and
-  `IOTACodeInsightUIOverride`, were two interfaces in no shipped source:
-  `{CF888043-8F6A-4172-8A16-6C155F378FEA}` and
-  `{A84C137A-F375-478E-AD0C-479B707A22EB}`. Their RTTI in `coreide370.bpl`
-  (unit `CodCmplt`) names them `IInternalSupportErrorInsight` and
-  `IOTAAutoCodeCompletionTrait`; both GUIDs also sit in `IDELSP370.bpl`, so
-  DelphiLSP implements them.
+- What the IDE did query, in order: `IOTACodeInsightSelection` (supported),
+  `IOTACodeInsightManager` (supported), `{CF888043-...}` (refused),
+  `IOTACodeInsightUIOverride` (refused), `IOTAAsyncCodeInsightManager`
+  (supported), `{A84C137A-...}` (refused).
+- The two GUIDs are in no shipped source - not `ToolsAPI.pas`, not any other
+  unit under `source\`. Their type info in `coreide370.bpl` (unit `CodCmplt`;
+  the interface's name is the short string just ahead of the parent pointer
+  and flags that precede the GUID) names them:
 
-So Error Insight is fed by the selected provider through a private interface
-whose methods are undocumented. With any provider but DelphiLSP the IDE's
-Error Insight underlines nothing and its Structure View Errors folder stays
-empty - measured: PasTree selected, level Errors, an error typed, nothing.
-Implementing `IInternalSupportErrorInsight` would mean reverse-engineering a
-vtable that any IDE update may reorder; not taken. Consequence in the
-settings (0.73.7): while PasTree is the Code Insight Manager, PasTree draws
-the underlines whatever the Errors Insight choice says
-(`PasTreeErrorSquigglesEnabled`), and the dialog greys that choice.
+  | GUID | Name | Also present in |
+  |---|---|---|
+  | `{CF888043-8F6A-4172-8A16-6C155F378FEA}` | `IInternalSupportErrorInsight` | `IDELSP370.bpl` |
+  | `{A84C137A-F375-478E-AD0C-479B707A22EB}` | `IOTAAutoCodeCompletionTrait` | `IDELSP370.bpl`, `delphicoreide370.bpl` |
 
-## The editor option sets, and the gate that hands DelphiLSP its units - read 2026-10-21
+  So DelphiLSP's manager implements both. Next to them in the same type info
+  stand `IInternalErrorInsight`, `IEnvUnchangableInsightManager` and
+  `IInternalClassNavigation` - names only; their GUIDs were not matched and
+  nothing showed the IDE asking for them.
+
+What is proven and what is not:
+
+- **Proven:** Error Insight is fed by the selected provider, through
+  `IInternalSupportErrorInsight`, never through `IOTAModuleErrors` on the
+  manager. With any provider but DelphiLSP the IDE's Error Insight underlines
+  nothing and its Structure View Errors folder stays empty - measured:
+  PasTree selected, level Errors, an error typed, nothing.
+- The vtable fear of the first readout was unfounded - see the next section:
+  `IInternalSupportErrorInsight` has no methods at all.
+
+Consequence in the plugin (0.73.7): while PasTree is the Code Insight
+Manager, PasTree draws the underlines whatever the Errors Insight choice says
+(`PasTreeErrorSquigglesEnabled`), and the settings dialog greys that choice
+with the reason, keeping the user's own choice for when the manager is RAD
+Studio again.
+
+### How DelphiLSP feeds Error Insight and the Structure View - read 2026-10-23
+
+Read off the binaries, not measured in a running IDE: interface type info
+(`tkInterface`: parent, flags, GUID, unit, method count - the method names
+are not emitted for these interfaces), the BPLs' export and import tables
+(a Delphi export's name is its mangled signature, parameter types included),
+and `llvm-objdump` from `bin64` over the call sites. The scripts are Node,
+kept in no tracked place; the facts:
+
+| Name (unit) | GUID | Methods | Who implements / owns it |
+|---|---|---|---|
+| `IInternalSupportErrorInsight` (CodCmplt) | `{CF888043-8F6A-4172-8A16-6C155F378FEA}` | **0** - a marker | the provider's manager (DelphiLSP's `TLSPKibitzManager`) |
+| `IInternalErrorInsight` (CodCmplt) | `{87A8FB34-28BF-4682-B3E4-810C9109DE62}` | 1: `(const FileName: string): Boolean` | coreide's own `IOTACodeInsightServices` object |
+| `IOverrideModuleErrors` (CodeMgr) | `{27B1140A-7A75-487D-8A4B-74E6868B6AB6}` | 1 | asked for on the module before the hook below |
+| `IInternalClassNavigation` (CodCmplt) | `{555D1E69-E172-43D7-BC40-1D397418D8DF}` | 2 | not followed |
+| `IInternalParamCompTrueIndex` (CodCmplt) | `{D8EE3AF1-0651-422C-95D6-A69128FAAB5D}` | 1 | not followed |
+
+The chain:
+
+1. **The question.** `IInternalErrorInsight`'s one method fetches the
+   current Code Insight manager (choosing one for the file when there is
+   none) and answers `Supports(Manager, IInternalSupportErrorInsight)`. The
+   editor's parse hooks (coreide, unit `Elisionparser`) ask it through
+   `BorlandIDEServices` as `IOTACodeInsightServices`; on False they call
+   `UpdateErrorMarks(nil, Buffer, False)` and `RefreshViews` - every parse
+   WIPES the buffer's error marks and takes the classic path. That is why no
+   provider but DelphiLSP ever showed a mark: the 2026-10-20 spike saw the
+   IDE ask for the marker and get refused.
+2. **The push.** `Errorinsite.UpdateErrorMarks(const Errors: TOTAErrors;
+   Buffer: TEditBuffer; AStructure: Boolean): Boolean` (exported by
+   coreide) removes the buffer's old marks, adds one `TErrorMark` per error
+   and, with `AStructure` True, builds the Structure View's Errors folder - a
+   node per error of severity 1-3 - then sends `Errorinsite.
+   evUpdateErrorCount`, the status bar's count. DelphiLSP's
+   `TSourceInfo.SetErrors` stores the errors, finds the buffer and calls it
+   with True, then `TEditBuffer.UpdateViews(False)` when it returned True.
+   So the Structure View folder is not fed by any interface: it is a side
+   effect of this one call. **The folder is one for the whole IDE**, not
+   one per buffer: every call with True empties it first. DelphiLSP passes
+   True only for the active module's buffer; 0.75.1 passed it for every
+   file the server published for, and a clean file published after the
+   broken one emptied the folder at once (AVImark, 2026-10-23). Since 0.75.2
+   only the editor's top buffer gets True, and a tab switch re-pushes.
+3. **The pull.** A Delphi module's `IOTAModuleErrors.GetErrors`
+   (`delphierrorinsite<ver>.bpl`, a module handler) asks the module for
+   `IOverrideModuleErrors`, then calls the global hook
+   `Sourcemodule.LSPGetErrors: TLSPGetErrors = function(const AName: string;
+   var AErrors: TOTAErrors): Boolean` (exported by coreide; True = answered),
+   then falls back to the classic compiler. DelphiLSP assigns the hook in
+   `Lspmgr`'s unit initialization - unconditionally, whichever provider is
+   selected - and never resets it; its function answers True only for a
+   file it holds source info for.
+4. **Coordinates**, from DelphiLSP's diagnostic conversion: `Start.Line` =
+   LSP line + 1, `Start.CharIndex` = LSP character (0-based), `Stop` the same
+   line with the end character (exclusive), a diagnostic over several lines
+   cut into one error per line (`$7FFF` as the end of a line it continues
+   past). `TErrorMark` reads Start.Line, Start.CharIndex, Stop.CharIndex and
+   Severity; Stop.Line is not used.
+
+**Identical in 22.0, 23.0 and 37.0**, and in 37.0's 64-bit IDE: the same
+GUIDs, method counts, `TLSPGetErrors` signature, and every export name used
+above (Itanium-mangled in Win64, e.g. `_ZN12Sourcemodule12LSPGetErrorsE`);
+`delphierrorinsite280/290/370` all import `LSPGetErrors`, `IDELSP280/290/370`
+all import it and `UpdateErrorMarks` and all carry the marker GUID.
+
+**Taken in 0.75.0** (`PasTreeIdePlugin.NativeErrorInsight`): the manager
+answers the marker; the diagnostics-changed listener converts the server's
+diagnostics and, while PasTree is the provider, pushes them through
+`UpdateErrorMarks(..., True)` + `UpdateViews(False)`; the hook is chained -
+ours answers for a file it holds while PasTree is the provider, anything
+else goes to the previous value (DelphiLSP's). Every entry point is
+`GetProcAddress` on the coreide beside the linked designide, never a
+`requires` - a renamed or re-typed export is a missing name, logged once,
+and the painted underlines remain. Untested in the IDE as of this writing:
+whether the IDE draws its own marks while its level is None (ours set it so
+while PasTree is the provider), and whether the Structure View shows the
+folder then.
+
+### PasTree's underlines beside the IDE's
+
+`PasTreeIdePlugin.ErrorPaint` draws them (capability inventory, Diagnostics).
+What they obey since 0.73.7:
+
+- **The Error Insight level the user had.** Taking the underlines over sets
+  the IDE's level to None and remembers the previous one
+  (`SavedErrorInsightLevel`); ours then show only what that level showed -
+  Errors: severity 1; Errors and Warnings: 1-2; Errors, Warnings and Hints or
+  Everything: all (`PasTreeErrorMaxSeverity`). The hint over them obeys the
+  same filter. Nothing remembered (the level was None already) shows all.
+- **A level raised in Tools > Options** while ours are on is the user's
+  choice of the IDE's underlines: the setting follows it, at most one read a
+  second on the editor's mouse move (`FollowIdeErrorInsightLevel`) - except
+  while PasTree is the provider, where the IDE's underlines cannot exist.
+- **The hint without Tooltip symbol insight.** With that switch off, the
+  hint still explains our underlines - problems only, no card, no request.
+- **The level's form.** `ErrorInsightLevel` is declared `tkEnumeration`
+  (`GetOptionNames`); it reads as an Integer at a start and as a
+  UnicodeString after a write. A write is read back, and when the form the
+  option answered in does not hold, the Integer, the number as a string and
+  the name are tried in turn (`WriteLevelVerified`).
+- **A diagnostic spanning lines** - which this server never sends - is drawn
+  as one cell at its start, not with an end column read off another line.
+
+### Diagnosing DelphiLSP when it goes quiet
+
+- **Its own log.** `HKCU\Software\Embarcadero\BDS\37.0\LSP`, DWORD
+  `DelphiLSPLog` = 255 (Embarcadero docwiki "Troubleshooting: Delphi LSP"),
+  then a restart: the controller and its agents start with `-LogModes 255`
+  and write `%TEMP%\DelphiLSP\DelphiLSP.log`, `Agent0.log`, `Agent1.log` and
+  `*.trace.log`, appended across runs. A run started with `-LogModes 0`
+  despite the value logs nothing - check the agents' command line.
+- **What a healthy and a gated run look like.** In both, the controller gets
+  `initialize`, `workspace/didChangeConfiguration` with the project's
+  `dccOptions`, and a `textDocument/documentSymbol` of the .dpr. Gated (the
+  option-set gate below), no unit is ever handed over: the agents stay at
+  ~15 MB, where serving one they grow to ~80 MB and more. The Projects window
+  shows `CodeInsight: Stopped` when no provider exists at all, `Done` when
+  DelphiLSP has the project but no unit.
+- **Noise, not a lead.** DelphiLSP.exe crashes in `dcc32370.dll` (and
+  `dcc64370.dll` for Win64) at a fixed offset per IDE build at every project
+  close, in pairs, with a dump in `%LOCALAPPDATA%\CrashDumps` and event 1000
+  in the Application log - every day since at least 2026-07-22, the oldest
+  event kept, while DelphiLSP worked. It says nothing about a quiet DelphiLSP.
+- **A fresh profile** (`bds.exe -r <name>`) starts from defaults but does not
+  take library paths copied into its registry: IDE 13 keeps them in
+  `%APPDATA%\Embarcadero\<name>\37.0\EnvOptions.proj` and rewrites that file
+  at exit, so such a profile compares settings, not builds.
+
+### The editor option sets, and the gate that hands DelphiLSP its units - read 2026-10-21
 
 On 2026-10-20 DelphiLSP went silent in Alex's main profile - no completion, no
 Error Insight, an empty Structure view, nothing in any log - while Classic and
@@ -580,7 +732,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Squiggles, native | **DEAD** (spikes NEGATIVE 2026-08-22 and 2026-10-20) | - | the module answers `IOTAModuleErrors` natively and `FindFileTrait` never saw our registration; Error Insight is fed by the selected provider through the private `IInternalSupportErrorInsight`, never through `IOTAModuleErrors` on the manager - see both closed experiments above |
+| Squiggles, native | **Experimental** (0.75.0; public routes DEAD - spikes 2026-08-22 and 2026-10-20) | `PasTreeIdePlugin.NativeErrorInsight` | the public routes stay dead (the module answers `IOTAModuleErrors` natively; the manager is never asked for it). The private one DelphiLSP uses: the marker `IInternalSupportErrorInsight` on the manager, `Errorinsite.UpdateErrorMarks(..., True)` - marks, Structure View Errors folder, status bar count - and the `Sourcemodule.LSPGetErrors` hook, chained; see "How DelphiLSP feeds Error Insight" above |
 | Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity, in the shape the IDE's Error Insight "Editor rendering style" names (`ErrorInsight Marks`, `0..3` = Classic/Smooth Wave/Solid Line/Dots, read at most once a second - `IdeErrorMarkStyle`, since 0.52.5), each shape measured off the IDE's own and drawn anti-aliased through a premultiplied DIB + `AlphaBlend`, errors in the IDE's crimson; repaint via the session's diagnostics-changed listener. Since 0.52.4 an experimental choice, off by default: selecting it sets the IDE's `ErrorInsightLevel` (`Editor\Source Options\Borland.EditOptions.Pascal`) to `None` and remembers the old level (`ApplyErrorInsightChoice`) |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |

@@ -167,6 +167,9 @@ uses
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.ResultRows,   // PaintSyntaxTextTyped, EditorSyntaxColor
   PasTreeIdePlugin.OptionSets,   // the InsightManager reads and writes
+  // IInternalSupportErrorInsight, and the switch of the native Error Insight
+  // feed when the IDE selects or deselects us
+  PasTreeIdePlugin.NativeErrorInsight,
   PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled, the type colour
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
@@ -1488,7 +1491,16 @@ type
     IOTACodeInsightManager, IOTACodeInsightSelection,
     IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
     IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer,
-    IOTAPrimaryCodeInsightManager, IOTACodeInsightManagerEnvOptions)
+    IOTAPrimaryCodeInsightManager, IOTACodeInsightManagerEnvOptions,
+    // No methods: answering it tells the IDE that Error Insight for our files
+    // comes from us, so its parse hooks stop wiping the marks
+    // PasTreeIdePlugin.NativeErrorInsight puts on the buffers (2026-10-23).
+    IInternalSupportErrorInsight)
+  protected
+    // Refuses IInternalSupportErrorInsight while the setting is off - see
+    // NativeErrorInsightEnabled. Every interface of the class routes
+    // through this one.
+    function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;
   private
     FEnabled: Boolean;
     // GetContext's first call this session went to the log - see there.
@@ -1621,6 +1633,18 @@ constructor TPasCodeInsightManager.Create;
 begin
   inherited Create;
   FEnabled := True;
+end;
+
+function TPasCodeInsightManager.QueryInterface(const IID: TGUID;
+  out Obj): HResult;
+begin
+  if IsEqualGUID(IID, IInternalSupportErrorInsight)
+    and not NativeErrorInsightEnabled then
+  begin
+    Pointer(Obj) := nil;
+    Exit(E_NOINTERFACE);
+  end;
+  Result := inherited QueryInterface(IID, Obj);
 end;
 
 function TPasCodeInsightManager.CurrentView: IOTAEditView;
@@ -2935,6 +2959,7 @@ begin
   GInsightWarned := False;
   LspLogToServer('code insight: the IDE selected PasTree as the Insight '
     + 'Provider (ManagerEnabled)');
+  NativeErrorInsightProviderChanged(True);
   FollowIdeProviderChoice;
 end;
 
@@ -2943,6 +2968,7 @@ begin
   GInsightWarned := False;
   LspLogToServer('code insight: the IDE deselected PasTree as the Insight '
     + 'Provider (ManagerDisabled)');
+  NativeErrorInsightProviderChanged(False);
   FollowIdeProviderChoice;
 end;
 

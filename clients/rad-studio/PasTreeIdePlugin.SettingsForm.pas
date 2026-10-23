@@ -101,6 +101,7 @@ type
     lblErrorSquiggles: TLabel;
     cbxErrorSquiggles: TComboBox;
     lblErrorSquigglesHint: TLabel;
+    chkNativeErrorInsight: TCheckBox;
     lblInsightManager: TLabel;
     cbxInsightManager: TComboBox;
     lblInsightManagerHint: TLabel;
@@ -270,6 +271,8 @@ begin
   end;
   // Our list's option, so greyed with RAD Studio's list - value kept.
   chkCompletionBoldNames.Enabled := LForced;
+  // Fed only while PasTree is the provider - greyed otherwise, value kept.
+  chkNativeErrorInsight.Enabled := LForced;
 end;
 
 { Find References lives in the Find All submenu and nowhere else, so its
@@ -565,6 +568,7 @@ begin
     LForm.chkHighlightInactive.Checked := LSettings.HighlightInactive;
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.FErrorSquigglesOwn := LSettings.PasTreeErrorSquiggles;
+    LForm.chkNativeErrorInsight.Checked := LSettings.NativeErrorInsight;
     LForm.cbxInsightManager.ItemIndex := Ord(LSettings.PasTreeInsightManager);
     LForm.chkCompletionBoldNames.Checked := LSettings.CompletionBoldNames;
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
@@ -608,6 +612,7 @@ begin
     else
       LSettings.PasTreeErrorSquiggles := LForm.FErrorSquigglesOwn;
     LSettings.PasTreeInsightManager := LForm.cbxInsightManager.ItemIndex = 1;
+    LSettings.NativeErrorInsight := LForm.chkNativeErrorInsight.Checked;
     LSettings.CompletionBoldNames := LForm.chkCompletionBoldNames.Checked;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;

@@ -285,6 +285,18 @@ function PasTreeErrorSquigglesEnabled: Boolean;
 function PasTreeErrorMaxSeverity: Integer;
 
 /// <summary>
+/// Code Insight tab, under Errors Insight: whether the IDE's own Error
+/// Insight - the Structure View's Errors folder, the editor's marks and the
+/// status bar count - is fed from PasTree's diagnostics while PasTree is the
+/// Insight Provider (PasTreeIdePlugin.NativeErrorInsight, 0.75.0). ON BY
+/// DEFAULT (Alex, 2026-10-23); it goes through undocumented coreide entry
+/// points, so it can be switched off. Off: the manager stops answering the
+/// IDE's private marker and nothing is pushed or answered - the IDE's state
+/// before 0.75.0.
+/// </summary>
+function NativeErrorInsightEnabled: Boolean;
+
+/// <summary>
 /// Code Insight tab (0.68.0, labelled experimental): whether PasTree's Code
 /// Insight manager is registered and selected as the IDE's Insight Provider
 /// through the environment option InsightManager - see
@@ -442,6 +454,8 @@ type
     // False = the IDE's Error Insight draws the error underlines, True = we
     // do (and the IDE's level is set to None) - see ApplyErrorInsightChoice.
     PasTreeErrorSquiggles: Boolean;
+    // See NativeErrorInsightEnabled. Default True.
+    NativeErrorInsight: Boolean;
     // Code Insight tab - see PasTreeInsightManagerEnabled. Default False.
     PasTreeInsightManager: Boolean;
     // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
@@ -517,7 +531,8 @@ uses
   // sets: read and written in the Pascal set only.
   PasTreeIdePlugin.OptionSets,
   // LspLogToServer only, for SyncErrorInsightChoice's line.
-  PasTreeIdePlugin.LspSession;
+  PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.NativeErrorInsight;   // NativeErrorInsightSettingChanged
 
 const
   cSettingsKey = 'PasTree';
@@ -543,6 +558,7 @@ const
   cValueTypeFontStyle = 'TypeFontStyle';
   cValueHighlightInactive = 'HighlightInactiveCode';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
+  cValueNativeErrorInsight = 'NativeErrorInsight';
   cValueInsightManager = 'PasTreeInsightManager';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
@@ -739,6 +755,7 @@ begin
   Result.TypeFontStyle := [];
   Result.HighlightInactive := True;
   Result.PasTreeErrorSquiggles := False;
+  Result.NativeErrorInsight := True;
   Result.PasTreeInsightManager := False;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
@@ -797,6 +814,8 @@ begin
         ReadFlag(LReg, cValueLogAllIdeCrashes, Result.LogAllIdeCrashes);
       Result.PasTreeErrorSquiggles :=
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
+      Result.NativeErrorInsight :=
+        ReadFlag(LReg, cValueNativeErrorInsight, Result.NativeErrorInsight);
       Result.PasTreeInsightManager :=
         ReadFlag(LReg, cValueInsightManager, Result.PasTreeInsightManager);
       Result.DfmNoExplicitProps :=
@@ -875,6 +894,8 @@ begin
           Ord(ASettings.HighlightInactive));
         LReg.WriteInteger(cValueErrorSquiggles,
           Ord(ASettings.PasTreeErrorSquiggles));
+        LReg.WriteInteger(cValueNativeErrorInsight,
+          Ord(ASettings.NativeErrorInsight));
         LReg.WriteInteger(cValueInsightManager,
           Ord(ASettings.PasTreeInsightManager));
         LReg.WriteInteger(cValueDfmNoExplicit,
@@ -910,6 +931,8 @@ begin
   SetDfmExplicitFix(ASettings.DfmNoExplicitProps);
   SetDfmStyleElementsFix(ASettings.DfmNoDefaultStyleElems);
   SetCrashLogAll(ASettings.LogAllIdeCrashes);
+  // Ours onto the buffers, or off them, as the switch now says.
+  NativeErrorInsightSettingChanged;
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -1065,6 +1088,11 @@ function PasTreeErrorSquigglesEnabled: Boolean;
 begin
   Result := CurrentSettings.PasTreeErrorSquiggles or
     CurrentSettings.PasTreeInsightManager;
+end;
+
+function NativeErrorInsightEnabled: Boolean;
+begin
+  Result := CurrentSettings.NativeErrorInsight;
 end;
 
 function PasTreeErrorMaxSeverity: Integer;

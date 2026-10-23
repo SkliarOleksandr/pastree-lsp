@@ -93,6 +93,9 @@ contains
   PasTreeIdePlugin.OptionSets in 'PasTreeIdePlugin.OptionSets.pas',
   PasTreeIdePlugin.IdeInsight in 'PasTreeIdePlugin.IdeInsight.pas',
   PasTreeIdePlugin.ErrorPaint in 'PasTreeIdePlugin.ErrorPaint.pas',
+  { The IDE's own Error Insight fed from PasTree - coreide's private seams,
+    reached by name. See the unit's header. }
+  PasTreeIdePlugin.NativeErrorInsight in 'PasTreeIdePlugin.NativeErrorInsight.pas',
   PasTreeIdePlugin.SemanticPaint in 'PasTreeIdePlugin.SemanticPaint.pas',
   PasTreeIdePlugin.TokenShift in 'PasTreeIdePlugin.TokenShift.pas',
   PasTreeIdePlugin.DirectiveText in 'PasTreeIdePlugin.DirectiveText.pas',
