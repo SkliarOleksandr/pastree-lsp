@@ -7,9 +7,27 @@ unit PasTreeIdePlugin.Outline;
   ('PasTree.Outline' - deliberately NOT SourceCodeStructureType, so this
   never contends with whatever the IDE's own source provider registers).
 
+  THE IDE's OWN ICONS (0.76.0). The pane's image list already holds the
+  Pascal structure icons; coreide exports where they start,
+  Parsernodes.ImageIndexOffset, and both the classic structure (TNode.
+  get_ImageIndex) and DelphiLSP's outline (TDocumentSymbolNode.
+  get_ImageIndex) answer that plus a fixed offset - DelphiLSP's by the LSP
+  SymbolKind, through the table copied into NativeIconOffset below (read off
+  IDELSP370.bpl, 2026-10-23; identical export in 22.0, 23.0, 37.0 and Win64).
+  So a node here is drawn exactly like DelphiLSP's, in the IDE's theme. The
+  badges this unit drew itself before (a TImageList through AddImageList)
+  never showed in the themed IDE - the reason the outline was withdrawn on
+  2026-09-01. Not exported, or not set (-1): no icon, as before.
+
   Trigger: INTAEditServicesNotifier.EditorViewActivated - the moment a
   source tab becomes active, its outline is requested (async, like every
   LSP question here) and the pane's context replaced when the answer lands.
+  And after every analysis of the shown file (the diagnostics-changed
+  listener, 0.76.1): until then a type added to the file - a new unsaved
+  unit, measured 2026-10-23 - never reached the pane until the tab was
+  activated again. A rebuild whose symbols are the same as the pane's is
+  skipped (OutlineSignature), and a node the user collapsed stays collapsed
+  across rebuilds (GCollapsed).
   Double-clicking a node navigates history-aware.
 
   LIVE-RUN CAVEAT, recorded up front: whether the IDE's own providers
@@ -29,6 +47,13 @@ interface
 procedure InitializeOutline;
 procedure FinalizeOutline;
 
+/// <summary>
+/// The IDE selected (True) or deselected (False) PasTree as the Insight
+/// Provider: the top editor's outline into the pane, or ours out of it so
+/// DelphiLSP's takes its place.
+/// </summary>
+procedure OutlineProviderChanged(AActive: Boolean);
+
 implementation
 
 uses
@@ -40,15 +65,15 @@ uses
   Winapi.Windows,
   Vcl.Forms,
   Vcl.Menus,
-  Vcl.Graphics,
-  Vcl.Controls,
   DockForm,
   ToolsAPI,
-  ToolsAPI.UI,
   StructureViewAPI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings,
+  // CoreIdeExport, and the Errors folder a new context drops
+  PasTreeIdePlugin.NativeErrorInsight,
+  PasTreeIdePlugin.CodeInsight,   // PasTreeIsActiveInsightProvider
   PasTreeIdePlugin.GotoDeclaration;
 
 const
@@ -57,13 +82,10 @@ const
 var
   GNotifierIndex: Integer = -1;
   GAlive: Boolean = False;
-  // Runtime-drawn 16x16 kind badges (a colored disc with the kind's
-  // letter), registered with the structure view ONCE - AddImageList
-  // returns the base index our nodes offset from. Drawn rather than
-  // shipped: no resource pipeline, and the colors come from the IDE's
-  // theme-aware palette so dark themes get their variants.
-  GImages: TImageList = nil;
-  GImageBase: Integer = -1;
+  // coreide's Parsernodes.ImageIndexOffset - where the Pascal structure icons
+  // start in the pane's image list. Looked up once; nil = not exported.
+  GIconBase: PInteger = nil;
+  GIconBaseLooked: Boolean = False;
   // The context currently installed in the pane - kept so a stale async
   // answer (tab switched again before the outline arrived) can be told from
   // the current one by file path.
@@ -71,6 +93,13 @@ var
   // Whether the pane is holding a context of OURS right now. Not cosmetic
   // bookkeeping: it is what FinalizeOutline needs in order to take it back.
   GContextInstalled: Boolean = False;
+  // What the installed context shows, as OutlineSignature - an analysis
+  // that changed nothing the outline shows must not rebuild the pane.
+  GInstalledSignature: string;
+  // Node keys (file, group and names down to the node) the user collapsed.
+  // Nodes are built expanded; a rebuild would otherwise reopen every one.
+  GCollapsed: TDictionary<string, Boolean> = nil;
+  GListener: Integer = 0;
 
 type
   // Common IDispatch stub base: StructureViewAPI interfaces descend from
@@ -94,7 +123,12 @@ type
     FCaption: string;
     FFilePath: string;
     FRow, FCol: Integer;
-    FImageIndex: Integer;
+    // File + the captions down to this node - its identity across rebuilds,
+    // for GCollapsed.
+    FKey: string;
+    // The icon's offset from Parsernodes.ImageIndexOffset (NativeIconOffset),
+    // -1 for none. A folder (cIconFolder) shows open while expanded.
+    FIcon: Integer;
     FChildren: TList<IOTAStructureNode>;
     // Raw, not counted: parent holds child interfaces, so a counted
     // back-reference would be a cycle no refcount ever collects.
@@ -219,7 +253,7 @@ begin
   FFilePath := AFilePath;
   FRow := ARow;
   FCol := ACol;
-  FImageIndex := -1;
+  FIcon := -1;
   FChildren := TList<IOTAStructureNode>.Create;
   FExpanded := True;
 end;
@@ -273,6 +307,20 @@ end;
 procedure TPasOutlineNode.Set_Expanded(Value: WordBool);
 begin
   FExpanded := Value;
+  if (FKey = '') or (GCollapsed = nil) then
+    Exit;
+  if Value then
+    GCollapsed.Remove(FKey)
+  else
+    GCollapsed.AddOrSetValue(FKey, True);
+end;
+
+{ Sets the node's identity and the expanded state the user left it in. }
+procedure SetNodeKey(ANode: TPasOutlineNode; const AKey: string);
+begin
+  ANode.FKey := LowerCase(AKey);
+  ANode.FExpanded := (GCollapsed = nil)
+    or not GCollapsed.ContainsKey(ANode.FKey);
 end;
 
 function TPasOutlineNode.Get_Focused: WordBool;
@@ -290,9 +338,42 @@ begin
   Result := FCaption;
 end;
 
-function TPasOutlineNode.Get_ImageIndex: Integer;
+const
+  // Offsets from Parsernodes.ImageIndexOffset, as DelphiLSP uses them.
+  cIconFolder = 8;       // 9 is the same folder open
+  cIconFolderOpen = 9;
+
+function IconBase: Integer;
+{$IFDEF WIN64}
+const
+  cName = '_ZN11Parsernodes16ImageIndexOffsetE';
+{$ELSE}
+const
+  cName = '@Parsernodes@ImageIndexOffset';
+{$ENDIF}
 begin
-  Result := FImageIndex;
+  if not GIconBaseLooked then
+  begin
+    GIconBaseLooked := True;
+    GIconBase := CoreIdeExport(cName);
+  end;
+  if GIconBase = nil then
+    Result := -1
+  else
+    Result := GIconBase^;
+end;
+
+function TPasOutlineNode.Get_ImageIndex: Integer;
+var
+  LBase: Integer;
+begin
+  LBase := IconBase;
+  if (FIcon < 0) or (LBase < 0) then
+    Exit(-1);
+  if (FIcon = cIconFolder) and FExpanded then
+    Result := LBase + cIconFolderOpen
+  else
+    Result := LBase + FIcon;
 end;
 
 function TPasOutlineNode.Get_Name: WideString;
@@ -450,123 +531,40 @@ end;
   Building and installing the outline
   --------------------------------------------------------------------------- }
 
+{ DelphiLSP's own table (IDELSP370.bpl, TDocumentSymbolNode.get_ImageIndex):
+  LSP SymbolKind 1..26 -> offset from Parsernodes.ImageIndexOffset. 0 file,
+  1 field/variable/constant, 2 class, 3 interface, 4 property, 6 method,
+  7 function, 8 folder (9 open), 10 type, 11 constructor. }
+function NativeIconOffset(AKind: Integer): Integer;
 const
-  // Badge slots, in the order the image list is filled. imgGroup is the
-  // category header; the rest are declaration kinds.
-  imgGroup = 0;
-  imgType = 1;
-  imgRoutine = 2;
-  imgVar = 3;
-  imgConst = 4;
-  imgValue = 5;
-  imgProperty = 6;
-  imgField = 7;
-
-function BadgeIndexOf(const AKindWord: string): Integer;
+  cTable: array[1..26] of Integer = (0, 8, 8, 0, 2, 6, 4, 1, 11, 10, 3, 7,
+    1, 1, 1, 1, 1, 10, 2, 1, 1, 1, 10, 6, 6, 10);
 begin
-  if (AKindWord = 'class') or (AKindWord = 'interface') or
-     (AKindWord = 'record') or (AKindWord = 'enum') or
-     (AKindWord = 'array') then
-    Result := imgType
-  else if AKindWord = 'function' then
-    Result := imgRoutine
-  else if AKindWord = 'var' then
-    Result := imgVar
-  else if AKindWord = 'const' then
-    Result := imgConst
-  else if AKindWord = 'value' then
-    Result := imgValue
-  else if AKindWord = 'property' then
-    Result := imgProperty
-  else if AKindWord = 'field' then
-    Result := imgField
+  if (AKind >= Low(cTable)) and (AKind <= High(cTable)) then
+    Result := cTable[AKind]
   else
-    Result := imgGroup;
+    Result := -1;
 end;
 
-function BuildNode(const AFilePath: string;
+function BuildNode(const AFilePath, AParentKey: string;
   const ASymbol: TLspDocSymbol): IOTAStructureNode;
 var
-  LCaption: string;
   LNode: TPasOutlineNode;
   LIdx: Integer;
 begin
-  LCaption := ASymbol.Name;
-  if ASymbol.KindWord <> '' then
-    LCaption := LCaption + ' (' + ASymbol.KindWord + ')';
-  LNode := TPasOutlineNode.Create(LCaption, AFilePath, ASymbol.Row,
+  // The name alone, as the IDE's own pane shows it: the icon says the kind.
+  LNode := TPasOutlineNode.Create(ASymbol.Name, AFilePath, ASymbol.Row,
     ASymbol.Col);
-  if GImageBase >= 0 then
-    LNode.FImageIndex := GImageBase + BadgeIndexOf(ASymbol.KindWord);
+  LNode.FIcon := NativeIconOffset(ASymbol.Kind);
+  SetNodeKey(LNode, AParentKey + '/' + ASymbol.Name);
   Result := LNode;
   for LIdx := 0 to High(ASymbol.Children) do
-    Result.AddChildNode(BuildNode(AFilePath, ASymbol.Children[LIdx]), -1);
+    Result.AddChildNode(BuildNode(AFilePath, LNode.FKey,
+      ASymbol.Children[LIdx]), -1);
 end;
 
 var
   GViewMissingLogged: Boolean = False;
-
-procedure AddBadge(AImages: TImageList; const ALetter: string;
-  ABack: TColor);
-var
-  LBmp: TBitmap;
-begin
-  LBmp := TBitmap.Create;
-  try
-    LBmp.SetSize(16, 16);
-    LBmp.Canvas.Brush.Color := clFuchsia;   // the mask color
-    LBmp.Canvas.FillRect(Rect(0, 0, 16, 16));
-    LBmp.Canvas.Brush.Color := ABack;
-    LBmp.Canvas.Pen.Color := ABack;
-    LBmp.Canvas.Ellipse(1, 1, 15, 15);
-    LBmp.Canvas.Font.Name := 'Segoe UI';
-    LBmp.Canvas.Font.Size := 7;
-    LBmp.Canvas.Font.Style := [TFontStyle.fsBold];
-    LBmp.Canvas.Font.Color := clWhite;
-    LBmp.Canvas.Brush.Style := bsClear;
-    LBmp.Canvas.TextOut(8 - LBmp.Canvas.TextWidth(ALetter) div 2,
-      8 - LBmp.Canvas.TextHeight(ALetter) div 2, ALetter);
-    AImages.AddMasked(LBmp, clFuchsia);
-  finally
-    LBmp.Free;
-  end;
-end;
-
-// Register the badge list with the structure view the first time it is
-// reachable. -1 stays "no images" and nodes fall back to no icon.
-procedure EnsureImages(const AView: IOTAStructureView);
-var
-  LUI: INTAIDEUIServices;
-
-  function Themed(AColor: TIDEThemeColors; AFallback: TColor): TColor;
-  begin
-    if LUI <> nil then
-      Result := LUI.ThemeAwareColors[AColor]
-    else
-      Result := AFallback;
-  end;
-
-begin
-  if GImageBase >= 0 then
-    Exit;
-  if not Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-    LUI := nil;
-  if GImages = nil then
-  begin
-    GImages := TImageList.Create(nil);
-    GImages.Width := 16;
-    GImages.Height := 16;
-    AddBadge(GImages, '#', Themed(itcGray, clGray));       // group header
-    AddBadge(GImages, 'T', Themed(itcOrange, clWebOrange)); // types
-    AddBadge(GImages, 'R', Themed(itcBlue, clNavy));        // routines
-    AddBadge(GImages, 'V', Themed(itcGreen, clGreen));      // variables
-    AddBadge(GImages, 'C', Themed(itcViolet, clPurple));    // constants
-    AddBadge(GImages, 'E', Themed(itcGray, clGray));        // enum values
-    AddBadge(GImages, 'P', Themed(itcYellow, clOlive));     // properties
-    AddBadge(GImages, 'F', Themed(itcGreen, clTeal));       // fields
-  end;
-  GImageBase := AView.AddImageList(GImages.Handle, False);
-end;
 
 // Adds one 'Types'/'Routines'/... category root holding every top symbol
 // whose kind word is in AKinds - skipped entirely when none match, so the
@@ -594,12 +592,43 @@ begin
     if LGroup = nil then
     begin
       LGroup := TPasOutlineNode.Create(ACaption, AFilePath, 0, 0);
-      if GImageBase >= 0 then
-        TPasOutlineNode(LGroup as TObject).FImageIndex :=
-          GImageBase + imgGroup;
+      TPasOutlineNode(LGroup as TObject).FIcon := cIconFolder;
+      SetNodeKey(TPasOutlineNode(LGroup as TObject),
+        AFilePath + '|' + ACaption);
       AContext.AddRootNode(LGroup, -1);
     end;
-    LGroup.AddChildNode(BuildNode(AFilePath, ASymbols[LIdx]), -1);
+    LGroup.AddChildNode(BuildNode(AFilePath,
+      TPasOutlineNode(LGroup as TObject).FKey, ASymbols[LIdx]), -1);
+  end;
+end;
+
+{ Everything the pane shows of ASymbols, as one string. }
+function OutlineSignature(const AFilePath: string;
+  const ASymbols: TArray<TLspDocSymbol>): string;
+
+  procedure Add(ASB: TStringBuilder; const ASyms: TArray<TLspDocSymbol>);
+  var
+    LSym: TLspDocSymbol;
+  begin
+    for LSym in ASyms do
+    begin
+      ASB.Append(LSym.Name).Append(#1).Append(LSym.Kind).Append(#1)
+        .Append(LSym.Row).Append(#1).Append(LSym.Col).Append('(');
+      Add(ASB, LSym.Children);
+      ASB.Append(')');
+    end;
+  end;
+
+var
+  LSB: TStringBuilder;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    LSB.Append(LowerCase(AFilePath)).Append(#0);
+    Add(LSB, ASymbols);
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
   end;
 end;
 
@@ -609,6 +638,7 @@ var
   LView: IOTAStructureView;
   LContext: TPasOutlineContext;
   LMessages: IOTAMessageServices;
+  LSignature: string;
 begin
   if not Supports(BorlandIDEServices, IOTAStructureView, LView) then
   begin
@@ -624,7 +654,9 @@ begin
     end;
     Exit;
   end;
-  EnsureImages(LView);
+  LSignature := OutlineSignature(AFilePath, ASymbols);
+  if GContextInstalled and (LSignature = GInstalledSignature) then
+    Exit;
   LContext := TPasOutlineContext.Create(AFilePath);
   // Grouped the way the native Structure pane groups a unit: category
   // headers with the declarations under them; types keep their members as
@@ -639,6 +671,9 @@ begin
   AddGroup(LContext, AFilePath, 'Other', ASymbols, ['']);
   LView.SetStructureContext(LContext);
   GContextInstalled := True;
+  GInstalledSignature := LSignature;
+  // The new context took the Errors folder with the old one.
+  NativeErrorInsightRestoreStructure(AFilePath);
 end;
 
 procedure RequestOutline(const AFilePath: string);
@@ -668,17 +703,17 @@ procedure TOutlineEditNotifier.EditorViewActivated(
 begin
   if not Assigned(EditView) then
     Exit;
-  // THE OFF SWITCH FOR THIS FEATURE, and it is a single guard because
-  // SetStructureContext is the only thing that ever takes the pane: not
-  // pushing IS leaving it to the IDE's own provider. Checked here rather
-  // than at registration so the setting takes effect on the next tab
-  // activation instead of at the next IDE start - and so turning it back on
-  // needs no re-registration of a notifier the IDE would have to be told
-  // about again.
-  if not OverrideStructureView then
+  // THE PANE IS THE PROVIDER'S (0.76.3, Alex): with PasTree selected
+  // nothing else fills it - DelphiLSP is handed no unit - and with RAD Studio
+  // selected DelphiLSP does. So the Insight Provider choice is this
+  // feature's switch, and not pushing IS leaving the pane to DelphiLSP.
+  if not PasTreeIsActiveInsightProvider then
     Exit;
   if not IsPascalSourceFile(EditView.Buffer.FileName) then
     Exit;
+  // Always rebuilt here: another tab, or the IDE's own provider, may have
+  // had the pane since, so "the same symbols" proves nothing about it.
+  GInstalledSignature := '';
   RequestOutline(EditView.Buffer.FileName);
 end;
 
@@ -722,6 +757,39 @@ procedure TOutlineEditNotifier.DockFormRefresh(
 begin
 end;
 
+procedure OutlineProviderChanged(AActive: Boolean);
+var
+  LEditor: IOTAEditorServices;
+  LView: IOTAStructureView;
+  LTop: IOTAEditBuffer;
+begin
+  if not GAlive then
+    Exit;
+  GInstalledSignature := '';
+  if AActive then
+  begin
+    if Supports(BorlandIDEServices, IOTAEditorServices, LEditor) then
+      LTop := LEditor.TopBuffer;
+    if Assigned(LTop) and IsPascalSourceFile(LTop.FileName) then
+      RequestOutline(LTop.FileName);
+  end
+  else if GContextInstalled then
+  begin
+    GContextInstalled := False;
+    GCurrentFile := '';
+    if Supports(BorlandIDEServices, IOTAStructureView, LView) then
+      LView.SetStructureContext(nil);
+  end;
+end;
+
+{ An analysis landed: the shown file's outline again, if it changed. }
+procedure OnDiagnosticsChanged(const APath: string);
+begin
+  if GAlive and PasTreeIsActiveInsightProvider and (GCurrentFile <> '')
+    and SameText(APath, GCurrentFile) then
+    RequestOutline(GCurrentFile);
+end;
+
 procedure InitializeOutline;
 var
   LServices: IOTAEditorServices80;
@@ -732,6 +800,8 @@ begin
     Exit;
   GNotifierIndex := LServices.AddNotifier(TOutlineEditNotifier.Create);
   GAlive := True;
+  GCollapsed := TDictionary<string, Boolean>.Create;
+  GListener := LspAddDiagnosticsChangedListener(OnDiagnosticsChanged);
 end;
 
 procedure FinalizeOutline;
@@ -740,6 +810,8 @@ var
   LView: IOTAStructureView;
 begin
   GAlive := False;
+  LspRemoveDiagnosticsChangedListener(GListener);
+  GListener := 0;
   { TAKE THE CONTEXT BACK BEFORE THE CODE BEHIND IT GOES AWAY. This was
     missing, and it is the same dangling-code hazard the rest of the plugin
     deregisters everything to avoid: TPasOutlineContext and every
@@ -748,10 +820,7 @@ begin
     shown - and the package uninstalled from a running IDE, the Structure pane
     goes on holding those interfaces; the next repaint, the next click on a
     node, or merely the final _Release of them executes unloaded code.
-
-    Ahead of FreeAndNil(GImages) on purpose: while our context is still
-    installed the pane may repaint from that image list, which is what the
-    note below is about. }
+ }
   if GContextInstalled then
   begin
     GContextInstalled := False;
@@ -765,17 +834,14 @@ begin
         // exception escaping here would take the IDE down over a cleanup.
       end;
   end;
-  // The image list handle was handed to the structure view; the view keeps
-  // its own copy semantics unknown, so the list itself is freed last thing
-  // at unload, after nothing can repaint with it.
-  FreeAndNil(GImages);
-  GImageBase := -1;
   if GNotifierIndex >= 0 then
   begin
     if Supports(BorlandIDEServices, IOTAEditorServices80, LServices) then
       LServices.RemoveNotifier(GNotifierIndex);
     GNotifierIndex := -1;
   end;
+  GInstalledSignature := '';
+  FreeAndNil(GCollapsed);
 end;
 
 end.

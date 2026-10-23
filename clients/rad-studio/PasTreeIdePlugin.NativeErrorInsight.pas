@@ -80,6 +80,22 @@ procedure NativeErrorInsightProviderChanged(AActive: Boolean);
 /// </summary>
 procedure NativeErrorInsightSettingChanged;
 
+/// <summary>
+/// An export of the coreide that pairs with the linked designide, by its
+/// mangled name - nil when this IDE has no such name. The one place this
+/// package reaches into coreide; the Structure pane's icons use it too
+/// (PasTreeIdePlugin.Outline, Parsernodes.ImageIndexOffset).
+/// </summary>
+function CoreIdeExport(const AName: string): Pointer;
+
+/// <summary>
+/// The Structure View's Errors folder again for AFileName: the outline calls
+/// this right after it installs a context, because SetStructureContext drops
+/// the folder - a field added to a class, so a new outline, made the folder
+/// vanish while the same file's other errors kept it (2026-10-23).
+/// </summary>
+procedure NativeErrorInsightRestoreStructure(const AFileName: string);
+
 implementation
 
 uses
@@ -162,6 +178,16 @@ begin
   LPath := ExtractFilePath(LPath) + StringReplace(ExtractFileName(LPath),
     'designide', 'coreide', [rfIgnoreCase]);
   Result := GetModuleHandle(PChar(LPath));
+end;
+
+function CoreIdeExport(const AName: string): Pointer;
+var
+  LCore: HMODULE;
+begin
+  LCore := CoreIdeModule;
+  if LCore = 0 then
+    Exit(nil);
+  Result := GetProcAddress(LCore, PChar(AName));
 end;
 
 { Our hook in Sourcemodule.LSPGetErrors. True = answered (AErrors is ours,
@@ -344,6 +370,11 @@ begin
     Push(LSnap.Path, LSnap.Errors, True)
   else
     Push(AFileName, nil, True);
+end;
+
+procedure NativeErrorInsightRestoreStructure(const AFileName: string);
+begin
+  ViewActivated(AFileName);
 end;
 
 type

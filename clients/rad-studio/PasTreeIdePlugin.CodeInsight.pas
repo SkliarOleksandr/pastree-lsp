@@ -170,6 +170,7 @@ uses
   // IInternalSupportErrorInsight, and the switch of the native Error Insight
   // feed when the IDE selects or deselects us
   PasTreeIdePlugin.NativeErrorInsight,
+  PasTreeIdePlugin.Outline,   // the Structure pane follows the provider too
   PasTreeIdePlugin.Settings;   // AdvancedLoggingEnabled, the type colour
 
 { RE-ENTRANCY GUARD FOR THE IDE CALLBACKS. LspSession invokes a request's
@@ -2960,6 +2961,7 @@ begin
   LspLogToServer('code insight: the IDE selected PasTree as the Insight '
     + 'Provider (ManagerEnabled)');
   NativeErrorInsightProviderChanged(True);
+  OutlineProviderChanged(True);
   FollowIdeProviderChoice;
 end;
 
@@ -2969,6 +2971,7 @@ begin
   LspLogToServer('code insight: the IDE deselected PasTree as the Insight '
     + 'Provider (ManagerDisabled)');
   NativeErrorInsightProviderChanged(False);
+  OutlineProviderChanged(False);
   FollowIdeProviderChoice;
 end;
 

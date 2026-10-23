@@ -623,6 +623,9 @@ type
   TLspDocSymbol = record
     Name: string;
     KindWord: string;
+    // The server's LSP SymbolKind (5 class, 6 method, 12 function, ...) -
+    // what the Structure pane picks the IDE's own icon by (Outline).
+    Kind: Integer;
     Row: Integer;
     Col: Integer;
     Children: TArray<TLspDocSymbol>;
@@ -4505,7 +4508,8 @@ begin
     LSym.Name := LValue.GetValue<string>('name', '');
     if LSym.Name = '' then
       Continue;
-    LSym.KindWord := WorkspaceKindWord(LValue.GetValue<Integer>('kind', 0));
+    LSym.Kind := LValue.GetValue<Integer>('kind', 0);
+    LSym.KindWord := WorkspaceKindWord(LSym.Kind);
     LLine := LValue.GetValue<Integer>('selectionRange.start.line', -1);
     LChar := LValue.GetValue<Integer>('selectionRange.start.character', -1);
     if (LLine < 0) or (LChar < 0) then

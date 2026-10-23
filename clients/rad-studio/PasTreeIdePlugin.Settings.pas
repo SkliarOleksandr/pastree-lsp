@@ -43,24 +43,6 @@ uses
   System.UITypes;   // TColor and TFontStyles without dragging in the VCL
 
 /// <summary>
-/// Whether we replace the IDE's Structure pane content for Pascal sources
-/// (PasTreeIdePlugin.Outline). False leaves the pane to the IDE's own
-/// provider - our outline simply stops pushing, which is all it takes.
-///
-/// WITHDRAWN, TEMPORARILY, ON 2026-09-01: this always answers False and the
-/// dialog no longer shows the checkbox. The outline is not finished, and a
-/// half-finished pane is worse than the IDE's own - it looks like the
-/// feature, so what it gets wrong reads as what PasTree gets wrong.
-///
-/// The stored value, the record field and the registry name are all left
-/// alone deliberately: withdrawing a feature must not throw away the choice
-/// of anyone who had it on, so switching it back on is deleting the two
-/// lines below and putting the checkbox back in the .dfm - not recovering a
-/// setting nobody wrote down.
-/// </summary>
-function OverrideStructureView: Boolean;
-
-/// <summary>
 /// Whether "Find Declaration" is OURS - both the Ctrl+Click gesture
 /// (PasTreeIdePlugin.GotoDeclaration's mouse override) and the editor menu
 /// item (the cEdMenuCatIdentifier takeover in PasTreeIdePlugin.Wizard).
@@ -419,7 +401,6 @@ procedure ShowSettingsDialog;
 /// </summary>
 type
   TPasTreeSettings = record
-    OverrideStructureView: Boolean;
     CtrlClickNavigation: Boolean;
     OverrideDeclImplToggle: Boolean;
     EnableRename: Boolean;
@@ -518,8 +499,8 @@ uses
   ToolsAPI,
   // Implementation-section only, and it uses this unit back the same way -
   // a cycle Delphi permits precisely here. The split is deliberate: the
-  // store must be readable (OverrideStructureView, from Outline and the key
-  // binding) without dragging a form and its .dfm into the caller.
+  // store must be readable (from the features and the key binding) without
+  // dragging a form and its .dfm into the caller.
   PasTreeIdePlugin.SettingsForm,
   PasTreeIdePlugin.DfmExplicitFix,
   PasTreeIdePlugin.DfmStyleElementsFix,
@@ -536,7 +517,6 @@ uses
 
 const
   cSettingsKey = 'PasTree';
-  cValueStructureView = 'OverrideStructureView';
   cValueCtrlClick = 'CtrlClickNavigation';
   cValueDeclImplToggle = 'OverrideDeclImplToggle';
   cValueRename = 'EnableRename';
@@ -732,7 +712,6 @@ var
 
 begin
   // DEFAULTS FIRST, so every early exit below lands on them.
-  Result.OverrideStructureView := True;
   Result.CtrlClickNavigation := True;
   Result.OverrideDeclImplToggle := True;
   Result.EnableRename := True;
@@ -779,8 +758,6 @@ begin
       Result.TypeFontStyle := StylesOf(ReadInt(LReg, cValueTypeFontStyle, 0));
       Result.HighlightInactive :=
         ReadFlag(LReg, cValueHighlightInactive, Result.HighlightInactive);
-      Result.OverrideStructureView :=
-        ReadFlag(LReg, cValueStructureView, Result.OverrideStructureView);
       Result.CtrlClickNavigation :=
         ReadFlag(LReg, cValueCtrlClick, Result.CtrlClickNavigation);
       Result.OverrideDeclImplToggle :=
@@ -859,8 +836,6 @@ begin
       if not LReg.OpenKey(LKey, True) then
         Exit;
       try
-        LReg.WriteInteger(cValueStructureView,
-          Ord(ASettings.OverrideStructureView));
         LReg.WriteInteger(cValueCtrlClick, Ord(ASettings.CtrlClickNavigation));
         LReg.WriteInteger(cValueDeclImplToggle,
           Ord(ASettings.OverrideDeclImplToggle));
@@ -943,14 +918,6 @@ begin
     GLoaded := True;
   end;
   Result := GSettings;
-end;
-
-function OverrideStructureView: Boolean;
-begin
-  // WITHDRAWN - see the declaration. To bring the feature back, this becomes
-  //   Result := CurrentSettings.OverrideStructureView;
-  // again; CurrentSettings still holds the user's real choice throughout.
-  Result := False;
 end;
 
 function CtrlClickNavigation: Boolean;

@@ -7,13 +7,10 @@ unit PasTreeIdePlugin.SettingsForm;
   should be adjustable by dragging things around rather than by editing
   coordinates in code.
 
-  ONE SWITCH IS DELIBERATELY ABSENT: the Structure pane outline, withdrawn on
-  2026-09-01 until it is finished (PasTreeIdePlugin.Settings.
-  OverrideStructureView says why, and is where it comes back from). Its stored
-  value is untouched - the dialog simply neither reads nor writes it - so a
-  user who had it on still has it on when the checkbox returns. Do not
-  "tidy up" the field or the registry name on the strength of it being absent
-  here.
+  NO SWITCH FOR THE STRUCTURE PANE OUTLINE (0.76.3): it is part of PasTree
+  being the Insight Provider - with PasTree selected nothing else fills the
+  pane, with RAD Studio selected DelphiLSP does - so the Code Insight Manager
+  choice is its switch (PasTreeIdePlugin.Outline).
 
   THREE TABS SINCE 0.33.0 - Navigation (what a click or a key resolves to),
   Editing (what changes code), Diagnostics (the log) - because seven switches
