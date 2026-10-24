@@ -93,6 +93,20 @@ procedure CheckInsightProviderSelected;
 function PasTreeIsActiveInsightProvider: Boolean;
 
 /// <summary>
+/// Whether PasTree is the Insight Provider the user SELECTED - what the
+/// features that belong to the provider (the Structure pane, the IDE's own
+/// Error Insight) go by. Not PasTreeIsActiveInsightProvider: the IDE's
+/// CURRENT manager is per file and decided lazily, and it answered "not
+/// PasTree" at every tab switch (EditorViewActivated runs before the IDE
+/// has picked the new tab's manager) and all along on a project's .dpr
+/// (AVImark, 2026-10-23) - so the pane went empty on every switch and the
+/// .dpr never got one. Sticky instead: True from the first time the current
+/// manager is ours or the IDE calls ManagerEnabled, False again only on
+/// ManagerDisabled, the IDE's word that the user chose another provider.
+/// </summary>
+function PasTreeProviderSelected: Boolean;
+
+/// <summary>
 /// Makes the IDE's Insight Provider agree with the settings' Code Insight
 /// Manager choice (PasTreeInsightManagerEnabled), so the user never has to
 /// find the combobox in Tools > Options > Editor > Source.
@@ -1487,6 +1501,12 @@ end;
   The manager
   --------------------------------------------------------------------------- }
 
+var
+  // See PasTreeProviderSelected.
+  GProviderSelected: Boolean = False;
+  // The extensions HandlesFile declined and logged (lower-cased, with the dot).
+  GHandlesFileDeclined: TDictionary<string, Boolean> = nil;
+
 type
   TPasCodeInsightManager = class(TInterfacedObject, IOTACodeInsightManager100,
     IOTACodeInsightManager, IOTACodeInsightSelection,
@@ -1753,8 +1773,21 @@ begin
 end;
 
 function TPasCodeInsightManager.HandlesFile(const AFileName: string): Boolean;
+var
+  LExt: string;
 begin
   Result := IsPascalSourceFile(AFileName);
+  // Which names the IDE asks about, once per extension we decline. Not the
+  // .dproj a project's main source is asked under: as a selectable provider
+  // this manager is never asked about it - TPasProjectSourceManager is.
+  if not Result then
+  begin
+    LExt := LowerCase(ExtractFileExt(AFileName));
+    if (GHandlesFileDeclined <> nil)
+      and not GHandlesFileDeclined.ContainsKey(LExt)
+      and LspLogDetail('code insight: HandlesFile declined ' + AFileName) then
+      GHandlesFileDeclined.Add(LExt, True);
+  end;
 end;
 
 function TPasCodeInsightManager.GetLongestItem: string;
@@ -2958,6 +2991,7 @@ procedure FollowIdeProviderChoice; forward;
 procedure TPasCodeInsightManager.ManagerEnabled;
 begin
   GInsightWarned := False;
+  GProviderSelected := True;
   LspLogToServer('code insight: the IDE selected PasTree as the Insight '
     + 'Provider (ManagerEnabled)');
   NativeErrorInsightProviderChanged(True);
@@ -2968,6 +3002,7 @@ end;
 procedure TPasCodeInsightManager.ManagerDisabled;
 begin
   GInsightWarned := False;
+  GProviderSelected := False;
   LspLogToServer('code insight: the IDE deselected PasTree as the Insight '
     + 'Provider (ManagerDisabled)');
   NativeErrorInsightProviderChanged(False);
@@ -2987,6 +3022,255 @@ end;
 var
   GManager: IOTACodeInsightManager;
   GManagerIndex: Integer = -1;
+  GProjectSourceIndex: Integer = -1;
+
+const
+  cProjectSourceManagerId = cOurManagerId + '.ProjectSource';
+
+{ ---------------------------------------------------------------------------
+  The project-source companion - PasTree for the name ".dproj"
+
+  WHY IT EXISTS (read off coreide370 and proven with a probe manager on
+  AVImarkD37.dpk, 2026-10-24; local notes dpr-error-wipe.md). The IDE's
+  elision parser (ElisionParser.TElisionModule) asks after every edit
+  (Modified -> RemoveErrors) and after every parse (ApplyErrors) whether the
+  provider does Error Insight for the module - IInternalErrorInsight with the
+  MODULE's file name - and wipes the buffer's marks, and rebuilds the
+  Structure View's Errors folder from its own parse, when the answer is no.
+  A project's main source (.dpr, .dpk) belongs to the project module, whose
+  file name is the .dproj. The IDE picks the provider for that name in
+  CodCmplt.TCodeCompletionManager.LoadKibitzManager: its first loop skips
+  every manager implementing IOTACodeInsightSelection (TPasCodeInsightManager,
+  DelphiLSP's), which are found only through the editor option sets by
+  extension - and ".dproj" is in the XML set, which names no provider. So no
+  answer from the main manager could ever reach the .dpr's marks: its
+  HandlesFile is not even called for the .dproj.
+
+  This manager is what the first loop takes: no IOTACodeInsightSelection,
+  HandlesFile True for a .dproj while PasTree is the selected provider and
+  the IDE's own Error Insight is on, and - through QueryInterface - the main
+  manager's IOTAAsyncCodeInsightManager (AsyncEnabled) and
+  IOTAPrimaryCodeInsightManager, which make it the loop's primary candidate,
+  inserted at the head of the current-manager list, and the marker
+  IInternalSupportErrorInsight, which is the answer the parser wants.
+
+  EVERYTHING ELSE IS THE MAIN MANAGER. The current-manager list is a cache:
+  once loaded for the .dproj this manager can stay current for a while and
+  be handed Code Insight calls for the .dpr (or the next unit) before the IDE
+  clears the list. Every method and every other interface is the main
+  manager's, so whatever the IDE asks it is PasTree answering - except its
+  name, its ID (FindManagerFromId must keep finding the main manager for
+  the option set's choice) and HandlesFile.
+  --------------------------------------------------------------------------- }
+
+type
+  TPasProjectSourceManager = class(TInterfacedObject, IOTACodeInsightManager100,
+    IOTACodeInsightManager)
+  protected
+    function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;
+  public
+    { IOTACodeInsightManager100 }
+    function GetName: string;
+    function GetIDString: string;
+    function GetEnabled: Boolean;
+    procedure SetEnabled(Value: Boolean);
+    function EditorTokenValidChars(PreValidating: Boolean): TSysCharSet;
+    procedure AllowCodeInsight(var Allow: Boolean; const Key: Char);
+    function PreValidateCodeInsight(const Str: string): Boolean;
+    function IsViewerBrowsable(Index: Integer): Boolean;
+    function GetMultiSelect: Boolean;
+    procedure GetSymbolList(out SymbolList: IOTACodeInsightSymbolList);
+    procedure OnEditorKey(Key: Char; var CloseViewer: Boolean;
+      var Accept: Boolean);
+    function HandlesFile(const AFileName: string): Boolean;
+    function GetLongestItem: string;
+    procedure GetParameterList(out ParameterList: IOTACodeInsightParameterList);
+    procedure GetCodeInsightType(AChar: Char; AElement: Integer;
+      out CodeInsightType: TOTACodeInsightType; out InvokeType: TOTAInvokeType);
+    function InvokeCodeCompletion(HowInvoked: TOTAInvokeType;
+      var Str: string): Boolean;
+    function InvokeParameterCodeInsight(HowInvoked: TOTAInvokeType;
+      var SelectedIndex: Integer): Boolean;
+    procedure ParameterCodeInsightAnchorPos(var EdPos: TOTAEditPos);
+    function ParameterCodeInsightParamIndex(EdPos: TOTAEditPos): Integer;
+    function GetHintText(HintLine, HintCol: Integer): string;
+    function GotoDefinition(out AFileName: string; out ALineNum: Integer;
+      Index: Integer = -1): Boolean;
+    procedure Done(Accepted: Boolean; out DisplayParams: Boolean);
+    { IOTACodeInsightManager }
+    function GetOptionSetName: string;
+  end;
+
+function TPasProjectSourceManager.QueryInterface(const IID: TGUID;
+  out Obj): HResult;
+begin
+  // Never selectable: that is what keeps it in LoadKibitzManager's first
+  // loop, and out of the Insight Provider combobox.
+  if IsEqualGUID(IID, IOTACodeInsightSelection) then
+  begin
+    Pointer(Obj) := nil;
+    Exit(E_NOINTERFACE);
+  end;
+  if IsEqualGUID(IID, IInterface)
+    or IsEqualGUID(IID, IOTACodeInsightManager100)
+    or IsEqualGUID(IID, IOTACodeInsightManager) then
+    Exit(inherited QueryInterface(IID, Obj));
+  if not Assigned(GManager) then
+  begin
+    Pointer(Obj) := nil;
+    Exit(E_NOINTERFACE);
+  end;
+  // The marker (refused there while NativeErrorInsightEnabled is off), the
+  // async, primary, 90, env-options and custom-draw shapes: the main
+  // manager's own.
+  Result := GManager.QueryInterface(IID, Obj);
+end;
+
+function TPasProjectSourceManager.GetName: string;
+begin
+  Result := 'PasTree code insight (project source)';
+end;
+
+function TPasProjectSourceManager.GetIDString: string;
+begin
+  Result := cProjectSourceManagerId;
+end;
+
+function TPasProjectSourceManager.GetEnabled: Boolean;
+begin
+  Result := Assigned(GManager) and GManager.GetEnabled;
+end;
+
+procedure TPasProjectSourceManager.SetEnabled(Value: Boolean);
+begin
+  // The main manager's switch, not ours.
+end;
+
+{ A .dproj, while PasTree is the provider the user selected and the IDE's own
+  Error Insight is fed from it - and not a .dproj open as text in the editor
+  (its XML tab would get Pascal completion). GProviderSelected rather than
+  PasTreeProviderSelected: this runs inside LoadKibitzManager, where asking
+  the IDE for its current manager would re-enter the choice being made. }
+function TPasProjectSourceManager.HandlesFile(const AFileName: string): Boolean;
+var
+  LServices: IOTAEditorServices;
+  LIterator: IOTAEditBufferIterator;
+  I: Integer;
+begin
+  Result := Assigned(GManager) and GProviderSelected
+    and NativeErrorInsightEnabled
+    and SameText(ExtractFileExt(AFileName), '.dproj');
+  if Result and Supports(BorlandIDEServices, IOTAEditorServices, LServices)
+    and LServices.GetEditBufferIterator(LIterator) then
+    for I := 0 to LIterator.Count - 1 do
+      if SameText(LIterator.EditBuffers[I].FileName, AFileName) then
+        Exit(False);
+end;
+
+function TPasProjectSourceManager.EditorTokenValidChars(
+  PreValidating: Boolean): TSysCharSet;
+begin
+  Result := GManager.EditorTokenValidChars(PreValidating);
+end;
+
+procedure TPasProjectSourceManager.AllowCodeInsight(var Allow: Boolean;
+  const Key: Char);
+begin
+  GManager.AllowCodeInsight(Allow, Key);
+end;
+
+function TPasProjectSourceManager.PreValidateCodeInsight(
+  const Str: string): Boolean;
+begin
+  Result := GManager.PreValidateCodeInsight(Str);
+end;
+
+function TPasProjectSourceManager.IsViewerBrowsable(Index: Integer): Boolean;
+begin
+  Result := GManager.IsViewerBrowsable(Index);
+end;
+
+function TPasProjectSourceManager.GetMultiSelect: Boolean;
+begin
+  Result := GManager.GetMultiSelect;
+end;
+
+procedure TPasProjectSourceManager.GetSymbolList(
+  out SymbolList: IOTACodeInsightSymbolList);
+begin
+  GManager.GetSymbolList(SymbolList);
+end;
+
+procedure TPasProjectSourceManager.OnEditorKey(Key: Char;
+  var CloseViewer: Boolean; var Accept: Boolean);
+begin
+  GManager.OnEditorKey(Key, CloseViewer, Accept);
+end;
+
+function TPasProjectSourceManager.GetLongestItem: string;
+begin
+  Result := GManager.GetLongestItem;
+end;
+
+procedure TPasProjectSourceManager.GetParameterList(
+  out ParameterList: IOTACodeInsightParameterList);
+begin
+  GManager.GetParameterList(ParameterList);
+end;
+
+procedure TPasProjectSourceManager.GetCodeInsightType(AChar: Char;
+  AElement: Integer; out CodeInsightType: TOTACodeInsightType;
+  out InvokeType: TOTAInvokeType);
+begin
+  GManager.GetCodeInsightType(AChar, AElement, CodeInsightType, InvokeType);
+end;
+
+function TPasProjectSourceManager.InvokeCodeCompletion(
+  HowInvoked: TOTAInvokeType; var Str: string): Boolean;
+begin
+  Result := GManager.InvokeCodeCompletion(HowInvoked, Str);
+end;
+
+function TPasProjectSourceManager.InvokeParameterCodeInsight(
+  HowInvoked: TOTAInvokeType; var SelectedIndex: Integer): Boolean;
+begin
+  Result := GManager.InvokeParameterCodeInsight(HowInvoked, SelectedIndex);
+end;
+
+procedure TPasProjectSourceManager.ParameterCodeInsightAnchorPos(
+  var EdPos: TOTAEditPos);
+begin
+  GManager.ParameterCodeInsightAnchorPos(EdPos);
+end;
+
+function TPasProjectSourceManager.ParameterCodeInsightParamIndex(
+  EdPos: TOTAEditPos): Integer;
+begin
+  Result := GManager.ParameterCodeInsightParamIndex(EdPos);
+end;
+
+function TPasProjectSourceManager.GetHintText(HintLine,
+  HintCol: Integer): string;
+begin
+  Result := GManager.GetHintText(HintLine, HintCol);
+end;
+
+function TPasProjectSourceManager.GotoDefinition(out AFileName: string;
+  out ALineNum: Integer; Index: Integer): Boolean;
+begin
+  Result := GManager.GotoDefinition(AFileName, ALineNum, Index);
+end;
+
+procedure TPasProjectSourceManager.Done(Accepted: Boolean;
+  out DisplayParams: Boolean);
+begin
+  GManager.Done(Accepted, DisplayParams);
+end;
+
+function TPasProjectSourceManager.GetOptionSetName: string;
+begin
+  Result := GManager.GetOptionSetName;
+end;
 
 procedure InitializeCodeInsight;
 var
@@ -2996,8 +3280,13 @@ begin
     Exit;
   if not Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
     Exit;
+  GHandlesFileDeclined := TDictionary<string, Boolean>.Create;
   GManager := TPasCodeInsightManager.Create;
   GManagerIndex := LServices.AddCodeInsightManager(GManager);
+  // After the main manager: LoadKibitzManager walks the list from the last
+  // registered, and the companion delegates to GManager.
+  GProjectSourceIndex := LServices.AddCodeInsightManager(
+    TPasProjectSourceManager.Create);
   GAlive := True;
   // NOT ANNOUNCED. This used to say "registered - now select PasTree under
   // Tools > Options ...", loud on purpose because picking the provider is the
@@ -3005,6 +3294,13 @@ begin
   // first: the provider is already selected, so the line is a step report
   // nobody needs, and this panel earns its keep only if what appears in it is
   // worth reading. Log failures, not steps.
+end;
+
+function PasTreeProviderSelected: Boolean;
+begin
+  if PasTreeIsActiveInsightProvider then
+    GProviderSelected := True;
+  Result := GProviderSelected;
 end;
 
 function PasTreeIsActiveInsightProvider: Boolean;
@@ -3020,9 +3316,12 @@ begin
   LCurrent := nil;
   LServices.GetCurrentCodeInsightManager(LCurrent);
   // By IDString, not interface identity: the services may hand back a
-  // different interface reference onto the same registered manager.
+  // different interface reference onto the same registered manager. The
+  // project-source companion is PasTree too - it is current after the IDE
+  // chose a manager for a .dproj.
   Result := Assigned(LCurrent)
-    and SameText(LCurrent.GetIDString, GManager.GetIDString);
+    and (SameText(LCurrent.GetIDString, GManager.GetIDString)
+      or SameText(LCurrent.GetIDString, cProjectSourceManagerId));
 end;
 
 { ---------------------------------------------------------------------------
@@ -3419,6 +3718,13 @@ begin
   // The completion window outlives this package: its WindowProc must stop
   // pointing into our code before the code goes.
   FreeAndNil(GStatusStrip);
+  // The companion first: it delegates to GManager.
+  if GProjectSourceIndex >= 0 then
+  begin
+    if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
+      LServices.RemoveCodeInsightManager(GProjectSourceIndex);
+    GProjectSourceIndex := -1;
+  end;
   if GManagerIndex >= 0 then
   begin
     if Supports(BorlandIDEServices, IOTACodeInsightServices, LServices) then
@@ -3426,6 +3732,8 @@ begin
     GManagerIndex := -1;
   end;
   GManager := nil;
+  GProviderSelected := False;
+  FreeAndNil(GHandlesFileDeclined);
 end;
 
 procedure CheckInsightProviderSelected;
@@ -3440,7 +3748,8 @@ begin
   if not Supports(BorlandIDEServices, IOTACodeInsightServices60, LServices) then
     Exit;
   LServices.GetCurrentCodeInsightManager(LCurrent);
-  if LCurrent = GManager then
+  if (LCurrent = GManager) or (Assigned(LCurrent)
+    and SameText(LCurrent.GetIDString, cProjectSourceManagerId)) then
   begin
     // Selected again after a warning earlier this session - the next time it
     // is switched away should say so again, not stay silent because of an

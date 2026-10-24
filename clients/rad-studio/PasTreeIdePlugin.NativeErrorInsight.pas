@@ -109,7 +109,7 @@ uses
   ToolsAPI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,   // IsPascalSourceFile
-  PasTreeIdePlugin.CodeInsight,    // PasTreeIsActiveInsightProvider
+  PasTreeIdePlugin.CodeInsight,    // PasTreeProviderSelected
   PasTreeIdePlugin.Settings;       // PasTreeErrorMaxSeverity
 
 type
@@ -167,6 +167,8 @@ var
   // write it: the package loads before any project opens, and a line logged
   // then reaches nothing (first IDE run of 0.75.0, 2026-10-23).
   GReadout: string;
+  // Files whose current manager was logged as not ours (lower-cased).
+  GForeignLogged: TDictionary<string, Boolean>;
 
 { The coreide that pairs with the designide this package was linked against:
   same directory, same version suffix (designide370.bpl -> coreide370.bpl). }
@@ -294,6 +296,43 @@ begin
   Result := Assigned(LTop) and SameText(LTop.FileName, AName);
 end;
 
+{ A DIAGNOSTIC, for the project source whose marks the IDE wipes right after
+  our push (AVImark.dpr, 2026-10-23; units are fine): when the IDE's current
+  manager for the top buffer is not ours, its parse hooks remove our marks
+  (it does not answer IInternalSupportErrorInsight). Says once per file
+  which manager that is and what the buffer's module is called - a project's
+  main source belongs to the .dproj module, which no option set claims. }
+procedure LogForeignManagerOnce(const AName: string);
+var
+  LCI: IOTACodeInsightServices;
+  LCurrent: IOTACodeInsightManager;
+  LEditor: IOTAEditorServices;
+  LTop: IOTAEditBuffer;
+  LManager, LModule: string;
+begin
+  if (GForeignLogged = nil) or GForeignLogged.ContainsKey(LowerCase(AName))
+    or PasTreeIsActiveInsightProvider then
+    Exit;
+  LManager := 'none';
+  if Supports(BorlandIDEServices, IOTACodeInsightServices, LCI) then
+  begin
+    LCI.GetCurrentCodeInsightManager(LCurrent);
+    if Assigned(LCurrent) then
+      LManager := LCurrent.GetIDString;
+  end;
+  LModule := '?';
+  if Supports(BorlandIDEServices, IOTAEditorServices, LEditor) then
+  begin
+    LTop := LEditor.TopBuffer;
+    if Assigned(LTop) and Assigned(LTop.Module) then
+      LModule := LTop.Module.FileName;
+  end;
+  if LspLogDetail(Format('native error insight: the IDE''s current manager '
+    + 'for %s is "%s", not PasTree (its module: %s) - its parse hooks wipe '
+    + 'our marks there', [ExtractFileName(AName), LManager, LModule])) then
+    GForeignLogged.Add(LowerCase(AName), True);
+end;
+
 { Puts AErrors on APath's buffer when it is open; nil takes them off.
 
   THE STRUCTURE VIEW'S ERRORS FOLDER IS ONE FOR THE WHOLE IDE, not one per
@@ -334,6 +373,8 @@ begin
     Exit;
   end;
   LTop := IsTopBuffer(LName);
+  if LTop then
+    LogForeignManagerOnce(LName);
   LChanged := GUpdateErrorMarks(AErrors, LBuffer, LTop);
   if LChanged and Assigned(GUpdateViews) then
     GUpdateViews(LBuffer, False);
@@ -471,7 +512,7 @@ begin
   LSnap.Errors := ToOtaErrors(LDiags);
   GLock.Enter;
   try
-    GActive := NativeErrorInsightEnabled and PasTreeIsActiveInsightProvider;
+    GActive := NativeErrorInsightEnabled and PasTreeProviderSelected;
     GSnapshot.AddOrSetValue(LowerCase(APath), LSnap);
   finally
     GLock.Leave;
@@ -509,7 +550,7 @@ end;
 
 procedure NativeErrorInsightSettingChanged;
 begin
-  NativeErrorInsightProviderChanged(PasTreeIsActiveInsightProvider);
+  NativeErrorInsightProviderChanged(PasTreeProviderSelected);
 end;
 
 procedure InitializeNativeErrorInsight;
@@ -531,6 +572,7 @@ begin
   GLock := TCriticalSection.Create;
   GSnapshot := TDictionary<string, TSnapshot>.Create;
   GPushed := TDictionary<string, TSnapshot>.Create;
+  GForeignLogged := TDictionary<string, Boolean>.Create;
   LCore := CoreIdeModule;
   if LCore = 0 then
   begin
@@ -582,6 +624,7 @@ begin
   GUpdateViews := nil;
   FreeAndNil(GSnapshot);
   FreeAndNil(GPushed);
+  FreeAndNil(GForeignLogged);
   FreeAndNil(GLock);
 end;
 

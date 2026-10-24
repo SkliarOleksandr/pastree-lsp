@@ -69,11 +69,12 @@ uses
   ToolsAPI,
   StructureViewAPI,
   PasTreeIdePlugin.LspSession,
+  PasTreeIdePlugin.OutlineRows,   // TLspOutlineRow
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings,
   // CoreIdeExport, and the Errors folder a new context drops
   PasTreeIdePlugin.NativeErrorInsight,
-  PasTreeIdePlugin.CodeInsight,   // PasTreeIsActiveInsightProvider
+  PasTreeIdePlugin.CodeInsight,   // PasTreeProviderSelected
   PasTreeIdePlugin.GotoDeclaration;
 
 const
@@ -96,9 +97,10 @@ var
   // What the installed context shows, as OutlineSignature - an analysis
   // that changed nothing the outline shows must not rebuild the pane.
   GInstalledSignature: string;
-  // Node keys (file, group and names down to the node) the user collapsed.
-  // Nodes are built expanded; a rebuild would otherwise reopen every one.
-  GCollapsed: TDictionary<string, Boolean> = nil;
+  // Node key (file and captions down to the node) -> the expanded state the
+  // user left it in. A rebuild would otherwise put every node back to its
+  // default.
+  GExpanded: TDictionary<string, Boolean> = nil;
   GListener: Integer = 0;
 
 type
@@ -307,20 +309,22 @@ end;
 procedure TPasOutlineNode.Set_Expanded(Value: WordBool);
 begin
   FExpanded := Value;
-  if (FKey = '') or (GCollapsed = nil) then
-    Exit;
-  if Value then
-    GCollapsed.Remove(FKey)
-  else
-    GCollapsed.AddOrSetValue(FKey, True);
+  if (FKey <> '') and (GExpanded <> nil) then
+    GExpanded.AddOrSetValue(FKey, Value);
 end;
 
-{ Sets the node's identity and the expanded state the user left it in. }
-procedure SetNodeKey(ANode: TPasOutlineNode; const AKey: string);
+{ Sets the node's identity and its expanded state: the user's, else the
+  default. }
+procedure SetNodeKey(ANode: TPasOutlineNode; const AKey: string;
+  ADefaultExpanded: Boolean);
+var
+  LExpanded: Boolean;
 begin
   ANode.FKey := LowerCase(AKey);
-  ANode.FExpanded := (GCollapsed = nil)
-    or not GCollapsed.ContainsKey(ANode.FKey);
+  if (GExpanded <> nil) and GExpanded.TryGetValue(ANode.FKey, LExpanded) then
+    ANode.FExpanded := LExpanded
+  else
+    ANode.FExpanded := ADefaultExpanded;
 end;
 
 function TPasOutlineNode.Get_Focused: WordBool;
@@ -531,101 +535,179 @@ end;
   Building and installing the outline
   --------------------------------------------------------------------------- }
 
-{ DelphiLSP's own table (IDELSP370.bpl, TDocumentSymbolNode.get_ImageIndex):
-  LSP SymbolKind 1..26 -> offset from Parsernodes.ImageIndexOffset. 0 file,
-  1 field/variable/constant, 2 class, 3 interface, 4 property, 6 method,
-  7 function, 8 folder (9 open), 10 type, 11 constructor. }
-function NativeIconOffset(AKind: Integer): Integer;
+{ THE TREE, AS DelphiLSP's PANE LAYS IT OUT (0.76.4, Alex's screenshots of
+  both, 2026-10-23): one 'Structure' root; under it the sections in source
+  order - interface, implementation, initialization, finalization, a
+  program's main begin - and in a program, which has none, the uses clause
+  and the begin straight under the root; under a section its uses folder
+  (each unit a row) and its declarations; a type's members under the type.
+  Built from pastree/outline (scope module, with the units of every uses
+  clause) rather than documentSymbol, which has no sections, no uses and no
+  signatures. Only the root and the interface start expanded - DelphiLSP's
+  defaults; what the user opens or closes is kept (GExpanded).
+
+  Icons are DelphiLSP's offsets (IDELSP370.bpl, TDocumentSymbolNode.
+  get_ImageIndex, by LSP SymbolKind): 0 file, 1 field/variable/constant,
+  2 class, 3 interface, 4 property, 6 method, 7 function, 8 folder (9 open),
+  10 other type, 11 constructor. A plain procedure is a Function there too. }
 const
-  cTable: array[1..26] of Integer = (0, 8, 8, 0, 2, 6, 4, 1, 11, 10, 3, 7,
-    1, 1, 1, 1, 1, 10, 2, 1, 1, 1, 10, 6, 6, 10);
+  cIconFile = 0;
+  cIconVar = 1;
+  cIconClass = 2;
+  cIconInterface = 3;
+  cIconProperty = 4;
+  cIconMethod = 6;
+  cIconFunction = 7;
+  cIconType = 10;
+  cIconConstructor = 11;
+
+function RowIcon(const ARow: TLspOutlineRow): Integer;
+var
+  LDetail: string;
 begin
-  if (AKind >= Low(cTable)) and (AKind <= High(cTable)) then
-    Result := cTable[AKind]
+  if ARow.Kind = 'type' then
+  begin
+    LDetail := LowerCase(Trim(ARow.Detail));
+    if (LDetail.StartsWith('= class') and not LDetail.StartsWith('= class of'))
+      or LDetail.StartsWith('= packed class') then
+      Result := cIconClass
+    else if LDetail.StartsWith('= interface')
+      or LDetail.StartsWith('= dispinterface') then
+      Result := cIconInterface
+    else
+      Result := cIconType;
+  end
+  else if ARow.Kind = 'routine' then
+  begin
+    if Pos('constructor', ARow.Head) > 0 then
+      Result := cIconConstructor
+    else if ARow.Owner <> '' then
+      Result := cIconMethod
+    else
+      Result := cIconFunction;
+  end
+  else if ARow.Kind = 'property' then
+    Result := cIconProperty
+  else if (ARow.Kind = 'var') or (ARow.Kind = 'const') then
+    Result := cIconVar
   else
     Result := -1;
 end;
 
-function BuildNode(const AFilePath, AParentKey: string;
-  const ASymbol: TLspDocSymbol): IOTAStructureNode;
-var
-  LNode: TPasOutlineNode;
-  LIdx: Integer;
+{ What a row reads as in the pane: a type by its name, everything else by
+  its name and detail - `Refill(const A: Integer)`, `Dlg: TMedHistoryDlg` -
+  and a method body by its owner too (`TFoo.Bar(...)`), since in the
+  implementation it stands apart from its class. }
+function RowCaption(const ARow: TLspOutlineRow): string;
 begin
-  // The name alone, as the IDE's own pane shows it: the icon says the kind.
-  LNode := TPasOutlineNode.Create(ASymbol.Name, AFilePath, ASymbol.Row,
-    ASymbol.Col);
-  LNode.FIcon := NativeIconOffset(ASymbol.Kind);
-  SetNodeKey(LNode, AParentKey + '/' + ASymbol.Name);
-  Result := LNode;
-  for LIdx := 0 to High(ASymbol.Children) do
-    Result.AddChildNode(BuildNode(AFilePath, LNode.FKey,
-      ASymbol.Children[LIdx]), -1);
+  Result := ARow.Name;
+  if ARow.IsImpl and (ARow.Owner <> '') then
+    Result := ARow.Owner + '.' + Result;
+  if ARow.Kind <> 'type' then
+    Result := Result + ARow.Detail;
 end;
 
 var
   GViewMissingLogged: Boolean = False;
 
-// Adds one 'Types'/'Routines'/... category root holding every top symbol
-// whose kind word is in AKinds - skipped entirely when none match, so the
-// pane never shows empty headers.
-procedure AddGroup(const AContext: TPasOutlineContext;
-  const AFilePath, ACaption: string; const ASymbols: TArray<TLspDocSymbol>;
-  const AKinds: array of string);
-var
-  LGroup: IOTAStructureNode;
-  LIdx, LK: Integer;
-  LMatch: Boolean;
+function NewNode(const AFilePath, ACaption: string; ARow, ACol,
+  AIcon: Integer; const AParentKey: string;
+  ADefaultExpanded: Boolean): TPasOutlineNode;
 begin
-  LGroup := nil;
-  for LIdx := 0 to High(ASymbols) do
-  begin
-    LMatch := False;
-    for LK := 0 to High(AKinds) do
-      if ASymbols[LIdx].KindWord = AKinds[LK] then
-      begin
-        LMatch := True;
-        Break;
-      end;
-    if not LMatch then
-      Continue;
-    if LGroup = nil then
+  Result := TPasOutlineNode.Create(ACaption, AFilePath, ARow, ACol);
+  Result.FIcon := AIcon;
+  SetNodeKey(Result, AParentKey + '/' + ACaption, ADefaultExpanded);
+end;
+
+procedure BuildTree(const AContext: TPasOutlineContext;
+  const AFilePath: string; const ARows: TArray<TLspOutlineRow>);
+var
+  LTop, LRoot, LSection, LUses, LNode, LParent: TPasOutlineNode;
+  LTypes: TDictionary<string, TPasOutlineNode>;
+  LRow: TLspOutlineRow;
+  LKey: string;
+begin
+  // The pane does not draw a context's root nodes, only what is under them
+  // (0.76.4 showed no 'Structure', and the Types/Routines groups before it
+  // never showed either) - so 'Structure' sits under one root of its own.
+  LTop := NewNode(AFilePath, '', 0, 0, -1, LowerCase(AFilePath), True);
+  AContext.AddRootNode(LTop, -1);
+  LRoot := NewNode(AFilePath, 'Structure', 0, 0, cIconFile, LTop.FKey, True);
+  LTop.AddChildNode(LRoot, -1);
+  LSection := LRoot;
+  LUses := nil;
+  LTypes := TDictionary<string, TPasOutlineNode>.Create;
+  try
+    for LRow in ARows do
     begin
-      LGroup := TPasOutlineNode.Create(ACaption, AFilePath, 0, 0);
-      TPasOutlineNode(LGroup as TObject).FIcon := cIconFolder;
-      SetNodeKey(TPasOutlineNode(LGroup as TObject),
-        AFilePath + '|' + ACaption);
-      AContext.AddRootNode(LGroup, -1);
+      // An include's rows are its file's, not this pane's.
+      if not SameText(LRow.FilePath, AFilePath) then
+        Continue;
+      if LRow.Kind = 'section' then
+      begin
+        LSection := NewNode(AFilePath, LRow.Head, LRow.Line, LRow.Col,
+          cIconFolder, LRoot.FKey, LRow.Head = 'interface');
+        LRoot.AddChildNode(LSection, -1);
+        LUses := nil;
+      end
+      else if LRow.Kind = 'uses' then
+      begin
+        if LRow.Name = '' then
+        begin
+          LUses := NewNode(AFilePath, LRow.Head, LRow.Line, LRow.Col,
+            cIconFolder, LSection.FKey, False);
+          LSection.AddChildNode(LUses, -1);
+        end
+        else if LUses <> nil then
+          LUses.AddChildNode(NewNode(AFilePath, LRow.Name, LRow.Line,
+            LRow.Col, cIconFile, LUses.FKey, False), -1);
+      end
+      else if RowIcon(LRow) >= 0 then
+      begin
+        // A member goes under its type, a method body stays in its section -
+        // and so does a member whose type is not in the pane (its type sits
+        // in an include, or is named differently). TryGetValue sets its out
+        // parameter to nil on a miss, so never hand it LParent itself: that
+        // was an access violation on AVImark (2026-10-24).
+        LParent := LSection;
+        if (LRow.Owner <> '') and not LRow.IsImpl
+          and LTypes.TryGetValue(LowerCase(LRow.Owner), LNode) then
+          LParent := LNode;
+        LNode := NewNode(AFilePath, RowCaption(LRow), LRow.Line, LRow.Col,
+          RowIcon(LRow), LParent.FKey, False);
+        LParent.AddChildNode(LNode, -1);
+        if LRow.Kind = 'type' then
+        begin
+          if LRow.Owner <> '' then
+            LKey := LRow.Owner + '.' + LRow.Name
+          else
+            LKey := LRow.Name;
+          LTypes.AddOrSetValue(LowerCase(LKey), LNode);
+        end;
+      end;
+      // module and include rows: the root stands for the module, and an
+      // include is not a declaration.
     end;
-    LGroup.AddChildNode(BuildNode(AFilePath,
-      TPasOutlineNode(LGroup as TObject).FKey, ASymbols[LIdx]), -1);
+  finally
+    LTypes.Free;
   end;
 end;
 
-{ Everything the pane shows of ASymbols, as one string. }
+{ Everything the pane shows of ARows, as one string. }
 function OutlineSignature(const AFilePath: string;
-  const ASymbols: TArray<TLspDocSymbol>): string;
-
-  procedure Add(ASB: TStringBuilder; const ASyms: TArray<TLspDocSymbol>);
-  var
-    LSym: TLspDocSymbol;
-  begin
-    for LSym in ASyms do
-    begin
-      ASB.Append(LSym.Name).Append(#1).Append(LSym.Kind).Append(#1)
-        .Append(LSym.Row).Append(#1).Append(LSym.Col).Append('(');
-      Add(ASB, LSym.Children);
-      ASB.Append(')');
-    end;
-  end;
-
+  const ARows: TArray<TLspOutlineRow>): string;
 var
   LSB: TStringBuilder;
+  LRow: TLspOutlineRow;
 begin
   LSB := TStringBuilder.Create;
   try
     LSB.Append(LowerCase(AFilePath)).Append(#0);
-    Add(LSB, ASymbols);
+    for LRow in ARows do
+      LSB.Append(LRow.Kind).Append(#1).Append(LRow.Head).Append(#1)
+        .Append(LRow.Owner).Append(#1).Append(LRow.Name).Append(#1)
+        .Append(LRow.Detail).Append(#1).Append(Ord(LRow.IsImpl)).Append(#1)
+        .Append(LRow.Line).Append(#1).Append(LRow.Col).Append(#2);
     Result := LSB.ToString;
   finally
     LSB.Free;
@@ -633,7 +715,7 @@ begin
 end;
 
 procedure InstallOutline(const AFilePath: string;
-  const ASymbols: TArray<TLspDocSymbol>);
+  const ARows: TArray<TLspOutlineRow>);
 var
   LView: IOTAStructureView;
   LContext: TPasOutlineContext;
@@ -654,21 +736,11 @@ begin
     end;
     Exit;
   end;
-  LSignature := OutlineSignature(AFilePath, ASymbols);
+  LSignature := OutlineSignature(AFilePath, ARows);
   if GContextInstalled and (LSignature = GInstalledSignature) then
     Exit;
   LContext := TPasOutlineContext.Create(AFilePath);
-  // Grouped the way the native Structure pane groups a unit: category
-  // headers with the declarations under them; types keep their members as
-  // children one level further down.
-  AddGroup(LContext, AFilePath, 'Types', ASymbols,
-    ['class', 'interface', 'record', 'enum', 'array']);
-  AddGroup(LContext, AFilePath, 'Routines', ASymbols, ['function']);
-  AddGroup(LContext, AFilePath, 'Variables', ASymbols, ['var']);
-  AddGroup(LContext, AFilePath, 'Constants', ASymbols, ['const']);
-  AddGroup(LContext, AFilePath, 'Values', ASymbols, ['value']);
-  AddGroup(LContext, AFilePath, 'Properties', ASymbols, ['property']);
-  AddGroup(LContext, AFilePath, 'Other', ASymbols, ['']);
+  BuildTree(LContext, AFilePath, ARows);
   LView.SetStructureContext(LContext);
   GContextInstalled := True;
   GInstalledSignature := LSignature;
@@ -679,8 +751,8 @@ end;
 procedure RequestOutline(const AFilePath: string);
 begin
   GCurrentFile := AFilePath;
-  LspDocumentSymbols(AFilePath,
-    procedure(ASuccess: Boolean; const ASymbols: TArray<TLspDocSymbol>;
+  LspOutlineStructure(AFilePath,
+    procedure(ASuccess: Boolean; const ARows: TArray<TLspOutlineRow>;
       const AError: string)
     begin
       if not GAlive then
@@ -690,7 +762,7 @@ begin
       if not SameText(GCurrentFile, AFilePath) then
         Exit;
       if ASuccess then
-        InstallOutline(AFilePath, ASymbols);
+        InstallOutline(AFilePath, ARows);
       // Failures stay quiet: "no server yet" is the normal state right
       // after the IDE starts, and the pane simply keeps what it shows.
     end);
@@ -707,7 +779,7 @@ begin
   // nothing else fills it - DelphiLSP is handed no unit - and with RAD Studio
   // selected DelphiLSP does. So the Insight Provider choice is this
   // feature's switch, and not pushing IS leaving the pane to DelphiLSP.
-  if not PasTreeIsActiveInsightProvider then
+  if not PasTreeProviderSelected then
     Exit;
   if not IsPascalSourceFile(EditView.Buffer.FileName) then
     Exit;
@@ -785,7 +857,7 @@ end;
 { An analysis landed: the shown file's outline again, if it changed. }
 procedure OnDiagnosticsChanged(const APath: string);
 begin
-  if GAlive and PasTreeIsActiveInsightProvider and (GCurrentFile <> '')
+  if GAlive and PasTreeProviderSelected and (GCurrentFile <> '')
     and SameText(APath, GCurrentFile) then
     RequestOutline(GCurrentFile);
 end;
@@ -800,7 +872,7 @@ begin
     Exit;
   GNotifierIndex := LServices.AddNotifier(TOutlineEditNotifier.Create);
   GAlive := True;
-  GCollapsed := TDictionary<string, Boolean>.Create;
+  GExpanded := TDictionary<string, Boolean>.Create;
   GListener := LspAddDiagnosticsChangedListener(OnDiagnosticsChanged);
 end;
 
@@ -841,7 +913,7 @@ begin
     GNotifierIndex := -1;
   end;
   GInstalledSignature := '';
-  FreeAndNil(GCollapsed);
+  FreeAndNil(GExpanded);
 end;
 
 end.

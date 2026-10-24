@@ -6403,6 +6403,70 @@ end;
   (`type`, `routine`, `include`...; `interface`, `implementation`...), just
   once each: the client is not compiled against PasTree and must not depend
   on an enum's order, only on this answer's own tables. }
+{ pastree/outline's `usesItems` (module scope): after each uses landmark, one
+  row per unit the clause names - Kind okUses as the landmark's, Head 'unit',
+  Name the unit as written (`System.Win.ComObj`), positioned on its name.
+  PasModuleOutline lists the clause alone, which is what the Go To picker
+  wants (1500 unit rows would drown it); the IDE's Structure pane shows the
+  units inside its uses folder, as DelphiLSP's does, and asks for this. A
+  unit behind an inactive $IFDEF was never parsed and is not a row. }
+function WithUsesItems(const ATree: TPasTree;
+  const AEntries: TArray<TPasOutlineEntry>): TArray<TPasOutlineEntry>;
+var
+  LList: TList<TPasOutlineEntry>;
+  LEntry, LItem: TPasOutlineEntry;
+  LChild, LName, LVisTok: Integer;
+  LVis: TPasVisibleToken;
+begin
+  LList := TList<TPasOutlineEntry>.Create;
+  try
+    for LEntry in AEntries do
+    begin
+      LList.Add(LEntry);
+      if (LEntry.Kind <> okUses) or (LEntry.Node < 0)
+        or (LEntry.Node > High(ATree.Nodes)) then
+        Continue;
+      LChild := ATree.Nodes[LEntry.Node].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LName := NIL_NODE;
+        if ATree.Nodes[LChild].Kind = nkUsesItem then
+          LName := ATree.Nodes[LChild].FirstChild;
+        if LName <> NIL_NODE then
+        begin
+          LItem := LEntry;
+          LItem.Head := 'unit';
+          LItem.Name := ATree.NodeSpanText(LName);
+          LItem.Node := LChild;
+          LVisTok := ATree.NodeLeftmostVis(LName);
+          if (LItem.Name <> '') and (LVisTok >= 0)
+            and (LVisTok <= High(ATree.Source.Visible)) then
+          begin
+            LVis := ATree.Source.Visible[LVisTok];
+            if (LVis.FileId >= 0) and (LVis.FileId <= High(ATree.Source.Files))
+            then
+            begin
+              var LTS := ATree.Source.Files[LVis.FileId];
+              if (LVis.TokenIndex >= 0)
+                and (LVis.TokenIndex <= High(LTS.Tokens)) then
+              begin
+                LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start,
+                  LItem.Line, LItem.Col);
+                LItem.FilePath := ATree.Source.FileNames[LVis.FileId];
+                LList.Add(LItem);
+              end;
+            end;
+          end;
+        end;
+        LChild := ATree.Nodes[LChild].NextSibling;
+      end;
+    end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
 function TLspServer.HandleOutline(const AMsg: TLspIncoming): string;
 const
   KINDS: array[TPasOutlineKind] of string = ('module', 'section', 'uses',
@@ -6478,6 +6542,9 @@ begin
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
     LEntries := PasModuleOutline(FProject.Model(LMid).Tree);
+    if (AMsg.Params <> nil)
+      and AMsg.Params.GetValue<Boolean>('usesItems', False) then
+      LEntries := WithUsesItems(FProject.Model(LMid).Tree, LEntries);
   end
   else
   begin

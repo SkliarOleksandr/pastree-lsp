@@ -1081,6 +1081,14 @@ procedure LspOutlineModule(const AFileName: string;
   const AOnDone: TLspOutlineProc);
 
 /// <summary>
+/// LspOutlineModule plus a row per unit of every uses clause (Kind 'uses',
+/// Head 'unit', Name the unit) - what the Structure pane builds its tree
+/// from (PasTreeIdePlugin.Outline). The picker does not ask for those.
+/// </summary>
+procedure LspOutlineStructure(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+
+/// <summary>
 /// The picker's PROJECT list (scope "project"): every declaration of every
 /// unit of the project that owns AFileName, without positions. Asked of the
 /// owner alone.
@@ -1657,7 +1665,7 @@ type
       const AOnDone: TLspWorkspaceSymbolsProc);
     /// <summary>pastree/outline - AScope is 'module' (AFileName's own list)
     /// or 'project' (AFileName ignored). See LspOutlineModule.</summary>
-    procedure Outline(const AScope, AFileName: string;
+    procedure Outline(const AScope, AFileName: string; AUsesItems: Boolean;
       const AOnDone: TLspOutlineProc);
     /// <summary>pastree/units - AScope 'project' or 'closure'; AFileName
     /// the document whose uses mark the rows ('' for none).</summary>
@@ -4594,7 +4602,7 @@ begin
 end;
 
 procedure TLspSession.Outline(const AScope, AFileName: string;
-  const AOnDone: TLspOutlineProc);
+  AUsesItems: Boolean; const AOnDone: TLspOutlineProc);
 var
   LParams, LDoc: TJSONObject;
   LProjectFile: string;
@@ -4615,6 +4623,8 @@ begin
     LDoc := TJSONObject.Create;
     LDoc.AddPair('uri', PathToLspUri(AFileName));
     LParams.AddPair('textDocument', LDoc);
+    if AUsesItems then
+      LParams.AddPair('usesItems', TJSONBool.Create(True));
   end;
   LProjectFile := FProjectFile;
   // Raw: the answer is a table of 100k rows for a big project, read by
@@ -6632,7 +6642,21 @@ begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  LSession.Outline('module', AFileName, AOnDone);
+  LSession.Outline('module', AFileName, False, AOnDone);
+end;
+
+procedure LspOutlineStructure(const AFileName: string;
+  const AOnDone: TLspOutlineProc);
+var
+  LSession: TLspSession;
+begin
+  LSession := SessionForRequest(AFileName);
+  if LSession = nil then
+  begin
+    AOnDone(False, nil, 'LSP session not initialized');
+    Exit;
+  end;
+  LSession.Outline('module', AFileName, True, AOnDone);
 end;
 
 procedure LspOutlineProject(const AFileName: string;
@@ -6646,7 +6670,7 @@ begin
     AOnDone(False, nil, 'LSP session not initialized');
     Exit;
   end;
-  LSession.Outline('project', AFileName, AOnDone);
+  LSession.Outline('project', AFileName, False, AOnDone);
 end;
 
 procedure LspUnits(const AScope, AFileName: string;

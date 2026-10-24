@@ -2454,6 +2454,7 @@ var
   LRows: TArray<TLspOutlineRow>;
   LGreet, LGreetImpl, LModule, LField, LIdx: Integer;
   LLine, LChar: Integer;
+  LUnitLine, LUnitChar: Integer;
   LAllStamped, LAnyInterface, LAnyImplementation, LAnyPositioned: Boolean;
 
   function FindRow(const AKind, AName: string; AImpl: Boolean;
@@ -2532,6 +2533,31 @@ begin
   Check((LGreet >= 0) and (LRows[LGreet].Key = 'greet') and
     (LField >= 0) and (LRows[LField].Key = 'tbox.value'),
     'the reader stamps the lower-cased name column as the filter key');
+
+  // usesItems (the Structure pane's tree): the program's uses clause, then a
+  // row per unit it names, positioned on the name. Without it - the picker's
+  // request above - a uses clause is the one landmark row.
+  Check(FindRow('uses', 'DemoUnit', False, '') < 0,
+    'without usesItems no unit of a uses clause is a row');
+  LParams := TJSONObject.Create;
+  LParams.AddPair('scope', 'module');
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(TPath.Combine(GFixtureDir, 'DemoApp.dpr')));
+  LParams.AddPair('textDocument', LDoc);
+  LParams.AddPair('usesItems', TJSONBool.Create(True));
+  Check(AskRaw('pastree/outline', LParams), 'outline (module, usesItems) answered');
+  LRows := ParseOutlineTable(GResultJson, 'Demo.dproj', LError);
+  LIdx := FindRow('uses', '', False, '');
+  LField := FindRow('uses', 'Demo.Dotted', False, '');
+  Check((LIdx >= 0) and (LField > LIdx) and (LRows[LField].Head = 'unit') and
+    (FindRow('uses', 'DemoUnit', False, '') = LIdx + 1),
+    'the uses clause is followed by its units, head word "unit", dotted names whole');
+  FindPos(TPath.Combine(GFixtureDir, 'DemoApp.dpr'),
+    '  Demo.Dotted in ''Demo.Dotted.pas'',', 'Demo.Dotted', LUnitLine, LUnitChar);
+  Check((LField >= 0) and (LRows[LField].Line = LUnitLine + 1) and
+    (LRows[LField].Col = LUnitChar + 1), 'a unit row sits on the unit''s name');
+  Check(FindRow('section', '', False, '') >= 0,
+    'and the program''s main begin is a section row');
 
   // The project list.
   LParams := TJSONObject.Create;

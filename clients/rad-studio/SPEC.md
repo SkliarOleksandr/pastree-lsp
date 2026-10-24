@@ -513,6 +513,32 @@ above (Itanium-mangled in Win64, e.g. `_ZN12Sourcemodule12LSPGetErrorsE`);
 `delphierrorinsite280/290/370` all import `LSPGetErrors`, `IDELSP280/290/370`
 all import it and `UpdateErrorMarks` and all carry the marker GUID.
 
+**A project's main source is asked about under its .dproj** (read
+2026-10-23, proven with a probe manager on AVImarkD37.dpk 2026-10-24). The
+parse hooks of step 1 are `ElisionParser.TElisionModule`: `Modified` ->
+`RemoveErrors` on every edit (`UpdateErrorMarks(nil, Buffer, False)`), and
+`ApplyErrors` after every background parse (`UpdateErrorMarks(ItsOwnErrors,
+Buffer, True)` - the Errors folder rebuilt from the IDE's parse). Both find
+the buffer by the editor's name but ask the question with
+`IOTAModule.FileName` - for a .dpr/.dpk the project module, `X.dproj`. The
+question (`TCodeCompletionManager.SupportsErrorInsight`) answers from a
+cached current-manager list, and only when it is empty loads one for that
+name (`LoadKibitzManager`): a first loop over the registered managers that
+SKIPS every one implementing `IOTACodeInsightSelection` - PasTree's and
+DelphiLSP's alike - and takes one whose `HandlesFile` and `GetEnabled` say
+yes (an `IOTAAsyncCodeInsightManager` with `AsyncEnabled` and
+`IOTAPrimaryCodeInsightManager` first), then, only if none, the editor
+option sets by file extension. `.dproj` is in the XML set, which names no
+provider, so the answer was always no, and the .dpr's marks lived from our
+push to the next parse (half a second). DelphiLSP has the same wipe and
+hides it by publishing later. The fix since 0.76.7:
+`TPasProjectSourceManager` in `PasTreeIdePlugin.CodeInsight`, a second,
+non-selectable manager whose `HandlesFile` is True for a `.dproj` while
+PasTree is the selected provider and native Error Insight is on, and whose
+every other method and interface - the marker, async, primary - is the main
+manager's (the list is a cache: it may stay current and get the .dpr's Code
+Insight calls). Its own ID keeps `FindManagerFromId` finding the main one.
+
 **Taken in 0.75.0** (`PasTreeIdePlugin.NativeErrorInsight`): the manager
 answers the marker; the diagnostics-changed listener converts the server's
 diagnostics and, while PasTree is the provider, pushes them through
@@ -743,7 +769,7 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Outline | **Have again** (0.76.0; withdrawn 2026-09-01 .. 2026-10-23) | Structure pane, private `StructureType` 'PasTree.Outline' | withdrawn because its own badges (a `TImageList` through `AddImageList`) never showed in the themed IDE. Back with the IDE's own icons: coreide exports `Parsernodes.ImageIndexOffset`, where the Pascal structure icons start in the pane's image list, and a node answers it plus DelphiLSP's offset for its LSP SymbolKind (`TDocumentSymbolNode.get_ImageIndex`, table in `PasTreeIdePlugin.Outline`; 8/9 = folder closed/open). Same export in 22.0, 23.0, 37.0 and Win64. No switch of its own since 0.76.3: shown exactly while PasTree is the Insight Provider (with PasTree selected nothing else fills the pane; with RAD Studio selected DelphiLSP does), taken back on ManagerDisabled. Rebuilt on EditorViewActivated and after each analysis of the shown file, unless its symbols are unchanged; collapsed nodes stay collapsed; the Errors folder is pushed again after every new context, which drops it |
+| Outline | **Have again** (0.76.0; withdrawn 2026-09-01 .. 2026-10-23) | Structure pane, private `StructureType` 'PasTree.Outline' | withdrawn because its own badges (a `TImageList` through `AddImageList`) never showed in the themed IDE. Back with the IDE's own icons: coreide exports `Parsernodes.ImageIndexOffset`, where the Pascal structure icons start in the pane's image list, and a node answers it plus DelphiLSP's offset for its LSP SymbolKind (`TDocumentSymbolNode.get_ImageIndex`, table in `PasTreeIdePlugin.Outline`; 8/9 = folder closed/open). Same export in 22.0, 23.0, 37.0 and Win64. Laid out as DelphiLSP lays it out since 0.76.4: a Structure root, the sections (interface, implementation, initialization, finalization, a program's begin), each uses clause a folder of its units, declarations with their signatures, members under their type; only the root and the interface start expanded. Built from pastree/outline (module, usesItems) - documentSymbol has no sections, uses or signatures. No switch of its own since 0.76.3: shown exactly while PasTree is the Insight Provider (with PasTree selected nothing else fills the pane; with RAD Studio selected DelphiLSP does), taken back on ManagerDisabled. Rebuilt on EditorViewActivated and after each analysis of the shown file, unless its symbols are unchanged; collapsed nodes stay collapsed; the Errors folder is pushed again after every new context, which drops it |
 | Outline follows the caret | Ready | `IOTAStructureView370.SelectNodeEx` (`105`) + `EditorSetCaretPos` (`ToolsAPI.Editor.pas:878`) | scroll-into-view select, driven by a real caret event instead of polling |
 | Outline survives a refresh | Ready | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
 | Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
