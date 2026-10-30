@@ -3638,6 +3638,67 @@ begin
     + 'Definition does - not on its line''s keyword, not one line past it');
 end;
 
+{ 5t. classComplete with the caret in a FREE routine's body that nothing
+  declares: the declaration goes into the interface section (Alex,
+  2026-10-29 - IntToStrSep2 answered "nothing to implement"). }
+procedure TestClassCompleteFreeDecl;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+
+  function AskAt(const AFixture, ALineHint, AToken: string): Boolean;
+  var
+    LParams, LDoc, LPos: TJSONObject;
+  begin
+    LFile := TPath.Combine(GFixtureDir, AFixture);
+    FindPos(LFile, ALineHint, AToken, LLine, LChar);
+    LParams := TJSONObject.Create;
+    LDoc := TJSONObject.Create;
+    LDoc.AddPair('uri', PathToLspUri(LFile));
+    LParams.AddPair('textDocument', LDoc);
+    LPos := TJSONObject.Create;
+    LPos.AddPair('line', TJSONNumber.Create(LLine));
+    LPos.AddPair('character', TJSONNumber.Create(LChar));
+    LParams.AddPair('position', LPos);
+    Result := Ask('pastree/classComplete', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5t. classComplete declares a free routine from its body ===');
+  Check(AskAt('DemoClassCompleteFreeDecl.pas', 'function Undeclared(',
+    'Undeclared'), 'answered for a caret on an undeclared free body');
+  Check(GOk and GResultJson.Contains('"count":1') and GResultJson.Contains(
+    '"newText":"\r\nfunction Undeclared(const A: Integer; B: string): '
+    + 'string; inline;"'),
+    'one edit: the declaration, directives and all');
+  Check(GOk and GResultJson.Contains('"line":17,"character":30'),
+    'after the interface section''s last routine declaration');
+  Check(GOk and GResultJson.Contains('"caret":{"line":18,"character":9}'),
+    'and the caret lands on the new declaration''s identifier');
+
+  Check(AskAt('DemoClassCompleteFreeDecl.pas', 'procedure Helper;', 'Helper'),
+    'answered for a forward-declared body');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('nothing to implement in Helper'),
+    'a forward declaration is a declaration - nothing to do');
+
+  Check(AskAt('DemoClassCompleteFreeDecl.pas', 'procedure Changed(A: string)',
+    'Changed'), 'answered for a body whose declaration differs');
+  Check(GOk and GResultJson.Contains('"count":0')
+    and GResultJson.Contains('declared with other parameters'),
+    'a signature edit is refused, not declared a second time');
+
+  Check(AskAt('DemoClassCompleteFreeDeclFirst.pas', 'procedure Lonely(',
+    'Lonely'), 'answered for the first routine of an interface');
+  Check(GOk and GResultJson.Contains(
+    '"newText":"\r\n\r\nprocedure Lonely(A: Integer);"')
+    and GResultJson.Contains('"line":11,"character":6'),
+    'at the end of the section, a blank line below the type');
+  Check(GOk and GResultJson.Contains('"caret":{"line":13,"character":10}'),
+    'and the caret on its identifier');
+end;
+
 { 5h. pastree/syncPrototypes: a signature edited on one side, mirrored.
 
   Every check names a POSITION as well as an expectation, because the caret is
@@ -4973,6 +5034,7 @@ begin
       TestClassCompleteFieldOnlyCaret;
       TestClassCompleteGeneric;
       TestClassCompleteOrphanCaret;
+      TestClassCompleteFreeDecl;
       TestClassCompleteBrokenBuffer;
       TestSyncPrototypes;
       TestAnnotateArgs;

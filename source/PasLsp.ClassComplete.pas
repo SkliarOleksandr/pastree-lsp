@@ -38,7 +38,10 @@ unit PasLsp.ClassComplete;
      correctly qualified to a class this unit declares, with no matching
      member in `TFoo` - the declaration goes back into the class. Native
      Delphi's Ctrl+Shift+C does this; a replacement that only fills in bodies
-     is not a replacement. See ClassCompleteFor's orphan pass, and
+     is not a replacement. The same for a FREE routine whose body the caret
+     is in, declared nowhere in the unit: the declaration goes into the
+     interface section, after its last routine declaration (FreeDeclAnchor).
+     See ClassCompleteFor's orphan pass, and
      MemberAnchorsOf for where the declaration lands - the SAME rule a
      property's synthesized accessor method follows: end of `private` if
      there is one, a new `private` ahead of any other section if there is
@@ -1508,6 +1511,54 @@ begin
   Result := True;
 end;
 
+{ Where a FREE routine's declaration goes when its body has none (the free
+  half of the orphan pass): right after the interface section's last routine
+  declaration, at its indentation, when it has one; else at the end of the
+  section, a blank line below whatever is there. ABlankLine says which. False
+  when there is no interface section (a .dpr) or the point is in an include. }
+function FreeDeclAnchor(const ATree: TPasTree; out ALine, ACol: Integer;
+  out AIndent: string; out ABlankLine: Boolean): Boolean;
+var
+  LSec, LChild, LLast, LVisIdx: Integer;
+begin
+  Result := False;
+  ALine := 0;
+  ACol := 0;
+  AIndent := '';
+  ABlankLine := True;
+  LSec := ChildOfKind(ATree, 0, nkInterfaceSec);
+  if LSec = NIL_NODE then
+    Exit;
+  LLast := NIL_NODE;
+  LChild := ATree.Nodes[LSec].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (ATree.Nodes[LChild].Kind = nkRoutine) and ((LLast = NIL_NODE) or
+       (ATree.Nodes[LChild].LastToken > ATree.Nodes[LLast].LastToken)) then
+      LLast := LChild;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+  if LLast <> NIL_NODE then
+  begin
+    ABlankLine := False;
+    AIndent := IndentOfToken(ATree, ATree.NodeLeftmostVis(LLast));
+    LVisIdx := PastSemicolon(ATree, ATree.Nodes[LLast].LastToken);
+  end
+  else
+  begin
+    LVisIdx := ATree.Nodes[LSec].LastToken;
+    // An empty section: its span degenerates to the keyword (ImplInsertPos).
+    if LVisIdx < ATree.Nodes[LSec].FirstToken then
+      LVisIdx := ATree.Nodes[LSec].FirstToken
+    else
+      LVisIdx := PastSemicolon(ATree, LVisIdx);
+  end;
+  if (LVisIdx < 0) or (LVisIdx > High(ATree.Source.Visible)) or
+     (ATree.Source.Visible[LVisIdx].FileId <> 0) then
+    Exit;
+  Result := VisLineCol(ATree, LVisIdx, True, ALine, ACol);
+end;
+
 { An existing body's two insertion points (see TImplSite). The one BEFORE it
   starts at its `class` word, which sits outside the node (BuildHeader's
   note), and climbs over the comments directly above it - a comment that
@@ -1992,6 +2043,10 @@ var
   // raw position, which InsertedLinesAhead is asked about), the lines from
   // that edit's line down to the declaration, and the column of its name.
   LOrphanEditLine, LOrphanEditCol, LOrphanLineOffset, LOrphanCaretCol: Integer;
+  // The caret's own free routine, when it is a body: its declaration-to-be.
+  LFreeOrphan: TOrphanCandidate;
+  LHasFreeOrphan, LFreeBlankLine, LSameName: Boolean;
+  LFreeIndent: string;
   // ---- the property-accessor pass
   LTypeName, LPropType, LIndexParams, LWord, LSpecText, LAccessorName,
     LSetterBody, LReadField, LAllText: string;
@@ -2168,6 +2223,7 @@ begin
       end;
     end;
 
+    LHasFreeOrphan := False;
     for LIdx := 0 to High(ATree.Nodes) do
     begin
       if ATree.Nodes[LIdx].Kind <> nkRoutine then
@@ -2203,8 +2259,9 @@ begin
           unit has been seen (below), because the real declaration can sit
           AFTER this implementation in ATree.Nodes (arena order, not source
           order). A free routine (LDots = 1) has no class to be orphaned
-          from - a missing forward declaration there is a compile error, not
-          this feature's business. }
+          from; a body with no declaration is legal there, and gets one in
+          the interface section only when the caret is in it - see the free
+          orphan below. }
         if LDots > 1 then
         begin
           LOrphanCand := Default(TOrphanCandidate);
@@ -2215,6 +2272,16 @@ begin
             LOrphanCand.NameOffset);
           if LOrphanCand.Header <> '' then
             LOrphans.Add(LOrphanCand);
+        end
+        else if LScopeIsRoutine and not LSkip and (LKey = LScopeKey) then
+        begin
+          // The caret's free routine as a body: a declaration candidate,
+          // filtered below once every declaration has been seen.
+          LFreeOrphan := Default(TOrphanCandidate);
+          LFreeOrphan.Key := LKey;
+          LFreeOrphan.Header := BuildHeader(ATree, LIdx, LNameFirst, LNameLast,
+            '', LSegments[0], {AKeepDirectives} True, LFreeOrphan.NameOffset);
+          LHasFreeOrphan := LFreeOrphan.Header <> '';
         end;
         Continue;
       end;
@@ -2580,6 +2647,52 @@ begin
         LSeen.Free;
         LMembers.Free;
       end;
+    end;
+
+    { THE FREE ORPHAN: the caret in the body of a free routine declared
+      nowhere in the unit - the declaration goes into the interface section,
+      as native Ctrl+Shift+C does it (Alex, 2026-10-29: IntToStrSep2 answered
+      "nothing to implement"). Only at the caret, never for the whole unit: a
+      body without a declaration is a legal implementation-only helper, and
+      publishing every one of those is not what anybody pressed the key for.
+      A routine of the same name declared with OTHER parameters and no
+      `overload` is a signature being edited - syncPrototypes' question; a
+      second declaration would only be E2004, so it is refused with that. }
+    if LHasFreeOrphan and not LDeclaredKeys.ContainsKey(LScopeKey) then
+    begin
+      LSameName := False;
+      for LIdx := 0 to LDecls.Count - 1 do
+        if (LDecls[LIdx].Chain = '') and
+           (LDecls[LIdx].NameLower = LowerCase(StripGenerics(LScopeName))) then
+          LSameName := True;
+      if LSameName and
+         (Pos(' overload;', LowerCase(LFreeOrphan.Header)) = 0) then
+      begin
+        Result.Provider := 'pastree/classComplete: ' + LScopeName +
+          ' is declared with other parameters - nothing to declare';
+        Exit;
+      end;
+      if not FreeDeclAnchor(ATree, LOrphanEditLine, LOrphanEditCol,
+        LFreeIndent, LFreeBlankLine) then
+      begin
+        Result.Provider := 'pastree/classComplete: no interface section to '
+          + 'declare ' + LScopeName + ' in';
+        Exit;
+      end;
+      LChain := LScopeName;
+      if LFreeBlankLine then
+      begin
+        AddEdit(LOrphanEditLine, LOrphanEditCol, 'member',
+          sLineBreak + sLineBreak + LFreeOrphan.Header);
+        LOrphanLineOffset := 2;
+      end
+      else
+      begin
+        AddEdit(LOrphanEditLine, LOrphanEditCol, 'member',
+          sLineBreak + LFreeIndent + LFreeOrphan.Header);
+        LOrphanLineOffset := 1;
+      end;
+      LOrphanCaretCol := Length(LFreeIndent) + 1 + LFreeOrphan.NameOffset;
     end;
 
     // Declaration order is source order, and the arena is not in source
