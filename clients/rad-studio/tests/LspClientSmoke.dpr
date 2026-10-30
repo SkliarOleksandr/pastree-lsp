@@ -3880,6 +3880,15 @@ begin
     and GResultJson.Contains('"newText":"{AHandle:} {out} "'),
     'the two annotated arguments are left alone, the third is written');
 
+  // `F(A < B, C > (D))` over values: one nkAmbiguous node, two comparison
+  // arguments (PasTree 0.145.0, spec 16.3.1) - each gets its own name.
+  Check(AskAt('Both(M < H, H > (M));', 'Both'),
+    'answered for a call whose arguments are an nkAmbiguous');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ALess:} "')
+    and GResultJson.Contains('"newText":"{AMore:} "'),
+    'the two comparisons are two arguments, each annotated');
+
   // Overloads by arity.
   Check(AskAt('Twin(1);', 'Twin'), 'answered for the one-argument overload');
   Check(GOk and GResultJson.Contains('"count":1')

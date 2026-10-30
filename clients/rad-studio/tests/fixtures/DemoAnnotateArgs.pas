@@ -33,6 +33,9 @@ unit DemoAnnotateArgs;
     the Defaults call        - parameters whose defaults are IDENTIFIERS
                                (True, MaxInt): a default is not a name, so
                                every argument keeps its own parameter's.
+    the Both call            - `A < B, C > (D)` over values: two comparisons
+                               in one PasTree node (nkAmbiguous, 0.145.0),
+                               annotated as the two arguments they are.
 *)
 
 interface
@@ -53,6 +56,7 @@ procedure Outer(AValue: Integer; AExtra: Integer);
 procedure Defaults(AFlag: Boolean; AVisible: Boolean = True; ACacheable:
   Boolean =
   True; AMax: Integer = MaxInt);
+procedure Both(ALess, AMore: Boolean);
 
 type
   TGateway = procedure(const ARequest: string; out AReply: string);
@@ -103,6 +107,10 @@ procedure Defaults(AFlag: Boolean; AVisible: Boolean; ACacheable: Boolean;
 begin
 end;
 
+procedure Both(ALess, AMore: Boolean);
+begin
+end;
+
 procedure Demo;
 var
   S: string;
@@ -127,6 +135,7 @@ begin
   Outer(True, M);
   Open({AFileName:} S, M, {AHandle:} H);
   Defaults(False, True, True, 5);
+  Both(M < H, H > (M));
   M := 0;
 end;
 

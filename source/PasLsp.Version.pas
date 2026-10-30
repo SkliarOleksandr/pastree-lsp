@@ -358,7 +358,11 @@ const
   /// declaration's colon and the types a heritage list can name in it - an
   /// older library compiles and silently lists constants and records there.
   /// (TPasCompletion.CaretSource, from the same release, is a compile error.)
-  cMinPasTreeVersion = '0.126.0';
+  /// 0.145.0 (2026-10-30): a call argument `F(A < B, C > (D))` is ONE
+  /// nkAmbiguous node for the arguments the model reads it as (spec 16.3.1;
+  /// AmbigArgCount / AmbigArg, which annotateArgs expands) - an older
+  /// library does not compile.
+  cMinPasTreeVersion = '0.145.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

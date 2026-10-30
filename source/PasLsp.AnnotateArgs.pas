@@ -805,6 +805,55 @@ begin
       Exit(True);
 end;
 
+{ The arguments of the nkCall ACall in order, each as the node it starts at
+  (ANodes) and whether it is a comparison (ACompare). An nkAmbiguous child
+  stands for what the model reads it as (AmbigArgCount / AmbigArg): the one
+  generic call or cast, starting at its head, or its comparisons, each
+  starting at its left operand, and its middle items. False while one of
+  them is undecided - nobody knows how many arguments there are then. }
+function ArgStarts(AModel: TPasSemaModel; ACall: Integer;
+  out ANodes: TArray<Integer>; out ACompare: TArray<Boolean>): Boolean;
+var
+  LArg, LCount, LK, LN, LLeft, LRight: Integer;
+  LTree: TPasTree;
+begin
+  Result := True;
+  ANodes := nil;
+  ACompare := nil;
+  LTree := AModel.Tree;
+  LCount := 0;
+  LArg := LTree.Nodes[ACall].FirstChild;
+  if LArg <> NIL_NODE then
+    LArg := LTree.Nodes[LArg].NextSibling;
+  while LArg <> NIL_NODE do
+  begin
+    LN := 1;
+    if LTree.Nodes[LArg].Kind = nkAmbiguous then
+    begin
+      LN := AModel.AmbigArgCount(LArg);
+      if LN < 0 then
+        Exit(False);
+    end;
+    SetLength(ANodes, LCount + LN);
+    SetLength(ACompare, LCount + LN);
+    if (LTree.Nodes[LArg].Kind = nkAmbiguous) and
+       (AModel.AmbigReadingOf(LArg) = arCompare) then
+      for LK := 0 to LN - 1 do
+      begin
+        ACompare[LCount] := AModel.AmbigArg(LArg, LK, LLeft, LRight);
+        ANodes[LCount] := LLeft;
+        Inc(LCount);
+      end
+    else
+    begin
+      ANodes[LCount] := LArg;
+      ACompare[LCount] := False;
+      Inc(LCount);
+    end;
+    LArg := LTree.Nodes[LArg].NextSibling;
+  end;
+end;
+
 function AnnotateArgsAt(ACompletion: TPasCompletion; AModel: TPasSemaModel;
   AProject: TPasSemaProject; APasLine, APasCol: Integer;
   const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
@@ -825,6 +874,8 @@ var
   LComments: TArray<string>;
   LText: string;
   LEdit: TLspAnnotateEdit;
+  LArgNodes: TArray<Integer>;
+  LArgIsCompare: TArray<Boolean>;
 begin
   Result := Default(TLspAnnotateAnswer);
   Result.Provider := cProvider + ': the caret is not in a call';
@@ -868,16 +919,18 @@ begin
     Result.Scope := 'one';
   end;
 
-  // The arguments: every child of the call node after the callee.
-  LArgCount := 0;
-  LArg := LTree.Nodes[LCall].FirstChild;
-  if LArg <> NIL_NODE then
-    LArg := LTree.Nodes[LArg].NextSibling;
-  while LArg <> NIL_NODE do
+  // The arguments: every child of the call node after the callee - except
+  // that `F(A < B, C > (D))` is ONE child for as many arguments as the
+  // model reads it as (PasTree 0.145.0, spec 16.3.1): two comparisons, or
+  // the one generic call or cast. Each argument is the node it starts at
+  // and whether it is a comparison, which names nothing of its own.
+  if not ArgStarts(AModel, LCall, LArgNodes, LArgIsCompare) then
   begin
-    Inc(LArgCount);
-    LArg := LTree.Nodes[LArg].NextSibling;
+    Result.Provider := cProvider + ': an argument reads as type arguments ' +
+      'or as comparisons, and nothing has decided which yet';
+    Exit;
   end;
+  LArgCount := Length(LArgNodes);
   if LArgCount = 0 then
   begin
     Result.Provider := cProvider + ': the call has no arguments';
@@ -1014,11 +1067,10 @@ begin
     one argument - the line break and the annotation - and they are ONE edit,
     because two edits at one spot are two things a writer must order and a
     client must not reorder. }
-  LArgIdx := 0;
   LSelfNamed := 0;
-  LArg := LTree.Nodes[LTree.Nodes[LCall].FirstChild].NextSibling;
-  while LArg <> NIL_NODE do
+  for LArgIdx := 0 to LArgCount - 1 do
   begin
+    LArg := LArgNodes[LArgIdx];
     if LTree.NodeVisRange(LArg, LFirst, LLast) and
        GapBefore(LTree, LFirst, LGapLine, LGapCol, LInsLine, LInsCol,
          LOnOwnLine) then
@@ -1041,7 +1093,7 @@ begin
       begin
         LComments := LeadingBraceComments(LTree, LFirst);
         if (AOptions.Mode <> amNone) and not HasNameComment(LComments) then
-          if (AOptions.Mode <> amAnonymous) or
+          if (AOptions.Mode <> amAnonymous) or LArgIsCompare[LArgIdx] or
              IsAnonymousArg(AModel, LArg) then
             LText := '{' + LParams[LArgIdx].Name + ':} '
           else
@@ -1081,8 +1133,6 @@ begin
         Result.Edits := Result.Edits + [LEdit];
       end;
     end;
-    Inc(LArgIdx);
-    LArg := LTree.Nodes[LArg].NextSibling;
   end;
 
   { NOT "already annotated" when nothing was written because the anonymous
