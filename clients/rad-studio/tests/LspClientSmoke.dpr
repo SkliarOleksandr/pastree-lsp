@@ -4848,6 +4848,269 @@ begin
   end;
 end;
 
+{ Within a few seconds, the last publish for the file named AFileName (lower
+  case, see FindDiagOf) holds AText - or, AWant False, does not; no publish
+  at all counts as not holding it. Top level for PumpUntil (E2555). }
+function DiagShows(const AFileName, AText: string; AWant: Boolean): Boolean;
+begin
+  Result := PumpUntil(
+    function: Boolean
+    var
+      LKey: string;
+    begin
+      Result := (FindDiagOf(AFileName, LKey) and
+        GDiagnostics[LKey].Contains(AText)) = AWant;
+    end, 5000);
+end;
+
+{ 5y. AN $I INCLUDE'S EDIT REACHES THE UNITS INCLUDING IT (0.76.10), over a
+  project of its own in a scratch directory - its own server and log, like
+  5x. An include has no model, and the server's "is this file ours" asked
+  ModelIdOf alone: an editor edit of one was "outside this closure: kept as
+  an overlay, no rebuild", a saved one "outside this closure - no rebuild",
+  and the units including it stayed stale until something else rebuilt
+  (2026-10-31). Now an include of ONE unit is a module run of that unit -
+  in the interface, where a consumer is redone with it, and in a routine
+  body - an include of two is a rebuild, and a saved one is a rebuild.
+
+  And an include is never a root or a priority file. The IDE opens its tabs
+  before the first analysis, and the last one opened was the priority file,
+  which AnalyzeStaged loads as a unit whatever it is: the include became a
+  unit of its own (E2029 on its first line, published to its tab), and its
+  edits re-ran THAT model and never its includer. So the include whose edit
+  is checked first is the one opened last. A folder session (no project, the
+  open documents are the roots) closes the section. }
+procedure TestIncludeEdits(const AExe: string);
+var
+  LDir, LLog, LUnitText, LBefore, LAfter: string;
+  LSaved, LOwn: TLspClient;
+  LOptions: TLspInitOptions;
+  LLine, LChar: Integer;
+
+  function P(const AName: string): string;
+  begin
+    Result := TPath.Combine(LDir, AName);
+  end;
+
+  // ReadServerLog's, over this section's own log.
+  function ReadLog: string;
+  var
+    LStream: TFileStream;
+    LBytes: TBytes;
+  begin
+    Result := '';
+    if not TFile.Exists(LLog) then
+      Exit;
+    LStream := TFileStream.Create(LLog, fmOpenRead or fmShareDenyNone);
+    try
+      SetLength(LBytes, LStream.Size);
+      if Length(LBytes) > 0 then
+        LStream.ReadBuffer(LBytes[0], Length(LBytes));
+      Result := TEncoding.UTF8.GetString(LBytes);
+    finally
+      LStream.Free;
+    end;
+  end;
+
+  function NewClient(const AProjectFile: string): TLspClient;
+  begin
+    Result := TLspClient.Create(AExe, ExtractFilePath(AExe),
+      procedure(const AText: string)
+      begin
+        Writeln('  [log] ' + AText);
+      end);
+    Result.OnNotification :=
+      procedure(const AMethod: string; AParams: TJSONValue)
+      begin
+        if (AMethod = 'textDocument/publishDiagnostics') and
+           Assigned(AParams) then
+          GDiagnostics.AddOrSetValue(
+            LowerCase(AParams.GetValue<string>('uri', '')), AParams.ToJSON);
+      end;
+    GClient := Result;
+    LOptions := Default(TLspInitOptions);
+    LOptions.ProjectFile := AProjectFile;
+    LOptions.Platform := 'Win32';
+    LOptions.SearchPaths := [LDir];
+    LOptions.LogFile := LLog;
+  end;
+
+  // A request that waits for the analysis: the edit before it is analyzed.
+  procedure Settle;
+  begin
+    FindPosInText(LUnitText, 'Result := cIntfValue;', 'cIntfValue', LLine,
+      LChar);
+    Ask('textDocument/definition', PositionParams(P('IncUnit.pas'), LLine,
+      LChar));
+  end;
+
+  procedure SendDidChangeWatched(const AFile: string);
+  var
+    LParams, LItem: TJSONObject;
+    LChanges: TJSONArray;
+  begin
+    LItem := TJSONObject.Create;
+    LItem.AddPair('uri', PathToLspUri(AFile));
+    LItem.AddPair('type', TJSONNumber.Create(2));   // Changed
+    LChanges := TJSONArray.Create;
+    LChanges.Add(LItem);
+    LParams := TJSONObject.Create;
+    LParams.AddPair('changes', LChanges);
+    GClient.Notify('workspace/didChangeWatchedFiles', LParams);
+  end;
+
+begin
+  Writeln;
+  Writeln('=== 5y. an $I include''s edit reaches the units including it ===');
+  LDir := TPath.Combine(TPath.GetTempPath,
+    'pastree-includes-' + IntToStr(GetCurrentProcessId));
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  LLog := P('server.log');
+  TFile.WriteAllText(P('IncApp.dpr'), 'program IncApp;'#13#10 +
+    'uses IncUnit, IncUser, IncTwoA, IncTwoB;'#13#10'begin'#13#10'end.'#13#10);
+  TFile.WriteAllText(P('IncIntf.inc'), 'const cIntfValue = 1;'#13#10);
+  TFile.WriteAllText(P('IncBody.inc'), 'LBody := 1;'#13#10);
+  TFile.WriteAllText(P('IncSaved.inc'), 'const cSavedValue = 1;'#13#10);
+  TFile.WriteAllText(P('IncShared.inc'), 'const cShared = 1;'#13#10);
+  // IncIntf.inc in the interface, IncSaved.inc in the implementation section,
+  // IncBody.inc in a routine body.
+  LUnitText := 'unit IncUnit;'#13#10'interface'#13#10 +
+    '{$I IncIntf.inc}'#13#10'function UseIntf: Integer;'#13#10 +
+    'function UseBody: Integer;'#13#10'function UseSaved: Integer;'#13#10 +
+    'implementation'#13#10'{$I IncSaved.inc}'#13#10 +
+    'function UseIntf: Integer;'#13#10'begin'#13#10 +
+    '  Result := cIntfValue;'#13#10'end;'#13#10 +
+    'function UseBody: Integer;'#13#10'var'#13#10'  LBody: Integer;'#13#10 +
+    'begin'#13#10'  {$I IncBody.inc}'#13#10'  Result := LBody;'#13#10 +
+    'end;'#13#10'function UseSaved: Integer;'#13#10'begin'#13#10 +
+    '  Result := cSavedValue;'#13#10'end;'#13#10'end.'#13#10;
+  TFile.WriteAllText(P('IncUnit.pas'), LUnitText);
+  TFile.WriteAllText(P('IncUser.pas'), 'unit IncUser;'#13#10'interface'#13#10 +
+    'uses IncUnit;'#13#10'const cUserValue = cIntfValue;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  TFile.WriteAllText(P('IncTwoA.pas'), 'unit IncTwoA;'#13#10'interface'#13#10 +
+    '{$I IncShared.inc}'#13#10'const cA = cShared;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  TFile.WriteAllText(P('IncTwoB.pas'), 'unit IncTwoB;'#13#10'interface'#13#10 +
+    '{$I IncShared.inc}'#13#10'const cB = cShared;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+
+  LSaved := GClient;
+  LOwn := nil;
+  try
+    LOwn := NewClient(P('IncApp.dpr'));
+    Check(LOwn.Start(LOptions), 'a server for the scratch project');
+    // Before the first analysis, an include LAST: the priority file.
+    SendDidOpen(P('IncUnit.pas'));
+    SendDidOpen(P('IncUser.pas'));
+    SendDidOpen(P('IncTwoA.pas'));
+    SendDidOpen(P('IncTwoB.pas'));
+    SendDidOpen(P('IncBody.inc'));
+    SendDidOpen(P('IncShared.inc'));
+    SendDidOpen(P('IncIntf.inc'));
+    Settle;
+    Check(GOk and GResultJson.Contains('IncIntf.inc'),
+      'the constant resolves into the include');
+    Check(not ContainsText(ReadLog, '<- ' + P('IncIntf.inc')),
+      'the include opened last was not loaded as a unit of its own');
+    Check(DiagShows('incintf.inc', 'E2029', False),
+      'and its tab has no "unit expected" error');
+
+    // The interface include: the includer and its consumer.
+    LBefore := ReadLog;
+    SendDidChange(P('IncIntf.inc'), 'const cIntfRenamed = 1;'#13#10);
+    Settle;
+    LAfter := Copy(ReadLog, Length(LBefore) + 1, MaxInt);
+    Check(DiagShows('incunit.pas', '''cIntfValue''', True),
+      'interface include: the unit including it lost the constant (E2003)');
+    Check(DiagShows('incuser.pas', '''cIntfValue''', True),
+      'interface include: and so did its consumer');
+    Check(ContainsText(LAfter, 'analysis done: incremental IncUnit.pas ' +
+      '(its $I include IncIntf.inc edited)'),
+      'interface include: a module run of its includer, the log naming both');
+    Check(not LAfter.Contains('analysis started: full rebuild'),
+      'interface include: and no closure rebuild');
+    SendDidChange(P('IncIntf.inc'), 'const cIntfValue = 1;'#13#10);
+    Settle;
+    Check(DiagShows('incunit.pas', '''cIntfValue''', False) and
+      DiagShows('incuser.pas', '''cIntfValue''', False),
+      'interface include: reverted, both clean again');
+
+    // The body include: the use it gains is one of the constant's.
+    LBefore := ReadLog;
+    SendDidChange(P('IncBody.inc'), 'LBody := cIntfValue;'#13#10);
+    FindPosInText(LUnitText, 'Result := cIntfValue;', 'cIntfValue', LLine,
+      LChar);
+    Check(Ask('textDocument/references',
+      PositionParams(P('IncUnit.pas'), LLine, LChar, True)),
+      'body include: references answered');
+    Check(GOk and GResultJson.Contains('IncBody.inc'),
+      'body include: the use it gained is a reference');
+    LAfter := Copy(ReadLog, Length(LBefore) + 1, MaxInt);
+    Check(ContainsText(LAfter, 'analysis done: incremental IncUnit.pas ' +
+      '(its $I include IncBody.inc edited)') and
+      not LAfter.Contains('analysis started: full rebuild'),
+      'body include: a module run of its includer');
+    SendDidChange(P('IncBody.inc'), 'LBody := 1;'#13#10);
+    Settle;
+
+    // Two includers: two modules, a rebuild.
+    LBefore := ReadLog;
+    SendDidChange(P('IncShared.inc'), 'const cSharedX = 1;'#13#10);
+    Settle;
+    LAfter := Copy(ReadLog, Length(LBefore) + 1, MaxInt);
+    Check(DiagShows('inctwoa.pas', '''cShared''', True) and
+      DiagShows('inctwob.pas', '''cShared''', True),
+      'two includers: both lost the constant');
+    Check(LAfter.Contains('IncShared.inc is an $I include of 2 units - ' +
+      'full rebuild') and LAfter.Contains('analysis started: full rebuild'),
+      'two includers: a full rebuild, the log saying why');
+    SendDidChange(P('IncShared.inc'), 'const cShared = 1;'#13#10);
+    Settle;
+    Check(DiagShows('inctwoa.pas', '''cShared''', False),
+      'two includers: reverted, clean again');
+
+    // Saved on disk, not open: the watched-file path.
+    LBefore := ReadLog;
+    TFile.WriteAllText(P('IncSaved.inc'), 'const cSavedRenamed = 1;'#13#10);
+    SendDidChangeWatched(P('IncSaved.inc'));
+    Settle;
+    LAfter := Copy(ReadLog, Length(LBefore) + 1, MaxInt);
+    Check(LAfter.Contains('changed on disk - rebuild scheduled') and
+      not LAfter.Contains('outside this closure'),
+      'saved include: its disk change scheduled a rebuild');
+    Check(DiagShows('incunit.pas', '''cSavedValue''', True),
+      'saved include: and the unit including it lost the constant');
+    TFile.WriteAllText(P('IncSaved.inc'), 'const cSavedValue = 1;'#13#10);
+    FreeAndNil(LOwn);
+
+    // A folder session: the open documents are the roots, and the include
+    // is not one of them.
+    LLog := P('server-folder.log');
+    LOwn := NewClient('');
+    Check(LOwn.Start(LOptions), 'a server for the folder');
+    SendDidOpen(P('IncUser.pas'));
+    SendDidOpen(P('IncIntf.inc'));
+    Settle;
+    Check(ContainsText(ReadLog, 'analysis started: full rebuild, 1 roots'),
+      'folder: one root - the open unit, not the open include');
+    LBefore := ReadLog;
+    SendDidChange(P('IncIntf.inc'), 'const cIntfRenamed = 1;'#13#10);
+    Settle;
+    LAfter := Copy(ReadLog, Length(LBefore) + 1, MaxInt);
+    Check(DiagShows('incuser.pas', '''cIntfValue''', True) and
+      ContainsText(LAfter, 'analysis done: incremental IncUnit.pas'),
+      'folder: the include''s edit is a module run of the unit including it');
+  finally
+    GClient := LSaved;
+    LOwn.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestRestartOnConfigChange(const AExe: string);
 var
   LOldPid, LNewPid: DWORD;
@@ -5053,6 +5316,7 @@ begin
       TestOnTypeFormatting;
       TestCancelHygiene;
       TestUnusedUnits(GExe);
+      TestIncludeEdits(GExe);
       // Empties the server log: after every section that reads it back.
       TestLogHeaderAfterClear;
       // These three each kill or replace the server, so they go last.

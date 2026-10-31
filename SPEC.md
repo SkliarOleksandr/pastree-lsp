@@ -835,6 +835,42 @@ its stages, and a `taken in by the incremental run` block with each new
 unit's file and diagnostics - the one part of the parse record (below) that a
 module run changes.
 
+**An `$I` include is part of the units that include it** (0.76.10). It has no
+model, and "is this document one of ours" (`AffectsAnalysis`) asked
+`ModelIdOf` alone, so an edited include was "outside this closure: kept as an
+overlay", a saved one was skipped by the file watcher, and the units including
+it stayed stale until something else rebuilt - in the client project,
+`AVIMARK.INC`, which 1301 units include. A file now counts when a model's file
+table (`Tree.Source.FileNames`: the unit's own file, then every include it
+read) holds it, and the one changed document resolves to its unit:
+
+- **One includer: a module run of that unit**, logged as `analysis done:
+  incremental <unit> (its $I include <inc> edited)`. The project re-reads the
+  include from its buffer like any other; PasTree's differential harness
+  found the run exact for an include in a routine body and in the interface.
+  On the client: 31 ms for a body include, 63 ms for an interface one, against
+  a 1.3 s rebuild.
+- **Several includers: a rebuild** (`<inc> is an $I include of N units - full
+  rebuild`) - the entry point takes one module; the parse donor still
+  reparses only the units whose text moved.
+- **Saved and not open:** the watched-file rebuild, as for a unit.
+
+The table behind it (`IncludersOf`) is kept per model id together with the
+file table each id was keyed from - the model's own array, held, so an
+unchanged address is an unchanged table - and brought up to date on the first
+question after a project swap: the closure once (5 ms on 3064 units), then the
+one unit a module run re-read (0.3 ms), never a walk per keystroke.
+
+**An include is never a root or a priority file.** `AnalyzeStaged` loads both
+as units whether or not anything uses them, and the IDE opens its tabs before
+the first analysis: the include opened last became a unit of its own (`unit
+<- AVIMARK.INC`, E2029 `unit, program, library or package expected` published
+to its tab), `ModelIdOf` knew it from then on, and its edits re-ran that model
+instead of the units including it. A priority include stands for its one
+includer (for none with several); with no project to ask yet, an `.inc` file
+is taken for an include; a folder session's open includes are not roots.
+`LspClientSmoke` 5y pins all of it on a project of its own.
+
 Then: `TPasAsyncSession.CreateForModule` takes ownership of the project, the
 document buffers go in exactly as for a full session, and the project comes
 back through `TakeProject` accepted or refused. A refusal costs one finalize -

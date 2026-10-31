@@ -142,6 +142,16 @@ type
   { What one promotion of a light unit came to (TLspServer.NotePromotion). }
   TLspPromoteOutcome = (poPromoted, poRebuild, poRefused);
 
+  { The units of the analyzed project that $I-include one file
+    (TLspServer.IncludersOf): how many, and the sum of their model ids -
+    which, for one includer, is its id. Kept by adding and taking away a
+    unit's ids as its file table changes (RefreshIncluders), so no unit has
+    to be remembered as "the first". }
+  TLspIncluders = record
+    Count: Integer;
+    MidSum: Int64;
+  end;
+
   { One semantic token (HandleSemanticTokens' answer, and the per-line type
     spans the result surfaces carry). The legend indices live beside the
     legend constant below. }
@@ -400,6 +410,29 @@ type
     // as the parse donor.
     FModuleMode: Boolean;
     FModuleFile: string;
+    // The $I include whose edit started the running module session, '' for
+    // a unit's own: FModuleFile is then the one unit that includes it, and
+    // the run's log lines name both (see TryStartModuleAnalysis).
+    FModuleInclude: string;
+    // THE $I INCLUDES OF THE ANALYZED PROJECT (IncludersOf): include path key
+    // (PasFullPathKey, ModelIdOf's own) -> the units including it. Built on
+    // the first question, brought up to date on the first one after a
+    // project swap (FIncStale), dropped with the project (DropProject). A
+    // session that only edits units never builds it - ModelIdOf answers for
+    // a unit first. nil = not built.
+    FIncluders: TDictionary<string, TLspIncluders>;
+    // Per model id: the file table FIncluders was last brought up to date
+    // with, and the include keys it gave. The table is the model's own array,
+    // HELD - an array still referenced is never freed, so its address is
+    // never reused, and an unchanged address is an unchanged table. A refresh
+    // after a module run therefore re-keys the one unit the run re-read, not
+    // the closure: keying all of it is 4.7 ms on the client's 3064 units, per
+    // keystroke while an include is unsaved (measured 2026-10-31).
+    FIncTables: TArray<TArray<string>>;
+    FIncKeys: TArray<TArray<string>>;
+    // A project swap since the last refresh (WsSynced): new models, or a new
+    // project, may have new file tables.
+    FIncStale: Boolean;
     // The blast-radius ceiling handed to the project before a module run;
     // 0 = leave PasTree's own default (128, a measured value). See the
     // "moduleRedoLimit" initialization option.
@@ -453,6 +486,10 @@ type
     function OverlayParts(AAll: Boolean = False): TArray<string>;
     procedure CommitBuiltParts;
     function AffectsAnalysis(const APath: string): Boolean;
+    function IncludersOf(const APath: string; out AFirst: string): Integer;
+    procedure RefreshIncluders;
+    function IsInclude(const APath: string): Boolean;
+    function ModuleIncludeNote: string;
     function DiskNewerThanAnalysis(const APath: string): Boolean;
     function ChangedDocs(out APath: string): Integer;
     function NamerOf(const ADocPath: string): string;
@@ -776,6 +813,7 @@ begin
   FPromoteRebuilt.Free;
   FLineTokenCache.Free;
   FLineMisses.Free;
+  FIncluders.Free;
   inherited;
 end;
 
@@ -1367,7 +1405,7 @@ var
   LRoots, LPriority: TArray<string>;
   LDoc: TLspDocument;
   LAlias: TPasUnitAlias;
-  LItem: string;
+  LItem, LFirst, LIncluder: string;
 begin
   if FSession <> nil then
   begin
@@ -1420,6 +1458,7 @@ begin
   end;
   FModuleMode := False;
   FModuleFile := '';
+  FModuleInclude := '';
   // The keystroke case first: one already-analyzed unit's text changed and
   // nothing else did. If PasTree's guards accept it this costs tens of
   // milliseconds; if they refuse, the rebuild below runs instead, one
@@ -1437,16 +1476,32 @@ begin
       + ' run several times slower than it should (measured 4.5x) because the'
       + ' memory manager sleeps on allocation contention instead of spinning.'
       + ' Set it at startup - see pastree-server.dpr and SPEC.md.');
+  // AN $I INCLUDE IS NEVER A ROOT OR A PRIORITY FILE. AnalyzeStaged loads
+  // every one of those as a unit, whether or not anything uses it, so an open
+  // include handed over became a unit of its own - `unit  <- AVIMARK.INC`,
+  // E2029 on its first line - and from then on ModelIdOf knew it as one: its
+  // edits re-ran that model, and the units that include it stayed stale
+  // (2026-10-31). A priority include stands for the one unit including it;
+  // with several there is no one module to put first.
   if FMainSource <> '' then
     LRoots := [FMainSource]
   else
   begin
     LRoots := nil;
     for LDoc in FDocs.All do
-      LRoots := LRoots + [LDoc.Path];
+      if not IsInclude(LDoc.Path) then
+        LRoots := LRoots + [LDoc.Path];
   end;
-  if APriorityFile <> '' then
-    LPriority := [APriorityFile]
+  LFirst := APriorityFile;
+  if (LFirst <> '') and IsInclude(LFirst) then
+  begin
+    if IncludersOf(APriorityFile, LIncluder) = 1 then
+      LFirst := LIncluder
+    else
+      LFirst := '';
+  end;
+  if LFirst <> '' then
+    LPriority := [LFirst]
   else
     LPriority := nil;
 
@@ -1782,8 +1837,8 @@ begin
       LWhy := 'no project returned'
     else
       LWhy := FProject.StageTimings;
-    Log(Format('incremental refused for %s (%s) - full rebuild',
-      [FModuleFile, LWhy]));
+    Log(Format('incremental refused for %s%s (%s) - full rebuild',
+      [FModuleFile, ModuleIncludeNote, LWhy]));
     FNoModuleOnce := True;
     StartAnalysis(FModuleFile);
     Exit;
@@ -1836,8 +1891,8 @@ begin
     LLight := Format(' (%d interface-only, %d promoted)',
       [FProject.LightCount, Length(FProject.PromotedFiles)]);
   var LDone := Format('analysis done: %s, %d units%s in %d ms, %d diagnostics',
-    [IfThen(LWasModule, 'incremental ' + TPath.GetFileName(FModuleFile),
-       'full rebuild'), FProject.ModelCount, LLight,
+    [IfThen(LWasModule, 'incremental ' + TPath.GetFileName(FModuleFile) +
+       ModuleIncludeNote, 'full rebuild'), FProject.ModelCount, LLight,
      GetTickCount64 - FBuildStart, LDiagTotal]);
   if FLogDetail then
     LDone := LDone + Format('; stages %s %s',
@@ -2003,10 +2058,145 @@ end;
   nothing and does not count in the overlay signature, where it would turn the
   next one-file edit into a two-document change and cost the module fast path.
   Without a completed project the answer is True: nothing is known yet, and
-  the first buffer is what starts the initial build. }
+  the first buffer is what starts the initial build.
+
+  AN $I INCLUDE OF A UNIT IS ONE OF OURS TOO, and it has no model, so asking
+  ModelIdOf alone answered "outside" for it: an edit of an include was kept
+  as an overlay and a saved one skipped as a watched file, and the units
+  including it stayed stale until something else rebuilt - in the client
+  project, the define file 1301 units include (2026-10-31). }
 function TLspServer.AffectsAnalysis(const APath: string): Boolean;
+var
+  LFirst: string;
 begin
-  Result := (FProject = nil) or (FProject.ModelIdOf(APath) >= 0);
+  Result := (FProject = nil) or (FProject.ModelIdOf(APath) >= 0) or
+    (IncludersOf(APath, LFirst) > 0);
+end;
+
+{ How many units of the analyzed project $I-include APath - their file tables
+  (Tree.Source.FileNames: the unit's own file first, then every include it
+  read, nested ones too) - and, for exactly one, which: AFirst, the path the
+  project loaded the unit from. 0 with no project, and for a file no unit
+  includes. An include in an inactive $IFDEF branch is in no table, which is
+  right: nothing read it. }
+function TLspServer.IncludersOf(const APath: string;
+  out AFirst: string): Integer;
+var
+  LKey: string;
+  LEntry: TLspIncluders;
+begin
+  AFirst := '';
+  Result := 0;
+  if FProject = nil then
+    Exit;
+  RefreshIncluders;
+  if PasFullPathKey(APath, LKey) and FIncluders.TryGetValue(LKey, LEntry) then
+  begin
+    Result := LEntry.Count;
+    if (Result = 1) and (LEntry.MidSum >= 0) and
+       (LEntry.MidSum < FProject.ModelCount) then
+      AFirst := FProject.ModelFile(Integer(LEntry.MidSum));
+  end;
+end;
+
+{ Brings FIncluders up to date with FProject: every model whose file table is
+  not the one last keyed for its id (FIncTables) has its old keys taken out
+  and its new ones put in. The whole closure on the first call, the units a
+  module run re-read on a later one; ids past a smaller project's end are
+  taken out. A model with no table, or none yet, gives no keys. }
+procedure TLspServer.RefreshIncluders;
+var
+  LMid, LIdx, LCount: Integer;
+  LModel: TPasSemaModel;
+  LNames, LKeys: TArray<string>;
+  LKey: string;
+  LEntry: TLspIncluders;
+
+  procedure Drop(AMid: Integer);
+  var
+    LOld: string;
+    LGone: TLspIncluders;
+  begin
+    for LOld in FIncKeys[AMid] do
+      if FIncluders.TryGetValue(LOld, LGone) then
+      begin
+        Dec(LGone.Count);
+        Dec(LGone.MidSum, AMid);
+        if LGone.Count <= 0 then
+          FIncluders.Remove(LOld)
+        else
+          FIncluders.AddOrSetValue(LOld, LGone);
+      end;
+    FIncKeys[AMid] := nil;
+    FIncTables[AMid] := nil;
+  end;
+
+begin
+  if FIncluders = nil then
+    FIncluders := TDictionary<string, TLspIncluders>.Create
+  else if not FIncStale then
+    Exit;
+  FIncStale := False;
+  LCount := FProject.ModelCount;
+  for LMid := LCount to High(FIncKeys) do
+    Drop(LMid);
+  SetLength(FIncTables, LCount);
+  SetLength(FIncKeys, LCount);
+  for LMid := 0 to LCount - 1 do
+  begin
+    LModel := FProject.Model(LMid);
+    // A demoted model keeps its file names - DemoteText frees the text, not
+    // the table.
+    if LModel <> nil then
+      LNames := LModel.Tree.Source.FileNames
+    else
+      LNames := nil;
+    if Pointer(LNames) = Pointer(FIncTables[LMid]) then
+      Continue;
+    Drop(LMid);
+    // From 1: FileNames[0] is the unit's own file. Once per unit, however
+    // often it includes one file.
+    LKeys := nil;
+    for LIdx := 1 to High(LNames) do
+      if PasFullPathKey(LNames[LIdx], LKey) and (IndexStr(LKey, LKeys) < 0) then
+        LKeys := LKeys + [LKey];
+    for LKey in LKeys do
+    begin
+      if not FIncluders.TryGetValue(LKey, LEntry) then
+        LEntry := Default(TLspIncluders);
+      Inc(LEntry.Count);
+      Inc(LEntry.MidSum, LMid);
+      FIncluders.AddOrSetValue(LKey, LEntry);
+    end;
+    FIncTables[LMid] := LNames;
+    FIncKeys[LMid] := LKeys;
+  end;
+end;
+
+{ Is APath an $I include rather than a unit: one a unit of the analyzed
+  project includes, or - when no unit does, or nothing is analyzed yet to
+  ask - an .inc file, the one extension no unit has. A file the project
+  has a model for is a unit, whatever its name. }
+function TLspServer.IsInclude(const APath: string): Boolean;
+var
+  LFirst: string;
+begin
+  if (FProject <> nil) and (FProject.ModelIdOf(APath) >= 0) then
+    Exit(False);
+  Result := (IncludersOf(APath, LFirst) > 0) or
+    SameText(ExtractFileExt(APath), '.inc');
+end;
+
+{ The running module session's include, for its log lines: '' for a unit's
+  own edit, otherwise ' (its $I include <file> edited)' after the unit's
+  name. }
+function TLspServer.ModuleIncludeNote: string;
+begin
+  if FModuleInclude = '' then
+    Result := ''
+  else
+    Result := Format(' (its $I include %s edited)',
+      [TPath.GetFileName(FModuleInclude)]);
 end;
 
 { Was APath written after the newest analysis read the disk? The running full
@@ -2315,8 +2505,8 @@ end;
   ModuleAccepted to tell which, and rebuilds for real on a refusal. }
 function TLspServer.TryStartModuleAnalysis: Boolean;
 var
-  LPath, LNamer, LTakeInNote: string;
-  LId, LChanged, LIdx: Integer;
+  LPath, LNamer, LTakeInNote, LInclude, LIncluder: string;
+  LId, LChanged, LIdx, LIncluders: Integer;
   LDoc: TLspDocument;
 begin
   Result := False;
@@ -2335,6 +2525,34 @@ begin
   if FDiskMoved then
     Exit;
   LChanged := ChangedDocs(LPath);
+  // AN $I INCLUDE EDITED: its text is part of every unit including it, and it
+  // has no model of its own. One includer is a module run of THAT unit - the
+  // project re-reads the include from its buffer, which is handed over below
+  // with every other one; PasTree's differential harness found the run exact
+  // for an include in a routine body and in the interface. Several includers
+  // are several modules, which the entry point does not take: a rebuild,
+  // whose parse donor still reparses only the units whose text moved.
+  LInclude := '';
+  if (LChanged = 1) and (FProject.ModelIdOf(LPath) < 0) then
+  begin
+    LIncluders := IncludersOf(LPath, LIncluder);
+    // The editor's spelling of the include, for the log lines: LPath is the
+    // signature's lower-cased one.
+    if FDocs.TryGet(LPath, LDoc) then
+      LInclude := LDoc.Path
+    else
+      LInclude := LPath;
+    if LIncluders > 1 then
+    begin
+      Log(Format('%s is an $I include of %d units - full rebuild',
+        [TPath.GetFileName(LInclude), LIncluders]));
+      Exit;
+    end;
+    if LIncluders = 1 then
+      LPath := LIncluder
+    else
+      LInclude := '';
+  end;
   LTakeInNote := '';
   if TakeInNamer(LNamer) then
   begin
@@ -2376,6 +2594,7 @@ begin
   FStartedParts := OverlayParts(True);
   FModuleBaseCount := FProject.ModelCount;
   FModuleFile := LPath;
+  FModuleInclude := LInclude;
   FModuleMode := True;
   // Set on the project rather than kept by the session, and set here rather
   // than once at startup: every full rebuild produces a NEW project carrying
@@ -2402,8 +2621,8 @@ begin
   StartProgress(cProgressTitleIncremental);
   // Detail only: the plain log has one line per incremental run, its
   // "analysis done".
-  LogDetail(Format('analysis started: incremental, one module (%s)%s',
-    [LPath, LTakeInNote]));
+  LogDetail(Format('analysis started: incremental, one module (%s)%s%s',
+    [LPath, ModuleIncludeNote, LTakeInNote]));
   FSession.Start;
   Result := True;
 end;
@@ -2650,6 +2869,9 @@ begin
   FOutlineCache := '';
   FreeAndNil(FLineTokenCache);
   FreeAndNil(FLineMisses);
+  FreeAndNil(FIncluders);
+  FIncTables := nil;
+  FIncKeys := nil;
 end;
 
 procedure TLspServer.EndDonorLend;
@@ -2675,11 +2897,13 @@ begin
     Exit;
   FWsGen := FWS.Generation;
   // A new project or new models: the outline table and the type spans are
-  // views of the old ones.
+  // views of the old ones, and the include table is brought up to date on
+  // its next question.
   FOutlineCache := '';
   FReachLib := nil;
   FreeAndNil(FLineTokenCache);
   FreeAndNil(FLineMisses);
+  FIncStale := True;
   // Every project swap passes through here, so this is where an open
   // document demoted in the project being swapped in gets its text back -
   // see HydrateOpenDoc.
@@ -3151,6 +3375,7 @@ begin
     Exit;
   FModuleBaseCount := FProject.ModelCount;
   FModuleFile := LPath;
+  FModuleInclude := '';
   FModuleMode := True;
   FPromoteMode := True;
   FPromoteWhy := AWhy;

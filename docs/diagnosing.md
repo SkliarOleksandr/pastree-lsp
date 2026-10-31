@@ -92,6 +92,15 @@ for `analysis started:`:
   `newunits=N(<names>)` in its stages, then `taken in by the incremental run`
   listing the files. `incremental refused ... new-dependency-<why>` names the
   case PasTree left to a rebuild (see its docs/incremental-analysis.md).
+- An `$I` INCLUDE edited (since 0.76.10): `analysis done: incremental <unit>
+  (its $I include <inc> edited)` when one unit includes it, `<inc> is an $I
+  include of N units - full rebuild` when several do - a define file every
+  unit includes rebuilds on every edit, by design. `outside this closure` on
+  an include's didChange means no unit of this closure reads it (an inactive
+  `$IFDEF` branch, another project's include). A parse record listing the
+  include as a unit of its own (`unit  <- <inc>`, E2029) is the priority trap
+  SPEC.md's "The incremental fast path" describes - a server older than
+  0.76.10.
 
 The rest of this section is about a slow REBUILD, a different question.
 
