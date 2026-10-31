@@ -100,7 +100,9 @@ for `analysis started:`:
   `$IFDEF` branch, another project's include). A parse record listing the
   include as a unit of its own (`unit  <- <inc>`, E2029) is the priority trap
   SPEC.md's "The incremental fast path" describes - a server older than
-  0.76.10.
+  0.76.10. An error inside an include that the parse record lists (under
+  the unit including it, `<inc>(line,col)`) but the include's tab does not
+  show is a server older than 0.76.11.
 
 The rest of this section is about a slow REBUILD, a different question.
 

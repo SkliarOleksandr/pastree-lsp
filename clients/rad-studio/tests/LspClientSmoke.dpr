@@ -4871,7 +4871,9 @@ end;
   and the units including it stayed stale until something else rebuilt
   (2026-10-31). Now an include of ONE unit is a module run of that unit -
   in the interface, where a consumer is redone with it, and in a routine
-  body - an include of two is a rebuild, and a saved one is a rebuild.
+  body - an include of two is a rebuild, and a saved one is a rebuild. An
+  error inside an include is on the include's own tab (0.76.11), once
+  however many units include it.
 
   And an include is never a root or a priority file. The IDE opens its tabs
   before the first analysis, and the last one opened was the priority file,
@@ -4882,7 +4884,7 @@ end;
   open documents are the roots) closes the section. }
 procedure TestIncludeEdits(const AExe: string);
 var
-  LDir, LLog, LUnitText, LBefore, LAfter: string;
+  LDir, LLog, LUnitText, LBefore, LAfter, LKey: string;
   LSaved, LOwn: TLspClient;
   LOptions: TLspInitOptions;
   LLine, LChar: Integer;
@@ -4933,6 +4935,20 @@ var
     LOptions.Platform := 'Win32';
     LOptions.SearchPaths := [LDir];
     LOptions.LogFile := LLog;
+  end;
+
+  // How many diagnostics the last publish for AFileName carried.
+  function DiagCount(const AFileName: string): Integer;
+  var
+    LJson: string;
+  begin
+    Result := 0;
+    if FindDiagOf(AFileName, LKey) then
+    begin
+      LJson := GDiagnostics[LKey];
+      Result := (Length(LJson) - Length(LJson.Replace('"severity":', ''))) div
+        Length('"severity":');
+    end;
   end;
 
   // A request that waits for the analysis: the edit before it is analyzed.
@@ -5027,6 +5043,8 @@ begin
       'interface include: the unit including it lost the constant (E2003)');
     Check(DiagShows('incuser.pas', '''cIntfValue''', True),
       'interface include: and so did its consumer');
+    Check(DiagShows('incintf.inc', 'E2003', False),
+      'interface include: their errors stay off the include''s own tab');
     Check(ContainsText(LAfter, 'analysis done: incremental IncUnit.pas ' +
       '(its $I include IncIntf.inc edited)'),
       'interface include: a module run of its includer, the log naming both');
@@ -5053,8 +5071,24 @@ begin
       '(its $I include IncBody.inc edited)') and
       not LAfter.Contains('analysis started: full rebuild'),
       'body include: a module run of its includer');
+    // An error INSIDE the include belongs on the include's own tab: its
+    // includer's model holds it, under the include's file id, and the tab
+    // has no model of its own to look in (0.76.11).
+    SendDidChange(P('IncBody.inc'), 'LBody := cNoSuchBody;'#13#10);
+    Settle;
+    Check(DiagShows('incbody.inc', '''cNoSuchBody''', True),
+      'body include: an error inside it is on its own tab');
+    if FindDiagOf('incbody.inc', LKey) then
+      Writeln('  -- ' + GDiagnostics[LKey]);
+    Check(DiagShows('incbody.inc', '"start":{"line":0,"character":9},' +
+      '"end":{"line":0,"character":20}', True),
+      'body include: under the whole name, in the include''s own lines');
+    Check(DiagShows('incunit.pas', 'cNoSuchBody', False),
+      'body include: and not on the tab of the unit including it');
     SendDidChange(P('IncBody.inc'), 'LBody := 1;'#13#10);
     Settle;
+    Check(DiagShows('incbody.inc', 'cNoSuchBody', False),
+      'body include: corrected, its tab is clean again');
 
     // Two includers: two modules, a rebuild.
     LBefore := ReadLog;
@@ -5071,6 +5105,21 @@ begin
     Settle;
     Check(DiagShows('inctwoa.pas', '''cShared''', False),
       'two includers: reverted, clean again');
+    // Each includer's model holds an error inside the include: the tab shows
+    // it once.
+    SendDidChange(P('IncShared.inc'), 'const cShared = cNoSuchShared;'#13#10);
+    Settle;
+    Check(DiagShows('incshared.inc', '''cNoSuchShared''', True),
+      'two includers: an error inside the include is on its tab');
+    Check(DiagCount('incshared.inc') = 1,
+      Format('two includers: once, not once per includer (%d)',
+      [DiagCount('incshared.inc')]));
+    if FindDiagOf('incshared.inc', LKey) then
+      Writeln('  -- ' + GDiagnostics[LKey]);
+    SendDidChange(P('IncShared.inc'), 'const cShared = 1;'#13#10);
+    Settle;
+    Check(DiagShows('incshared.inc', 'cNoSuchShared', False),
+      'two includers: corrected, the include''s tab is clean again');
 
     // Saved on disk, not open: the watched-file path.
     LBefore := ReadLog;

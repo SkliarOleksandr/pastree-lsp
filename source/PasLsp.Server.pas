@@ -487,6 +487,7 @@ type
     procedure CommitBuiltParts;
     function AffectsAnalysis(const APath: string): Boolean;
     function IncludersOf(const APath: string; out AFirst: string): Integer;
+    function IncluderMids(const APath: string): TArray<Integer>;
     procedure RefreshIncluders;
     function IsInclude(const APath: string): Boolean;
     function ModuleIncludeNote: string;
@@ -2099,6 +2100,25 @@ begin
   end;
 end;
 
+{ The ids of every model that $I-includes APath, in id order - IncludersOf's
+  units themselves, read off the per-id keys (FIncKeys). Empty with no
+  project and for a file no unit includes. }
+function TLspServer.IncluderMids(const APath: string): TArray<Integer>;
+var
+  LKey: string;
+  LMid: Integer;
+begin
+  Result := nil;
+  if (FProject = nil) or not PasFullPathKey(APath, LKey) then
+    Exit;
+  RefreshIncluders;
+  if not FIncluders.ContainsKey(LKey) then
+    Exit;
+  for LMid := 0 to High(FIncKeys) do
+    if IndexStr(LKey, FIncKeys[LMid]) >= 0 then
+      Result := Result + [LMid];
+end;
+
 { Brings FIncluders up to date with FProject: every model whose file table is
   not the one last keyed for its id (FIncTables) has its old keys taken out
   and its new ones put in. The whole closure on the first call, the units a
@@ -3669,7 +3689,8 @@ end;
   "unchanged" shorthand. A diagnostic raised inside an $I include is matched
   by the include's own FileId path, so it lands on the include's buffer if
   that file is open, and is dropped otherwise (its unit's main file is the
-  wrong place to draw it). }
+  wrong place to draw it). Until 0.76.11 it was dropped either way: the
+  include's tab looked for a model of its own, and an include has none. }
 procedure TLspServer.PublishDiagnostics;
 var
   LDoc: TLspDocument;
@@ -3688,11 +3709,13 @@ procedure TLspServer.PublishDiagnosticsFor(const ADoc: TLspDocument);
 var
   LMid, LIdx, LFileId, LLine, LChar, LEndChar, LEndLine: Integer;
   LModel: TPasSemaModel;
-  LDiagFile, LKey: string;
+  LDiagFile, LKey, LItem: string;
   LSB: TStringBuilder;
   LFirst, LMainIsDoc: Boolean;
   LIdent: TPasNavIdent;
   LNameLine, LNameCol, LNameColTo: Integer;
+  LMids: TArray<Integer>;
+  LSeen: TStringList;
 
   { The NAME a diagnostic's node stands for, when IdentAt found none at the
     diagnostic's position: a dotted name is an nkMember, whose FirstToken -
@@ -3750,14 +3773,32 @@ var
   end;
 
 begin
+  // AN OPEN $I INCLUDE HAS NO MODEL: its diagnostics are in the models of the
+  // units including it, under its file id, and asking ModelIdOf alone sent
+  // its tab `[]` whatever was wrong inside it (2026-10-31). Several includers
+  // each hold their own copy of one error: the tab shows it once.
   LMid := FNav.ModelIdOf(ADoc.Path);
+  if LMid >= 0 then
+    LMids := [LMid]
+  else
+    LMids := IncluderMids(ADoc.Path);
   LSB := TStringBuilder.Create;
+  LSeen := nil;
   try
+    if Length(LMids) > 1 then
+    begin
+      LSeen := TStringList.Create;
+      LSeen.UseLocale := False;
+      LSeen.CaseSensitive := True;
+      LSeen.Sorted := True;
+    end;
     LFirst := True;
-    if LMid >= 0 then
+    LKey := LowerCase(ADoc.Path);
+    for LMid in LMids do
     begin
       LModel := FProject.Model(LMid);
-      LKey := LowerCase(ADoc.Path);
+      if LModel = nil then
+        Continue;
       // Whether this open doc IS the model's main file - the only space
       // IdentAt's coordinates live in. False for an open $I include.
       LMainIsDoc := LowerCase(TPath.GetFullPath(
@@ -3780,9 +3821,6 @@ begin
         // above. Logging them a second time only made the open documents'
         // subset look like the whole picture, which is the misreading that
         // cost a debugging session.
-        if not LFirst then
-          LSB.Append(',');
-        LFirst := False;
         PasTreeToLsp(LModel.Diags[LIdx].Line, LModel.Diags[LIdx].Col,
           LLine, LChar);
         // The range END: most diagnostics anchor on an identifier
@@ -3815,14 +3853,24 @@ begin
           PasTreeToLsp(LNameLine, LNameCol, LLine, LChar);
           PasTreeToLsp(LNameLine, LNameColTo, LEndLine, LEndChar);
         end;
-        LSB.Append(Format(
+        LItem := Format(
           '{"range":{"start":{"line":%d,"character":%d},' +
           '"end":{"line":%d,"character":%d}},' +
           '"severity":%d,"code":%s,"source":"pastree","message":%s}',
           [LLine, LChar, LLine, LEndChar,
            DiagSeverity(LModel.Diags[LIdx].Code),
            JsonQuote(LModel.Diags[LIdx].Code),
-           JsonQuote(LModel.Diags[LIdx].Msg)]));
+           JsonQuote(LModel.Diags[LIdx].Msg)]);
+        if LSeen <> nil then
+        begin
+          if LSeen.IndexOf(LItem) >= 0 then
+            Continue;
+          LSeen.Add(LItem);
+        end;
+        if not LFirst then
+          LSB.Append(',');
+        LFirst := False;
+        LSB.Append(LItem);
       end;
     end;
     // THE VERSION THESE WERE COMPUTED FROM, not the one the document is on
@@ -3841,6 +3889,7 @@ begin
       '"params":{"uri":%s,"version":%d,"diagnostics":[%s]}}',
       [JsonQuote(PathToUri(ADoc.Path)), LVer, LSB.ToString]));
   finally
+    LSeen.Free;
     LSB.Free;
   end;
 end;
