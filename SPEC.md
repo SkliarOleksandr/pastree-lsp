@@ -1,7 +1,7 @@
 # PasTree LSP Server - specification
 
-Status: 2026-08-19. Phases 1-2 are implemented and exercised live against
-VS Code; see "Protocol coverage" below for what the standard still holds and
+Status: 0.78.4 (2026-11-02). Both clients - the RAD Studio package and VS
+Code - run on this server; see "Protocol coverage" below for what the standard still holds and
 the repo README for what the server does today.
 
 ## Goal
@@ -121,9 +121,11 @@ that mistake.
   `win32-oom-is-address-space`.)
 - **Isolation.** An analyzer crash or the suspected `TPasSourceManager`
   Prefetch race must not take the IDE down.
-- **Reuse.** The same exe is the future editor-agnostic LSP server for free.
+- **Reuse.** The same exe is the editor-agnostic LSP server every client uses (VS Code
+  included).
 
-The 64-bit IDE (RAD Studio 12.3 and later, built for since 0.56.0) removes the
+The 64-bit IDE (RAD Studio 13 and later - `LMINMAJOR64` in
+`scripts\ide.bat` - built for since 0.56.0) removes the
 first reason for its own package and neither of the others, which is why that
 package runs the analysis out of process too: a crash is still a crash, and
 the server is still the one implementation every client shares.
@@ -147,9 +149,10 @@ Three layers, strict dependency direction:
    - **overlay buffers**: in-memory file contents supplied by the host,
      consulted before disk everywhere, including Prefetch; versioned;
    - **cancellation**: long analysis takes a token and polls it.
-   These two items live in the PasTree repo's To do and are prerequisites.
+   Both landed in PasTree before the server's first phase (see "Order of
+   work", step 1).
 2. **pastree-server.exe** (this repo) - owns the JSON-RPC loop, LSP lifecycle,
-   project state, and all caches (the plugin's BuildNavigator cache moves
+   project state, and all caches (the plugin's former BuildNavigator cache moved
    here). Win64 only, like every PasTree tool.
 3. **Clients** - the IDE plugin translates ToolsAPI events to LSP and LSP
    results back to IDE actions; IDE-specific features (IOTAHistoryServices
@@ -200,7 +203,7 @@ this server is the host that proved a host can forget.
 
 ## Protocol coverage
 
-Phases 1-2 (the plugin-parity set) and part of phase 3 are implemented. What
+Everything in the table below is implemented. What
 follows walks the whole LSP 3.17 inventory, so this list is CLOSED - every
 request in the standard is either implemented, in a tier below, or explicitly
 out of scope with a reason. Tiers are by value-per-effort for OUR clients (the
@@ -546,7 +549,7 @@ order they were understood:
   read the same text out of the same bytes, which is what makes the byte-level
   gate sound rather than merely cheap. `cMinPasTreeVersion` is pinned at or past
   that release, so an older sibling checkout fails loudly instead of shifting
-  columns quietly. (0.13.2 today; the constant in
+  columns quietly. (The constant in
   [PasLsp.Version](source/PasLsp.Version.pas) is the only authority, and it
   moves forward as other library requirements land.)
 
@@ -589,13 +592,13 @@ where both halves get it, rather than in the layer that happened to notice.
 
 ### Tier 1 - done 2026-08-19
 
-All four shipped. Two notes worth keeping:
+All four shipped. Notes worth keeping:
 
 - **No percentage in `$/progress`.** `Total` is "modules discovered so far"
   and grows as the closure opens up - measured going 3/4 → 3/145 within a
   second - so a percentage during discovery is arithmetic about a denominator
   that has not happened yet. Clamping it monotonic (tried first) parked the bar
-  at 75%% while the real ratio was 2%%, which is worse than no bar: a wrong
+  at 75% while the real ratio was 2%, which is worse than no bar: a wrong
   number reads as fact. The message carries phase and counts instead.
 - **Not cancellable.** The machinery exists (the session cancels mid-pass), but
   a cancelled build leaves the user with no results at all - worse than
@@ -653,11 +656,13 @@ All four shipped. Two notes worth keeping:
   Reconfigure without a restart. Today a changed `.dproj` only prints a note
   from the watched-files handler, because search paths, defines, namespaces
   and the project's unit list are read once at `initialize`. The RAD Studio
-  client compensates since 0.43.0: it compares the `.dproj`'s last-write time
-  against the one its server started with, in front of every request, and
-  restarts the server on a difference (the IDE saves the `.dproj` when
-  Project Options closes or a unit is added - exactly when the closure
-  changes). A protocol-level reconfigure would make that restart a rebuild.
+  client compensates: when it sees the `.dproj` saved (Project Options closed,
+  a unit added - exactly when the closure changes) it asks
+  `pastree/projectChanged` and restarts the server only when the answer is
+  `changed` (0.61.0; 0.43.0 restarted on any newer last-write time), and it
+  restarts it when the IDE's active configuration or platform changes
+  (0.77.2). A protocol-level reconfigure would turn those restarts into
+  rebuilds.
 - **`textDocument/foldingRange`.** From the CST: unit sections, type bodies,
   `begin`/`end` blocks, `$REGION`.
 - **`textDocument/documentLink`.** A `uses` item and an `$I` include name are
@@ -691,8 +696,9 @@ All four shipped. Two notes worth keeping:
 - **`textDocument/signatureHelp`.** DELIVERED 2026-08-22 alongside
   completion (see [COMPLETION.md](COMPLETION.md)): PasTree's `CallAt`
   answers through the same seam, active argument counted per request.
-- **`textDocument/selectionRange`.** Wants a declaration's full extent - the
-  `NodeSpan` the PasTree To-do already lists, which is also the fix for
+- **`textDocument/selectionRange`.** Wants a declaration's full extent - a
+  navigator-side span PasTree does not expose yet (the server's
+  `documentSymbol` comment calls it NodeSpan), which is also the fix for
   `documentSymbol`'s name-only ranges.
 - **`textDocument/codeAction` (+ resolve), `workspace/executeCommand`,
   `workspace/applyEdit`.** Quick fixes. "Add the missing unit to `uses`" is
@@ -749,7 +755,8 @@ All four shipped. Two notes worth keeping:
 - **Project configuration.** The server needs what the CLI tools need: the
   `.dproj`, platform (`-p:Win64` semantics), and the IDE registry search
   paths (`-L` equivalents). Passed in `initializationOptions`; the plugin
-  harvests them from ToolsAPI, other clients from a config file.
+  harvests them from ToolsAPI; the VS Code client from its settings and, for
+  the IDE's library paths, from the IDE's registry hive (`clients/vscode/ide.js`).
 
 ## Order of work
 
@@ -765,12 +772,13 @@ Done, in this order (2026-08-16 … 19):
 7. Validated with VS Code as a second client - the proof that no IDE-specific
    assumption leaked into the protocol.
 
-Next, and NOT in protocol order:
+Then, NOT in protocol order, also done:
 
-8. The IDE plugin becomes an LSP client (its own repo) - the point of the
-   whole exercise, and the only step that retires in-process analysis.
+8. The IDE plugin became an LSP client (in its own repository first, merged
+   here on 2026-08-20) - the point of the whole exercise, and the step that
+   retired in-process analysis.
 9. Tier 1 of the coverage list above, `$/progress` first: a 5-second rebuild
-   the client cannot see is the most visible remaining gap.
+   the client cannot see was the most visible gap.
 10. (PasTree repo) incremental reanalysis - **DONE, both sides.** PasTree
     0.9.0 shipped the parse donor and single-module reanalysis, 0.10.0 put
     INTERFACE edits on the fast path (the units a change can reach are
@@ -906,10 +914,11 @@ list rehydrate its library units per keystroke.
 
 `moduleRedoLimit` in the initializationOptions writes PasTree's
 `ModuleRedoLimit` - how many affected units an interface edit may pull in
-before rebuilding instead. 0 keeps the library's measured default of 128.
-It is per-project by nature: on a 3676-unit closure a COM type-library unit
-reaches 28 consumers (redone in ~2 s against a 29 s rebuild) while a core
-types unit reaches 1181, which is past break-even and correctly rebuilds.
+before rebuilding instead. 0 or absent keeps the library's default, no
+ceiling (since PasTree 0.16.2: on a client closure the whole reach of 1260
+units redid in 7.2 s against a 28-29 s rebuild, and the old default of 128
+turned each such edit into the rebuild it was meant to avoid). A positive
+value is for a project measured otherwise.
 
 `analysisThreads` in the initializationOptions is the width of the thread
 pool every parallel pass runs on (PasTree's `ConfigureThreadPool`); 0 or
@@ -921,8 +930,8 @@ client does when its Performance setting changes. PasTree takes a pool below
 so 1 is not a width: it switches PasTree's `SingleThreaded` mode on for every
 session (every stage on the session's worker thread; an incremental run
 inherits it with the project), and the pool stays at 2 for what still runs
-on it, the search-path index. The log's `analysis threads:` line says the
-count in effect.
+on it, the search-path index. The log's `host:` header line says the count
+in effect (`N analysis threads (...)`).
 
 `compilerVersion` in the initializationOptions is the dcc the analysis
 emulates: the value of `CompilerVersion` and `RTLVersion` in `$IF`, and the
@@ -936,9 +945,11 @@ builds clean. The log's `configured:` line names it (`compiler=35.0`). The VS
 Code client sends none.
 
 The log distinguishes all of it, because a fast path that quietly stops
-firing is indistinguishable from a slow analyzer: `analysis started:
-incremental, one module (<file>)` against `analysis started: full rebuild`,
-then `analysis done (incremental)`, and on a refusal `incremental refused for
+firing is indistinguishable from a slow analyzer: `analysis started: full
+rebuild` against `analysis started: incremental, one module (<file>)` (the
+latter in the detail log only, since 0.74.0), then `analysis done:
+incremental <file>, ...` or `analysis done: full rebuild, ...`, and on a
+refusal `incremental refused for
 <file> (module=refused:<reason>) - full rebuild` with PasTree's own reason.
 `LspClientSmoke` section 5c is the gate: it reads the server's log back and
 requires the module path for the first edit to a file, an edit on top of an
@@ -965,9 +976,9 @@ is logged). PasTree exempts those files and that directory anyway; dropping
 the tree too keeps a library path that points at a parent of the project
 from making the project's siblings light. A client that sends no
 `libraryPaths` gets full mode - the server cannot tell somebody else's tree
-from the user's. The log's `light libraries:` header line says on or off and
-how many trees; after each full build `light libraries: N of M units
-analyzed interface-only, K promoted to a full analysis` (`light tree <dir>`
+from the user's. The `configured:` header line ends with the light mode - on
+with the tree count, or off and why; after each full build the `analysis
+done` line carries `(N interface-only, K promoted)` (`light tree <dir>`
 lines in the detail block). The RAD Studio client sends `lightLibraries: false` when the
 Performance page's "Parsing mode" is Full instead of Fast (the default), and
 restarts the server for a change; VS Code has `pastree.lightLibraries`.
@@ -1131,25 +1142,26 @@ and it buries everything else. Turn it on with `logUnits` in the
 initializationOptions (`pastree.logUnits` in the VS Code client) or
 `PASTREE_LSP_LOG_UNITS=1` in the environment, for the one question it answers.
 
-Every navigation line names **both ends**, prefixed by the LSP method exactly as
-it arrived on the wire:
+Every navigation line names **both ends**, prefixed by the method's name
+without its protocol namespace (`LogCommand`, since 0.74.0):
 
 ```
-textDocument/definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3)
+definition: PasTreeDemo.Main.pas(133,11) 'TArray' -> System.pas(589,3), 4 ms
 ```
 
 A line that gave only the target could not be checked - `TArray` resolving into
 `System.Generics.Collections` looks reasonable until you know the click was on
-`TArray<T>`, which belongs in `System.pas`. And the full method name rather than
-a label of our own means one grep answers "what did the client actually ask
+`TArray<T>`, which belongs in `System.pas`. And the method's own name rather
+than a label of our own means one grep answers "what did the client actually ask
 for", and that the prefix cannot drift from the request it describes.
 
 ## Open questions
 
-- stdio vs named pipe for the IDE plugin specifically (stdio needs the plugin
-  to own the child process's pipes; ToolsAPI imposes no obstacle, but verify)
-- how much of `TPasAsyncSession` (the demo's async layer) is reusable as the
-  server's scheduling core vs. server-owned from scratch
+- ~~stdio vs named pipe for the IDE plugin~~ - **ANSWERED: stdio**, the
+  plugin owning the child's pipes (`PasTreeIdePlugin.LspTransport`).
+- ~~how much of `TPasAsyncSession` is reusable~~ - **ANSWERED: all of it**;
+  the server drives PasTree's `TPasAsyncSession` (full, `CreateForModule`,
+  `CreateForPromotion`) and owns only the decision of which to start.
 - ~~incremental reanalysis granularity~~ - **ANSWERED, shipped 2026-08-28.**
   The question was where to cut, given that a rebuild splits 21% interface
   parse / 27% full parse / 52% cross passes, so caching the parse could never

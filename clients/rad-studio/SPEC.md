@@ -1,4 +1,4 @@
-| Signature help | **DELIVERED** | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | shipped with completion, same manager || Completion | **DELIVERED 2026-08-21** | Code Insight (`PasTreeIdePlugin.CodeInsight`) | the position-in-invalid-text block is gone: PasTree answers it || Rename | **DELIVERED 2026-08-30** | `IOTAEditWriter` via# PasTree IDE Plugin - capability specification
+# PasTree IDE Plugin - capability specification
 
 Status: draft, 2026-08-19. What this plugin COULD present, and what it would
 take. The README describes what it does today; this describes the space.
@@ -95,16 +95,17 @@ nothing, or the editor becomes visibly slower while scrolling.
 Not a user-visible feature, but it is upstream of the correctness of every one
 of them, so it comes first.
 
-**Today** the plugin hands the server the `.dproj` path plus the platform, and
-the server evaluates that file itself with the same MSBuild logic the CLI tools
+**Today** the plugin hands the server the `.dproj` path, the active platform
+and configuration, the compiler version (0.77.0) and the IDE's Library paths
+(below), and the server evaluates that file itself with the same MSBuild logic the CLI tools
 use. That works, and it is why the LSP path already gets the project's real
 defines and search paths where the old in-process path did not. Two things are
 nonetheless wrong with it:
 
 - It reads the file **on disk**. Project options the user changed but has not
   saved are invisible, and so is anything the IDE itself contributes.
-- It cannot see IDE-level paths at all. For a Win32 project that is where
-  third-party and DCU-only library paths live.
+- IDE-level settings beyond the Library Path and Browsing Path (below) are
+  not sent.
 
 **The IDE's own resolved values are readable**, and that is the better source.
 `IOTAProject.ProjectOptions` gives `IOTAProjectOptions`; the active
@@ -128,11 +129,12 @@ project file uses:
 | Include path (`{$I}`) | `sIncludePath` | `DCC_IncludePath` |
 
 Beyond paths, a set of switches change **what the analysis means**, not just
-what the compiler emits, and the server currently assumes defaults for all of
-them: `sLegacyIFEND`, `sStringChecks`, `sLongStrings`, `sExtendedSyntax`,
-`sTypedAtParameter`, `sWriteableConstants`, `sMinimumEnumSize`, and the
-range/IO/overflow/assertion checks. `{$IFEND}` acceptance in particular decides
-whether a file parses at all.
+what the compiler emits: `sLegacyIFEND`, `sStringChecks`, `sLongStrings`,
+`sExtendedSyntax`, `sTypedAtParameter`, `sWriteableConstants`,
+`sMinimumEnumSize`, and the range/IO/overflow/assertion checks. **Since 0.69.0
+the server reads the active configuration's switches from the `.dproj`**
+(PasTree's `TPasDProj.Switches`, logged as `switches: ...`), `DCC_ConsoleTarget`
+included; `sLegacyIFEND` and `sStringChecks` are not among them.
 
 `DCCStrs` also carries the whole warning table as `DCC_<WARNING_NAME>` triples
 (`true`/`false`/`error`), which is the source for honouring a project's warning
@@ -224,7 +226,7 @@ Release - with nothing saying it was stale.
   Release header without a request - is the AVImark test.
 
 Known cost, accepted: a new process has no parse donor, so this is a full
-rebuild - 5.8 s on AVImark (2026-10-15), Full Parse on the status panel and
+rebuild - 5.8 s on AVImark (2026-10-15), "analyzing..." on the status panel and
 requests waiting meanwhile. Configuration switches are rare.
 
 Not in this item: reconfiguring a running server instead of restarting it
@@ -242,27 +244,31 @@ and does not fight).
 
 ## Feeding the server: change events
 
-The plugin currently syncs documents only when a request is about to go out
-(sync-on-request, see the README for why). That is right for navigation and
-wrong for anything continuous, and these are the surfaces that fix it.
+Documents are synced in front of every request (a full pass) and, since
+2026-08-22, after a typing pause: `PasTreeIdePlugin.IdleSync` restarts a
+debounce timer on `EditorViewModified` and pushes only the modified buffers as
+`didChange`. These are the surfaces around it.
 
 - **`INTAEditViewNotifier.EditorIdle(View)`** - `ToolsAPI.pas:2346`. Fires after
   editing stops for a period **tied to the user's own Code Insight delay
-  setting**. This is the debounce trigger the push-based `didChange` needs, and
-  it is better than any timer we would pick ourselves: the user has already told
-  the IDE how patient they are. Note the `BeginPaint`/`PaintLine`/`EndPaint`
+  setting**. An alternative trigger for the push-based `didChange`; IdleSync
+  uses `EditorViewModified` and its own debounce instead. Note the `BeginPaint`/`PaintLine`/`EndPaint`
   members on this same interface are explicitly `deprecated` in favour of
   `ToolsAPI.Editor`'s events (`2364`, `2397`, `2405`) - do not use them.
 - **`IOTAModuleNotifier`** - `2926`, with `Modified` and `AfterSave` inherited
   from `IOTANotifier` (`1493`), plus `BeforeRename`/`AfterRename` on `…80`
   (`2940`). Per-document change and rename.
 - **`IOTAEditorContent.GetContentAge: TDateTime`** - `1607`. A cheap version
-  stamp. We currently detect "did this buffer change" by comparing the whole
-  text we last sent; this is O(1).
+  stamp. **Adopted in substance (0.54.3):** `TLspDocumentSync` reuses the
+  text it holds while the edit counter, the file's disk stamp and the buffer's
+  age (`IOTAEditBuffer.CurrentDate`) are unchanged; only a buffer that moved is
+  read.
 - **`IOTAEditBufferIterator`** - `7530`, from
   `IOTAEditorServices60.GetEditBufferIterator` (`7764`). Enumerates every open
-  buffer, which is the missing `didOpen` catch-up at startup: today the first
-  request discovers them.
+  buffer. Not needed for the startup catch-up: the project-open prewarm starts
+  the server and `OnReady` sends every open buffer (`ResendAll` + `Sync`, 0.77.1);
+  used only to look a buffer up by name (`NativeErrorInsight.IdeBufferName`,
+  `TPasProjectSourceManager.HandlesFile`).
 - **`IOTAProjectNotifier`** - `3928`: `ModuleAdded`, `ModuleRemoved`,
   `ModuleRenamed`. Feeds `workspace/didChangeWatchedFiles` precisely instead of
   the server guessing from a file watcher.
@@ -273,7 +279,8 @@ wrong for anything continuous, and these are the surfaces that fix it.
   first Ctrl+Click. What is still NOT adopted is using it to replace "compare
   the harvested config on every request" - `EnsureSession` still does that, and
   it is what makes the notifier-driven restart correct rather than a second
-  source of truth.
+  source of truth. Since 0.77.2 the configuration-switch ticker calls it too
+  (see above).
 - **`IOTACompileNotifier`** - `9793`, and `IsBackgroundCompileActive`. Worth
   having in order to *stop* analysing while the IDE compiles in the background,
   rather than competing with it for the machine.
@@ -289,7 +296,8 @@ Also worth adopting for configuration, on top of the previous section:
 (`3383`) reads **list-valued** properties like search paths as a list instead of
 one flattened string, and **`IOTAServices.ExpandRootMacro`** (`7379`) expands
 `$(BDS)`-style macros - which is the answer to the unexpanded-macro hazard noted
-above. `IOTAProjectUnitScopes.GetUnitScopes(ConfigName, PlatformName)`
+above, and is used since for the IDE Library paths (`GetIDELibraryPaths`, after
+the IDE's Environment Variables overrides). `GetValues` is not used yet. `IOTAProjectUnitScopes.GetUnitScopes(ConfigName, PlatformName)`
 (`10478`) gives the project's unit scope prefixes directly.
 
 ## The strategic fork: become Code Insight, or sit beside it
@@ -359,7 +367,9 @@ implementer does not re-derive it:
   whenever PasTree IS the selected provider, so the two never both run; the
   menu takeover has no such option, because the native item never reaches the
   package at all, and it is therefore decided once at load from the same
-  switch. The one-way-door caveat comes back with it, knowingly.) The IDE draws the
+  switch. The one-way-door caveat comes back with it, knowingly - on 12 and 13;
+  on Delphi 11.3 the takeover is a hidden native item in `EditorLocalMenu`,
+  reversible, `PasTreeIdePlugin.EditorPopup`.) The IDE draws the
   Ctrl+hover underline from OUR resolver (today it underlines from the native
   engine while the click resolves through ours - a visible disagreement we
   currently just live with), navigates, and feeds its own history.
@@ -563,10 +573,9 @@ ours answers for a file it holds while PasTree is the provider, anything
 else goes to the previous value (DelphiLSP's). Every entry point is
 `GetProcAddress` on the coreide beside the linked designide, never a
 `requires` - a renamed or re-typed export is a missing name, logged once,
-and the painted underlines remain. Untested in the IDE as of this writing:
-whether the IDE draws its own marks while its level is None (ours set it so
-while PasTree is the provider), and whether the Structure View shows the
-folder then.
+and the painted underlines remain. Tested in the IDE (Alex, 2026-10-23,
+0.75.3): the marks, the Errors folder and the status-bar count show while
+PasTree is the provider.
 
 ### PasTree's underlines beside the IDE's
 
@@ -754,8 +763,9 @@ same wall and would be answered by the same spike.
 ## Capability inventory
 
 Status column: **Have** / **Ready** (server answers it; only the IDE side is
-missing) / **Server** (needs server-side work first) / **Spike** (blocked on the
-file-trait question above).
+missing) / **Server** (needs server-side work first) / **Spike** (none left: the
+file-trait question is closed, see above). Rows that say **Partly** or name a
+version are delivered in that form.
 
 ### Navigation
 
@@ -765,7 +775,7 @@ file-trait question above).
 | Go to declaration into a compiled-only unit | **Have** (0.44.0) | a read-only editor tab named `Foo.dcu.pas`, through a registered `IOTAFileSystem` (`PasTreeIdePlugin.DcuSource`) | The server analyzes a unit with no `.pas` from its `.dcu` (PasTree 0.37.0) and answers Locations into the text it generated; the IDE cannot open a `.dcu`, so the tab is a virtual module whose text comes from one `pastree/dcuSource` request and whose I/O goes through our file system (`IsReadonly` True, plus the buffer's own flag). Named `<dcu path>.pas` for the highlighter; `PathToLspUri` maps it back to the `.dcu`, so every request from the tab reaches the server under the URI it knows. Closed, with a Build line, when the project's server is replaced (platform, configuration, re-saved `.dproj`) - a Win64 build may name a different `.dcu`. A refused `.dcu` puts the reader's reason on the Build tab. Both navigation paths (the override and the Insight manager's `AsyncGotoDefinitionEx`) reach it. Reasons in the README, "Compiled-only units" |
 | Declaration ↔ implementation toggle | **Have** (2026-08-21) | Ctrl+Shift+Up/Down through the package's keyboard binding | `ToggleKeyProc`; silent on a caret that is not on a routine since 2026-08-29 (live queue item 7) |
 | Find references | Have | Messages panel, grouped by file | upgrade path below |
-| Find All submenu (overrides, implementations, descendants, assignments, creations, destructions) | **Have** (0.34.0, completed 0.37.0) | one `Find All` submenu via the ToolsAPI category convention (`Parent.child`), items greyed per caret by a synchronous `pastree/findAllAt` under a 250 ms budget | `PasTreeIdePlugin.FindHierarchy`; Descendants is a nested tree in the Messages panel through the `Pointer` `AddCustomMessage(msg, Parent)` returns, to any depth |
+| Find All submenu (references, overrides, implementations, descendants, assignments, creations, destructions, defines, defines at cursor, options at cursor, the three unused-units commands) | **Have** (0.34.0, completed 0.37.0) | one `Find All` submenu via the ToolsAPI category convention (`Parent.child`), items greyed per caret by a synchronous `pastree/findAllAt` under a 250 ms budget | `PasTreeIdePlugin.FindHierarchy`; Descendants is a nested tree in the Messages panel through the `Pointer` `AddCustomMessage(msg, Parent)` returns, to any depth |
 | Type definition | **Have** (2026-08-21) | "Find Type Declaration" menu item | same history-aware navigation as the other jumps |
 | Peek definition | Server | `IOTACodeBrowsePreview` (`8851`) | trait route ruled out by the closed experiment; needs a window of our own |
 | Back/Forward across jumps | Have | `IOTAHistoryServices` | we supply our own captioned `IOTAHistoryItem` |
@@ -774,8 +784,8 @@ file-trait question above).
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Squiggles, native | **Experimental** (0.75.0; public routes DEAD - spikes 2026-08-22 and 2026-10-20) | `PasTreeIdePlugin.NativeErrorInsight` | the public routes stay dead (the module answers `IOTAModuleErrors` natively; the manager is never asked for it). The private one DelphiLSP uses: the marker `IInternalSupportErrorInsight` on the manager, `Errorinsite.UpdateErrorMarks(..., True)` - marks, Structure View Errors folder, status bar count - and the `Sourcemodule.LSPGetErrors` hook, chained; see "How DelphiLSP feeds Error Insight" above |
-| Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity, in the shape the IDE's Error Insight "Editor rendering style" names (`ErrorInsight Marks`, `0..3` = Classic/Smooth Wave/Solid Line/Dots, read at most once a second - `IdeErrorMarkStyle`, since 0.52.5), each shape measured off the IDE's own and drawn anti-aliased through a premultiplied DIB + `AlphaBlend`, errors in the IDE's crimson; repaint via the session's diagnostics-changed listener. Since 0.52.4 an experimental choice, off by default: selecting it sets the IDE's `ErrorInsightLevel` (`Editor\Source Options\Borland.EditOptions.Pascal`) to `None` and remembers the old level (`ApplyErrorInsightChoice`) |
+| Squiggles, native | **Have** (0.75.3, on by default; switchable because it rides undocumented coreide entry points; public routes DEAD - spikes 2026-08-22 and 2026-10-20) | `PasTreeIdePlugin.NativeErrorInsight` | the public routes stay dead (the module answers `IOTAModuleErrors` natively; the manager is never asked for it). The private one DelphiLSP uses: the marker `IInternalSupportErrorInsight` on the manager, `Errorinsite.UpdateErrorMarks(..., True)` - marks, Structure View Errors folder, status bar count - and the `Sourcemodule.LSPGetErrors` hook, chained; see "How DelphiLSP feeds Error Insight" above |
+| Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity, in the shape the IDE's Error Insight "Editor rendering style" names (`ErrorInsight Marks`, `0..3` = Classic/Smooth Wave/Solid Line/Dots, read at most once a second - `IdeErrorMarkStyle`, since 0.52.5), each shape measured off the IDE's own and drawn anti-aliased through a premultiplied DIB + `AlphaBlend`, errors in the IDE's crimson; repaint via the session's diagnostics-changed listener. Since 0.52.4 a choice, off by default and forced on while PasTree is the Insight Provider (0.73.7): selecting it sets the Pascal option set's `ErrorInsightLevel` to `None` through `IOTAEnvironmentOptions.Values` (`WithPascalOptionSet`, 0.73.8) and remembers the old level (`ApplyErrorInsightChoice`) |
 | Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
 | Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
 | A diagnostics list pane | Ready | custom messages, or `IOTAToDoManager` (`8330`) | see "Result surfaces" |
@@ -787,7 +797,7 @@ file-trait question above).
 |---|---|---|---|
 | Outline | **Have again** (0.76.0; withdrawn 2026-09-01 .. 2026-10-23) | Structure pane, private `StructureType` 'PasTree.Outline' | withdrawn because its own badges (a `TImageList` through `AddImageList`) never showed in the themed IDE. Back with the IDE's own icons: coreide exports `Parsernodes.ImageIndexOffset`, where the Pascal structure icons start in the pane's image list, and a node answers it plus DelphiLSP's offset for its LSP SymbolKind (`TDocumentSymbolNode.get_ImageIndex`, table in `PasTreeIdePlugin.Outline`; 8/9 = folder closed/open). Same export in 22.0, 23.0, 37.0 and Win64. Laid out as DelphiLSP lays it out since 0.76.4: a Structure root, the sections (interface, implementation, initialization, finalization, a program's begin), each uses clause a folder of its units, declarations with their signatures, members under their type; only the root and the interface start expanded. Built from pastree/outline (module, usesItems) - documentSymbol has no sections, uses or signatures. No switch of its own since 0.76.3: shown exactly while PasTree is the Insight Provider (with PasTree selected nothing else fills the pane; with RAD Studio selected DelphiLSP does), taken back on ManagerDisabled. Rebuilt on EditorViewActivated and after each analysis of the shown file, unless its symbols are unchanged; collapsed nodes stay collapsed; the Errors folder is pushed again after every new context, which drops it |
 | Outline follows the caret | Ready | `IOTAStructureView370.SelectNodeEx` (`105`) + `EditorSetCaretPos` (`ToolsAPI.Editor.pas:878`) | scroll-into-view select, driven by a real caret event instead of polling |
-| Outline survives a refresh | Ready | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
+| Outline survives a refresh | **Have** (0.76.3, our own state table `GExpanded` in `PasTreeIdePlugin.Outline`, not `IOTAStructureNodeStatePreserver`) | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
 | Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
 | Document highlight (occurrences) | Ready | `PaintText` underlay, or `plsBackground` row wash | server answers it today |
 | Folding ranges | Server | `pgsElision` custom-draw | `IOTAModuleRegions` ruled out by the closed experiment (module answers natively); `IOTAElideActions` (`2530`) only exposes categories, not arbitrary ranges |
@@ -799,7 +809,7 @@ file-trait question above).
 | Rename | **DELIVERED 2026-08-30** | `IOTAEditWriter` via `CreateUndoableWriter` (`2551`) | apply edits front-to-back - the writer cannot move backward (`1690`), and a plain writer flushes undo (`1693`) |
 | Rename, in-place multi-caret | Server | `IOTASyncEditPoints` (`2158`) + `IOTAEditBlock.SyncEditBlock` (`2226`) | drives the editor's own sync-edit mode from positions we supply |
 | Rename, from the outline | Server | `IOTAEditableStructureNode` (`245`) | F2 on an outline node, `SetValue` comes back to us - a rename UI for free |
-| Quick fixes / code actions | **First one DELIVERED 2026-09-14 (0.42.0): Annotate argument(s)** - the rest still Server | our own local-menu item beside Rename (`PasTreeIdePlugin.AnnotateArgs`), plus `stSurroundsWith`/`stRefactoring` templates (`CodeTemplateAPI.pas:57`) for later | `{Name:}` and `{var}`/`{out}` written in front of a call's arguments - the inlay hint other IDEs paint, as text, because this editor shows nothing that is not in the buffer. One item ("Annotate Arguments..."), one modal dialog with a .dfm (`PasTreeIdePlugin.AnnotateArgsForm` - the package's second designed form): all / anonymous only / the argument at the caret, `{var}`/`{out}` on or off, one argument per line; last choices kept for the session. The item is HIDDEN when the caret is in no call, and the dialog offers "at the caret" only when the caret was in the list - the verdict rides `pastree/findAllAt` as `annotate`, so it costs the popup no second request. Edits through one undoable writer - insertions, or replacements of the whitespace in front of each argument when laid out one per line (prototype sync's applier shape). The server owns every rule (`PasLsp.AnnotateArgs`): the resolver's overload or a refusal by count, idempotence, intrinsics named from the engine's signature table. The IDE already stores surround-with templates we could expose as further actions |
+| Quick fixes / code actions | **First one DELIVERED 2026-09-14 (0.42.0): Annotate argument(s)** - the rest still Server | our own local-menu item beside Rename (`PasTreeIdePlugin.AnnotateArgs`), plus `stSurroundsWith`/`stRefactoring` templates (`CodeTemplateAPI.pas:57`) for later | `{Name:}` and `{var}`/`{out}` written in front of a call's arguments - the inlay hint other IDEs paint, as text, because this editor shows nothing that is not in the buffer. One item ("Annotate Arguments..."), one modal dialog with a .dfm (`PasTreeIdePlugin.AnnotateArgsForm`, a designed form): all / anonymous only / the argument at the caret, `{var}`/`{out}` on or off, one argument per line; last choices kept for the session. The item is HIDDEN when the caret is in no call, and the dialog offers "at the caret" only when the caret was in the list - the verdict rides `pastree/findAllAt` as `annotate`, so it costs the popup no second request. Edits through one undoable writer - insertions, or replacements of the whitespace in front of each argument when laid out one per line (prototype sync's applier shape). The server owns every rule (`PasLsp.AnnotateArgs`): the resolver's overload or a refusal by count, idempotence, intrinsics named from the engine's signature table. The IDE already stores surround-with templates we could expose as further actions |
 | Completion | **DELIVERED 2026-08-21** | Code Insight (`PasTreeIdePlugin.CodeInsight`) | the position-in-invalid-text block below is gone - PasTree's completion engine answers it |
 | Signature help | **DELIVERED** | Code Insight; `IOTACodeInsightParameterList100` (`8594`) carries real parameter ranges | shipped with completion, same manager |
 | Semantic tokens (type names) | **Have** (0.48.0, 2026-09-22) | `PaintText` AFTER-event: the type sub-spans of a run repainted over the IDE's text (`PasTreeIdePlugin.SemanticPaint`) | Spike findings, all three routes paint: a run is coalesced by paint attribute and coded by its first non-blank cell (`(TWinControl);` is one atSymbol run), so a type name is a sub-span located by column, pixels proportional within the run rect; `Canvas.Font.Color` set in the before-event IS honoured (whole run); `AllowDefaultPainting := False` + own paint works too. After-event overpaint chosen: the IDE keeps styles, selection and the current-line band. Tokens cached per file by the session (`semanticTokens/full`), refreshed on each `publishDiagnostics` for a viewed file, the previous answer kept between edits - and carried onto the edited text line by line, each token painted only where its identifier still stands (`PasTreeIdePlugin.TokenShift`, 2026-09-25: painted at the old columns, typing in front of a type name left its colour behind for half a second). A Save As lends the old name's tokens to the new one until the rebuild that takes the new name in answers. `IOTAHighlighter` (`1801`) remains the wrong route: synchronous per line, no new colour registrable (`INTACodeEditorOptions` `881` read-only) |
@@ -850,11 +860,11 @@ properly and knows which branches are really dead.
 
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
-| Grouped, navigable result tree | **Done 2026-08-31** | `IOTACustomMessage100` (`6316`) + `INTACustomDrawMessage` (`6332`), tree via `AddCustomMessagePtr`/`AddCustomMessage(Parent)` | `PasTreeIdePlugin.ResultRows`, used by Find References: owner-drawn syntax-colored snippets, match highlight, navigable headers. The Rename tab is the same shape and the natural next adopter |
+| Grouped, navigable result tree | **Done 2026-08-31** | `IOTACustomMessage100` (`6316`) + `INTACustomDrawMessage` (`6332`), tree via `AddCustomMessagePtr`/`AddCustomMessage(Parent)` | `PasTreeIdePlugin.ResultRows`, used by Find References, Rename, the Find All family, Find Defines and Unused Units: owner-drawn syntax-colored snippets, match highlight, navigable headers |
 | Menu items on results | Ready | `INTAMessageNotifier.MessageViewMenuShown` (`6458`) | "rename this", "open all" |
 | A filterable results pane | Ready | `IOTAToDoManager` (`8330`) + `INTAToDoItem` (`8250`) | free filtering and navigation; **Professional/Enterprise only** (`10858`), so gate on `IOTAVersionSKUInfoService` (`10810`) |
 | Hierarchy views (call, type) | Partly - the type hierarchy DOWN is Find All > Descendants (0.37.0), a nested tree in the Messages panel | `INTACustomEditorView` (`7882`) or `INTACustomDockableForm` (`7121`) for anything richer | a whole frame as an editor tab or a dockable window; an editor view also gets a Structure pane via `IOTACustomEditorViewStructure`. Not needed for a tree: the Messages panel nests to any depth |
-| Progress for long operations | **Done 2026-08-31** | `IOTAIDEWaitDialogServices270` (`10597`) | `PasTreeIdePlugin.WaitDialog`, over Find References and Rename. `290` (`10626`) makes it cancellable - not used yet. The server's `$/progress` goes to the editor's status bar instead - see the next row |
+| Progress for long operations | **Done 2026-08-31** | `IOTAIDEWaitDialogServices270` (`10597`) | `PasTreeIdePlugin.WaitDialog`, over Find References, Rename, the Find All family, Find Defines, Go To (armed, `ShowWaitDialogAfter`) and Unused Units. `290` (`10626`) makes it cancellable - not used yet. The server's `$/progress` goes to the editor's status bar instead - see the next row |
 | Analysis status in the editor | **Built 2026-10-01** (0.61.0) | `INTAEditorServices.EditWindow[]`, `INTAEditWindow.StatusBar` | `PasTreeIdePlugin.StatusPanel`: our own panel appended to each edit window's status bar, "PasTree: Ready / analyzing (inc)... / analyzing..." (wording Alex's, 0.61.1), polled every 300 ms, a run under 250 ms not shown. The client declares `window.workDoneProgress` and answers `window/workDoneProgress/create` with null; `TLspClient.Activity` is the run in progress. Since 0.72.0 a fourth kind, `laLibrary` (a `begin` title with "library"): a request making library bodies full before it answers (light mode - a Find on TObject, Unused Units); the panel says "library bodies..." and the same tick writes the server's report line ("PasTree: library bodies: 12 unit(s)") under the running command's wait dialog (`UpdateWaitDialogWork`). The server's `window/showMessage` and its `window/logMessage` up to Warning go to the Messages window as text ("library implementations not searched: N units", the escalation to a full analysis) |
 | Unused Units (Find All) | **Built 2026-10-05** (0.62.0) | `IOTAMessageServices` tree rows, `IOTAProject.RemoveFile` / `AddFile`, `IOTASourceEditor.CreateUndoableWriter` | `PasTreeIdePlugin.UnusedUnits`: Unused Units, Unused Units in the Project, Units Nobody Uses (PasTree 0.93.0's checks, the demo's commands) as a tree in a tab per command ("Unused Units", "Unused Units in the Project", "Units Nobody Uses" - without "PasTree " since 0.62.7, the captions ran too long; one tab for all three until 0.62.5, so each search threw the others' results and Removes away) - the file name alone on top (`NewFileNameRow`; for Unused Units of the one unit, "interface (N)" and "implementation (N)" instead, each entry its own node, a section row standing for all of them), the `uses` lines under it without tags, notes (`NewNoteRow`) for doubts and refusals. A toolbar per tab since this (`ShowResultToolbar`): Remove takes out the node selected in the tree (`ResultFocusedRow` - the IDE's VirtualTrees tree read through RTTI, `FocusedNode` and `NodeParent`, as the ToolsAPI has no selection), Remove All every node left; the edits are asked for at the click (`pastree/usesRemoval`), applied all or nothing (multi-line, checked against the text first; open files through one undoable writer each, others on disk), and nobody-used units are taken out of the project. Revert takes the last Remove back - a stack - checking every clause still reads what that Remove wrote, at the offset it left it |
 
@@ -863,7 +873,7 @@ properly and knows which branches are really dead.
 | Capability | Status | IDE surface | Notes |
 |---|---|---|---|
 | Shortcuts for our commands | **Done 2026-08-21**, one binding since 0.47.0 | `IOTAKeyboardBinding` (`7594`) with `btPartial` (`1432`) | ONE binding for the whole package (`PasTreeIdePlugin.KeyBindings`; features `RegisterKey`, the wizard binds once) - the README's "Keyboard bindings" has why five was wrong. `ToggleKeyProc` takes Ctrl+Shift+Up/Down for the decl↔impl jump. `btPartial` layers over the user's keymap instead of replacing it and shows up on Key Mappings, where it can be reordered or switched off; `btComplete` would claim to *be* the keymap. Returns `krHandled` even with nowhere to go - `krUnhandled` hands the key back to the IDE, which would then run its own version of the jump, and the two disagreeing is indistinguishable from ours misbehaving |
-| Trigger characters | Server | `cevKeyboardEvents` + `EditorKeyDown` (`848`) | coordinate with `IOTACodeTemplateServices.AutoComplete` (`CodeTemplateAPI.pas:290`) and read the user's template trigger keys (`303`-`311`) so we do not shadow snippet expansion |
+| Trigger characters | **Partly** - Enter (block completion, `PasTreeIdePlugin.BlockClose`: `EditorKeyUp` observer + `onTypeFormatting`, 2026-08-31); other characters Server | `cevKeyboardEvents` + `EditorKeyDown` (`848`) | coordinate with `IOTACodeTemplateServices.AutoComplete` (`CodeTemplateAPI.pas:290`) and read the user's template trigger keys (`303`-`311`) so we do not shadow snippet expansion |
 
 ## Infrastructure to adopt regardless of feature order
 
@@ -874,21 +884,27 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
   whose server can die under it, ours should descend from this.
 - **`IOTAServices.GetLocalApplicationDataDirectory`** - `7343`. The right home
   home for a *cache*. Not for the log: that now goes next to the project as
-  `pastree-lsp.log`, with stderr beside it, because a log is only useful where
+  `<project-name>-pastree-lsp.log` (one per project), the server's stderr
+  appended into it, because a log is only useful where
   the person debugging a failed navigation will look for it.
 - **`INTAIDEUIServices.ThemeAwareColors[]`** - `ToolsAPI.UI.pas:99`, over
   `itcRed`/`itcYellow`/`itcBlue`/`itcGray`. Anything we paint on a raw canvas is
   unthemed by default; hardcoded `clRed` is unreadable in the dark theme. Pair
   with `INTACodeEditorOptions.FontColor[]` for the syntax palette, and
-  `IOTAIDEThemingServices250` (`10537`) for custom panes.
+  `IOTAIDEThemingServices250` (`10537`) for custom panes. **Adopted:**
+  `PasTreeIdePlugin.IdeUI` (`IdeThemeColor`; on Delphi 11 a copied palette,
+  0.78.1), used by the result rows and the unit picker.
 - **`INTAIDEUIServices.InputQuery`** - `ToolsAPI.UI.pas:91`. A correctly themed
-  prompt; enough for a rename dialog without designing a form.
+  prompt; enough for a rename dialog without designing a form. **Adopted and
+  outgrown:** Rename's prompt until 0.51.0, replaced by
+  `PasTreeIdePlugin.RenameForm`.
 - **`IOTAEditPosition.RipText`** (`2095`) or
   **`INTACodeEditorState290.EditorToken`** (`ToolsAPI.Editor.pas:304`) - the
   identifier under the cursor, tokenized by the IDE. Replaces `IdentifierAt` in
   `PasTreeIdePlugin.FindReferences`, which scans word characters by hand.
 - **`INTACodeEditorState280.GetCharacterPosPx`** (`219`) - position to pixels,
-  which is what anchors a squiggle rect or a popup. We already use its inverse,
+  which is what anchors a squiggle rect or a popup. **Adopted** by the hover
+  hint (`PasTreeIdePlugin.TooltipSymbolInsight`), beside its inverse,
   `PointToCharacterPos`.
 - **`InvalidateEditorLogicalLine`** (`992`) - repaint by *logical* line, so LSP
   line numbers go straight in without mapping around folds.
@@ -937,20 +953,19 @@ Small, cheap, and each one fixes something we currently do wrong or crudely:
 The original eight-step order (file-trait spike, diagnostics, idle
 `didChange`, Structure outline, result rows, keyboard bindings, IDE Insight
 symbols, Code Insight) is spent: every step was delivered, answered negative
-(the spike) or withdrawn (the outline, see the inventory). What it left open
+(the spike); the outline, withdrawn on 2026-09-01, is back since 0.76.3 (see
+the inventory). What it left open
 is only the decoration around diagnostics - the gutter column, the scrollbar
 minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
 
 ## The live queue (2026-08-22, user asks - supersedes the first order)
 
-1. **Error Insight - DELIVERED via the paint path (2026-08-22, first live
-   run pending).** The spike answered NEGATIVE the same day (closed
+1. **Error Insight - DELIVERED via the paint path (2026-08-22).** The spike answered NEGATIVE the same day (closed
    experiment above); `PasTreeIdePlugin.ErrorPaint` draws the squiggles
    from the session's publishDiagnostics cache. Still queued from the
    diagnostics table: the gutter glyph and the scrollbar minimap, which
    make a squiggle findable rather than merely visible.
-2. **Help Insight: XMLDoc documentation - DELIVERED 2026-08-23 (first live
-   run pending).** PasTree 0.6.3 landed §8D, so the block arrives from the
+2. **Help Insight: XMLDoc documentation - DELIVERED 2026-08-23.** PasTree 0.6.3 landed §8D, so the block arrives from the
    engine (`SymDocComment` for hover, `ItemDocComment` per completion item)
    and the RENDERING is ours: `source/PasLsp.XmlDoc.pas` turns the raw
    `///` run into display text - summary, remarks, parameters, returns,
@@ -961,7 +976,7 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    `completionItem.documentation` carries it per row, EAGERLY, because
    `IOTACodeInsightSymbolList80.GetSymbolDocumentation` is a synchronous
    UI-thread call and a `completionItem/resolve` round-trip is not
-   available there. `cMinPasTreeVersion` has moved on since (0.13.2 today) - see
+   available there. `cMinPasTreeVersion` has moved on since - see
    [PasLsp.Version](../../source/PasLsp.Version.pas) for the current value
    rather than trusting a number written here.
    **The look, settled 2026-08-23 by reading the product.** The first live
@@ -1005,8 +1020,8 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
      nothing for us to implement. Combined with the hint being a plain
      window, that closes the question: **the editor tooltip is plain text,
      and the only way to make it look like the native one is to draw it
-     ourselves** (`INTACustomDrawCodeInsightViewer.DrawLine` with
-     `DrawingHintText=True`, item 6's custom hint window). Do not re-derive
+     ourselves** - which 0.63.0 did (`PasTreeIdePlugin.TooltipSymbolInsight`).
+     Do not re-derive
      this; the option set below was the other candidate and changed nothing.
 
    The VIEWER's documentation pane, by contrast, does render HTML - and it
@@ -1021,14 +1036,12 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    contents (our field, ignored by other clients - the `pastreeCall`
    precedent) and it is what the rich window would be fed the moment one is
    reachable; completion rows carry `data.docHtml`, which the viewer's
-   documentation pane does want as HTML. A custom-drawn
-   hint window (see 6) is no longer the plan for this; what remains open is
-   the OTHER door into the editor's Help Insight window,
-   **`IOTAHelpInsight`** (`6787`) - queried FROM the module, which the
-   file-trait spike suggests is the IDE's own. A one-time readout now says
-   which it is on the first hover of a session (`[pastree] IOTAHelpInsight:
-   ...` on the Build tab), so the next decision is made on a measurement
-   rather than on the assumption.
+   documentation pane does want as HTML. A hint window of our own became the
+   answer for the editor hover: since 0.63.0 it is
+   `PasTreeIdePlugin.TooltipSymbolInsight`, a popup the plugin draws under
+   every Insight Provider (the IDE's own hint switched off through
+   `IOTAEnvironmentOptions` `DeclarationInformation`). The `IOTAHelpInsight`
+   readout answered negative, above.
 3. **Class completion (Ctrl+Shift+C), ours - DELIVERED and VERIFIED LIVE
    2026-08-23 (v0.13.0 → v0.15.2), on a 4000-line demo unit and a
    22 000-line one in the user's own project.** Bodies, property accessors,
@@ -1041,8 +1054,11 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
 
    `pastree/classComplete` (our
    request, not an LSP method - see the handler's comment for why not
-   `codeAction`) parses the LIVE buffer and answers with the text that
-   implements every declaration lacking a body: methods, and - the ask that
+   `codeAction`) parses the LIVE buffer and answers, for the type or free
+   routine at the caret (since 0.29.2; the whole unit when no position is
+   sent), with the text that implements every declaration lacking a body,
+   and with a declaration for an implementation that has none (0.29.0, free
+   routines since 0.76.8): methods, and - the ask that
    started this - **free routines declared in the unit's interface
    section**, which the native completion ignores. Skipped, by rule and by
    harness: an implemented routine (matched on chain + name + parameter
@@ -1056,7 +1072,7 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    the topmost new body line. `PasTreeIdePlugin.ClassComplete`
    is the binding; `krHandled` unconditionally, so a decline can never fall
    through to the native one behind the user's back. **Switchable off** since
-   2026-09-01 as **Complete Class At Cursor** in the Overrides group, which
+   2026-09-01 as **Complete Class At Cursor** on the Settings dialog's Editing tab, which
    is the one path that answers `krUnhandled` - that is what makes "off" mean
    the IDE's own class completion, with no keymap to unbind. It gates the
    prototype sync below with it: one keystroke, one switch.
@@ -1207,9 +1223,10 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    **Still open on this feature:** implementing an INTERFACE a class declares
    (`TFoo = class(TObject, IBar)` → stubs for every `IBar` method - the one
    thing the native completion does that this does not, and it needs the
-   project model rather than the buffer); `class var` for a class property
-   whose accessor is a field; and harness coverage for a type with no
-   `private` section at all, a `record`, and `strict private`.
+   project model rather than the buffer); and harness coverage for a
+   `record` and for `strict private`. (Done since: `class var` for a class
+   property whose accessor is a field, 0.52.0; a type with no `private`
+   section, `TOrphanHost` in the fixture.)
 
    The original entry, for the reasoning that has not changed: the native one
    is not gated
@@ -1254,15 +1271,20 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    processing. The observer cannot swallow anything; at key-up the buffer
    already holds the line break, so it asks right there and applies the
    answer through `CreateUndoableWriter`, dropping it if the caret left
-   the row. Fourth
-   switch in Settings (`EnableBlockCompletion`), checked at keystroke time.
+   the row. On 37.0 that observer; 22.0 and 23.0 have no editor keyboard
+   events, so the key-up comes from the shared WindowProc hook
+   (`PasTreeIdePlugin.EditorWindowHook`) with the same observer semantics.
+   A switch on the Settings dialog's Editing tab (`EnableBlockCompletion`),
+   checked at keystroke time.
    `LspClientSmoke` section 5h pins both the insertion (opener's
    indentation, caret line untouched) and the balanced-file `null`.
 5. **Rename refactoring, ours - DELIVERED 2026-08-30, VERIFIED LIVE
    2026-08-31** (a constant renamed across a 3759-unit project: 9 sites,
-   6 files, 5 of them rewritten on disk - the tab said so). The dialog
-   goes through `INTAIDEUIServices.InputQuery` since 0.21.10 (the VCL
-   one came up light inside the dark theme), and both this and Find
+   6 files, 5 of them rewritten on disk - the tab said so). The dialog is
+   our own themed form (`PasTreeIdePlugin.RenameForm`) since 0.51.0, with
+   the group's project list beneath the new name; from 0.21.10 to 0.51.0 it
+   was `INTAIDEUIServices.InputQuery` (the VCL one came up light inside the
+   dark theme). Both this and Find
    References run under the IDE wait dialog since 0.21.11
    (`PasTreeIdePlugin.WaitDialog` over `IOTAIDEWaitDialogServices`;
    texts kept short - the dialog does not grow for them; every terminal
@@ -1300,8 +1322,9 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    encoding - never loaded as a module, because loading a form unit brings
    its designer and saving the module rewrites the untouched `.dfm`. Sites
    are addressed as UTF-8 byte offsets computed from the plan's line and
-   character column. The plan is the union of every RUNNING project server's
-   answer (`LspRenamePlan`, the References-in-group shape; the owner's
+   character column. The plan is the union of the answers of the owning
+   project's server and of each project ticked in the Rename dialog (started
+   on demand, since 0.51.3; `LspRenamePlan`, the References-in-group shape; the owner's
    verdict decides, others contribute edits, merged by position). Disk
    writes reach the server as `workspace/didChangeWatchedFiles`. The results
    tab carries one button, Revert - the same applier run backwards over the
@@ -1370,8 +1393,8 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    typo. A copy of the keyword list here would be a second answer able to
    disagree with the first.
 
-   **Switchable off** in Tools > PasTree > Settings, third switch in the
-   Overrides group. Off hides the menu item (hidden, not greyed - a disabled
+   **Switchable off** in Tools > PasTree > Settings, on the Editing
+   tab. Off hides the menu item (hidden, not greyed - a disabled
    item reads as "not right now", and this one would not come back on its
    own) and answers `krUnhandled` for Ctrl+Shift+E, which hands the key back
    to the IDE. A feature that EDITS the user's code is the one that most
@@ -1440,9 +1463,11 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    if the text at the mapped column still reads as the identifier -
    anything stale degrades to an unhighlighted snippet, never to a
    highlight on the wrong characters. The **custom colored hint window**
-   is carried over from the old order, still queued.
+   from the old order is delivered: the hover hint, 0.63.0
+   (`PasTreeIdePlugin.TooltipSymbolInsight`).
    **Idle-debounced `didChange` DELIVERED 2026-08-22**
-   (`PasTreeIdePlugin.IdleSync`: `EditorViewModified` + 600 ms timer →
+   (`PasTreeIdePlugin.IdleSync`: `EditorViewModified` + a 250 ms timer, 600 ms
+   in the first cut →
    `LspIdleSync`, a no-op without a running server) - first live run
    found squiggles updating only on save, because the doc sync ran only in
    front of requests. `IOTAEditLineTracker` stays queued: between an edit
@@ -1465,21 +1490,23 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
 
    The reason a diagnosis would want is not lost, it just moved out of the
    user's face: the server logs `nothing to toggle to at that position` into
-   `pastree-lsp.log` for exactly this answer.
+   the project's `<project-name>-pastree-lsp.log` for exactly this answer.
 8. **The Build tab is for what the user must ACT on - DELIVERED 2026-09-01,
    and it is item 7's rule applied to the rest.** Class completion wrote
    `nothing to implement` on most presses of Ctrl+Shift+C and prototype sync
    wrote a line on every one; both are ordinary outcomes of a key pressed
    constantly, and a panel read for compiler errors is the wrong place for
-   them (user). They now go to `pastree-lsp.log` through `LspLogToServer`
+   them (user). They now go to the project's log through `LspLogToServer`
    (a `LogTrace` beside each unit's `LogDiagnostic`, so the split is visible
    at every call site). What still reaches the Build tab: a request that
    FAILED, an answer dropped because the buffer moved under it, and an
    overload set too ambiguous to mirror - each of which means the keystroke
    did not do what it looked like it did.
 9. **Logging, and the settings that gate it - DELIVERED 2026-09-01
-   (v0.24.0).** Two switches in a new Logging group of the dialog.
-   **Enable logging** (default on) decides whether `pastree-lsp.log` exists
+   (v0.24.0).** Switches on the Settings dialog's Diagnostics tab (a Logging
+   group when added; Clear log when opening a project and Log all IDE crashes
+   joined them later). **Enable logging** (default on) decides whether the
+   project's `<project-name>-pastree-lsp.log` exists
    at all: off sends the server no `logFile`, which is how it already
    understands "no log" - nothing is written rather than written and
    discarded. The IDE-side crash record is deliberately NOT gated by it: a
@@ -1494,9 +1521,10 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    ran - `<command>: <where> '<name>' -> <result>, <N> ms` - the document
    notifications (didOpen/didChange/didClose), the server's life seen from
    the IDE (ready with its version, a mismatch, a restart and why, a lost
-   connection) and every failure. On adds the rest: the configuration
-   inventory (every search path, define, namespace and alias), the closure's
-   diagnostics one by one, an analysis's stages and memory, every background
+   connection), every diagnostic of the closure per unit with its path (since
+   0.76.12; after an incremental run, the taken-in units') and every failure.
+   On adds the rest: the configuration inventory (every search path, define,
+   namespace and alias), an analysis's stages and memory, every background
    request (semantic tokens, highlight, completion, signature help, the
    context-menu probe), the IDE's asking/answer pairs and its `ask` lines,
    Rename's steps, the Messages toolbar's construction and the IDE-side
@@ -1597,11 +1625,13 @@ server, and no behaviour to unwind later.
 
 ### The rules
 
-**One server per project configuration**, keyed by exactly what already forces
-a restart today: project file, platform, build configuration, log path, log
-detail. That key is the comparison `EnsureSession` performs, lifted into a
-function. Inside a session the only remaining reason to restart is
-`lcsStopped` - the server actually died.
+**One server per project**, keyed by its file name. That server is restarted
+when its platform, build configuration, log file, log detail, analysis threads
+or parsing mode changes (the comparison `EnsureSession` performs), when a
+re-saved `.dproj` changed its configuration, or when it died (`lcsStopped`).
+A configuration or platform switch in the IDE is noticed by a timer and acts
+once it has held for 250 ms (`PasTreeIdePlugin.ConfigSwitch`, since 0.77.2);
+the other changes take effect at the next request.
 
 **No cap, no eviction.** A group is as big as the user made it, and a
 half-populated pool would answer some clicks instantly and some after a full
@@ -1638,14 +1668,12 @@ server's closure. It reads as "navigation does not work in this unit".
 
 ### Documents
 
-Each editor buffer is synced to the session of its OWNING project and to no
-other. Not for tidiness: `didOpen`/`didChange` call `ScheduleAnalysis` on the
-server, so broadcasting every buffer to every session would make one tab switch
-schedule a rebuild in every live server. One buffer, one session.
-
-Buffers with no owning project follow their requests to the active session.
-Re-syncing them on a switch is cheap: unchanged text hits the server's
-`FBuiltSignature` backstop and schedules nothing.
+Every open buffer is synced to every running server (since 0.38.4; the first
+cut synced each buffer to its OWNING project only, and lost edits for a project
+that compiles a unit through its search path). The server filters: a buffer
+outside its closure is kept as an overlay but schedules no rebuild
+(`TLspServer.AffectsAnalysis`), and a `didOpen` whose text matches the disk
+schedules nothing, so a tab switch still costs no rebuild.
 
 ### The log
 
@@ -1665,16 +1693,14 @@ close, on-type formatting, and the painted diagnostics. Opening a result goes
 through `IOTAActionServices.OpenFile` and the edit buffers, which are
 group-wide - nothing on that path consults the active project.
 
-NOT seamless, and not because of routing: `workspace/symbol` and Rename. Their
-scope is a closure and a closure is one project, so a rename plans the sites in
-ONE of them - silently, which was the dangerous half. Since 0.31.1 the rename's
-result title NAMES the project it answered for whenever the group holds more
-than one (`LspAnsweringProject`), which turns a wrong answer into a partial
-one. `workspace/symbol` has no title of ours to say it in - it feeds the IDE's
-own search box - and still answers for the active project alone.
+NOT seamless, and not because of routing: `workspace/symbol`. Its scope is a
+closure and a closure is one project, and it has no title of ours to say so in -
+it feeds the IDE's own search box - so it answers for the active project alone.
 
-Find References left that category in 0.32.0: it now asks every running project
-and merges. Its title reports the coverage instead of the project.
+Find References left that category in 0.32.0 and Rename in 0.39.1 (until then
+it planned the sites in ONE closure, its title naming the project since
+0.31.1); both ask the projects of the group and merge, chosen in the scope
+dialog since 0.51.3. Their titles report the coverage.
 
 ### Closing and reopening a group costs nothing
 
@@ -1782,10 +1808,10 @@ the alternative is a wait the user did not ask for.
    nothing until asked for. `ProjectsInGroup` still counts the whole group,
    so `across 2 of 9 projects` stays an honest statement of coverage.
 
-   **Group-wide Rename is deliberately NOT this.** Deferred (Alex, 2026-09-07)
-   until the rename itself is reworked. It is a plan the user approves, and a
-   plan spanning two closures has to be presented as one before a single file
-   is written; the interim remains naming the project in its result title.
+   **Group-wide Rename followed** (it was deferred on 2026-09-07 as a plan
+   the user approves, which has to be presented as one before a file is
+   written): 0.39.1 applies and saves across the group, and since 0.51.3 its
+   project list sits in `RenameForm`.
 ### Verified in a real group
 
 2026-09-07, `AVImark.groupproj` - NINE projects - on 0.31.1, from the five
@@ -1823,7 +1849,8 @@ later:
    only the projects ticked in the scope dialog (`PasTreeIdePlugin.GroupScope`).
    A group symbol search would have to go through that dialog too.
 5. A project ADDED to or REMOVED from an open group. Removal must dispose its
-   session; the notification for it is not yet identified.
+   session; the notification for it is not yet identified. Until then
+   `Prune` disposes it at the next activation of any project.
 
 Group-wide Rename, item 6 of the original list, is delivered: 0.39.1 applies
 and saves across the group, 0.51.3 put it behind the same scope dialog.
@@ -1881,9 +1908,9 @@ were weighed:
   a new clause after the section keyword, the file's own line break - need
   the tree. The client applies it through one undoable writer behind
   Annotate's buffer-length gate.
-- **Covered** by `LspClientSmoke` section 5n. **Not yet tested in the IDE**
-  or on AVImark, where the implicit set is the large one - the harnesses
-  cannot say whether 3,700 rows feel instant in a 32-bit IDE.
+- **Covered** by `LspClientSmoke` section 5n, and tested in RAD Studio 13.1
+  on the large project before the 0.54.0 commit (3,700 rows in the 32-bit
+  IDE); row colours fixed for the dark theme in 0.55.1.
 - **The menu and toolbar (0.54.1).** View > Units..., its toolbar button
   and File > Use Unit... run IDE actions from `INTAServices.ActionList`,
   `ViewUnitCommand` and `FileUseUnitCommand` (same names in 22.0, 23.0 and
@@ -1898,7 +1925,8 @@ were weighed:
 ## Go To over library units (deferred 2026-09-19, not started)
 
 **The ask.** Go To (Ctrl+G, `PasTreeIdePlugin.GoToForm` / `.GoToPicker`,
-0.45.0+) lists the module, the project and the group - never the library
+0.45.0+) lists the module and the project (a group tab, 0.45.3, was withdrawn
+in 0.47.23) - never the library
 units the closure reaches through the search path (RTL, VCL, third-party).
 Alex asked for them too, either behind a checkbox ("include libraries") or,
 if the cost allowed, always. Weighed 2026-09-19 and put aside, not because
@@ -1911,8 +1939,8 @@ takes any list of model ids, so "library" is literally all models minus the
 project set that `HandleOutline` builds today - no hydration, no new PasTree
 work. What is NOT true is "every object on the paths": the server knows only
 the units the closure reached through `uses`. A unit on the search path that
-nothing uses is not analyzed and cannot be listed (the IDE-wide Library Path
-is not read either - see "Still missing" above). Fine for Go To by symbol;
+nothing uses is not analyzed and cannot be listed (the IDE Library Path is
+read since 0.54.0, but only as a search path). Fine for Go To by symbol;
 not a Find Unit.
 
 **The arithmetic (AVImark, the real test bed).** The closure is 3767 units,
@@ -1972,8 +2000,9 @@ whether a two-character minimum before library rows appear is acceptable
 under shape B.
 
 **A byproduct worth keeping in view.** Rows of kind `module` over the whole
-closure are exactly the data the queued Use Unit / Find Unit dialog above
-needs; design the request parameters so one call serves both.
+closure were the data the Use Unit / View Unit dialog needed; it was built
+(0.54.0) on its own request instead, `pastree/units` with scope `closure`,
+so a library outline need not serve it.
 
 ## The product mark, and the sizes it still needs
 
@@ -2012,9 +2041,10 @@ translation either way.
 
 - **A formatter.** Needs a printer; PasTree parses and analyzes but does not
   emit source. Same verdict, same reason, as the server spec's.
-- **Becoming the Pascal Insight Provider before completion works.** See the
-  fork above: it is a replacement, not an addition, and every gap becomes a
-  regression the day a user switches.
+- **Becoming the DEFAULT Insight Provider.** Since 0.68.0 PasTree can be
+  chosen as Code Insight Manager (experimental; RAD Studio stays the default).
+  See the fork above: making it the default would turn every remaining gap
+  into a regression the day a user upgrades.
 - **Anything design-time.** Component and property editors, the Object
   Inspector (`PropInspAPI.pas`), the palette, the form designer: their currency
   is instantiated objects on a designer, ours is declarations in text. Checked;

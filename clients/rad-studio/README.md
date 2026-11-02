@@ -736,11 +736,14 @@ when the last of them went. The four LSP units are described in "Files";
   server's incremental sync goes unused: one whole-document replacement per
   user action is cheaper than a stream of ranged patches, and cannot silently
   desynchronise the way a mis-applied patch can. A push-based `didChange`
-  becomes necessary when `publishDiagnostics` arrives, and belongs alongside
-  this rather than instead of it.
-- **One server per project configuration.** Changing the active project,
-  platform or build configuration restarts the server, because the server
-  fixes its configuration at `initialize`.
+  became necessary when `publishDiagnostics` arrived, and was added alongside
+  this rather than instead of it (`PasTreeIdePlugin.IdleSync`, 2026-08-22:
+  the modified buffers after a 250 ms typing pause).
+- **One server per project configuration.** Changing the active platform or
+  build configuration restarts the server, because the server fixes its
+  configuration at `initialize` - since 0.77.2 on a timer, once the new value
+  has held for 250 ms (`PasTreeIdePlugin.ConfigSwitch`), not at the next
+  request.
 - **Lazy, timerless restart.** A dead server is respawned by the next
   request, with backoff and a give-up count. A completed handshake clears the
   failure history. On every handshake the open documents are re-sent, since a
@@ -801,6 +804,7 @@ is an IDE crash. Out of process it is a server restart and a line in the log.
 
 ### What is left
 
+**Delivered since (2026-08-22, native marks 0.75.3) - kept for the reasoning.**
 `publishDiagnostics`. The server side already exists and sends them
 unsolicited; the client currently drops them explicitly (see the stub comment
 in `PasTreeIdePlugin.LspSession.pas`). Turning them into a feature needs three
@@ -1280,8 +1284,8 @@ log anything leaves its last words.
   once by the editor, so a line containing one could be off by one after it -
   inherited unchanged from the in-process path, which relied on the same
   identity (see the header of `PasTreeIdePlugin.LspDocuments.pas`).
-- Nothing reaches the server between requests, by design (sync on request).
-  Harmless for navigation; the reason diagnostics will need a notifier.
+- ~~Nothing reaches the server between requests~~ - since 2026-08-22 the
+  modified buffers are pushed after a typing pause (`PasTreeIdePlugin.IdleSync`).
 - Rebuilding this package inside the same running IDE session is unreliable
   even with an explicit Uninstall/Build/Install cycle - always restart the
   IDE before testing a rebuild. The likely cause is
