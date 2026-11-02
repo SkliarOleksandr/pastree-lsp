@@ -150,6 +150,30 @@ begin
   Result := TEncoding.UTF8.GetString(LBytes).ToLower.Contains(AText.ToLower);
 end;
 
+{ The whole log, lower-cased - for a check about the ORDER of two lines. }
+function LogTextLower: string;
+var
+  LStream: TFileStream;
+  LBytes: TBytes;
+begin
+  Result := '';
+  if not TFile.Exists(GLogPath) then
+    Exit;
+  try
+    LStream := TFileStream.Create(GLogPath, fmOpenRead or fmShareDenyNone);
+  except
+    Exit;
+  end;
+  try
+    SetLength(LBytes, LStream.Size);
+    if Length(LBytes) > 0 then
+      LStream.ReadBuffer(LBytes[0], Length(LBytes));
+  finally
+    LStream.Free;
+  end;
+  Result := TEncoding.UTF8.GetString(LBytes).ToLower;
+end;
+
 { The file and the 0-based line of a Location answer ('' / -1 for none). }
 procedure ResultLocation(const AJson: string; out APath: string;
   out ALine: Integer);
@@ -423,6 +447,17 @@ begin
     // they simply cannot distinguish this run's lines from that one's.
   end;
   Check(GClient.Start(LOptions), 'server started');
+  // ANOTHER PROJECT'S PROGRAM OPEN BEFORE THE FIRST BUILD (0.76.14). The IDE
+  // sends every open buffer of a group to every server, and before the first
+  // build each didOpen named its file the priority, which is loaded as a unit
+  // whether or not anything uses it: AVImark's server took the group's COM
+  // server .dpr in and logged 24 F1027 in a project dcc builds clean. Light
+  // pass only - the full pass keeps proving that the project alone, with
+  // nothing open, starts the build. DemoApp's units are all fixtures, and
+  // two of them carry diagnostics by design, so a fixture path in the parse
+  // record means they joined this project's closure.
+  if ALight then
+    DidOpen(TPath.Combine(GRepoDir, 'tests\fixtures\DemoApp.dpr'));
 
   Writeln;
   Writeln('=== the project alone starts the analysis ===');
@@ -434,7 +469,19 @@ begin
     Studio neither happens until the user does something. }
   Check(PumpUntil(function: Boolean
       begin Result := LogContains('analysis done') end, cAnswerTimeoutMs),
-    'the analysis ran with no request and no document open');
+    IfThen(ALight, 'the analysis ran with no request',
+      'the analysis ran with no request and no document open'));
+  if ALight then
+  begin
+    var LLog := LogTextLower;
+    var LOpened := LLog.IndexOf('textdocument/didopen ' +
+      TPath.Combine(GRepoDir, 'tests\fixtures\demoapp.dpr').ToLower);
+    Check((LOpened >= 0) and (LOpened < LLog.IndexOf('analysis started')),
+      'another project''s program was open before the first build');
+    Check(not LLog.Contains('<- ' +
+      TPath.Combine(GRepoDir, 'tests\fixtures\').ToLower),
+      'and none of its units joined this project''s closure');
+  end;
 
   DidOpen(LWizard);
 

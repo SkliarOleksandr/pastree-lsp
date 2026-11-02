@@ -28,6 +28,19 @@ in the initializationOptions (`pastree.logUnits` in VS Code) or
 thing that answers "which of several copies on the search path won?". Off by
 default because it is hundreds of lines per rebuild.
 
+## F1027 in a project dcc builds clean
+
+Before suspecting the search path, check whether the units carrying the
+F1027 belong to this project at all. Find who names the reported unit's
+importer: if only ANOTHER project of the group does (its `.dpr` lists it),
+the closure took in a file it should not have. On 2026-11-02 that was 24
+F1027 on AVImark, every one in a unit of the group's COM server, whose
+`.dpr` was the last buffer opened before the first build and became its
+priority file - and a priority file is loaded whether anything uses it or
+not. Fixed in 0.76.14 (`StartAnalysis`: before there is a closure only the
+main source and the units the `.dproj` lists can be the priority). The
+`didOpen` lines before `analysis started` show what was open then.
+
 ## Colours on the wrong spans, or "nothing to toggle" while typing
 
 Half a type name coloured, a method name painted as a type, Ctrl+Shift+Up/Down

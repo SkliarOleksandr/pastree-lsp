@@ -549,6 +549,7 @@ type
     procedure InvalidateAnalysis;
     procedure StartAnalysis(const APriorityFile: string);
     procedure ScheduleAnalysis(const APriorityFile: string);
+    function IsProjectListed(const APath: string): Boolean;
     procedure FlushPending;
     procedure FinalizeAnalysisIfDone;
     procedure DiscardHalfUpdatedProject;
@@ -1494,6 +1495,19 @@ begin
         LRoots := LRoots + [LDoc.Path];
   end;
   LFirst := APriorityFile;
+  // NOR IS ANOTHER PROJECT'S FILE, before there is a closure to ask. The
+  // client sends every open buffer to every server of a group, every didOpen
+  // before the first build names its file the priority (AffectsAnalysis is
+  // True with no project), and the last one wins - on 2026-11-02 that was
+  // AVImarkCOMServer.dpr, a background tab of the group's COM server. Loaded
+  // as a unit of AVImark, it pulled its 9 in-process units in under AVImark's
+  // search path, and the log showed 24 F1027 for units only the COM server's
+  // path holds, in a project dcc builds clean. Only the main source and the
+  // units the .dproj lists are known to belong; anything else waits for the
+  // closure, where AffectsAnalysis decides.
+  if (LFirst <> '') and (FProject = nil) and (FMainSource <> '') and
+     not IsProjectListed(LFirst) then
+    LFirst := '';
   if (LFirst <> '') and IsInclude(LFirst) then
   begin
     if IncludersOf(APriorityFile, LIncluder) = 1 then
@@ -1750,9 +1764,11 @@ begin
         LFile := LModel.Tree.Source.FileNames[LFileId]
       else
         LFile := FProject.ModelFile(LMi);
-      LLines := LLines + [Format('    %s %s: %s',
+      // Msg alone: PasTree's TSemaDiag.Msg already starts with the code, and
+      // printing Code in front of it read `E2003: E2003 Undeclared ...`.
+      LLines := LLines + [Format('    %s %s',
         [PosTag(LFile, LModel.Diags[LDi].Line, LModel.Diags[LDi].Col),
-         LModel.Diags[LDi].Code, LModel.Diags[LDi].Msg])];
+         LModel.Diags[LDi].Msg])];
     end;
   end;
   if (LTotal = 0) and not FLogUnits then
@@ -2076,6 +2092,24 @@ var
 begin
   Result := (FProject = nil) or (FProject.ModelIdOf(APath) >= 0) or
     (IncludersOf(APath, LFirst) > 0);
+end;
+
+{ The main source or a unit the .dproj lists - what is known to belong to this
+  project before any analysis has run. A unit the search path alone supplies
+  is not here; StartAnalysis's priority rule is the only caller and loses only
+  the ordering for it. }
+function TLspServer.IsProjectListed(const APath: string): Boolean;
+var
+  LKey, LItemKey: string;
+begin
+  Result := False;
+  if not PasFullPathKey(APath, LKey) then
+    Exit;
+  if PasFullPathKey(FMainSource, LItemKey) and (LItemKey = LKey) then
+    Exit(True);
+  for var LItem in FProjectFiles do
+    if PasFullPathKey(LItem, LItemKey) and (LItemKey = LKey) then
+      Exit(True);
 end;
 
 { How many units of the analyzed project $I-include APath - their file tables
@@ -2511,9 +2545,9 @@ begin
         LFile := LModel.Tree.Source.FileNames[LFileId]
       else
         LFile := FProject.ModelFile(LMi);
-      LLines := LLines + [Format('    %s %s: %s',
+      LLines := LLines + [Format('    %s %s',
         [PosTag(LFile, LModel.Diags[LDi].Line, LModel.Diags[LDi].Col),
-         LModel.Diags[LDi].Code, LModel.Diags[LDi].Msg])];
+         LModel.Diags[LDi].Msg])];
     end;
   end;
   LogBlock(LLines);
