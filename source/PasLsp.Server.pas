@@ -1708,11 +1708,13 @@ end;
   PASTREE_LSP_LOG_UNITS=1 in the environment for a session where no client
   passes options. Both are read once, at initialize.
 
-  THE WHOLE BLOCK IS THE DETAIL LOG'S since 2026-10-22, also at the user's
-  call: the plain log keeps the count on its "analysis done" line, which is
-  what says a list is worth asking for, and a project with missing search
-  paths put 580 diagnostic lines per rebuild into it. A report that needs
-  the list is a report with Advanced Logging on. }
+  THE DIAGNOSTICS ARE IN THE PLAIN LOG, EVERY ONE, NO CAP (Alex, 2026-11-02).
+  From 0.74.0 to 0.76.11 the whole block was Advanced Logging's, because a
+  project with missing search paths put 580 lines per rebuild into the plain
+  log - and a colleague's log then said "1 diagnostics" and nothing about
+  which, so the one report that needed it could not answer. An error is a
+  failure, and failures stay in the plain log. A clean rebuild writes
+  nothing here: the "analysis done" line already says 0. }
 procedure TLspServer.LogParseRecord;
 var
   LLines: TArray<string>;
@@ -1720,7 +1722,7 @@ var
   LModel: TPasSemaModel;
   LFile: string;
 begin
-  if (FProject = nil) or not FLogDetail then
+  if FProject = nil then
     Exit;
   LLines := ['parsed closure: ' + IntToStr(FProject.ModelCount) + ' units'];
   LTotal := 0;
@@ -1753,6 +1755,8 @@ begin
          LModel.Diags[LDi].Code, LModel.Diags[LDi].Msg])];
     end;
   end;
+  if (LTotal = 0) and not FLogUnits then
+    Exit;
   LLines := LLines + [Format('parsed closure: %d diagnostics total', [LTotal])];
   LogBlock(LLines);
 end;
@@ -2489,11 +2493,13 @@ begin
     Exit;
   LLines := [Format('taken in by the incremental run: %d units',
     [FProject.ModelCount - FModuleBaseCount])];
-  // The count in the plain log, the units and their diagnostics in the
-  // detail log - as LogParseRecord.
-  for LMi := FModuleBaseCount to IfThen(FLogDetail, FProject.ModelCount, 0) - 1 do
+  // The count and every diagnostic in the plain log, the inventory of clean
+  // units in the detail log - as LogParseRecord.
+  for LMi := FModuleBaseCount to FProject.ModelCount - 1 do
   begin
     LModel := FProject.Model(LMi);
+    if not FLogDetail and (Length(LModel.Diags) = 0) then
+      Continue;
     LLines := LLines + [Format('  unit %s <- %s%s',
       [LModel.UnitNameLower, FProject.ModelFile(LMi),
        IfThen(Length(LModel.Diags) = 0, '',

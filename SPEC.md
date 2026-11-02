@@ -1086,7 +1086,11 @@ nobody has open is exactly what breaks navigation in the file they do have
 open). The configuration block lists the search paths themselves, not just how
 many.
 
-Both are the **detail log**, on by default; `logDetail: false`
+The diagnostics are in **every** log, all of them, uncapped (0.76.12): a
+failure stays in the plain log, and from 0.74.0 to 0.76.11 a report said
+`1 diagnostics` and nothing about which. A clean rebuild writes no parse record
+there - the `analysis done` line already says 0. The configuration block is the
+**detail log**, on by default; `logDetail: false`
 (`pastree.logDetail` in VS Code, the "Advanced logging" box in the RAD Studio
 dialog, which sends false unless it is ticked) leaves the plain log (0.74.0):
 
@@ -1099,12 +1103,15 @@ dialog, which sends false unless it is ticked) leaves the plain log (0.74.0):
 - one line per command, in one shape - `<command>: <where> '<name>' ->
   <result>, <N> ms` (`LogCommand`), a miss saying why;
 - `didOpen`, `didChange`, `didClose`;
-- every refusal, failure and exception.
+- every refusal, failure and exception;
+- every diagnostic of the closure after a rebuild, under its unit's path, and
+  of the units an incremental run took in.
 
-The detail log adds the parse record, the configuration block, an analysis's
-stages and memory, and the echo of every background request: semantic tokens,
-document highlight, document symbols, completion, signature help, workspace
-symbols, `pastree/findAllAt`, `pastree/declarationAt`, on-type formatting.
+The detail log adds the clean units a run took in, the configuration block, an
+analysis's stages and memory, and the echo of every background request:
+semantic tokens, document highlight, document symbols, completion, signature
+help, workspace symbols, `pastree/findAllAt`, `pastree/declarationAt`, on-type
+formatting.
 
 The full **unit inventory** - one `unit x <- path` line per unit, which answers
 "which of several copies on the search path won for this name?" - is off by
