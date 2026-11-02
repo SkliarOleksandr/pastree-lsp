@@ -143,7 +143,7 @@ begin
     begin
       LWriter.CopyTo(LStarts[LIdx]);
       LWriter.DeleteTo(LEnds[LIdx]);
-      LWriter.Insert(UTF8String(AAnswer.Edits[LIdx].Text));
+      LWriter.Insert(PAnsiChar(UTF8String(AAnswer.Edits[LIdx].Text)));  // PAnsiChar: the UTF8String overload is 12+
     end;
   finally
     LWriter := nil;   // the writer commits on release

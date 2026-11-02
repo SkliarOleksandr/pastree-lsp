@@ -76,8 +76,10 @@ if defined LBADPLAT (
   goto :fail
 )
 
-rem The floor is a real requirement, not caution: the package targets Delphi 12
-rem and newer (see README.md).
+rem The floor is a real requirement, not caution: the package targets Delphi
+rem 11.3 and newer (see README.md). 11.3 and not 11.0: the editor half of
+rem ToolsAPI (INTACodeEditorServices280) was completed over the 11.x minors,
+rem and only 11.3 has been built and run against.
 rem
 rem DELPHI 12 ATHENS IS BDS 23.0 - the registry key is the IDE's own version,
 rem which has not matched the product name since "Delphi 10 Seattle" was 17.0:
@@ -87,7 +89,7 @@ rem 12, and the effect was not a crash: it silently withheld an installed,
 rem perfectly suitable IDE and called it too old. Change this only against the
 rem actual key under HKCU\Software\Embarcadero\BDS on a machine that has the
 rem version in question.
-set "LMINMAJOR=23"
+set "LMINMAJOR=22"
 
 rem THE 64-BIT IDE HAS ITS OWN FLOOR, and this one IS caution - deliberately.
 rem Delphi 12.3 shipped a 64-bit IDE as an optional "initial release" (no
@@ -111,7 +113,7 @@ if %LCOUNT%==0 (
   echo.
   echo No suitable RAD Studio installation found.
   if defined LOLD echo Installed but too old:!LOLD!
-  echo This package needs Delphi 12 ^(BDS 23.0^) or newer.
+  echo This package needs Delphi 11.3 ^(BDS 22.0^) or newer.
   goto :fail
 )
 

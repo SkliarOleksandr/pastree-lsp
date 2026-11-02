@@ -203,6 +203,9 @@ type
     FOnFlush: TProc;            // see OnFlush
     // Configuration (fixed at initialize)
     FPlatform: TPasPlatform;
+    // The CompilerVersion the analysis emulates ($IF CompilerVersion and
+    // RTLVersion, VERnnn) - the client's compilerVersion, else PasTree's.
+    FCompilerVersion: Double;
     FMainSource: string;
     FSearchPaths: TArray<string>;
     FDefines: TArray<string>;
@@ -792,6 +795,7 @@ begin
   FPromoteRebuilt.Duplicates := dupIgnore;
   FLightLibraries := True;
   FPlatform := pfWin64;
+  FCompilerVersion := DEFAULT_COMPILER_VERSION;
   FTrace := GetEnvironmentVariable('PASTREE_LSP_TRACE') <> '';
   FLogUnits := GetEnvironmentVariable('PASTREE_LSP_LOG_UNITS') <> '';
   FLogDetail := True;
@@ -1128,6 +1132,7 @@ var
   LVal: TJSONValue;
   LDProj: TPasDProj;
   LAlias: TPasUnitAlias;
+  LCompilerVersion: Double;
   LDef: TPasUnitAliasDef;
 begin
   LProjectFile := '';
@@ -1146,6 +1151,13 @@ begin
     // developed on 13.0, and the search paths alone say only "37.0", which
     // both updates share.
     LHost := AOptions.GetValue<string>('host', '');
+    // WHICH COMPILER, from the same authority: the RAD Studio package sends
+    // the one it was built with, which is its IDE's. Without it an 11.3
+    // project was analyzed as 13 - `{$IF RTLVersion >= 36}` taken, an E2003
+    // in a unit dcc builds clean (2026-11-02). Out of range reads as absent.
+    LCompilerVersion := AOptions.GetValue<Double>('compilerVersion', 0);
+    if (LCompilerVersion >= 20) and (LCompilerVersion < 100) then
+      FCompilerVersion := LCompilerVersion;
     LPlatformStr := AOptions.GetValue<string>('platform', '');
     LConfigStr := AOptions.GetValue<string>('config', '');
     LItem := AOptions.GetValue<string>('logFile', '');
@@ -1344,10 +1356,11 @@ begin
   // FOURTH and last header line: the configuration in counts, the switches
   // as dcc gets them ("why is this {$IFOPT D+} branch dead" is answered by
   // the config the .dproj evaluated to), and the light mode.
-  LogHeader(Format('configured: platform=%s main=%s paths=%d defines=%d'
+  LogHeader(Format('configured: platform=%s compiler=%s main=%s paths=%d defines=%d'
     + ' libraryPaths=%d projectFiles=%d projectDir=%s; switches %s, console'
     + ' target %s; light libraries %s',
-    [PlatformName(FPlatform), FMainSource, Length(FSearchPaths),
+    [PlatformName(FPlatform), FormatFloat('0.0', FCompilerVersion,
+       TFormatSettings.Invariant), FMainSource, Length(FSearchPaths),
      Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
      FProjectDir,
      IfThen(Length(FSwitches) = 0, '(dcc defaults)',
@@ -1535,7 +1548,7 @@ begin
   LogDetail(Format('building the analysis session: %d roots, %d paths, %d overlays',
     [Length(LRoots), Length(FSearchPaths), FDocs.Count]));
   FSession := TPasAsyncSession.Create(FPlatform, FSearchPaths, FDefines,
-    LRoots, LPriority);
+    LRoots, LPriority, FCompilerVersion);
   FSession.SetNamespaces(FNamespaces);
   // A member after a dot that nothing resolves (`Grid.Canvas2`) is E2003 too.
   // PasTree leaves it off by default - a false E2003 on a member is worse
@@ -2817,7 +2830,8 @@ var
 begin
   // StartAnalysis's configuration, setting for setting (see the note
   // there), on a bare project instead of a session.
-  Result := TPasSemaProject.Create(FPlatform, FSearchPaths, FDefines);
+  Result := TPasSemaProject.Create(FPlatform, FSearchPaths, FDefines,
+    FCompilerVersion);
   try
     Result.SetNamespaces(FNamespaces);
     Result.ReportUnresolvedMembers := True;
@@ -4496,7 +4510,7 @@ begin
 
   if FCompletion = nil then
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-      FDefines);
+      FDefines, FCompilerVersion);
   SyncCompletionOverlays;
   WaitHeldProject(AMsg.IdJson, cHeldProjectBudgetMs);   // as completion
   LMid := -1;
@@ -4806,7 +4820,7 @@ begin
   begin
     if FCompletion = nil then
       FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-        FDefines);
+        FDefines, FCompilerVersion);
     // Document truth for the overlay parse too: an $I include open with
     // unsaved edits must be preprocessed from its live text, exactly as the
     // analysis session sees it.
@@ -6781,6 +6795,18 @@ begin
   end;
 end;
 
+// TArray.Contains<T> is Delphi 12+, and the server is built by the compiler of
+// the RAD Studio version the build targets - 11.3 included.
+function ContainsInt(const AItems: TArray<Integer>; AValue: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(AItems) do
+    if AItems[LIdx] = AValue then
+      Exit(True);
+  Result := False;
+end;
+
 function TLspServer.HandleOutline(const AMsg: TLspIncoming): string;
 const
   KINDS: array[TPasOutlineKind] of string = ('module', 'section', 'uses',
@@ -6875,7 +6901,7 @@ begin
     for LItem in FProjectFiles do
     begin
       LMid := FNav.ModelIdOf(LItem);
-      if (LMid >= 0) and not TArray.Contains<Integer>(LMids, LMid) then
+      if (LMid >= 0) and not ContainsInt(LMids, LMid) then
         LMids := LMids + [LMid];
     end;
     // A project with no .dproj (a bare .dpr - the harness's, or a file
@@ -6887,7 +6913,7 @@ begin
         begin
           LItem := TPath.GetFullPath(FProject.ModelFile(LMid));
           if LItem.StartsWith(IncludeTrailingPathDelimiter(FProjectDir),
-               True) and not TArray.Contains<Integer>(LMids, LMid) then
+               True) and not ContainsInt(LMids, LMid) then
             LMids := LMids + [LMid];
         end;
     LEntries := FNav.ProjectOutline(LMids);
@@ -7356,7 +7382,7 @@ begin
       '{"edits":[],"count":0,"provider":"no text"}'));
   if FCompletion = nil then
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-      FDefines);
+      FDefines, FCompilerVersion);
   SyncCompletionOverlays;
   // `bodyOrder`: where a new body goes among its type's existing ones -
   // "alphabetical" (the default, the native command's) or "declaration".
@@ -7453,7 +7479,7 @@ begin
       '{"edits":[],"count":0,"provider":"no text"}'));
   if FCompletion = nil then
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-      FDefines);
+      FDefines, FCompilerVersion);
   SyncCompletionOverlays;
   LAnswer := FCompletion.SyncPrototypeAt(LPath, LText, LPasLine, LPasCol);
 
@@ -7511,7 +7537,7 @@ begin
   end;
   if FCompletion = nil then
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-      FDefines);
+      FDefines, FCompilerVersion);
   SyncCompletionOverlays;
   LMid := -1;
   if FNav <> nil then
@@ -7721,7 +7747,7 @@ begin
     begin
       if FCompletion = nil then
         FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-          FDefines);
+          FDefines, FCompilerVersion);
       SyncCompletionOverlays;
       LInfo := FCompletion.UsesInfoAt(LDocPath, LItem);
       LHasDoc := LInfo.Kind <> '';
@@ -7852,7 +7878,7 @@ begin
   begin
     if FCompletion = nil then
       FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-        FDefines);
+        FDefines, FCompilerVersion);
     SyncCompletionOverlays;
     LAnswer := FCompletion.UseUnitAt(LPath, LText, LUnit, LImpl, LIndent,
       LMargin);
@@ -8231,7 +8257,7 @@ begin
       'usesRemoval: files required'));
   if FCompletion = nil then
     FCompletion := TLspCompletionEngine.Create(FPlatform, FSearchPaths,
-      FDefines);
+      FDefines, FCompilerVersion);
   SyncCompletionOverlays;
   LAllRefused := nil;
   LAllMissing := nil;

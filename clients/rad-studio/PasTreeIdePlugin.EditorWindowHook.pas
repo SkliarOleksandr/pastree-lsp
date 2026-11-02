@@ -87,6 +87,14 @@ type
   TEditorKeyUpEvent = procedure(const AEditor: TWinControl;
     AKey: Word) of object;
 
+  /// <summary>
+  /// Fired once per editor control, the first time this unit hooks it - and
+  /// replayed for the controls already hooked when a handler registers. The
+  /// editor popup bridge (Delphi 11, which has no local-menu API) rides on
+  /// it to find each edit window's TPopupMenu.
+  /// </summary>
+  TEditorFoundEvent = procedure(const AEditor: TWinControl) of object;
+
 /// <summary>
 /// Claims plain Ctrl+left clicks in every editor. No-op on ToolsAPI 37.0+,
 /// where the caller uses OnEditorMouseDownEx/UpEx instead.
@@ -99,6 +107,11 @@ procedure RegisterCtrlClickHandler(const AClaims: TEditorClickClaim;
 /// caller uses OnEditorKeyUp instead.
 /// </summary>
 procedure RegisterKeyUpHandler(const AHandler: TEditorKeyUpEvent);
+
+/// <summary>
+/// Observes editor discovery. No-op on ToolsAPI 37.0+, where nothing needs it.
+/// </summary>
+procedure RegisterEditorFoundHandler(const AHandler: TEditorFoundEvent);
 
 /// <summary>
 /// Releases every hook and the editor notifier. MUST be called before the
@@ -120,6 +133,10 @@ begin
 end;
 
 procedure RegisterKeyUpHandler(const AHandler: TEditorKeyUpEvent);
+begin
+end;
+
+procedure RegisterEditorFoundHandler(const AHandler: TEditorFoundEvent);
 begin
 end;
 
@@ -173,6 +190,7 @@ type
     FClaims: TEditorClickClaim;
     FOnClick: TEditorClickEvent;
     FOnKeyUp: TEditorKeyUpEvent;
+    FOnFound: TEditorFoundEvent;
     // The pending claim: decided on the button-down and honoured on the
     // matching up, so the two halves of one click can never disagree. See
     // BeginClaim.
@@ -197,6 +215,19 @@ type
 
 var
   GRegistry: TEditorHookRegistry;
+
+{$IF CompilerVersion < 36}
+// Delphi 11 declares TEditorMouseMoveEvent WITHOUT `of object` (fixed in 12),
+// so the notifier can only call a plain procedure there. This forwards to the
+// one registry; the mouse-down/up events have the same defect and are not
+// used by this unit.
+procedure MouseMoveForwarder(const AEditor: TWinControl; AShift: TShiftState;
+  AX, AY: Integer);
+begin
+  if Assigned(GRegistry) then
+    GRegistry.DoMouseMove(AEditor, AShift, AX, AY);
+end;
+{$IFEND}
 
 { TEditorWindowHook }
 
@@ -310,7 +341,11 @@ begin
     Exit;
   FNotifier := TEditorDiscoveryNotifier.Create;
   FNotifier.OnEditorBeginPaint := DoBeginPaint;
+{$IF CompilerVersion < 36}
+  FNotifier.OnEditorMouseMove := MouseMoveForwarder;
+{$ELSE}
   FNotifier.OnEditorMouseMove := DoMouseMove;
+{$IFEND}
   FNotifierIndex := FServices.AddEditorEventsNotifier(FNotifier);
 end;
 
@@ -354,6 +389,8 @@ begin
     end;
   FHooks.Add(TEditorWindowHook.Create(Self, AEditor));
   FLastHooked := AEditor;
+  if Assigned(FOnFound) then
+    FOnFound(AEditor);
 end;
 
 /// <summary>
@@ -445,6 +482,22 @@ begin
   if not Assigned(AHandler) and not Assigned(GRegistry) then
     Exit;
   Registry.FOnKeyUp := AHandler;
+end;
+
+procedure RegisterEditorFoundHandler(const AHandler: TEditorFoundEvent);
+var
+  LIndex: Integer;
+begin
+  if not Assigned(AHandler) and not Assigned(GRegistry) then
+    Exit;
+  Registry.FOnFound := AHandler;
+  // Replay: the registry may have been discovering editors for a while
+  // before this handler existed (the menu manager is created before the
+  // features that bring the registry to life register with it).
+  if Assigned(AHandler) then
+    for LIndex := 0 to Registry.FHooks.Count - 1 do
+      if not Registry.FHooks[LIndex].Dead then
+        AHandler(Registry.FHooks[LIndex].Control);
 end;
 
 procedure FinalizeEditorWindowHooks;

@@ -972,6 +972,17 @@ end;
 // The node to select once AGone has left the tree: the first one shown
 // after the last of them, else the last one shown before them; -1 when
 // none is left.
+// TArray.IndexOf<T> is Delphi 12+.
+function IndexOfInt(const AItems: TArray<Integer>; AValue: Integer): Integer;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(AItems) do
+    if AItems[LIdx] = AValue then
+      Exit(LIdx);
+  Result := -1;
+end;
+
 function NodeAfter(const AGone: TArray<Integer>): Integer;
 var
   LLast, LFirst: Integer;
@@ -981,7 +992,7 @@ begin
   LLast := -1;
   LFirst := -1;
   for var LIdx := 0 to High(GTab.ShownNode) do
-    if TArray.IndexOf<Integer>(AGone, GTab.ShownNode[LIdx]) >= 0 then
+    if IndexOfInt(AGone, GTab.ShownNode[LIdx]) >= 0 then
     begin
       if LFirst < 0 then
         LFirst := LIdx;
@@ -991,12 +1002,12 @@ begin
     Exit;
   for var LIdx := LLast + 1 to High(GTab.ShownNode) do
   begin
-    LGone := TArray.IndexOf<Integer>(AGone, GTab.ShownNode[LIdx]) >= 0;
+    LGone := IndexOfInt(AGone, GTab.ShownNode[LIdx]) >= 0;
     if not LGone then
       Exit(GTab.ShownNode[LIdx]);
   end;
   for var LIdx := LFirst - 1 downto 0 do
-    if TArray.IndexOf<Integer>(AGone, GTab.ShownNode[LIdx]) < 0 then
+    if IndexOfInt(AGone, GTab.ShownNode[LIdx]) < 0 then
       Exit(GTab.ShownNode[LIdx]);
 end;
 

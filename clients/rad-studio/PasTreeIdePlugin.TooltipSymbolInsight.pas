@@ -97,7 +97,7 @@ uses
   System.Variants, System.Math, System.StrUtils, System.Win.Registry,
   Winapi.Windows, Winapi.Messages,
   Vcl.Controls, Vcl.Graphics, Vcl.Forms, Vcl.ExtCtrls, Vcl.AppEvnts,
-  ToolsAPI, ToolsAPI.Editor, ToolsAPI.UI,
+  ToolsAPI, ToolsAPI.Editor, PasTreeIdePlugin.IdeUI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.DirectiveText,
   PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings,
@@ -257,6 +257,17 @@ var
   // back after that must not touch a freed window (the LspSession callbacks
   // run on the main thread, but can still be queued behind the unload).
   GAlive: Boolean;
+
+{$IF CompilerVersion < 36}
+// Delphi 11 declares TEditorMouseMoveEvent WITHOUT `of object` (fixed in 12),
+// so its notifier can only call a plain procedure: this one forwards.
+procedure MouseMoveForwarder(const Editor: TWinControl; Shift: TShiftState;
+  X, Y: Integer);
+begin
+  if Assigned(GController) then
+    GController.DoMouseMove(Editor, Shift, X, Y);
+end;
+{$IFEND}
 
 { Helpers }
 
@@ -501,15 +512,14 @@ end;
 
 procedure TSymbolInsightWindow.ReadColors;
 var
-  LUI: INTAIDEUIServices;
   LEditor: IOTAEditorServices;
 begin
   FBack := ThemedColor(clInfoBk);
   FText := ThemedColor(clInfoText);
   FDim := ThemedColor(clGrayText);
   FBorder := ThemedColor(clBtnShadow);
-  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-    FLink := LUI.ThemeAwareColors[itcBlue]
+  if HaveIdeAccents then
+    FLink := IdeThemeColor(itcBlue, clNone)
   else
     FLink := clHotLight;
   if TypeHighlightEnabled then
@@ -976,7 +986,11 @@ begin
   if Supports(BorlandIDEServices, INTACodeEditorServices, FServices) then
   begin
     FNotifier := TSymbolInsightNotifier.Create;
+{$IF CompilerVersion < 36}
+    FNotifier.OnEditorMouseMove := MouseMoveForwarder;
+{$ELSE}
     FNotifier.OnEditorMouseMove := DoMouseMove;
+{$IFEND}
     FNotifierIndex := FServices.AddEditorEventsNotifier(FNotifier);
   end;
 end;

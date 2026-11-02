@@ -2516,6 +2516,8 @@ begin
   Result.Platform := APlatform;
   Result.Config := AConfig;
   Result.Host := HostDescription;
+  // This package's compiler IS the IDE's - see TLspInitOptions.CompilerVersion.
+  Result.CompilerVersion := System.CompilerVersion;
   // The IDE's own platform id, NOT the normalized one: the registry key and
   // the $(Platform) macro are named after what the IDE calls the platform
   // (Win64x has its own Library key), while APlatform has already been folded
@@ -5418,7 +5420,7 @@ var
   LProject: IOTAProject;
   LSession: TLspSession;
   LIdx, LSel: Integer;
-  LChosen: Boolean;
+  LChosen, LKnown: Boolean;
 begin
   Result := nil;
   if FDestroying then
@@ -5446,9 +5448,15 @@ begin
       Continue;
     // Created here if need be - the request that follows starts its server.
     LSession := SessionFor(LProject);
-    if Assigned(LSession) and
-       not TArray.Contains<TLspSession>(Result, LSession) then
-      Result := Result + [LSession];
+    // A loop, not TArray.Contains: that is Delphi 12+.
+    if Assigned(LSession) then
+    begin
+      LKnown := False;
+      for LSel := 0 to High(Result) do
+        LKnown := LKnown or (Result[LSel] = LSession);
+      if not LKnown then
+        Result := Result + [LSession];
+    end;
   end;
 end;
 

@@ -327,7 +327,9 @@ begin
   // Insight - from the settings cache, so no registry read per run.
   if not PasTreeErrorSquigglesEnabled then
     Exit;
-  if ASyntaxCode = atFolded then
+  // atFolded is exported by ToolsAPI only since Delphi 12; the 11.3 editor
+  // passes the same code, so the value is pinned for it.
+  if ASyntaxCode = {$IF Declared(atFolded)} atFolded {$ELSE} 40 {$IFEND} then
     Exit;   // a folded box stands for many lines; per-line ranges lie there
   if not IsPascalSourceFile(AContext.FileName) then
     Exit;

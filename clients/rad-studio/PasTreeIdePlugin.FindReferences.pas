@@ -75,7 +75,7 @@ implementation
 uses
   Winapi.Windows, System.SysUtils, System.Character,
   System.Generics.Collections, Vcl.Dialogs, Vcl.Forms,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
+  PasTreeIdePlugin.IdeUI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.RenameToolbar;
 
@@ -653,8 +653,8 @@ begin
         if (Length(AHits) = 0) and (LName = '') then
         begin
           CloseWaitDialog;
-          (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
-            'No identifier under the cursor.', mtInformation, [mbOK], -1);
+          IdeMessageDlg(
+            'No identifier under the cursor.', mtInformation, [mbOK]);
           Exit;
         end;
 

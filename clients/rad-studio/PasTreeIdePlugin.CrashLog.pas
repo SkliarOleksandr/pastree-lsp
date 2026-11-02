@@ -468,13 +468,17 @@ begin
   Result := (UIntPtr(AAddr) >= GOwnLow) and (UIntPtr(AAddr) < GOwnHigh);
 end;
 
-function VectoredHandler(AInfo: PExceptionPointers): LongInt; stdcall;
+type
+  // Our own alias: Delphi 11 declares the record but not PExceptionPointers.
+  PCrashExceptionPointers = ^TExceptionPointers;
+
+function VectoredHandler(AInfo: PCrashExceptionPointers): LongInt; stdcall;
 var
   LFrames: TFrames;
   LCount, LIdx, LScanFrom: Integer;
   LOurs: Boolean;
   LText: string;
-  LRec: PExceptionRecord;
+  LRec: Winapi.Windows.PExceptionRecord;   // System has one too; 11 picks it
 begin
   Result := EXCEPTION_CONTINUE_SEARCH;   // observe only, never handle
   LRec := AInfo.ExceptionRecord;

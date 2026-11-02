@@ -924,6 +924,17 @@ inherits it with the project), and the pool stays at 2 for what still runs
 on it, the search-path index. The log's `analysis threads:` line says the
 count in effect.
 
+`compilerVersion` in the initializationOptions is the dcc the analysis
+emulates: the value of `CompilerVersion` and `RTLVersion` in `$IF`, and the
+`VERnnn` define - for the closure, the incremental runs and the completion
+overlay alike. Absent (or outside 20..99) keeps PasTree's default, 37.0. The
+RAD Studio package sends its own compiler's constant, which is its IDE's,
+since a designtime package loads only there: 35.0 in Delphi 11, 36.0 in 12.
+Before 0.77.0 nothing sent it, and every project was analyzed as 13's - an
+11.3 project got an E2003 inside `{$IF RTLVersion >= 36}`, in a unit its dcc
+builds clean. The log's `configured:` line names it (`compiler=35.0`). The VS
+Code client sends none.
+
 The log distinguishes all of it, because a fast path that quietly stops
 firing is indistinguishable from a slow analyzer: `analysis started:
 incremental, one module (<file>)` against `analysis started: full rebuild`,

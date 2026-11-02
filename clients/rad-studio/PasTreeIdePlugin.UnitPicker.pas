@@ -110,7 +110,7 @@ begin
     Exit;
   try
     LWriter.CopyTo(LPos);
-    LWriter.Insert(UTF8String(AEdit.Text));
+    LWriter.Insert(PAnsiChar(UTF8String(AEdit.Text)));  // PAnsiChar: the UTF8String overload is 12+
   finally
     LWriter := nil;   // the writer commits on release
   end;

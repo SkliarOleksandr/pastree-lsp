@@ -114,6 +114,14 @@ type
     /// </summary>
     Host: string;
     /// <summary>
+    /// Sent as compilerVersion when above 0: the CompilerVersion the analysis
+    /// emulates - its value in `$IF CompilerVersion`/`RTLVersion` and the
+    /// VERnnn define. The package sends its own compiler's, which is the IDE's
+    /// (a designtime package loads only there): 35.0 in Delphi 11, 36.0 in 12,
+    /// 37.0 in 13. 0 = the server's default, PasTree's 37.0.
+    /// </summary>
+    CompilerVersion: Double;
+    /// <summary>
     /// Sent as logDetail=false, which suppresses the configuration inventory
     /// (every search path, define, namespace and alias) in the server's log.
     /// A NEGATIVE flag on purpose: Default(TLspInitOptions) must mean "log as
@@ -588,6 +596,8 @@ begin
     LResult.AddPair('logFile', LogFile);
   if Host <> '' then
     LResult.AddPair('host', Host);
+  if CompilerVersion > 0 then
+    LResult.AddPair('compilerVersion', TJSONNumber.Create(CompilerVersion));
   // Only when suppressing: the server's default is True, so sending the
   // default would be noise in a handshake that is read by hand.
   if SuppressLogDetail then

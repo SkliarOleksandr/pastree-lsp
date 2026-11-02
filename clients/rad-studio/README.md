@@ -1003,6 +1003,87 @@ per-check `[ok]`/`[FAIL]` list and exits non-zero on failure. Build them into
 finds its fixtures at `..\fixtures` and `LspProjectSmoke` finds this package's
 `.dproj` at `..\..`, both relative to the test exe.
 
+## RAD Studio versions
+
+The package builds and loads in **Delphi 11.3 (BDS 22.0), 12 (23.0) and 13
+(37.0)**; `scripts\ide.bat` enforces the floor. One source, no per-version
+forks: every difference is selected on the *presence of the API* (`{$IF
+Declared(...)}`) where it can be, and on `CompilerVersion` (35 = 11, 36 = 12)
+only where the missing thing is a whole unit or a signature. After any `$IF`
+edit compile-check all three - a fix for one has broken another before.
+
+What Delphi 11 lacks, and what stands in for it:
+
+- **No `ToolsAPI.UI` / `INTAIDEUIServices`** (12+): the IDE's themed
+  `MessageDlg` and its theme-aware accent palette. Everything goes through
+  `PasTreeIdePlugin.IdeUI`, the only unit naming `ToolsAPI.UI`; on 11 it falls
+  back to `Vcl.Dialogs` (light inside a dark IDE - the very thing
+  `INTAIDEUIServices` fixed on 12) and to each caller's own colours. Result
+  rows, the hover hint's link and the unit picker's paths lose their accents,
+  not their content.
+- **No editor local-menu API** (`INTAEditorLocalMenu`,
+  `IOTAEditorServices.GetEditorLocalMenu`, 12+). On 11 the same `TAction`s
+  are put into each edit window's `EditorLocalMenu: TPopupMenu` by
+  `PasTreeIdePlugin.EditorPopup`, in a chained `OnPopup` that runs after the
+  IDE's own. It finds the menu through the editor window hook's discovery
+  event (`RegisterEditorFoundHandler`) rather than by walking `Screen.Forms`,
+  because edit windows come and go. The "Find Declaration" takeover is
+  *reversible* there - the native item is a `TMenuItem` and is merely hidden
+  while ours is visible - so the list is always handed over and the setting
+  decides at each popup; no one-way door, no restart.
+- **`IOTAAsyncCodeInsightManager290` / `AsyncGotoDefinitionEx`** (12+) does
+  not exist, so the Insight Provider never sees a Ctrl+Click on 11; Ctrl+Click
+  is the `WindowProc` hook's, exactly as on 12.
+- **`IOTACodeInsightViewer290.CompletionAcceptMode`** (12+) does not exist:
+  accepting a completion always overwrites the word under the caret, which is
+  what every version did before 0.73.5.
+- **`ToolsAPI.Editor` declares the mouse event types without `of object`**
+  (fixed in 12), so `OnEditorMouseMove` can only take a plain procedure there -
+  `EditorWindowHook` and `TooltipSymbolInsight` each forward through one.
+- **`IOTAStructureNode.Data` is `Integer`** on 11 and `IntPtr` on 12+; the
+  Outline node's getter and setter follow (`TNodeData`).
+- **`IOTAEditWriter.Insert(UTF8String)`** is 12+; every writer passes
+  `PAnsiChar`, which both have.
+- **`TArray.Contains` / `TArray.IndexOf`** are 12+; their callers loop - in the
+  package and in the server, which `build.bat` compiles with the targeted
+  version's own dcc64, so it has to build under 11.3 as well (PasTree does).
+- **11's `TJSONValue.ToJSON` writes `\/` for `/`**; 12 and 13 do not. Equal
+  JSON, and every reader here decodes it - but `LspClientSmoke` matches text,
+  so it un-escapes what it captures.
+- **The StyleElements IDE fix is not needed and not built**: 22.0's
+  `TControl.GetStyleElements` reads the field (no bug), and it lacks
+  `GetInternalStyleElements` the replacement calls. The setting is accepted and
+  nothing is patched.
+- **Winapi gaps**: no `EXTENDED_STARTUPINFO_PRESENT`, no `PExceptionPointers`,
+  and the `PROC_THREAD_ATTRIBUTE_LIST` functions are declared over the record
+  rather than a pointer. `LspTransport` and `CrashLog` import or declare their
+  own, identically on every version.
+- **`atBinary` and `atFolded`** are exported only since 12. Binary literals are
+  painted as hex in result rows (which is what 11's editor does), and the
+  folded-box syntax code is pinned to its value (40, as 12 declares it).
+
+**The analysis is told which compiler to emulate.** The package sends its
+own `CompilerVersion` as `compilerVersion` at initialize (35.0 in 11, 36.0 in
+12, 37.0 in 13), and the server evaluates `$IF CompilerVersion`/`RTLVersion`
+and `VERnnn` as that dcc does. Until 0.77.0 every project was analyzed as
+13's, which in 11.3 meant a false E2003 inside a `$IF RTLVersion >= 36`
+branch dcc skips (SPEC.md, `compilerVersion`).
+
+coreide's private seams (`PasTreeIdePlugin.NativeErrorInsight`,
+`Parsernodes.ImageIndexOffset`) are exported by `coreide280.bpl` under the same
+mangled names, so they are looked up there as on 12 and 13; that the records
+behind them have the same layout in 22.0 is an assumption until it has run.
+
+**Compiled is not run.** The first port (0.40.0) was loaded in 11.3 once;
+this one (0.77.0, the same stand-ins carried over 122 commits) compiles under
+22.0, 23.0 and 37.0, and `build.bat 22.0 --test` passes every harness, but it
+has not been exercised in a live Delphi 11 yet. The
+popup bridge rests on the menu component being named `EditorLocalMenu`, which
+is GExperts lore, not documentation. 11.0-11.2 have not been tried; the
+editor ToolsAPI grew over the minors (`INTACodeEditorServices280` is
+11.2/11.3), so they may not compile. 10.4 has no editor ToolsAPI at all and is
+not a target.
+
 ## Versions
 
 **One version for the whole product**, shared with the server:

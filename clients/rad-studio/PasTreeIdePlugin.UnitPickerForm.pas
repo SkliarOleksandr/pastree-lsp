@@ -200,7 +200,7 @@ uses
   System.IOUtils,
   System.Generics.Defaults,
   ToolsAPI,
-  ToolsAPI.UI,
+  PasTreeIdePlugin.IdeUI,
   PasTreeIdePlugin.Settings;
 
 const
@@ -307,14 +307,12 @@ end;
   the dark theme's #2D2F32 - and the directory clGrayText, which stays for
   the 'compiled only' tag. }
 procedure RowColors(out AName, APath, AQuiet: TColor);
-var
-  LUI: INTAIDEUIServices;
 begin
   AName := Themed(clWindowText);
   AQuiet := Themed(clGrayText);
   APath := AQuiet;
-  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-    APath := LUI.ThemeAwareColors[itcBlue];
+  if HaveIdeAccents then
+    APath := IdeThemeColor(itcBlue, clNone);
 end;
 
 function ShowUnitPicker(AMode: TUnitPickerMode;

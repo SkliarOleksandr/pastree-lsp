@@ -72,7 +72,7 @@ implementation
 
 uses
   System.SysUtils, System.Generics.Collections, Vcl.Forms,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
+  PasTreeIdePlugin.IdeUI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar;
 
 const

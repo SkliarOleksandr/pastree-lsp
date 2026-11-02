@@ -65,6 +65,10 @@ uses
   ToolsAPI,
   PasTreeIdePlugin.CodePatch;
 
+// 22.0 (Delphi 11) does not have the bug - its getter reads the field - nor
+// GetInternalStyleElements and IDesignerHook.GetExcludedStyleElements, which
+// the copy below calls. There the setting is accepted and nothing is patched.
+{$IF CompilerVersion >= 36}
 type
   // Protected access; never instantiated - the replacements run with Self
   // being the real writer and the real control, reached through the jumps.
@@ -205,9 +209,11 @@ begin
     Remove;
   end;
 end;
+{$IFEND}
 
 procedure SetDfmStyleElementsFix(AEnabled: Boolean);
 begin
+{$IF CompilerVersion >= 36}
   if AEnabled = DfmStyleElementsFixActive then
     Exit;
   try
@@ -219,22 +225,31 @@ begin
     on E: Exception do
       LogDiagnostic('StyleElements fix: ' + E.ClassName + ': ' + E.Message);
   end;
+{$IFEND}
 end;
 
 function DfmStyleElementsFixActive: Boolean;
 begin
+{$IF CompilerVersion >= 36}
   Result := GWritePatch.Active and GStylePatch.Active;
+{$ELSE}
+  Result := False;
+{$IFEND}
 end;
 
+{$IF CompilerVersion >= 36}
 var
   GIgnored: string;
+{$IFEND}
 
 initialization
 
 finalization
+{$IF CompilerVersion >= 36}
   // Before the BPL unloads: both jumps point into this package. Not Remove -
   // the Build tab may already be gone.
   GStylePatch.Remove(GIgnored);
   GWritePatch.Remove(GIgnored);
+{$IFEND}
 
 end.

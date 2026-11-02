@@ -174,7 +174,7 @@ uses
   Vcl.Themes,
   Vcl.StdCtrls,   // TCustomListBox - the completion window's ancestor
   ToolsAPI,
-  ToolsAPI.UI,
+  PasTreeIdePlugin.IdeUI,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.DcuNames,
@@ -1510,7 +1510,8 @@ var
 type
   TPasCodeInsightManager = class(TInterfacedObject, IOTACodeInsightManager100,
     IOTACodeInsightManager, IOTACodeInsightSelection,
-    IOTAAsyncCodeInsightManager, IOTAAsyncCodeInsightManager290,
+    IOTAAsyncCodeInsightManager,
+    {$IF Declared(IOTAAsyncCodeInsightManager290)} IOTAAsyncCodeInsightManager290, {$IFEND}
     IOTACodeInsightManager90, INTACustomDrawCodeInsightViewer,
     IOTAPrimaryCodeInsightManager, IOTACodeInsightManagerEnvOptions,
     // No methods: answering it tells the IDE that Error Insight for our files
@@ -1627,10 +1628,13 @@ type
     function GetCodeInsightUIName: string;
     procedure ManagerDisabled;
     procedure ManagerEnabled;
-    { IOTAAsyncCodeInsightManager290 }
+    { IOTAAsyncCodeInsightManager290 - Delphi 12 and newer. On 11 Ctrl+Click
+      never reaches the provider; GotoDeclaration's window hook has it. }
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
     function AsyncGotoDefinitionEx(const AFileName: string;
       ALine, ACharIndex: Integer;
       ACallBack: TOTAGotoDefinitionCallBackEx): Integer;
+{$IFEND}
     { IOTACodeInsightManager90 - the viewer's Help Insight pane, in HTML }
     function GetHelpInsightHtml: WideString;
     { INTACustomDrawCodeInsightViewer }
@@ -2008,7 +2012,9 @@ procedure TPasCodeInsightManager.Done(Accepted: Boolean;
 var
   LServices: IOTACodeInsightServices;
   LViewer: IOTACodeInsightViewer;
+{$IF Declared(IOTACodeInsightViewer290)}
   LViewer290: IOTACodeInsightViewer290;
+{$IFEND}
   LSelected, LSuffix: string;
   LItem: TLspCompletionItem;
   LView: IOTAEditView;
@@ -2038,8 +2044,12 @@ begin
   // insert replaces only the typed prefix and keeps the rest of the word
   // after the new name - until 0.73.5 every accept overwrote, so completing
   // `Fo|oBar` in insert mode lost `oBar`.
+{$IF Declared(IOTACodeInsightViewer290)}
   LInsertMode := Supports(LViewer, IOTACodeInsightViewer290, LViewer290) and
     (LViewer290.CompletionAcceptMode = camInsert) and Assigned(LView);
+{$ELSE}
+  LInsertMode := False;   // 11 has no accept mode: always overwrite
+{$IFEND}
   LSuffix := '';
   if LInsertMode then
   begin
@@ -2441,6 +2451,7 @@ begin
   Result := LId;
 end;
 
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
 function TPasCodeInsightManager.AsyncGotoDefinitionEx(const AFileName: string;
   ALine, ACharIndex: Integer; ACallBack: TOTAGotoDefinitionCallBackEx): Integer;
 var
@@ -2508,6 +2519,7 @@ begin
   LInInvoke := False;
   Result := LId;
 end;
+{$IFEND}
 
 { A detail's overload tail ` (+N)` cut off into ATail - it is ours, not code,
   and is drawn dim. Matched from the END: a parameter list could contain a

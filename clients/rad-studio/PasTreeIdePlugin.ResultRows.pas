@@ -228,7 +228,7 @@ implementation
 
 uses
   System.SysUtils, System.Types, System.StrUtils,
-  System.UITypes, ToolsAPI.UI, PasTreeIdePlugin.FormModules,
+  System.UITypes, PasTreeIdePlugin.IdeUI, PasTreeIdePlugin.FormModules,
   PasTreeIdePlugin.Settings;   // the Highlighting tab's type colour
 
 { ------------------------------------------------------------------------- }
@@ -452,7 +452,13 @@ begin
       Inc(LPos);
       while (LPos <= LLen) and CharInSet(AText[LPos], ['0', '1', '_']) do
         Inc(LPos);
+      {$IF Declared(atBinary)}
       Add(LStart, LPos - LStart, atBinary);
+{$ELSE}
+      // Delphi 11 has no binary-literal attribute; its editor paints them as
+      // hex, so the rows do too.
+      Add(LStart, LPos - LStart, atHex);
+{$IFEND}
     end
     else if CharInSet(LChar, ['0' .. '9']) then
       TakeNumber
@@ -775,7 +781,6 @@ end;
 
 function MatchMarkerColor(ABaseColor: TColor): TColor;
 var
-  LUI: INTAIDEUIServices;
   LBaseRgb: Cardinal;
   LPanelIsDark: Boolean;
 begin
@@ -787,8 +792,8 @@ begin
   LPanelIsDark :=
     (2 * GetRValue(LBaseRgb) + 5 * GetGValue(LBaseRgb) + GetBValue(LBaseRgb))
       div 8 > 128;
-  if LPanelIsDark and Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
-    Result := LUI.ThemeAwareColors[itcRed];
+  if LPanelIsDark and HaveIdeAccents then
+    Result := IdeThemeColor(itcRed, clNone);
 end;
 
 function EditorSyntaxColor(ACode: TOTASyntaxCode; ADefault: TColor): TColor;
@@ -1214,7 +1219,6 @@ var
   end;
 
 var
-  LUI: INTAIDEUIServices;
   LOldBkMode: Integer;
 begin
   LHavePalette := TryEditorOptions(LOptions);
@@ -1226,11 +1230,11 @@ begin
   LOrange := LBaseColor;
   LGreen := LBaseColor;
   LMatchColor := MatchMarkerColor(LBaseColor);
-  if Supports(BorlandIDEServices, INTAIDEUIServices, LUI) then
+  if HaveIdeAccents then
   begin
-    LBlue := LUI.ThemeAwareColors[itcBlue];
-    LOrange := LUI.ThemeAwareColors[itcOrange];
-    LGreen := LUI.ThemeAwareColors[itcGreen];
+    LBlue := IdeThemeColor(itcBlue, clNone);
+    LOrange := IdeThemeColor(itcOrange, clNone);
+    LGreen := IdeThemeColor(itcGreen, clNone);
   end;
   LTop := ARect.Top + (ARect.Height - ACanvas.TextHeight('Ag')) div 2;
   LX := ARect.Left + cPad;

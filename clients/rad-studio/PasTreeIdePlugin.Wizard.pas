@@ -67,7 +67,8 @@ implementation
 
 uses
   System.SysUtils, System.StrUtils, System.Classes, Winapi.Windows, Vcl.ActnList, Vcl.Dialogs,
-  Vcl.Forms, Vcl.Menus, ToolsAPI, ToolsAPI.UI,
+  Vcl.Forms, Vcl.Menus, ToolsAPI,
+  PasTreeIdePlugin.EditorPopup,
   PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.FindHierarchy,
   PasTreeIdePlugin.FindDefines,
   PasTreeIdePlugin.UnusedUnits,
@@ -150,7 +151,9 @@ type
     procedure AddActions;
     procedure AddIdentifierActions;
     procedure OnFindDeclarationExecute(Sender: TObject);
+{$IF Declared(INTAEditorLocalMenu)}
     procedure EnsureIdentifierTakeover(const ALocalMenu: INTAEditorLocalMenu);
+{$IFEND}
     procedure OnFindDeclarationUpdate(Sender: TObject);
     procedure AddFindAllActions;
     procedure OnFindAllUpdate(Sender: TObject);
@@ -391,6 +394,7 @@ end;
   until the next IDE start, and the user saw a "Find Declaration" that never
   reached this package (Alex, 2026-09-13, on a directive - the native item
   cannot navigate those at all). }
+{$IF Declared(INTAEditorLocalMenu)}
 procedure TMenuManager.EnsureIdentifierTakeover(
   const ALocalMenu: INTAEditorLocalMenu);
 begin
@@ -402,12 +406,32 @@ begin
   FIdentifierRegistered := True;
   AddIdentifierActions;
 end;
+{$IFEND}
 
 constructor TMenuManager.Create;
 begin
   inherited;
   FActionList := TActionList.Create(nil);
 
+{$IF not Declared(INTAEditorLocalMenu)}
+  // Delphi 11: no local-menu API at all. The same actions go into each edit
+  // window's TPopupMenu by hand - see PasTreeIdePlugin.EditorPopup. There
+  // the takeover is a hidden native item, not an unregistered category, so
+  // it is no one-way door: the "Find Declaration" list is always handed
+  // over, and OnFindDeclarationUpdate's Visible (the setting) decides at
+  // each popup whether ours or the native item stands in the slot.
+  FRegistered := Supports(BorlandIDEServices, IOTAEditorServices,
+    FEditorServices);
+  if FRegistered then
+  begin
+    AddActions;
+    FIdentifierActionList := TActionList.Create(nil);
+    FIdentifierRegistered := True;
+    AddIdentifierActions;
+    RegisterEditorPopupActions(FActionList, cFindAllCategory,
+      FIdentifierActionList);
+  end;
+{$ELSE}
   if Supports(BorlandIDEServices, IOTAEditorServices, FEditorServices) then
   begin
     var LLocalMenuIntf := FEditorServices.GetEditorLocalMenu;
@@ -445,14 +469,20 @@ begin
   end
   else
     FRegistered := False;
+{$IFEND}
 end;
 
 destructor TMenuManager.Destroy;
+{$IF Declared(INTAEditorLocalMenu)}
 var
   LEditorServices: IOTAEditorServices;
+{$IFEND}
 begin
   // Must unregister before the package unloads, otherwise the IDE throws when
   // it next tries to build the local menu and calls our (freed) OnUpdate.
+{$IF not Declared(INTAEditorLocalMenu)}
+  FinalizeEditorPopup;   // the menu items point at the lists freed below
+{$ELSE}
   if FRegistered then
   begin
     if Supports(BorlandIDEServices, IOTAEditorServices, LEditorServices) then
@@ -466,6 +496,7 @@ begin
         LLocalMenuIntf.UnregisterActionList(cEdMenuCatIdentifier);
     end;
   end;
+{$IFEND}
   FreeAndNil(FActionList);
   FreeAndNil(FIdentifierActionList);
   inherited;
@@ -623,10 +654,13 @@ begin
   LAction := ActionOf(Sender);
   // The switch turned ON after load: take the Identifier slot over now (see
   // EnsureIdentifierTakeover) - this fires on every menu open, so the first
-  // menu after the change is the last one to show the native item.
+  // menu after the change is the last one to show the native item. Delphi
+  // 11 needs none of it: its list is handed over at startup (Create).
+{$IF Declared(INTAEditorLocalMenu)}
   if CtrlClickNavigation and not FIdentifierRegistered and
      Assigned(FEditorServices) then
     EnsureIdentifierTakeover(FEditorServices.GetEditorLocalMenu);
+{$IFEND}
   if LAction = nil then
     Exit;
   LAction.Visible := FindAllEnabled;

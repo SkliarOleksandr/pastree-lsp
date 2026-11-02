@@ -161,7 +161,8 @@ type
     FHostConsole: Boolean;
   public
     constructor Create(APlatform: TPasPlatform;
-      const ASearchPaths, ADefines: TArray<string>);
+      const ASearchPaths, ADefines: TArray<string>;
+      ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
     destructor Destroy; override;
     { The analysis's per-project preprocessor state, mirrored so the overlay
       is preprocessed as the analysis preprocessed the file (PasTree 0.106.0:
@@ -786,7 +787,8 @@ end;
 { TLspCompletionEngine }
 
 constructor TLspCompletionEngine.Create(APlatform: TPasPlatform;
-  const ASearchPaths, ADefines: TArray<string>);
+  const ASearchPaths, ADefines: TArray<string>;
+  ACompilerVersion: Double);
 var
   LDefine: string;
 begin
@@ -796,14 +798,15 @@ begin
   // The platform's implicit defines plus the project's own - the same set
   // the analysis preprocesses with, so an $IFDEF cannot make the overlay
   // parse a different text than the closure saw.
-  FDefines := CreatePlatformDefines(APlatform);
+  FDefines := CreatePlatformDefines(APlatform, ACompilerVersion);
   for LDefine in ADefines do
   begin
     FDefines.Define(LDefine);
     if SameText(Trim(LDefine), 'CONSOLE') then
       FHostConsole := True;
   end;
-  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines);
+  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines,
+    ACompilerVersion);
 end;
 
 destructor TLspCompletionEngine.Destroy;

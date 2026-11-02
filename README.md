@@ -52,7 +52,7 @@ the archive.
 
 **Install / requirements**
 
-- Delphi 12+ (Win64 target). The PasTree repo must sit beside this one as
+- Delphi 11.3 or newer (Win64 target). The PasTree repo must sit beside this one as
   `..\object-pascal-tree`; `build.bat` clones it there if it is missing, and
   prints the directory, commit and version it compiled against.
 - `build.bat` at the repository root builds the server (and the RAD Studio
@@ -147,7 +147,7 @@ for what each identifier resolved to. Extension-specific notes are in
 
 ## Requirements at a glance
 
-- Windows, Delphi 12+ (Win64 target) to build the server and the RAD Studio
+- Windows, Delphi 11.3 or newer (Win64 target) to build the server and the RAD Studio
   package.
 - The PasTree repo checked out as a sibling: `..\object-pascal-tree`.
 - Node.js only if building the VS Code extension.

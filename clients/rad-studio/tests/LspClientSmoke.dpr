@@ -125,8 +125,10 @@ begin
       GAnswered := True;
       GOk := ASuccess;
       GError := AError;
+      // Delphi 11's ToJSON escapes every '/' as '\/'; 12 and 13 do not. The
+      // same JSON - the checks below read it as 12 writes it.
       if Assigned(AResult) then
-        GResultJson := AResult.ToJSON;
+        GResultJson := AResult.ToJSON.Replace('\/', '/');
     end);
   Result := PumpUntil(function: Boolean begin Result := GAnswered end,
     cAnswerTimeoutMs);
@@ -5160,6 +5162,91 @@ begin
   end;
 end;
 
+{ 5z. THE CLIENT'S COMPILER VERSION (0.77.0), over a project of its own: a
+  server told compilerVersion 35.0 - what the package sends in Delphi 11 -
+  takes the $IF and $IFDEF branches dcc 35.0 takes. The server used to
+  analyze every project as 37.0, whatever IDE ran it, and an 11.3 project got
+  an E2003 inside an $IF on RTLVersion >= 36 in a unit dcc builds clean
+  (2026-11-02). Each branch calls a name nothing declares, so the E2003s
+  published say which branches were read. }
+procedure TestCompilerVersion(const AExe: string);
+var
+  LDir, LUnit, LLog: string;
+  LSaved, LOwn: TLspClient;
+  LOptions: TLspInitOptions;
+  LStream: TFileStream;
+  LBytes: TBytes;
+begin
+  Writeln;
+  Writeln('=== 5z. the client''s compiler version picks the $IF branches ===');
+  LDir := TPath.Combine(TPath.GetTempPath,
+    'pastree-compiler-' + IntToStr(GetCurrentProcessId));
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  LLog := TPath.Combine(LDir, 'server.log');
+  TFile.WriteAllText(TPath.Combine(LDir, 'CvMain.dpr'),
+    'program CvMain;'#13#10'uses CvUnit;'#13#10'begin'#13#10'  Run;'#13#10 +
+    'end.'#13#10);
+  LUnit := TPath.Combine(LDir, 'CvUnit.pas');
+  TFile.WriteAllText(LUnit, 'unit CvUnit;'#13#10'interface'#13#10 +
+    'procedure Run;'#13#10'implementation'#13#10'procedure Run;'#13#10 +
+    'begin'#13#10'{$IF RTLVersion >= 36}'#13#10'  CvWhenTwelve;'#13#10 +
+    '{$ELSE}'#13#10'  CvWhenEleven;'#13#10'{$IFEND}'#13#10 +
+    '{$IFDEF VER350}'#13#10'  CvWhenVer350;'#13#10'{$ENDIF}'#13#10 +
+    '{$IFDEF VER370}'#13#10'  CvWhenVer370;'#13#10'{$ENDIF}'#13#10 +
+    'end;'#13#10'end.'#13#10);
+
+  LSaved := GClient;
+  LOwn := TLspClient.Create(AExe, ExtractFilePath(AExe),
+    procedure(const AText: string)
+    begin
+      Writeln('  [log] ' + AText);
+    end);
+  LOwn.OnNotification :=
+    procedure(const AMethod: string; AParams: TJSONValue)
+    begin
+      if (AMethod = 'textDocument/publishDiagnostics') and
+         Assigned(AParams) then
+        GDiagnostics.AddOrSetValue(
+          LowerCase(AParams.GetValue<string>('uri', '')), AParams.ToJSON);
+    end;
+  GClient := LOwn;
+  try
+    LOptions := Default(TLspInitOptions);
+    LOptions.ProjectFile := TPath.Combine(LDir, 'CvMain.dpr');
+    LOptions.Platform := 'Win32';
+    LOptions.SearchPaths := [LDir];
+    LOptions.LogFile := LLog;
+    LOptions.CompilerVersion := 35.0;
+    Check(LOwn.Start(LOptions), 'a server told compilerVersion 35.0');
+    SendDidOpen(LUnit);
+    Check(DiagShows('cvunit.pas', 'CvWhenEleven', True),
+      'RTLVersion is 35: the $ELSE branch is read');
+    Check(DiagShows('cvunit.pas', 'CvWhenVer350', True),
+      'VER350 is defined');
+    Check(DiagShows('cvunit.pas', 'CvWhenTwelve', False) and
+      DiagShows('cvunit.pas', 'CvWhenVer370', False),
+      'the 37.0 branches are not read');
+    // Shared read: the server holds its log open.
+    LStream := TFileStream.Create(LLog, fmOpenRead or fmShareDenyNone);
+    try
+      SetLength(LBytes, LStream.Size);
+      if Length(LBytes) > 0 then
+        LStream.ReadBuffer(LBytes[0], Length(LBytes));
+    finally
+      LStream.Free;
+    end;
+    Check(ContainsText(TEncoding.UTF8.GetString(LBytes), 'compiler=35.0'),
+      'the configured line names the compiler');
+  finally
+    GClient := LSaved;
+    LOwn.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestRestartOnConfigChange(const AExe: string);
 var
   LOldPid, LNewPid: DWORD;
@@ -5366,6 +5453,7 @@ begin
       TestCancelHygiene;
       TestUnusedUnits(GExe);
       TestIncludeEdits(GExe);
+      TestCompilerVersion(GExe);
       // Empties the server log: after every section that reads it back.
       TestLogHeaderAfterClear;
       // These three each kill or replace the server, so they go last.

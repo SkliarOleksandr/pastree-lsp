@@ -73,7 +73,7 @@ rem report a successful install of nothing.
 
 > "%LSTAGE%\README.txt" echo PasTree LSP for RAD Studio %LVER%
 >>"%LSTAGE%\README.txt" echo.
->>"%LSTAGE%\README.txt" echo Requires Delphi 12 or newer, with the Win64 target installed, and git on
+>>"%LSTAGE%\README.txt" echo Requires Delphi 11.3 or newer, with the Win64 target installed, and git on
 >>"%LSTAGE%\README.txt" echo PATH is not needed - everything is in this archive.
 >>"%LSTAGE%\README.txt" echo.
 >>"%LSTAGE%\README.txt" echo To install: close RAD Studio, then run install.bat in this directory.

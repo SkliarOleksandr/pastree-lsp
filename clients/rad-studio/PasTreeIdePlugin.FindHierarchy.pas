@@ -105,7 +105,7 @@ implementation
 uses
   System.SysUtils, System.Character, System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms,
-  ToolsAPI.UI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
+  PasTreeIdePlugin.IdeUI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
   PasTreeIdePlugin.RenameToolbar,
   PasTreeIdePlugin.FindReferences;   // IdentifierAt, for the scope dialog
@@ -577,8 +577,8 @@ begin
         if not AIsSubject then
         begin
           CloseWaitDialog;   // a MODAL box follows - close first, always
-          (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
-            cNotSubject[ACommand], mtInformation, [mbOK], -1);
+          IdeMessageDlg(
+            cNotSubject[ACommand], mtInformation, [mbOK]);
           Exit;
         end;
         ReportUnderWaitDialog(Length(ARows),

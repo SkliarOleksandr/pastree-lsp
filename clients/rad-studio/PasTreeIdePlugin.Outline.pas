@@ -104,6 +104,10 @@ var
   GListener: Integer = 0;
 
 type
+  // IOTAStructureNode.Data widened from Integer to IntPtr in Delphi 12; the
+  // signatures below have to match the installed one exactly.
+  TNodeData = {$IF CompilerVersion >= 36} IntPtr {$ELSE} Integer {$IFEND};
+
   // Common IDispatch stub base: StructureViewAPI interfaces descend from
   // IDispatch, but nothing here is automation-scripted - E_NOTIMPL is the
   // honest answer for all four.
@@ -155,8 +159,8 @@ type
     function Get_Selected: WordBool; safecall;
     procedure Set_Selected(Value: WordBool); safecall;
     function Get_StateIndex: Integer; safecall;
-    function Get_Data: IntPtr; safecall;
-    procedure Set_Data(Value: IntPtr); safecall;
+    function Get_Data: TNodeData; safecall;
+    procedure Set_Data(Value: TNodeData); safecall;
     procedure RemoveChildNode(Index: Integer); safecall;
     { IOTANavigableStructureNode }
     function Navigate: Boolean; safecall;
@@ -164,7 +168,7 @@ type
     FExpanded: WordBool;
     FFocused: WordBool;
     FSelected: WordBool;
-    FData: IntPtr;
+    FData: TNodeData;
   end;
 
   TPasOutlineContext = class(TPasDispatchObject, IOTAStructureContext,
@@ -408,12 +412,12 @@ begin
   Result := -1;
 end;
 
-function TPasOutlineNode.Get_Data: IntPtr;
+function TPasOutlineNode.Get_Data: TNodeData;
 begin
   Result := FData;
 end;
 
-procedure TPasOutlineNode.Set_Data(Value: IntPtr);
+procedure TPasOutlineNode.Set_Data(Value: TNodeData);
 begin
   // Reserved by the structure view services (the interface's own warning) -
   // stored opaquely, never read by this unit.

@@ -219,21 +219,31 @@ const
   // ProcThreadAttributeValue(2, thread=False, input=True, additive=False),
   // i.e. 2 or PROC_THREAD_ATTRIBUTE_INPUT ($20000).
   PROC_THREAD_ATTRIBUTE_HANDLE_LIST = $00020002;
+  // Declared by Winapi.Windows only since Delphi 12; the value is the SDK's.
+  EXTENDED_STARTUPINFO_PRESENT_FLAG = $00080000;
   PIPE_REJECT_REMOTE_CLIENTS = $00000008;
 
 type
-  // Winapi.Windows declares the attribute-list APIs and
-  // EXTENDED_STARTUPINFO_PRESENT but not this record.
+  // Not declared by Winapi.Windows in any version.
   TStartupInfoEx = record
     StartupInfo: TStartupInfo;
     lpAttributeList: PProcThreadAttributeList;
   end;
 
-// Our own import of UpdateProcThreadAttribute, because the RTL's declares
-// lpPreviousValue and lpReturnSize as `var` while the API documents both as
-// reserved and REQUIRED to be NULL - passing real variables through the RTL
-// overload fails with ERROR_INVALID_PARAMETER (87). Pointer parameters let us
-// pass the nil the API insists on.
+// OUR OWN IMPORTS of the attribute-list API, for two reasons. UpdateProcThreadAttribute:
+// the RTL declares lpPreviousValue and lpReturnSize as `var` while the API
+// documents both as reserved and REQUIRED to be NULL - passing real variables
+// through the RTL overload fails with ERROR_INVALID_PARAMETER (87). The other
+// two: Delphi 11 declares them over the RECORD (`var lpAttributeList:
+// TProcThreadAttributeList`, or even by value), which cannot express the nil
+// of the sizing call nor a heap block of the size it answered; Delphi 12 added
+// pointer overloads. Importing pointer-typed versions here makes the code
+// identical on every compiler.
+function InitializeProcThreadAttributeListP(lpAttributeList: PProcThreadAttributeList;
+  dwAttributeCount, dwFlags: DWORD; var lpSize: NativeUInt): ByteBool; stdcall;
+  external kernel32 name 'InitializeProcThreadAttributeList';
+procedure DeleteProcThreadAttributeListP(lpAttributeList: PProcThreadAttributeList);
+  stdcall; external kernel32 name 'DeleteProcThreadAttributeList';
 function UpdateProcThreadAttributeNil(lpAttributeList: PProcThreadAttributeList;
   dwFlags: DWORD; Attribute: NativeUInt; lpValue: Pointer; cbSize: NativeUInt;
   lpPreviousValue: Pointer; lpReturnSize: Pointer): ByteBool; stdcall;
@@ -583,13 +593,13 @@ begin
   // Sizing call: documented to fail with ERROR_INSUFFICIENT_BUFFER while
   // filling in LSize.
   LSize := 0;
-  InitializeProcThreadAttributeList(PProcThreadAttributeList(nil), 1, 0, LSize);
+  InitializeProcThreadAttributeListP(nil, 1, 0, LSize);
   if LSize = 0 then
     raise ELspTransport.CreateFmt(
       'InitializeProcThreadAttributeList sizing failed (%d)', [GetLastError]);
   LSIEx.lpAttributeList := PProcThreadAttributeList(GetMemory(LSize));
   try
-    if not InitializeProcThreadAttributeList(LSIEx.lpAttributeList, 1, 0,
+    if not InitializeProcThreadAttributeListP(LSIEx.lpAttributeList, 1, 0,
       LSize) then
       raise ELspTransport.CreateFmt(
         'InitializeProcThreadAttributeList failed (%d)', [GetLastError]);
@@ -618,7 +628,7 @@ begin
       // idle, which is when a rebuild has the machine to itself anyway, and
       // gives the editor first call when it is not.
       if not CreateProcess(nil, PChar('"' + AExePath + '"'), nil, nil, True,
-        EXTENDED_STARTUPINFO_PRESENT or CREATE_NO_WINDOW or
+        EXTENDED_STARTUPINFO_PRESENT_FLAG or CREATE_NO_WINDOW or
         BELOW_NORMAL_PRIORITY_CLASS, nil, LDir,
         LSIEx.StartupInfo, LPI) then
         raise ELspTransport.CreateFmt('cannot start %s (%d)',
@@ -628,7 +638,7 @@ begin
       FProcessId := LPI.dwProcessId;
       CloseHandle(LPI.hThread);
     finally
-      DeleteProcThreadAttributeList(LSIEx.lpAttributeList);
+      DeleteProcThreadAttributeListP(LSIEx.lpAttributeList);
     end;
   finally
     FreeMemory(LSIEx.lpAttributeList);

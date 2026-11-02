@@ -168,7 +168,7 @@ uses
   // PasLsp.SourceText: reading a closed file and writing it back in its own
   // encoding, for the files the IDE does not have open - see CollectFiles.
   PasLsp.SourceText,
-  ToolsAPI.UI,
+  PasTreeIdePlugin.IdeUI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.RenameToolbar,
@@ -361,8 +361,8 @@ end;
 /// </summary>
 procedure TellUser(const AMessage: string; AKind: TMsgDlgType);
 begin
-  (BorlandIDEServices as INTAIDEUIServices).MessageDlg(AMessage, AKind,
-    [mbOK], -1);
+  IdeMessageDlg(AMessage, AKind,
+    [mbOK]);
 end;
 
 { The cheap half of the name check - see the unit header on why the other
@@ -1116,8 +1116,9 @@ begin
       // The site's OWN new text: a unit rename writes the full dotted name
       // where the reference was written in full and the bare leaf where a
       // namespace prefix resolved it, on the same line.
-      LWriter.Insert(UTF8String(SiteReplacement(APlan.Edits[LIdx],
-        ADirection)));
+      // PAnsiChar: the UTF8String overload is 12+.
+      LWriter.Insert(PAnsiChar(UTF8String(SiteReplacement(APlan.Edits[LIdx],
+        ADirection))));
     end;
   finally
     LWriter := nil;   // the writer commits on release

@@ -58,7 +58,9 @@ const
 
 type
   TPasInsightItem = class(TInterfacedObject, INTAIDEInsightItem270,
-    INTAIDEInsightItem280, INTAIDEInsightItem290, INTAIDEInsightItem)
+    INTAIDEInsightItem280,
+    {$IF Declared(INTAIDEInsightItem290)} INTAIDEInsightItem290, {$IFEND}
+    INTAIDEInsightItem)
   private
     FSymbol: TLspWorkspaceSymbol;
   public
