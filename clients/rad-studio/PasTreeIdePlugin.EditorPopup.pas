@@ -161,7 +161,17 @@ procedure THookedMenu.Notification(AComponent: TComponent;
   Operation: TOperation);
 begin
   inherited;
-  if (Operation = opRemove) and (AComponent = FMenu) then
+  if Operation <> opRemove then
+    Exit;
+  // An item freed by somebody else - the IDE's own OnPopup rebuilds the menu
+  // and frees items it does not know, ours among them. Holding on to one
+  // made the next RemoveOurs free it again: an invalid pointer operation in
+  // TMenuItem.Destroy on the second right-click (Alex, 2026-11-02, in 11.3).
+  if AComponent = FNative then
+    FNative := nil;
+  if AComponent is TMenuItem then
+    FOurs.Remove(TMenuItem(AComponent));
+  if AComponent = FMenu then
   begin
     FMenu := nil;
     FNative := nil;
@@ -178,13 +188,20 @@ begin
     Build;
 end;
 
+{ Only the items still alive are in FOurs - see Notification. Last first, so
+  a submenu's children go before their parent; freeing one removes it from
+  its parent item, and from FOurs through the notification. }
 procedure THookedMenu.RemoveOurs;
 var
-  LIdx: Integer;
+  LItem: TMenuItem;
 begin
-  for LIdx := FOurs.Count - 1 downto 0 do
-    FOurs[LIdx].Free;   // a TMenuItem removes itself from its parent
-  FOurs.Clear;
+  while FOurs.Count > 0 do
+  begin
+    LItem := FOurs.Last;
+    FOurs.Delete(FOurs.Count - 1);
+    LItem.RemoveFreeNotification(Self);
+    LItem.Free;
+  end;
 end;
 
 { The IDE's own item, by caption - there is no other handle to it, and the
@@ -211,6 +228,7 @@ var
   begin
     Result := TMenuItem.Create(FMenu);
     Result.Action := AAction;
+    Result.FreeNotification(Self);
     FOurs.Add(Result);
   end;
 
@@ -228,7 +246,10 @@ begin
   RemoveOurs;
   FNative := FindNative;
   if Assigned(FNative) then
-    LAt := FNative.MenuIndex + 1
+  begin
+    FNative.FreeNotification(Self);
+    LAt := FNative.MenuIndex + 1;
+  end
   else
     LAt := 0;
 

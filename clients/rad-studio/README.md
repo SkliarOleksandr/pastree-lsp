@@ -1016,11 +1016,14 @@ What Delphi 11 lacks, and what stands in for it:
 
 - **No `ToolsAPI.UI` / `INTAIDEUIServices`** (12+): the IDE's themed
   `MessageDlg` and its theme-aware accent palette. Everything goes through
-  `PasTreeIdePlugin.IdeUI`, the only unit naming `ToolsAPI.UI`; on 11 it falls
-  back to `Vcl.Dialogs` (light inside a dark IDE - the very thing
-  `INTAIDEUIServices` fixed on 12) and to each caller's own colours. Result
-  rows, the hover hint's link and the unit picker's paths lose their accents,
-  not their content.
+  `PasTreeIdePlugin.IdeUI`, the only unit naming `ToolsAPI.UI`. On 11 the
+  dialogs are `Vcl.Dialogs`' (light inside a dark IDE - the very thing
+  `INTAIDEUIServices` fixed on 12), and the accents come from a copy of the
+  palette 12 and 13 answer with (designide's `TIDEThemePalette`: Generic,
+  Dark, Light), the table picked by the IDE style's window colour. Until
+  0.78.1 11 had no accents and every Messages row was plain text. The other
+  colours - forms, lists, the hover hint - come from `IOTAIDEThemingServices`,
+  which 11 has.
 - **No editor local-menu API** (`INTAEditorLocalMenu`,
   `IOTAEditorServices.GetEditorLocalMenu`, 12+). On 11 the same `TAction`s
   are put into each edit window's `EditorLocalMenu: TPopupMenu` by

@@ -12,11 +12,16 @@ unit PasTreeIdePlugin.IdeUI;
   and nowhere else: this is the only unit that names ToolsAPI.UI, and it does
   so under CompilerVersion, which is 36.0 for Delphi 12 and 35.0 for 11.
 
-  ON DELPHI 11 THE FALLBACK IS THE CALLER'S. IdeThemeColor returns the color
-  the caller passed as AFallback, and the dialogs are Vcl.Dialogs' - which
-  means they are light inside a dark IDE there, the very thing the switch to
-  INTAIDEUIServices fixed on 12 (user, 2026-08-31). That is a known cost of
-  running on 11, not a bug to hunt.
+  ON DELPHI 11 THE PALETTE IS OURS. ThemeAwareColors is three fixed tables in
+  designide370.bpl's TIDEThemePalette - Generic, Dark, Light, each in
+  TIdeAccent's order - and they are copied here, the table picked as the IDE
+  would: Dark when the IDE's style paints a dark window, Light when it paints
+  a light one, Generic with IDE theming off. Until 0.78.1 11 had no accents
+  at all and every result row in Messages was the plain text colour - file
+  names and numbers included (Alex, 2026-11-02, next to the same search in
+  13). The dialogs are still Vcl.Dialogs' there - light inside a dark IDE,
+  the very thing the switch to INTAIDEUIServices fixed on 12 (user,
+  2026-08-31). That is a known cost of running on 11, not a bug to hunt.
 
   TIdeAccent duplicates the order of ToolsAPI.UI.TIDEThemeColors ON PURPOSE:
   a type alias would not re-export the enum's constants, and every caller
@@ -38,9 +43,10 @@ type
     itcOrange);
 
 /// <summary>
-/// True when the IDE hands out theme-aware accents at all (Delphi 12 and
-/// newer, and the service answered). Callers that have no sensible fallback
-/// color of their own use this to keep the canvas's prepared color instead.
+/// True when theme-aware accents are available: the IDE's on Delphi 12 and
+/// newer when the service answered, our copy of its palette on 11. Callers
+/// that have no sensible fallback color of their own use this to keep the
+/// canvas's prepared color instead.
 /// </summary>
 function HaveIdeAccents: Boolean;
 
@@ -66,9 +72,11 @@ function IdeInputQuery(const ACaption, APrompt: string;
 implementation
 
 uses
-  Vcl.Dialogs
+  Vcl.Dialogs, System.SysUtils, ToolsAPI
 {$IF CompilerVersion >= 36}
-  , System.SysUtils, ToolsAPI, ToolsAPI.UI
+  , ToolsAPI.UI
+{$ELSE}
+  , Winapi.Windows, Vcl.Themes
 {$IFEND}
   ;
 
@@ -76,6 +84,36 @@ uses
 function TryUI(out AUI: INTAIDEUIServices): Boolean;
 begin
   Result := Supports(BorlandIDEServices, INTAIDEUIServices, AUI);
+end;
+{$ELSE}
+type
+  TIdePalette = (ipGeneric, ipDark, ipLight);
+
+const
+  // designide370.bpl's TIDEThemePalette, read off the binary (2026-09-26):
+  // what INTAIDEUIServices.ThemeAwareColors answers on 12 and 13.
+  cPalette: array[TIdePalette, TIdeAccent] of TColor = (
+    ($B2783D, $324CCB, $64B5E8, $7D9F4D, $9F528A, $787878, $008CFF),
+    ($DFB68C, $5870E3, $64B5E8, $A1BC78, $FFAA7F, $787878, $008CFF),
+    ($844A0E, $01177E, $28495E, $4B6E18, $9F528A, $454545, $008CFF));
+
+{ Which table the IDE would answer from: its style's window colour decides
+  dark or light; with IDE theming off there is no theme, and 12 answers
+  Generic. }
+function ActivePalette: TIdePalette;
+var
+  LTheming: IOTAIDEThemingServices250;
+  LRgb: Cardinal;
+begin
+  Result := ipGeneric;
+  if not Supports(BorlandIDEServices, IOTAIDEThemingServices250, LTheming) or
+     not LTheming.IDEThemingEnabled or (LTheming.StyleServices = nil) then
+    Exit;
+  LRgb := ColorToRGB(LTheming.StyleServices.GetSystemColor(clWindow));
+  if (2 * GetRValue(LRgb) + 5 * GetGValue(LRgb) + GetBValue(LRgb)) div 8 < 128 then
+    Result := ipDark
+  else
+    Result := ipLight;
 end;
 {$IFEND}
 
@@ -88,7 +126,7 @@ begin
 end;
 {$ELSE}
 begin
-  Result := False;
+  Result := True;
 end;
 {$IFEND}
 
@@ -104,7 +142,7 @@ begin
 end;
 {$ELSE}
 begin
-  Result := AFallback;
+  Result := cPalette[ActivePalette, AAccent];
 end;
 {$IFEND}
 
