@@ -7041,10 +7041,14 @@ begin
     LBuf.Add(']}');
     // Two times, because they are two different problems: the list is
     // PasTree's walk over the symbol tables, the JSON is this unit's.
-    Log(Format('outline %s%s -> %d rows: list %d ms, json %d ms, %dK chars',
-      [LScope, IfThen(LPath <> '', ' ' + TPath.GetFileName(LPath), ''),
-       Length(LEntries), LListed - LStart, GetTickCount64 - LListed,
-       LBuf.Length div 1024]));
+    // Not for the module scope: the editor asks it for every file it shows,
+    // and a line per request buried the log (Alex, 2026-11-02). A module is
+    // a few hundred rows; the project scope is where these times matter.
+    if LScope <> 'module' then
+      Log(Format('outline %s%s -> %d rows: list %d ms, json %d ms, %dK chars',
+        [LScope, IfThen(LPath <> '', ' ' + TPath.GetFileName(LPath), ''),
+         Length(LEntries), LListed - LStart, GetTickCount64 - LListed,
+         LBuf.Length div 1024]));
     if LScope = 'project' then
       FOutlineCache := LBuf.ToString;
     Result := BuildResponse(AMsg.IdJson, LBuf.ToString);

@@ -184,9 +184,9 @@ analysis replaces the project. Same project: 205 ms first request, 65 ms on a
 repeat. If it is slow again on 0.46.0+:
 
 - Check the server log for `pastree/outline ... -> N rows: list X ms, json Y
-  ms` - `list` growing means the symbol tables are unusually large; `json`
-  growing
-  past a few tens of ms for a project this size means something changed in
+  ms` (project and closure scope only - since 0.78.3 a module request, made
+  for every file the editor shows, logs nothing) - `list` growing means the
+  symbol tables are unusually large; `json` growing past a few tens of ms for a project this size means something changed in
   `TJsonBuf` or the row shape.
 - `pastree/outline project -> cached` means the server-side cache answered -
   if it is STILL slow, the cost moved to the client or the wire, not PasTree.
