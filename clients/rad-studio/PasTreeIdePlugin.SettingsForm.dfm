@@ -387,7 +387,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         TabOrder = 1
         Items.Strings = (
           'RAD Studio (Error Insight)'
-          'PasTree (experimental)')
+          'PasTree')
       end
       object cbxInsightManager: TComboBox
         Left = 170
@@ -399,7 +399,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         OnChange = cbxInsightManagerChange
         Items.Strings = (
           'RAD Studio (DelphiLSP)'
-          'PasTree (experimental)')
+          'PasTree')
       end
       object chkNativeErrorInsight: TCheckBox
         Left = 35

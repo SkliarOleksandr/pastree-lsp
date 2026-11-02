@@ -20,8 +20,8 @@ unit PasTreeIdePlugin.SettingsForm;
   how it is triggered. Code Insight holds what replaces one of the IDE's own
   insight features - Tooltip symbol insight and, since 0.63.4, Errors Insight
   (moved there from Highlighting: it is a choice between the IDE's Error
-  Insight and ours, not a colour) - and, since 0.68.0, the experimental Code
-  Insight Manager choice (PasTreeIdePlugin.CodeInsight). Highlighting came later, and IDE Fixes (0.59.0) holds
+  Insight and ours, not a colour) - and, since 0.68.0, the Code Insight
+  Manager choice (PasTree by default since 0.79.0) (PasTreeIdePlugin.CodeInsight). Highlighting came later, and IDE Fixes (0.59.0) holds
   what corrects the IDE's own behaviour rather than adding a feature - first
   the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix),
   then the unchanged StyleElements of inherited forms (0.60.0,

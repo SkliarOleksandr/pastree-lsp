@@ -338,7 +338,10 @@ The costs are real and should be stated before anyone commits:
   gives a column.
 
 **DECIDED 2026-08-21: sit beside it for now, and becoming the manager IS the
-destination.** The concrete build plan - server plumbing, the
+destination.** Reached in two steps: selectable since 0.68.0 (labelled
+experimental), and the DEFAULT since 0.79.0 (Alex, 2026-11-02: "it works
+well"). A choice saved by an earlier version is kept, and switching back in
+either combobox restores DelphiLSP. The concrete build plan - server plumbing, the
 `PasTreeIdePlugin.CodeInsight` manager skeleton, gated registration, and the
 final switch - is [COMPLETION.md](../../COMPLETION.md) at the repository root. Not "revisit someday" - the manager route is the committed
 endgame, deferred only until the server answers enough of the interface to
@@ -2041,10 +2044,6 @@ translation either way.
 
 - **A formatter.** Needs a printer; PasTree parses and analyzes but does not
   emit source. Same verdict, same reason, as the server spec's.
-- **Becoming the DEFAULT Insight Provider.** Since 0.68.0 PasTree can be
-  chosen as Code Insight Manager (experimental; RAD Studio stays the default).
-  See the fork above: making it the default would turn every remaining gap
-  into a regression the day a user upgrades.
 - **Anything design-time.** Component and property editors, the Object
   Inspector (`PropInspAPI.pas`), the palette, the form designer: their currency
   is instantiated objects on a designer, ours is declarations in text. Checked;

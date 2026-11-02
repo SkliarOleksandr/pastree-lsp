@@ -21,6 +21,9 @@ unit PasTreeIdePlugin.Settings;
   turns something ON, so its default is OFF. The IDE Fixes tab is the
   exception to the exception: each fix turns something on and is still ON by
   default (Alex, 2026-09-29), because a fix nobody enables fixes nothing.
+  And the Code Insight Manager is PasTree by default since 0.79.0 (Alex,
+  2026-11-02): the replacement of the IDE's provider is the product now, not
+  an experiment.
   Written only by the dialog:
   nothing else in the package writes to the registry - except the Go To
   picker's own sizes (WritePickerValue) and the marker that remembers the
@@ -241,9 +244,10 @@ function LogAllIdeCrashes: Boolean;
 /// Error Insight. One choice, not two switches: the two drawn together put
 /// two families of underline on the same code in the same colours, and
 /// nothing on screen says which one is PasTree's. OFF BY DEFAULT since
-/// 0.52.4, and labelled experimental in the dialog (Alex, 2026-09-24): the
-/// Code Insight manager is withdrawn and DelphiLSP owns the insight
-/// features, so the native underlines are the expected ones.
+/// 0.52.4 (Alex, 2026-09-24): then the Code Insight manager was withdrawn
+/// and DelphiLSP owned the insight features, so the native underlines were
+/// the expected ones. Since 0.79.0 PasTree is the manager by default, so
+/// ours are what a default installation draws (below).
 ///
 /// FORCED ON WHILE PASTREE IS THE CODE INSIGHT MANAGER (0.73.7): the IDE's
 /// Error Insight takes its errors from the selected provider alone, through
@@ -279,11 +283,14 @@ function PasTreeErrorMaxSeverity: Integer;
 function NativeErrorInsightEnabled: Boolean;
 
 /// <summary>
-/// Code Insight tab (0.68.0, labelled experimental): whether PasTree's Code
-/// Insight manager is registered and selected as the IDE's Insight Provider
-/// through the environment option InsightManager - see
-/// PasTreeIdePlugin.CodeInsight's ApplyInsightManagerChoice. Default False:
-/// DelphiLSP stays the provider unless the user asks.
+/// Code Insight tab (0.68.0): whether PasTree's Code Insight manager is
+/// registered and selected as the IDE's Insight Provider through the
+/// environment option InsightManager - see PasTreeIdePlugin.CodeInsight's
+/// ApplyInsightManagerChoice. DEFAULT TRUE since 0.79.0 (Alex, 2026-11-02);
+/// labelled experimental and False before. A default reaches only a missing
+/// value: a user whose settings were ever saved keeps the False written then,
+/// and choosing DelphiLSP in Tools > Options still turns it off
+/// (FollowProviderInPascal).
 /// </summary>
 function PasTreeInsightManagerEnabled: Boolean;
 
@@ -437,7 +444,7 @@ type
     PasTreeErrorSquiggles: Boolean;
     // See NativeErrorInsightEnabled. Default True.
     NativeErrorInsight: Boolean;
-    // Code Insight tab - see PasTreeInsightManagerEnabled. Default False.
+    // Code Insight tab - see PasTreeInsightManagerEnabled. Default True.
     PasTreeInsightManager: Boolean;
     // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
     DfmNoExplicitProps: Boolean;
@@ -735,7 +742,7 @@ begin
   Result.HighlightInactive := True;
   Result.PasTreeErrorSquiggles := False;
   Result.NativeErrorInsight := True;
-  Result.PasTreeInsightManager := False;
+  Result.PasTreeInsightManager := True;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
   Result.AnalysisThreads := 0;

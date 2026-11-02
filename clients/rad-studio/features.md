@@ -7,8 +7,9 @@ a later main-thread turn, which is why answers can land after the caret has
 moved. Every feature that replaces or adds to a native command has its own
 on/off switch in **Tools > PasTree > Settings**.
 
-The last section covers the features that are only reachable when you select
-**PasTree** as the Code Insight Manager in Tools > PasTree > Settings.
+The last section covers the features that are only reachable while
+**PasTree** is the Code Insight Manager in Tools > PasTree > Settings - the
+default since 0.79.0.
 
 ## Navigation
 
@@ -334,9 +335,12 @@ queries natively and cannot be displaced. They follow the server's
 `publishDiagnostics`, so they appear when the analysis lands and vanish when it
 comes back clean, with no polling.
 
-Experimental, and off by default: "Errors Insight" on the Code Insight tab of
-the settings chooses who draws the error underlines - RAD Studio's own Error
-Insight (the default) or PasTree. Choosing PasTree sets the IDE's Error Insight
+While PasTree is the Code Insight Manager (the default), PasTree draws the
+error underlines and this choice is greyed: the IDE's Error Insight takes its
+errors from the selected provider alone. With RAD Studio as the manager,
+"Errors Insight" on the Code Insight tab of the settings chooses who draws
+them - RAD Studio's own Error Insight (then the default) or PasTree. Choosing
+PasTree sets the IDE's Error Insight
 level to None, so the same error is not underlined twice, and remembers the
 level it replaced; choosing RAD Studio again puts that level back, unless it
 has been changed in Tools > Options since. Both go through the IDE's live
@@ -431,11 +435,12 @@ changed is written. On by default, its own switch on the IDE Fixes tab.
 ## Through the Code Insight Manager
 
 These are the features RAD Studio routes through whichever Insight Provider is
-selected. They are inactive until you choose **PasTree (experimental)** as the
-**Code Insight Manager** on the Code Insight tab of Tools > PasTree > Settings:
-that registers the manager and selects it as the IDE's Insight Provider (the
-combobox under Tools > Options > Editor > Source), and switching back to
-RAD Studio restores the provider it replaced. The IDE moves to the new provider
+selected. **PasTree** is the **Code Insight Manager** by default (since
+0.79.0; the Code Insight tab of Tools > PasTree > Settings): the package
+registers the manager and selects it as the IDE's Insight Provider (the
+combobox under Tools > Options > Editor > Source), and switching to RAD Studio
+there, or in the IDE's own combobox, restores the provider it replaced. A
+choice saved by an earlier version is kept. The IDE moves to the new provider
 at its next Code Insight turn, a few seconds at most. The manager is not
 registered at all while RAD Studio is chosen, so PasTree does not appear in the
 IDE's combobox then.
