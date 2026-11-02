@@ -18,7 +18,7 @@ Green builds do not cover the half of this product that lives inside RAD
 Studio. On 2026-09-02 three defects passed a full build and were found by Alex
 opening a project and clicking - and each had already been committed as fixed.
 
-## English in the repository, Russian to Alex, plain hyphens, `local/` for working papers
+## English in the repository, Russian to Alex, plain hyphens, no client names in commits, `local/` for working papers
 
 **Everything written into this repository is in English** - specs, READMEs,
 commit messages, comments, log lines - because it outlives the conversation
@@ -41,6 +41,14 @@ Exactly one file must come back: `clients/rad-studio/tests/VersionSmoke.dpr`,
 where the em dash is a test INPUT - the multi-byte character the encoding
 checks are built on. (The bytes come from `printf` so this file stays ASCII;
 `grep -P` refuses to run in Git Bash's C locale here.)
+
+**A commit message never names the client project** the product is tested
+on - not the project, not its `.dpr`/`.dproj` files, units, forms or
+classes. Say what happened in general terms: "a project", "another group
+member's `.dpr`", "a large project". The code is proprietary, and a name in
+a pushed commit cannot be taken back. Check the message before every commit;
+an unpushed one is fixed with `git commit --amend`, a pushed one only with
+Alex's go-ahead. Alex has had to ask for this more than once (2026-11-02).
 
 **Working documents go in `local/`, which is ignored** - audits, plans,
 in-flight notes, logs sent in by users. A finished conclusion belongs in a
