@@ -1441,7 +1441,10 @@ uses
   System.Generics.Defaults,   // TComparer, for the group-wide merge
   System.Win.Registry,
   Winapi.Windows,
+  Vcl.ExtCtrls,   // TTimer, for the configuration switch watch
+  Vcl.Forms,      // Application, to leave a modal dialog alone
   PasTreeIdePlugin.LspClient,
+  PasTreeIdePlugin.ConfigSwitch,
   PasLsp.ProductVersion,
   PasLsp.SourceText,
   PasTreeIdePlugin.CrashLog,
@@ -1558,6 +1561,10 @@ type
     FStartedProjectStamp: string;
     FCheckingStamp: string;
     FRestartWhy: string;
+    // The configuration switch watch (CheckConfigSwitch): the debounce, and
+    // the line the restart it asks for logs instead of EnsureSession's own.
+    FSwitchWatch: TConfigSwitchWatch;
+    FSwitchNote: string;
     // Outstanding request per feature, so a new one supersedes the old.
     FPendingDefinition: Int64;
     FPendingDeclarationAt: Int64;
@@ -1603,6 +1610,15 @@ type
     function IsReady: Boolean;
     destructor Destroy; override;
     procedure Prewarm;
+    /// <summary>
+    /// One tick of the configuration switch watch - see
+    /// PasTreeIdePlugin.ConfigSwitch. Restarts the server, through
+    /// EnsureSession, once the IDE's active configuration or platform for
+    /// this session's project has differed from the running server's for
+    /// cConfigSwitchHoldMs. Passive otherwise: a server not up is left to
+    /// the next request.
+    /// </summary>
+    procedure CheckConfigSwitch(ANowMs: UInt64);
     procedure ProjectOpened;
     procedure ProjectClosed;
     /// <summary>workspace/didChangeWatchedFiles for APaths - see LspFilesChangedOnDisk.</summary>
@@ -1810,6 +1826,22 @@ var
   // The generated .dcu tabs' teardown trigger; see
   // LspSetSessionRestartListener.
   GSessionRestartListener: TProc;
+
+type
+  // TTimer.OnTimer wants a method; the watch itself is per session.
+  TConfigSwitchTicker = class
+  public
+    procedure Tick(Sender: TObject);
+  end;
+
+const
+  // Short against the hold, or the tick, not the hold, sets the wait: a
+  // switch is acted on 250-350 ms after it. Two reads per session per tick.
+  cConfigSwitchTickMs = 100;
+
+var
+  GConfigSwitchTimer: TTimer;
+  GConfigSwitchTicker: TConfigSwitchTicker;
 
 { ---------------------------------------------------------------------------
   ToolsAPI harvesting
@@ -2500,14 +2532,23 @@ begin
   Result := GetOpenProjectByFile(FProjectFile);
 end;
 
+{ The platform and configuration a server for AProject is started for - what
+  BuildOptions sends and what the configuration switch watch compares, read
+  in this one place so the two can never mean different things. }
+procedure ActiveTarget(const AProject: IOTAProject;
+  out APlatform, AConfig: string);
+begin
+  APlatform := NormalizePlatformName(AProject.CurrentPlatform);
+  AConfig := GetActiveConfigName(AProject);
+end;
+
 function TLspSession.BuildOptions(const AProject: IOTAProject;
   out APlatform, AConfig: string): TLspInitOptions;
 var
   LLogPath: string;
 begin
   Result := Default(TLspInitOptions);
-  APlatform := NormalizePlatformName(AProject.CurrentPlatform);
-  AConfig := GetActiveConfigName(AProject);
+  ActiveTarget(AProject, APlatform, AConfig);
   // IOTAProject.FileName is the .dproj - which is exactly what we want here.
   // The in-process version had to resolve the real .dpr next to it by naming
   // convention because TPasParser cannot read a .dproj; the server reads it
@@ -2674,10 +2715,23 @@ begin
       end;
     // A restarted server has no documents; re-open them before anything that
     // was queued behind the handshake gets answered from stale disk text.
+    //
+    // And then Sync, because ResendAll alone resends only what the set still
+    // holds - nothing after a restart this session ASKED for, whose Forget
+    // emptied it. Until 0.77.1 the open buffers then reached the new server
+    // with the next request only, and until they did it published no
+    // diagnostics, so nothing asked for the new semantic tokens: after a
+    // configuration switch the inactive-code grey stayed the old
+    // configuration's until a tab switch made a request (AVImark,
+    // 2026-11-02: didOpen 32 s after "server ready"). The opens go out
+    // before the server's first rebuild, which then publishes for each, and
+    // the tokens follow. After a crash restart Sync finds the set current and
+    // sends only what was typed while the server was down.
     FClient.OnReady :=
       procedure
       begin
         FDocs.ResendAll;
+        FDocs.Sync;
       end;
 
     { publishDiagnostics is CACHED here for the painted-squiggle layer
@@ -2768,6 +2822,8 @@ begin
         LogRestart(LOptions.LogFile, Format('%s was saved and changed (%s)'
           + ' - restarting the server to read it again.',
           [ExtractFileName(LOptions.ProjectFile), FRestartWhy]))
+      else if FSwitchNote <> '' then
+        LogRestart(LOptions.LogFile, FSwitchNote)
       else if FStartedThreads <> LOptions.AnalysisThreads then
         LogRestart(LOptions.LogFile, Format('analysis threads changed (%s)'
           + ' - restarting the server for %s.',
@@ -2786,6 +2842,10 @@ begin
     FStartedProjectStamp := LStamp;
     FCheckingStamp := '';   // the new server reads the file itself
     FRestartWhy := '';
+    // Whatever the watch had pending, the new server is started for what
+    // is selected now.
+    FSwitchNote := '';
+    FSwitchWatch.Reset;
     FDocs.Forget;   // the old server's documents die with it
     // And so do the generated .dcu tabs' texts - see
     // LspSetSessionRestartListener. Told BEFORE the new server starts, so a
@@ -2860,6 +2920,38 @@ begin
       FRestartWhy := LWhat;
       EnsureSession;
     end);
+end;
+
+procedure TLspSession.CheckConfigSwitch(ANowMs: UInt64);
+var
+  LProject: IOTAProject;
+  LPlatform, LConfig: string;
+begin
+  // Only a server that is up: one starting reads the selection itself, and
+  // a stopped one is the next request's to start - the watch never spawns.
+  if FDestroying or not IsReady then
+  begin
+    FSwitchWatch.Reset;
+    Exit;
+  end;
+  LProject := Project;
+  if not Assigned(LProject) then
+    Exit;
+  // Two reads per session per tick, whatever the project's size.
+  ActiveTarget(LProject, LPlatform, LConfig);
+  if FSwitchWatch.Observe(ConfigSwitchKey(FStartedConfig, FStartedPlatform),
+    ConfigSwitchKey(LConfig, LPlatform), ANowMs) <> csRestart then
+    Exit;
+  // EnsureSession decides and restarts, as for a request: the watch only
+  // asks sooner, and says why in its own words.
+  FSwitchNote := Format('%s - restarting the server for %s.',
+    [ConfigSwitchWhat(FStartedConfig, FStartedPlatform, LConfig, LPlatform),
+    ExtractFileName(FProjectFile)]);
+  try
+    EnsureSession;
+  finally
+    FSwitchNote := '';
+  end;
 end;
 
 /// <summary>
@@ -5488,14 +5580,47 @@ begin
     Result := nil;
 end;
 
+{ TConfigSwitchTicker }
+
+procedure TConfigSwitchTicker.Tick(Sender: TObject);
+var
+  LSession: TLspSession;
+  LNow: UInt64;
+begin
+  if not Assigned(GPool) then
+    Exit;
+  // Not while a dialog is up - Project Options among them: the watch holds
+  // its pending value, and the restart comes after the dialog closes.
+  if (Application.ModalLevel > 0) or
+     ((Application.MainFormHandle <> 0) and
+      not IsWindowEnabled(Application.MainFormHandle)) then
+    Exit;
+  LNow := GetTickCount64;
+  // Each project of a group has its own active configuration; a session
+  // whose project did not move answers csSame and is left alone.
+  for LSession in GPool.ReadySessions do
+    LSession.CheckConfigSwitch(LNow);
+end;
+
 procedure InitializeLspSession;
 begin
   if not Assigned(GPool) then
     GPool := TLspSessionPool.Create;
+  if not Assigned(GConfigSwitchTimer) then
+  begin
+    GConfigSwitchTicker := TConfigSwitchTicker.Create;
+    GConfigSwitchTimer := TTimer.Create(nil);
+    GConfigSwitchTimer.Interval := cConfigSwitchTickMs;
+    GConfigSwitchTimer.OnTimer := GConfigSwitchTicker.Tick;
+    GConfigSwitchTimer.Enabled := True;
+  end;
 end;
 
 procedure FinalizeLspSession;
 begin
+  // The timer first: a tick must not reach a pool being torn down.
+  FreeAndNil(GConfigSwitchTimer);
+  FreeAndNil(GConfigSwitchTicker);
   FreeAndNil(GPool);   // clears GSession first - see the destructor
 end;
 

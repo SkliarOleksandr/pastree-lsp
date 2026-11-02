@@ -125,6 +125,7 @@
         <DCCReference Include="PasTreeIdePlugin.NativeErrorInsight.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SemanticPaint.pas"/>
         <DCCReference Include="PasTreeIdePlugin.TokenShift.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.ConfigSwitch.pas"/>
         <DCCReference Include="PasTreeIdePlugin.DirectiveText.pas"/>
         <DCCReference Include="PasTreeIdePlugin.IdleSync.pas"/>
         <DCCReference Include="PasTreeIdePlugin.StatusPanel.pas"/>
