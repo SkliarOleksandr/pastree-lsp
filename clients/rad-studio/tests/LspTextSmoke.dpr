@@ -27,7 +27,8 @@ uses
   PasLsp.Protocol,
   PasLsp.XmlDoc,
   PasTreeIdePlugin.DirectiveText,
-  PasTreeIdePlugin.TokenShift;
+  PasTreeIdePlugin.TokenShift,
+  PasTreeIdePlugin.ConfigSwitch;
 
 var
   GFailures: Integer;
@@ -353,6 +354,74 @@ begin
     'ShiftSpan: a span whose start the edit replaced is left out');
 end;
 
+{ The configuration switch watch's debounce (PasTreeIdePlugin.ConfigSwitch):
+  a switch restarts only once it has held, a switch back restarts nothing, a
+  pass over several restarts once. }
+procedure TestConfigSwitch;
+var
+  LWatch: TConfigSwitchWatch;
+  LDebug, LRelease, LProfile, LDebug64: string;
+begin
+  Writeln('--- ConfigSwitch');
+  LDebug := ConfigSwitchKey('Debug', 'Win32');
+  LRelease := ConfigSwitchKey('Release', 'Win32');
+  LProfile := ConfigSwitchKey('Profile', 'Win32');
+  LDebug64 := ConfigSwitchKey('Debug', 'Win64');
+  LWatch := Default(TConfigSwitchWatch);
+
+  Check(LWatch.Observe(LDebug, LDebug, 1000) = csSame,
+    'the server runs the selection: nothing to do');
+  Check(LWatch.Observe(LDebug, ConfigSwitchKey('debug', 'WIN32'), 1000) = csSame,
+    'compared without case, as EnsureSession compares');
+
+  Check(LWatch.Observe(LDebug, LRelease, 2000) = csWaiting,
+    'a new selection waits');
+  Check(LWatch.Observe(LDebug, LRelease, 2000 + cConfigSwitchHoldMs - 1)
+    = csWaiting, 'and keeps waiting until it has held');
+  Check(LWatch.Observe(LDebug, LRelease, 2000 + cConfigSwitchHoldMs)
+    = csRestart, 'held: restart');
+  Check(LWatch.Observe(LDebug, LRelease, 2000 + cConfigSwitchHoldMs + 300)
+    = csWaiting, 'a restart is answered once - the watch starts over');
+
+  LWatch.Reset;
+  Check(LWatch.Observe(LDebug, LRelease, 5000) = csWaiting,
+    'Debug -> Release ...');
+  Check(LWatch.Observe(LDebug, LDebug, 5000 + cConfigSwitchHoldMs - 1)
+    = csSame,
+    '... -> Debug inside the hold: no restart');
+  Check(LWatch.Observe(LDebug, LDebug, 9000) = csSame,
+    'nor later');
+  Check(LWatch.Observe(LDebug, LRelease, 9300) = csWaiting,
+    'switching again starts a fresh hold');
+  Check(LWatch.Observe(LDebug, LRelease, 9300 + cConfigSwitchHoldMs - 1)
+    = csWaiting, 'not counted from the first switch');
+
+  LWatch.Reset;
+  Check(LWatch.Observe(LDebug, LRelease, 20000) = csWaiting,
+    'a pass: Release ...');
+  // Profile inside Release's hold, then waited out from Profile's start.
+  Check(LWatch.Observe(LDebug, LProfile, 20000 + cConfigSwitchHoldMs - 1)
+    = csWaiting, '... then Profile restarts the hold');
+  Check(LWatch.Observe(LDebug, LProfile, 20000 + 2 * cConfigSwitchHoldMs - 2)
+    = csWaiting, 'held from Profile, not from Release');
+  Check(LWatch.Observe(LDebug, LProfile, 20000 + 2 * cConfigSwitchHoldMs - 1)
+    = csRestart, 'one restart, for the last selection');
+
+  LWatch.Reset;
+  Check(LWatch.Observe(LDebug, LDebug64, 30000) = csWaiting,
+    'a platform switch waits like a configuration switch');
+  Check(LWatch.Observe(LDebug, LDebug64, 30000 + cConfigSwitchHoldMs)
+    = csRestart, 'and restarts once held');
+
+  CheckEq(ConfigSwitchWhat('Debug', 'Win32', 'Release', 'Win32'),
+    'active configuration changed (Debug -> Release)', 'the line: configuration');
+  CheckEq(ConfigSwitchWhat('Debug', 'Win32', 'Debug', 'Win64'),
+    'active platform changed (Win32 -> Win64)', 'the line: platform');
+  CheckEq(ConfigSwitchWhat('Debug', 'Win32', 'Release', 'Win64'),
+    'active configuration and platform changed (Debug Win32 -> Release Win64)',
+    'the line: both');
+end;
+
 begin
   GFailures := 0;
   TestUri;
@@ -361,6 +430,7 @@ begin
   TestPositions;
   TestDirectiveSymbol;
   TestTokenShift;
+  TestConfigSwitch;
 
   Writeln;
   if GFailures = 0 then

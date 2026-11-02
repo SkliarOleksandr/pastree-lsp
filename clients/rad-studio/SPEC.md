@@ -170,42 +170,58 @@ them). Its header records why both are needed. The symptom of getting this
 wrong is the quiet one: navigation resolves nothing, with no error, and the
 server log fills with F1027 "Unit not found".
 
-### To do: restart on a configuration switch, not at the next request
+### Restart on a configuration switch, not at the next request (0.77.0)
 
-Agreed with Alex 2026-10-15, not started. Seen on AVImark with 0.69.0:
+Agreed with Alex 2026-10-15, built 2026-11-02. Seen on AVImark with 0.69.0:
 switching Debug -> Release -> Debug in the IDE left the server on Debug the
 whole time (`define DEBUG`, `switches: $O- $W+` in the log), with no restart
-line. Not a regression: the active configuration and platform are compared
-only in `TLspSession.EnsureSession`, the gate in front of a REQUEST, so the
-server follows the switch at the next Ctrl+Click / completion / Go To - and a
-switch back before any request is no switch at all. The idle document sync
+line. The active configuration and platform were compared only in
+`TLspSession.EnsureSession`, the gate in front of a REQUEST, so the server
+followed the switch at the next Ctrl+Click / completion / Go To - and a
+switch back before any request was no switch at all. The idle document sync
 does not pass that gate.
 
 That was enough while every result was asked for. It is not now: the inactive
 code grey, the error squiggles, the type colouring and the status panel are
 painted without a request, so between the switch and the next request they
-show the OTHER configuration's view - Debug's `{$IFDEF DEBUG}` live under
-Release - with nothing saying it is stale.
+showed the OTHER configuration's view - Debug's `{$IFDEF DEBUG}` live under
+Release - with nothing saying it was stale.
 
-- [ ] **Detect on the idle tick.** ToolsAPI has no event for an active
-  configuration change, so poll: `ActiveConfiguration.Name` and
-  `CurrentPlatform` once per tick per pooled session (one read each, never per
-  row - see the measure-loop lesson). Platform the same way: it moves the
-  analysis exactly as much.
-- [ ] **Debounce, about a second.** Restart only once the new value has held
-  for ~1 s, so Debug -> Release -> Debug clicked through restarts nothing, and
-  a quick pass over several configurations restarts once.
-- [ ] **One decision, not two.** Call the existing `EnsureSession` comparison
-  from the tick rather than duplicating it, so the request path and the tick
-  can never disagree about what "changed" means.
-- [ ] **Only the project whose configuration moved.** In a group each project
-  has its own active configuration; the other sessions are left alone.
-- [ ] **Say why**, in the Build tab and the log: `active configuration
-  changed (Debug -> Release) - restarting the server` - distinct from the
-  existing `project configuration changed` line, which is the request path.
-- [ ] **Harness.** The comparison is IDE-side and LspSession is not in a
-  harness; at least a unit-level check of the debounce rule, and the AVImark
-  test (switch, wait, the log shows the Release header without a request).
+- **A timer, not the idle tick.** ToolsAPI has no event for an active
+  configuration change, and the idle tick of `PasTreeIdePlugin.IdleSync`
+  fires only after an edit, so a 100 ms timer in `PasTreeIdePlugin.LspSession`
+  (`TConfigSwitchTicker`) calls `TLspSession.CheckConfigSwitch` for every
+  READY session: `ActiveConfiguration.Name` and `CurrentPlatform`, one
+  read each per session per tick. A session without a server up is left to
+  the next request - the watch never spawns one. No tick while a modal dialog
+  is up (Project Options among them); the pending value waits for it.
+- **Debounce, 250 ms** (`PasTreeIdePlugin.ConfigSwitch`,
+  `cConfigSwitchHoldMs`) - the typing pause of `PasTreeIdePlugin.IdleSync`.
+  A value restarts only once it has held: a pass over several configurations
+  quicker than that restarts once, for the last. 0.77.0 held for a second,
+  which Alex found slow for no gain - nobody clicks through configurations,
+  so the wait was paid on every real switch (2026-11-02).
+- **One decision, not two.** `ActiveTarget` is the one reader of the platform
+  and configuration, for `BuildOptions` and the watch alike, and the watch
+  compares with `SameText` as `EnsureSession` does; once a value has held it
+  calls `EnsureSession`, which decides and restarts exactly as for a
+  request. Any restart, from either side, resets the watch.
+- **Only the project whose configuration moved.** Each pooled session
+  compares its own project's selection with its own server; the others
+  answer `csSame`.
+- **Says why**, in the Build tab and the log: `active configuration changed
+  (Debug -> Release) - restarting the server for X.dproj.` (`active platform
+  changed`, or both, for the platform) - distinct from the request path's
+  `project configuration changed` line.
+- **The new server gets the open documents at once** (0.77.1). `OnReady`
+  runs a full `Sync` after `ResendAll`: a restart this session asked for has
+  emptied the sent set, so the buffers used to reach the new server with the
+  next request only, it published no diagnostics until then, and nothing
+  asked for the new semantic tokens - the grey stayed the old
+  configuration's until a tab switch (first AVImark run, 2026-11-02).
+- **Harness:** `LspTextSmoke`'s `TestConfigSwitch` holds the debounce rule
+  and the line to cases. The IDE half - switch, wait, the log shows the
+  Release header without a request - is the AVImark test.
 
 Known cost, accepted: a new process has no parse donor, so this is a full
 rebuild - 5.8 s on AVImark (2026-10-15), Full Parse on the status panel and
