@@ -48,6 +48,13 @@ unit PasLsp.Server;
                   core); 1 = PasTree's SingleThreaded mode. Fixed for the
                   life of the process (PasTree pins the pool once), so a
                   client changes it by restarting the server
+    "undeclaredBehindMissingUnits" - True reports an undeclared identifier
+                  (E2003) in a unit with an import or include that did
+                  not load, too. False (the default) is PasTree's: no E2003
+                  there, since the missing unit may declare the name - which
+                  also hides every real typo in the unit. Changes what the
+                  analysis produces, so a client changes it by restarting
+                  the server
   A .dproj brings its own MainSource/search paths/defines/namespaces/aliases
   (TPasDProj - the same MSBuild evaluation the CLI tools use). Without a
   projectFile the open documents themselves become the analysis roots.
@@ -231,6 +238,10 @@ type
     // tell somebody else's tree from the user's without them.
     FLightLibraries: Boolean;
     FLightPaths: TArray<string>;
+    // The "undeclaredBehindMissingUnits" option (default False): PasTree's
+    // ReportUndeclaredBehindMissingUnits, on the session and on every bare
+    // project alike.
+    FUndeclaredBehindMissing: Boolean;
     // THE WORKSPACE ESCALATED (PasTree's decision D9): a query found a full
     // analysis cheaper than the library bodies it needed and rebuilt the
     // project in full. The session stays full from then on - FLightPaths is
@@ -1186,6 +1197,8 @@ begin
     // light-mode plan, decision D1): own units bind identically, the server
     // holds about half the memory and starts in about 60% of the time.
     FLightLibraries := AOptions.GetValue<Boolean>('lightLibraries', True);
+    FUndeclaredBehindMissing :=
+      AOptions.GetValue<Boolean>('undeclaredBehindMissingUnits', False);
   end;
   // HERE, before anything creates a TPasSemaProject: its constructor pins
   // the pool at the default width, and the pin is first-caller-wins for the
@@ -1358,7 +1371,7 @@ begin
   // the config the .dproj evaluated to), and the light mode.
   LogHeader(Format('configured: platform=%s compiler=%s main=%s paths=%d defines=%d'
     + ' libraryPaths=%d projectFiles=%d projectDir=%s; switches %s, console'
-    + ' target %s; light libraries %s',
+    + ' target %s; light libraries %s; undeclared behind a missing unit %s',
     [PlatformName(FPlatform), FormatFloat('0.0', FCompilerVersion,
        TFormatSettings.Invariant), FMainSource, Length(FSearchPaths),
      Length(FDefines), Length(FLibraryPaths), Length(FProjectFiles),
@@ -1370,7 +1383,8 @@ begin
        Format('on, %d trees interface-only until a unit is opened or an'
          + ' answer needs its bodies', [Length(FLightPaths)]),
        IfThen(not FLightLibraries, 'off (lightLibraries=false)',
-         'off, no library trees outside the project'))]));
+         'off, no library trees outside the project')),
+     IfThen(FUndeclaredBehindMissing, 'reported', 'not reported')]));
   // A ZERO HERE IS A REAL CONDITION, not a quiet default, so it says so in
   // the plain log rather than only in the detail block: with no library
   // trees declared, a rename that reaches into the RTL is planned and applied
@@ -1558,6 +1572,7 @@ begin
   // Carried by the project object, so the incremental CreateForModule path
   // below inherits it.
   FSession.SetReportUnresolvedMembers(True);
+  FSession.SetReportUndeclaredBehindMissingUnits(FUndeclaredBehindMissing);
   // The "analysisThreads" 1 - see ApplyInitOptions.
   if FPoolWidth = 1 then
     FSession.SetSingleThreadedInner(True);
@@ -2835,6 +2850,7 @@ begin
   try
     Result.SetNamespaces(FNamespaces);
     Result.ReportUnresolvedMembers := True;
+    Result.ReportUndeclaredBehindMissingUnits := FUndeclaredBehindMissing;
     if FPoolWidth = 1 then
       Result.SingleThreaded := True;
     if FProjectDir <> '' then

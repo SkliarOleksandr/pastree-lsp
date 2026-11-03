@@ -21,7 +21,10 @@ unit PasTreeIdePlugin.SettingsForm;
   insight features - Tooltip symbol insight and, since 0.63.4, Errors Insight
   (moved there from Highlighting: it is a choice between the IDE's Error
   Insight and ours, not a colour) - and, since 0.68.0, the Code Insight
-  Manager choice (PasTree by default since 0.79.0) (PasTreeIdePlugin.CodeInsight). Highlighting came later, and IDE Fixes (0.59.0) holds
+  Manager choice (PasTree by default since 0.79.0) (PasTreeIdePlugin.CodeInsight),
+  and since 0.83.0 whether a unit with a missing used unit reports its
+  undeclared identifiers - a question of which errors are shown, beside
+  Errors Insight rather than on Diagnostics, which is the log. Highlighting came later, and IDE Fixes (0.59.0) holds
   what corrects the IDE's own behaviour rather than adding a feature - first
   the form designer's Explicit* properties (PasTreeIdePlugin.DfmExplicitFix),
   then the unchanged StyleElements of inherited forms (0.60.0,
@@ -100,6 +103,8 @@ type
     lblErrorSquigglesHint: TLabel;
     chkNativeErrorInsight: TCheckBox;
     chkErrorMarks: TCheckBox;
+    chkUndeclaredBehindMissing: TCheckBox;
+    lblUndeclaredBehindMissingHint: TLabel;
     lblInsightManager: TLabel;
     cbxInsightManager: TComboBox;
     lblInsightManagerHint: TLabel;
@@ -568,6 +573,8 @@ begin
     LForm.FErrorSquigglesOwn := LSettings.PasTreeErrorSquiggles;
     LForm.chkNativeErrorInsight.Checked := LSettings.NativeErrorInsight;
     LForm.chkErrorMarks.Checked := LSettings.ErrorMarks;
+    LForm.chkUndeclaredBehindMissing.Checked :=
+      LSettings.UndeclaredBehindMissing;
     LForm.cbxInsightManager.ItemIndex := Ord(LSettings.PasTreeInsightManager);
     LForm.chkCompletionBoldNames.Checked := LSettings.CompletionBoldNames;
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
@@ -613,6 +620,8 @@ begin
     LSettings.PasTreeInsightManager := LForm.cbxInsightManager.ItemIndex = 1;
     LSettings.NativeErrorInsight := LForm.chkNativeErrorInsight.Checked;
     LSettings.ErrorMarks := LForm.chkErrorMarks.Checked;
+    LSettings.UndeclaredBehindMissing :=
+      LForm.chkUndeclaredBehindMissing.Checked;
     LSettings.CompletionBoldNames := LForm.chkCompletionBoldNames.Checked;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;

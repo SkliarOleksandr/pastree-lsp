@@ -141,6 +141,12 @@ type
     /// predates the switch.
     /// </summary>
     NoLightLibraries: Boolean;
+    /// <summary>
+    /// Sent as undeclaredBehindMissingUnits=true: E2003 reported in a unit
+    /// with a missing import too. False sends nothing: the server's default
+    /// is off; the plugin's setting is on by default.
+    /// </summary>
+    UndeclaredBehindMissingUnits: Boolean;
     /// <summary>Caller owns the returned object.</summary>
     function ToJson: TJSONObject;
   end;
@@ -608,6 +614,8 @@ begin
   // Only when off, for the same reason.
   if NoLightLibraries then
     LResult.AddPair('lightLibraries', TJSONBool.Create(False));
+  if UndeclaredBehindMissingUnits then
+    LResult.AddPair('undeclaredBehindMissingUnits', TJSONBool.Create(True));
   // Real JSON arrays: the server logs a warning and ignores any other shape,
   // which already cost this project a debugging round once.
   AddStrings('searchPaths', SearchPaths);

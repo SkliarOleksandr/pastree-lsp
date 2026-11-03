@@ -469,6 +469,12 @@ type
     // ("lightLibraries", the server's light mode). Default True, as the
     // server's. See LightLibrariesEnabled.
     LightLibraries: Boolean;
+    // Code Insight tab: undeclared identifiers reported in a unit with a
+    // missing import too ("undeclaredBehindMissingUnits"). Default True,
+    // unlike the server's and PasTree's: in an editor a typo hidden until
+    // a path is fixed costs more than a name the missing unit declares
+    // (Alex, 2026-11-03). See UndeclaredBehindMissingUnitsEnabled.
+    UndeclaredBehindMissing: Boolean;
   end;
 
 function LoadSettings: TPasTreeSettings;
@@ -497,6 +503,14 @@ function AnalysisThreadCount: Integer;
 /// a server started with the other value.
 /// </summary>
 function LightLibrariesEnabled: Boolean;
+
+/// <summary>
+/// The Code Insight tab's "undeclared identifiers behind a missing unit"
+/// switch, sent as undeclaredBehindMissingUnits=true when on. It changes what
+/// the analysis produces, so like the library switch TLspSession restarts a
+/// server started with the other value.
+/// </summary>
+function UndeclaredBehindMissingUnitsEnabled: Boolean;
 
 /// <summary>
 /// Registers the ONE listener called (main thread) after the dialog saved -
@@ -564,6 +578,7 @@ const
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
   cValueAnalysisThreads = 'AnalysisThreads';
   cValueLightLibraries = 'LightLibraries';
+  cValueUndeclaredBehindMissing = 'UndeclaredBehindMissingUnits';
   // The IDE level ApplyErrorInsightChoice replaced with None, to put back -
   // by name, one of cErrorInsightLevelNames.
   cValueSavedErrorInsightLevel = 'SavedErrorInsightLevel';
@@ -761,6 +776,7 @@ begin
   Result.DfmNoDefaultStyleElems := True;
   Result.AnalysisThreads := 0;
   Result.LightLibraries := True;
+  Result.UndeclaredBehindMissing := True;
 
   LKey := SettingsRegistryKey;
   if LKey = '' then
@@ -828,6 +844,8 @@ begin
         Result.AnalysisThreads := 0;
       Result.LightLibraries :=
         ReadFlag(LReg, cValueLightLibraries, Result.LightLibraries);
+      Result.UndeclaredBehindMissing := ReadFlag(LReg,
+        cValueUndeclaredBehindMissing, Result.UndeclaredBehindMissing);
     finally
       LReg.CloseKey;
     end;
@@ -904,6 +922,8 @@ begin
         LReg.WriteInteger(cValueAnalysisThreads, ASettings.AnalysisThreads);
         LReg.WriteInteger(cValueLightLibraries,
           Ord(ASettings.LightLibraries));
+        LReg.WriteInteger(cValueUndeclaredBehindMissing,
+          Ord(ASettings.UndeclaredBehindMissing));
       finally
         LReg.CloseKey;
       end;
@@ -1579,6 +1599,11 @@ end;
 function LightLibrariesEnabled: Boolean;
 begin
   Result := CurrentSettings.LightLibraries;
+end;
+
+function UndeclaredBehindMissingUnitsEnabled: Boolean;
+begin
+  Result := CurrentSettings.UndeclaredBehindMissing;
 end;
 
 procedure SetSettingsSavedListener(const AListener: TProc);

@@ -348,9 +348,22 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
           'vel it replaced.'
         WordWrap = True
       end
+      object lblUndeclaredBehindMissingHint: TLabel
+        Left = 54
+        Top = 244
+        Width = 386
+        Height = 60
+        Caption = 
+          'A unit whose uses clause names a unit that cannot be found repo' +
+          'rts no undeclared identifiers: the missing unit may ' +
+          'declare them. On, each name is checked against what was found -' +
+          ' real typos show, and so does every name the missing unit decla' +
+          'res. Restarts the server.'
+        WordWrap = True
+      end
       object lblInsightManager: TLabel
         Left = 16
-        Top = 244
+        Top = 316
         Width = 117
         Height = 15
         Caption = 'Code Insight Manager'
@@ -358,7 +371,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
       object lblInsightManagerHint: TLabel
         Left = 35
-        Top = 268
+        Top = 340
         Width = 403
         Height = 45
         Caption = 
@@ -391,11 +404,11 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
       object cbxInsightManager: TComboBox
         Left = 170
-        Top = 240
+        Top = 312
         Width = 270
         Height = 23
         Style = csDropDownList
-        TabOrder = 4
+        TabOrder = 5
         OnChange = cbxInsightManagerChange
         Items.Strings = (
           'RAD Studio (DelphiLSP)'
@@ -421,15 +434,25 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 3
       end
+      object chkUndeclaredBehindMissing: TCheckBox
+        Left = 35
+        Top = 224
+        Width = 405
+        Height = 17
+        Caption = 'Undeclared identifiers in units with a missing used unit'
+        Checked = True
+        State = cbChecked
+        TabOrder = 4
+      end
       object chkCompletionBoldNames: TCheckBox
         Left = 35
-        Top = 320
+        Top = 392
         Width = 405
         Height = 17
         Caption = 'Bold names in the Code Completion list'
         Checked = True
         State = cbChecked
-        TabOrder = 5
+        TabOrder = 6
       end
     end
     object tsDiagnostics: TTabSheet

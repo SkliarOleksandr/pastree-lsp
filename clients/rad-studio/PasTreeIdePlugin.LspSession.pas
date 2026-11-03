@@ -1537,6 +1537,7 @@ type
     // The Performance page's library switch the server was started with -
     // fixed per server process like the thread count.
     FStartedNoLight: Boolean;
+    FStartedUndeclared: Boolean;   // UndeclaredBehindMissingUnits, likewise
     // The Performance page's callback for pastree/benchmarkDone; nil when
     // no benchmark is waiting.
     FBenchmarkDone: TLspBenchmarkProc;
@@ -2596,6 +2597,8 @@ begin
     Result.NoLightLibraries := FLightOverride = 0
   else
     Result.NoLightLibraries := not LightLibrariesEnabled;
+  // What the analysis reports, so fixed per server like the parsing mode.
+  Result.UndeclaredBehindMissingUnits := UndeclaredBehindMissingUnitsEnabled;
   // The IDE-side timing lines (PasTreeIdePlugin.Timing) go into the same
   // file as the server's, but only with ADVANCED logging on: they are a few
   // lines per typing pause, which is the "log nobody can skim" the advanced
@@ -2617,6 +2620,7 @@ end;
 function TLspSession.EnsureSession: Boolean;
 const
   cParseMode: array[Boolean] of string = ('Full', 'Fast');
+  cReported: array[Boolean] of string = ('not reported', 'reported');
 var
   LProject: IOTAProject;
   LOptions: TLspInitOptions;
@@ -2805,6 +2809,7 @@ begin
      (FStartedLogDetail = not LOptions.SuppressLogDetail) and
      (FStartedThreads = LOptions.AnalysisThreads) and
      (FStartedNoLight = LOptions.NoLightLibraries) and
+     (FStartedUndeclared = LOptions.UndeclaredBehindMissingUnits) and
      (FCheckingStamp <> LStamp) then
     CheckSaved(LStamp);
   if (FClient.State = lcsStopped) or
@@ -2815,6 +2820,7 @@ begin
      (FStartedLogDetail <> not LOptions.SuppressLogDetail) or
      (FStartedThreads <> LOptions.AnalysisThreads) or
      (FStartedNoLight <> LOptions.NoLightLibraries) or
+     (FStartedUndeclared <> LOptions.UndeclaredBehindMissingUnits) or
      (FRestartWhy <> '') then
   begin
     if FClient.State <> lcsStopped then
@@ -2835,6 +2841,11 @@ begin
         LogRestart(LOptions.LogFile, Format('parsing mode changed (%s) -'
           + ' restarting the server for %s.',
           [cParseMode[not LOptions.NoLightLibraries],
+          ExtractFileName(LOptions.ProjectFile)]))
+      else if FStartedUndeclared <> LOptions.UndeclaredBehindMissingUnits then
+        LogRestart(LOptions.LogFile, Format('undeclared identifiers behind a'
+          + ' missing unit %s - restarting the server for %s.',
+          [cReported[LOptions.UndeclaredBehindMissingUnits],
           ExtractFileName(LOptions.ProjectFile)]))
       else
         LogRestart(LOptions.LogFile, Format('project configuration changed'
@@ -2875,6 +2886,7 @@ begin
     FStartedLogDetail := not LOptions.SuppressLogDetail;
     FStartedThreads := LOptions.AnalysisThreads;
     FStartedNoLight := LOptions.NoLightLibraries;
+    FStartedUndeclared := LOptions.UndeclaredBehindMissingUnits;
     if not FClient.Start(LOptions) then
       Exit;
   end;

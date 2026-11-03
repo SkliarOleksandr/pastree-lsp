@@ -360,6 +360,15 @@ environment options, as the Options dialog does, so no restart is needed. The
 underlines take the shape chosen in Tools > Options > Error Insight > "Editor
 rendering style".
 
+A unit whose `uses` names a unit that cannot be found shows the F1027 for it
+and, left to the analysis, no undeclared identifier at all: the missing unit
+may declare any name in the file, and the compiler stops at the F1027 anyway.
+That also hides every real typo in the unit until the path is fixed.
+"Undeclared identifiers in units with a missing used unit" on the Code Insight
+tab, on by default, checks each name against the units that were found - typos show, and
+so does every name the missing unit would have declared. A change restarts the
+project's server.
+
 ### Idle document sync
 
 Everything you type is pushed to the server after a short pause in typing, which
