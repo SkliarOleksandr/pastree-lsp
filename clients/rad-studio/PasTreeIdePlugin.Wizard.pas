@@ -80,6 +80,7 @@ uses
   PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.StatusPanel,
   PasTreeIdePlugin.Outline,
+  PasTreeIdePlugin.CaretWatch,
   PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.DfmExplicitFix,
   PasTreeIdePlugin.DfmStyleElementsFix,
@@ -926,6 +927,8 @@ begin
   InitializeStatusPanel;
   // The Structure pane outline for the active source file.
   InitializeOutline;
+  // Where the caret rests: the outline selects its node.
+  InitializeCaretWatch;
   // Ctrl+Shift+C: our class completion, replacing the native one by keyboard
   // binding (it is not gated by the Insight Provider selection, so this is
   // the only way to take it over).
@@ -1021,6 +1024,8 @@ begin
   // unloaded BPL. A no-op on 37.0 and later, where both use real ToolsAPI
   // events.
   FinalizeEditorWindowHooks;
+  // Before the outline: its caret timer selects outline nodes.
+  FinalizeCaretWatch;
   FinalizeOutline;
   FinalizeIdeInsight;
   FinalizeCodeInsight;

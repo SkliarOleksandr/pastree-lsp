@@ -109,6 +109,7 @@ contains
   PasTreeIdePlugin.Timing in 'PasTreeIdePlugin.Timing.pas',
   PasTreeIdePlugin.OutlineRows in 'PasTreeIdePlugin.OutlineRows.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
+  PasTreeIdePlugin.CaretWatch in 'PasTreeIdePlugin.CaretWatch.pas',
   PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',
   PasTreeIdePlugin.SyncPrototypes in 'PasTreeIdePlugin.SyncPrototypes.pas',
   PasTreeIdePlugin.AnnotateArgs in 'PasTreeIdePlugin.AnnotateArgs.pas',

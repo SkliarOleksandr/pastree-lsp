@@ -54,6 +54,13 @@ procedure FinalizeOutline;
 /// </summary>
 procedure OutlineProviderChanged(AActive: Boolean);
 
+/// <summary>
+/// The caret rested at ARow, ACol of AFilePath (PasTreeIdePlugin.CaretWatch): the
+/// node of the declaration it is in is selected in the pane, when the pane
+/// shows that file's outline.
+/// </summary>
+procedure OutlineCaretMoved(const AFilePath: string; ARow, ACol: Integer);
+
 implementation
 
 uses
@@ -79,6 +86,9 @@ uses
 
 const
   cOutlineStructureType = 'PasTree.Outline';
+  // How long after selecting a collapsed type the caret's member is looked
+  // for again - the pane opens the type after the selection returns.
+  cOutlineReselectMs = 100;
 
 var
   GNotifierIndex: Integer = -1;
@@ -102,6 +112,11 @@ var
   // default.
   GExpanded: TDictionary<string, Boolean> = nil;
   GListener: Integer = 0;
+  // The installed context's nodes that carry a position, in source order
+  // (BuildTree's) - what OutlineCaretMoved searches. Counted references: the
+  // pane may drop the context while a caret move still looks here.
+  GNodesByRow: TArray<IOTAStructureNode>;
+  GNodeRows, GNodeCols: TArray<Integer>;
 
 type
   // IOTAStructureNode.Data widened from Integer to IntPtr in Delphi 12; the
@@ -621,6 +636,12 @@ begin
   Result := TPasOutlineNode.Create(ACaption, AFilePath, ARow, ACol);
   Result.FIcon := AIcon;
   SetNodeKey(Result, AParentKey + '/' + ACaption, ADefaultExpanded);
+  if ARow >= 1 then
+  begin
+    GNodesByRow := GNodesByRow + [IOTAStructureNode(Result)];
+    GNodeRows := GNodeRows + [ARow];
+    GNodeCols := GNodeCols + [ACol];
+  end;
 end;
 
 procedure BuildTree(const AContext: TPasOutlineContext;
@@ -718,6 +739,141 @@ begin
   end;
 end;
 
+{ The caret in the top view when it shows AFilePath, else row 0. }
+procedure CaretIn(const AFilePath: string; out ARow, ACol: Integer);
+var
+  LEditor: IOTAEditorServices;
+  LView: IOTAEditView;
+begin
+  ARow := 0;
+  ACol := 0;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, LEditor) then
+    Exit;
+  LView := LEditor.TopView;
+  if (LView <> nil) and (LView.Buffer <> nil) and
+     SameText(LView.Buffer.FileName, AFilePath) then
+  begin
+    ARow := LView.Buffer.EditPosition.Row;
+    ACol := LView.Buffer.EditPosition.Column;
+  end;
+end;
+
+{ THE NODE THE CARET IS IN: the node that starts nearest above the caret's
+  row, or on it. pastree/outline gives where a declaration starts, not
+  where it ends, so a caret between two declarations belongs to the one
+  above - which is also what a caret inside a routine body, a class
+  declaration or a uses clause finds. On the caret's own row the column
+  decides: the last node starting at or before the caret, or the row's
+  first when the caret is in its indentation.
+  Selected with SelectNodeEx(MakeVisible) where the IDE has it (13): the
+  pane scrolls to it - it does not open a collapsed parent, so a hidden
+  node gives way to that parent below. 12 and 11.3 have SelectNode alone.
+  Selecting does not navigate - TPasOutlineContext.NodeSelected does
+  nothing, only DefaultNodeAction jumps - so this never moves the caret it
+  follows.
+  ARetry is the second look after a collapsed parent stood in: selecting a
+  collapsed type makes the pane open it, after the call has returned, so
+  the member the caret is on becomes visible only then - and the caret has
+  not moved, so nothing else would select it (2026-11-03). }
+procedure SelectCaretNode(const AFilePath: string; ARow, ACol: Integer;
+  ARetry: Boolean);
+var
+  LIdx, LBest: Integer;
+  LView: IOTAStructureView;
+  LSelected, LTarget, LNode: IOTAStructureNode;
+  {$IF Declared(IOTAStructureView370)}
+  LView370: IOTAStructureView370;
+  {$IFEND}
+
+  function CaptionOf(const ANode: IOTAStructureNode): string;
+  begin
+    if ANode = nil then
+      Result := '(nothing)'
+    else
+      Result := ANode.Caption;
+  end;
+
+begin
+  if not GAlive or not GContextInstalled or (ARow < 1) or
+     not PasTreeProviderSelected or not SameText(AFilePath, GCurrentFile) then
+    Exit;
+  // The last node starting at or before the caret, by row then column - so
+  // of `FirstLine, FirstCol: Integer` the caret on FirstLine selects that
+  // one, not the row's last (2026-11-03).
+  LBest := -1;
+  for LIdx := 0 to High(GNodeRows) do
+    if ((GNodeRows[LIdx] < ARow) or
+        ((GNodeRows[LIdx] = ARow) and (GNodeCols[LIdx] <= ACol))) and
+       ((LBest < 0) or (GNodeRows[LIdx] > GNodeRows[LBest]) or
+        ((GNodeRows[LIdx] = GNodeRows[LBest]) and
+         (GNodeCols[LIdx] >= GNodeCols[LBest]))) then
+      LBest := LIdx;
+  // A caret in the indentation before the row's first node: that node, not
+  // the one above.
+  if (LBest < 0) or (GNodeRows[LBest] < ARow) then
+    for LIdx := 0 to High(GNodeRows) do
+      if (GNodeRows[LIdx] = ARow) and ((LBest < 0) or
+         (GNodeRows[LBest] < ARow) or (GNodeCols[LIdx] < GNodeCols[LBest])) then
+        LBest := LIdx;
+  if LBest < 0 then
+    Exit;
+  try
+    if not Supports(BorlandIDEServices, IOTAStructureView, LView) then
+      Exit;
+    // A node under a collapsed parent is not shown, and selecting it shows
+    // nothing - a caret on a field of a collapsed record, or one Ctrl+Shift+Up
+    // put on a method's declaration in a collapsed class, selected nothing
+    // the user could see (2026-11-03). The outermost collapsed ancestor
+    // stands for it: the type the caret is in. The pane is left as the user
+    // folded it.
+    LTarget := GNodesByRow[LBest];
+    LNode := LTarget.Parent;
+    while LNode <> nil do
+    begin
+      if not LNode.Expanded then
+        LTarget := LNode;
+      LNode := LNode.Parent;
+    end;
+    // Already selected IN THE PANE - not merely by us last time: a click in
+    // the pane, or the IDE, may have moved the selection since.
+    LSelected := LView.GetFirstSelected;
+    if (LSelected <> nil) and (LSelected = LTarget) then
+      Exit;
+    {$IF Declared(IOTAStructureView370)}
+    if Supports(BorlandIDEServices, IOTAStructureView370, LView370) then
+      LView370.SelectNodeEx(LTarget, True)
+    else
+    {$IFEND}
+      LView.SelectNode(LTarget);
+    LSelected := LView.GetFirstSelected;
+    LspLogDetail(Format('outline: caret on row %d -> "%s" (row %d), shown'
+      + ' as "%s", the pane now selects "%s"', [ARow,
+       GNodesByRow[LBest].Caption, GNodeRows[LBest], LTarget.Caption,
+       CaptionOf(LSelected)]));
+    if not ARetry and (LTarget <> GNodesByRow[LBest]) then
+      TThread.ForceQueue(nil,
+        procedure
+        var
+          LFile: string;
+          LRow, LCol: Integer;
+        begin
+          // The caret read again: it may have moved while the pane opened.
+          LFile := GCurrentFile;
+          CaretIn(LFile, LRow, LCol);
+          SelectCaretNode(LFile, LRow, LCol, True);
+        end, cOutlineReselectMs);
+  except
+    on E: Exception do
+      LspLogDetail('outline: selecting the caret''s node failed: '
+        + E.ClassName + ': ' + E.Message);
+  end;
+end;
+
+procedure OutlineCaretMoved(const AFilePath: string; ARow, ACol: Integer);
+begin
+  SelectCaretNode(AFilePath, ARow, ACol, False);
+end;
+
 procedure InstallOutline(const AFilePath: string;
   const ARows: TArray<TLspOutlineRow>);
 var
@@ -725,6 +881,7 @@ var
   LContext: TPasOutlineContext;
   LMessages: IOTAMessageServices;
   LSignature: string;
+  LCaretRow, LCaretCol: Integer;
 begin
   if not Supports(BorlandIDEServices, IOTAStructureView, LView) then
   begin
@@ -744,12 +901,18 @@ begin
   if GContextInstalled and (LSignature = GInstalledSignature) then
     Exit;
   LContext := TPasOutlineContext.Create(AFilePath);
+  GNodesByRow := nil;
+  GNodeRows := nil;
+  GNodeCols := nil;
   BuildTree(LContext, AFilePath, ARows);
   LView.SetStructureContext(LContext);
   GContextInstalled := True;
   GInstalledSignature := LSignature;
   // The new context took the Errors folder with the old one.
   NativeErrorInsightRestoreStructure(AFilePath);
+  // And the selection: the caret's node again in the new tree.
+  CaretIn(AFilePath, LCaretRow, LCaretCol);
+  OutlineCaretMoved(AFilePath, LCaretRow, LCaretCol);
 end;
 
 procedure RequestOutline(const AFilePath: string);
@@ -917,6 +1080,9 @@ begin
     GNotifierIndex := -1;
   end;
   GInstalledSignature := '';
+  GNodesByRow := nil;
+  GNodeRows := nil;
+  GNodeCols := nil;
   FreeAndNil(GExpanded);
 end;
 

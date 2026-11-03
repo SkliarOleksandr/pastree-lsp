@@ -511,3 +511,14 @@ for the routine being called, from `textDocument/signatureHelp`. Overloads are
 offered as the multiple entries the IDE's parameter viewer expects. The active
 argument is recounted by the server on every request rather than tracked
 client-side, so the emboldened parameter cannot drift out of step with the text.
+
+### Structure outline
+
+The Structure pane shows the active unit as DelphiLSP lays it out - its
+sections, `uses` clauses, declarations and type members, with the IDE's own
+icons - from the analysis, refreshed after each one; a double-click goes to the
+declaration. It follows the caret: when the caret rests, the node of the
+declaration it is in is selected, and the pane scrolls to it on RAD Studio 13.
+A caret between two declarations belongs to the one above, since the outline
+knows where a declaration starts, not where it ends. Inside a type the pane
+shows collapsed, the type itself is selected rather than a hidden member.

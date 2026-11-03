@@ -134,6 +134,7 @@
         <DCCReference Include="PasTreeIdePlugin.StatusPanel.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Timing.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.CaretWatch.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>
         <DCCReference Include="PasTreeIdePlugin.SyncPrototypes.pas"/>
         <DCCReference Include="PasTreeIdePlugin.AnnotateArgs.pas"/>
