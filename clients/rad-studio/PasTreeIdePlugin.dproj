@@ -133,6 +133,8 @@
         <DCCReference Include="PasTreeIdePlugin.EditorPopup.pas"/>
         <DCCReference Include="PasTreeIdePlugin.StatusPanel.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Timing.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.NavSymbols.pas"/>
+        <DCCReference Include="PasTreeIdePlugin.NavToolbar.pas"/>
         <DCCReference Include="PasTreeIdePlugin.Outline.pas"/>
         <DCCReference Include="PasTreeIdePlugin.CaretWatch.pas"/>
         <DCCReference Include="PasTreeIdePlugin.ClassComplete.pas"/>

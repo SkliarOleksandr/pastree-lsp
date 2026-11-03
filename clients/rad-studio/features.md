@@ -512,6 +512,14 @@ offered as the multiple entries the IDE's parameter viewer expects. The active
 argument is recounted by the server on every request rather than tracked
 client-side, so the emboldened parameter cannot drift out of step with the text.
 
+### Navigation toolbar
+
+The two comboboxes above the editor in RAD Studio 12 and 13 - the unit's
+types and its routines - list the active unit and show the type and the
+routine the caret is in, from the same outline as the Structure pane. RAD
+Studio fills them from DelphiLSP's answers, so with PasTree as the provider
+they stayed empty until 0.82.0.
+
 ### Structure outline
 
 The Structure pane shows the active unit as DelphiLSP lays it out - its

@@ -108,6 +108,10 @@ contains
   PasTreeIdePlugin.StatusPanel in 'PasTreeIdePlugin.StatusPanel.pas',
   PasTreeIdePlugin.Timing in 'PasTreeIdePlugin.Timing.pas',
   PasTreeIdePlugin.OutlineRows in 'PasTreeIdePlugin.OutlineRows.pas',
+  { The editor's navigation toolbar, fed the outline as DelphiLSP's
+    documentSymbol tree (0.82.0). }
+  PasTreeIdePlugin.NavSymbols in 'PasTreeIdePlugin.NavSymbols.pas',
+  PasTreeIdePlugin.NavToolbar in 'PasTreeIdePlugin.NavToolbar.pas',
   PasTreeIdePlugin.Outline in 'PasTreeIdePlugin.Outline.pas',
   PasTreeIdePlugin.CaretWatch in 'PasTreeIdePlugin.CaretWatch.pas',
   PasTreeIdePlugin.ClassComplete in 'PasTreeIdePlugin.ClassComplete.pas',

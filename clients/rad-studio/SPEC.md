@@ -734,6 +734,80 @@ property set), whose current key follows the editor's set
 have no field naming the set and no part in the gate; that switch is left as
 it was.
 
+## The navigation toolbar - read 2026-11-03
+
+The two comboboxes above the editor in RAD Studio 12 and 13 ("Search for a
+type", "Search for a method") list the unit's types and routines and show the
+ones holding the caret. With PasTree as the Insight Provider they were empty;
+with DelphiLSP they work. Read off coreide370, codequeryide370,
+codequerydelphi370 and IDELSP370 (Win32), checked against 290 and the Win64
+370 set:
+
+- **The toolbar** is `EditorNavBar.TEditorNavigationToolbar` (coreide). On
+  editor idle it runs SQL against `IOTACodeQueryServices`
+  (`CodeQueryAPI`, `{03598A83-60A5-4608-81C8-F5F7739C3637}`) for the top
+  view's file: `SELECT parent_id, name FROM types WHERE start_line <= %d AND
+  end_line >= %d ORDER BY start_line DESC`, the same of `methods`. Nothing in
+  that path asks who the Insight Provider is.
+- **The tables** (`symbols`, with the views `types`, `methods`, `fields`...,
+  and `dependencies`) are built per file by the first parser registered with
+  `IDECodeQuery.RegisterCodeQueryParser` whose `HandlesFile` says yes
+  (`GetParserForFilename`, a plain `TList.Add` order). codequeryide registers
+  `TLSPCodeQueryParser` first: it takes a file when
+  `IOTAModuleServices.FindModule(file)` answers `ILSPDocumentSymbolModule`
+  (`LSPSrcInfo`, `{D8682E49-11EC-483F-93C7-53BF1E28CC8F}`), and writes that
+  object's symbols - a DelphiLSP documentSymbol answer as
+  `TArray<TOTALSPDocumentSymbol>` - into the tables. The Kind byte is the LSP
+  SymbolKind number, mapped to `symbol_type` 0 module / 1 type / 2 method /
+  3 field; lines are 0-based and stored +1. Only a module WITHOUT that object
+  falls through to codequerydelphi's own Castalia parser.
+- **The object** is `TLSPDocumentSymbolModule` (IDELSP). DelphiLSP's
+  `TLSPMgr.SendLSPDocumentSymbolRequest` constructs one when the module has
+  none and hands it to `IDocModule.AddModuleHandler` (coreide `DocModul`,
+  `{9E9C81A0-EDDC-11D1-9504-00608CCBF153}`, answered by `TCodeIDocModule`);
+  the module's `QueryInterface` then finds it among its handlers. Its answers
+  go in through `SetDocumentSymbols`, which notifies the parser's listeners.
+  With PasTree selected the answer never comes and the tables stay empty.
+- **Two levels reach the tables.** `TLSPCodeQueryParser.UpdateTables` wraps
+  the symbols in a root of Kind 2 named after the module, and
+  `TSQLiteSymbolWriter.InsertSymbols` descends from that root only, writing
+  a Kind 2 node below it as its children (a section is flattened away). So
+  the tables hold the sections' children - types, routine bodies, globals -
+  and no member of a type. The type box finds a caret's type by the
+  routine's parent chain (`GetTypeID`), which for a body ends at the root:
+  inside a method body it stays empty, with DelphiLSP as with us. A body put
+  under its class is not written at all (tried 2026-11-03: the method list
+  kept only the globals). 11.3's Castalia parser does tie a body to its class.
+- **RAD Studio 11.3** has no `TLSPCodeQueryParser` and no
+  `ILSPDocumentSymbolModule`: its toolbar reads the Castalia parser alone.
+
+What the plugin does (0.82.0, `PasTreeIdePlugin.NavToolbar`): after each
+outline of the active file (the Structure pane's pastree/outline request,
+module scope with uses items) the rows are reshaped into DelphiLSP's tree
+(`PasTreeIdePlugin.NavSymbols`, the shape read off DelphiLSP.exe's own answer
+to a probe unit) and handed to the module's `ILSPDocumentSymbolModule`. A
+module without one gets the IDE's own class, built through its exported
+constructor and attached with `AddModuleHandler` as DelphiLSP does - so no
+code of this package stays in a module after it unloads, and DelphiLSP finds
+and fills the same object when it is the provider again. Ranges need the
+declaration's END, which the outline rows did not carry: the server adds the
+node's extent as the rows' 14th element.
+
+The seam, as declared in `PasTreeIdePlugin.NavToolbar` (same in 290 and 370,
+Win32 and Win64):
+
+| | |
+|---|---|
+| `ILSPDocumentSymbolModule` | `SetDocumentSymbols`, `GetDocumentSymbols`, `SetEditBuffer`, `GetEditBuffer`, `RegisterChangeListener`, `UnregisterChangeListener` (register convention) |
+| `IDocModule` | `GetDocModule`, `AddModuleHandler`, `ModuleHandlerAlsoOnNotifyList`, `ModuleHandlerNoLongerOnNotifyList`, `RemoveModuleHandler` |
+| `TOTALSPDocumentSymbol` | Name, Detail `UTF8String`; Kind (byte, no RTTI); Tags (set, 1 byte); Deprecated; Range, SelectionRange (4 Integers each); Children - 48 bytes Win32, 64 Win64 |
+| class / constructor | `@Lspsrcinfo@TLSPDocumentSymbolModule@` and `...@$bctr$qqrv`; Win64 `_ZTVN10Lspsrcinfo24TLSPDocumentSymbolModuleE` (the VMT: its self-pointer at -176 is itself) and `_ZN10Lspsrcinfo24TLSPDocumentSymbolModuleC3Ev` |
+
+On a new RAD Studio: the RTTI of `TOTALSPDocumentSymbol` in designide, the
+interface tables of `TLSPDocumentSymbolModule` and `TCodeIDocModule` (the
+IIDs and the method each slot jumps to), and the four exports. A missing
+export is logged once and the toolbar is left to the IDE.
+
 ## What the experiment was (historical)
 
 Two interfaces would give us **native** diagnostics and **native** folding, with
@@ -805,6 +879,7 @@ version are delivered in that form.
 |---|---|---|---|
 | Outline | **Have again** (0.76.0; withdrawn 2026-09-01 .. 2026-10-23) | Structure pane, private `StructureType` 'PasTree.Outline' | withdrawn because its own badges (a `TImageList` through `AddImageList`) never showed in the themed IDE. Back with the IDE's own icons: coreide exports `Parsernodes.ImageIndexOffset`, where the Pascal structure icons start in the pane's image list, and a node answers it plus DelphiLSP's offset for its LSP SymbolKind (`TDocumentSymbolNode.get_ImageIndex`, table in `PasTreeIdePlugin.Outline`; 8/9 = folder closed/open). Same export in 22.0, 23.0, 37.0 and Win64. Laid out as DelphiLSP lays it out since 0.76.4: a Structure root, the sections (interface, implementation, initialization, finalization, a program's begin), each uses clause a folder of its units, declarations with their signatures, members under their type; only the root and the interface start expanded. Built from pastree/outline (module, usesItems) - documentSymbol has no sections, uses or signatures. No switch of its own since 0.76.3: shown exactly while PasTree is the Insight Provider (with PasTree selected nothing else fills the pane; with RAD Studio selected DelphiLSP does), taken back on ManagerDisabled. Rebuilt on EditorViewActivated and after each analysis of the shown file, unless its symbols are unchanged; collapsed nodes stay collapsed; the Errors folder is pushed again after every new context, which drops it |
 | Outline follows the caret | **Have** (0.81.0, run in the IDE; `OutlineCaretMoved` in `PasTreeIdePlugin.Outline`, the caret read by `PasTreeIdePlugin.CaretWatch` once it rests; the node nearest above the caret, since the outline rows carry starts only, or its outermost collapsed ancestor when it is hidden - `SelectNodeEx(MakeVisible)` does not open a parent, but the pane opens a selected type after the call returns, so the member is looked for again 100 ms later; the column decides between nodes on one row; `SelectNode` alone on 12 and 11.3, which have no `SelectNodeEx` and no `EditorSetCaretPos` - BeginPaint stands in for the caret event there) | `IOTAStructureView370.SelectNodeEx` (`105`) + `EditorSetCaretPos` (`ToolsAPI.Editor.pas:878`) | scroll-into-view select, driven by a real caret event instead of polling |
+| Navigation toolbar (type / method comboboxes above the editor) | **Have** (0.82.0, `PasTreeIdePlugin.NavToolbar`; RAD Studio 12 and 13 - 11.3's toolbar needs nothing from us) | `ILSPDocumentSymbolModule` of IDELSP, attached through coreide's `IDocModule` - see "The navigation toolbar" | the toolbar reads a SQL index built from DelphiLSP's documentSymbol answers; we hand it the outline in that shape, with the node extents the server adds |
 | Outline survives a refresh | **Have** (0.76.3, our own state table `GExpanded` in `PasTreeIdePlugin.Outline`, not `IOTAStructureNodeStatePreserver`) | `IOTAStructureNodeStatePreserver` (`135`) | without it, a rebuild collapses everything the user expanded |
 | Project-wide symbol search | **Have** (2026-08-22) | IDE Insight omnibox (Ctrl+.), 'PasTree symbols' category | prefetched index (the dialog's RequestingItems is once-per-open, no filter text); first cold open may be empty and kicks the fetch |
 | Document highlight (occurrences) | **Declined** (built in 0.81.0 and withdrawn before it shipped, 2026-11-03: the RAD Studio editor highlights the identifier under the caret itself, and well) | `PaintText` underlay, or `plsBackground` row wash | server answers it today |

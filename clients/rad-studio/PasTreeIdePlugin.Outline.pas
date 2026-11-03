@@ -82,6 +82,7 @@ uses
   // CoreIdeExport, and the Errors folder a new context drops
   PasTreeIdePlugin.NativeErrorInsight,
   PasTreeIdePlugin.CodeInsight,   // PasTreeProviderSelected
+  PasTreeIdePlugin.NavToolbar,
   PasTreeIdePlugin.GotoDeclaration;
 
 const
@@ -929,7 +930,12 @@ begin
       if not SameText(GCurrentFile, AFilePath) then
         Exit;
       if ASuccess then
+      begin
+        // The same rows feed the editor's navigation toolbar, which reads
+        // what DelphiLSP would have answered (PasTreeIdePlugin.NavToolbar).
+        NavToolbarOutlineArrived(AFilePath, ARows);
         InstallOutline(AFilePath, ARows);
+      end;
       // Failures stay quiet: "no server yet" is the normal state right
       // after the IDE starts, and the pane simply keeps what it shows.
     end);

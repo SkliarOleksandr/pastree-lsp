@@ -22,11 +22,13 @@ unit PasTreeIdePlugin.OutlineRows;
     "sections": ["","interface","implementation",...]
     "owners": ["","TFoo","TOuter.TInner",...]     the enclosing structs
     "files": [["file:///c%3A/x/Foo.pas","Foo",12], ...]   uri, unit name, unit id
-    "rows": [[kind,head,owner,"Name","detail",section,isImpl,file,sym,node,line,col], ...]
+    "rows": [[kind,head,owner,"Name","detail",section,isImpl,file,sym,node,line,col,[typeSpans],[extent]], ...]
 
   kind/head/owner/section/file are indices into the tables above, which the
   server writes BEFORE the rows; isImpl is 0/1; line/col are 1-based
-  (PasTree's own) and 0 on a project row. The words still travel as words:
+  (PasTree's own) and 0 on a project row. The two trailing arrays are
+  optional: the detail's type spans, and the declaration node's extent
+  [startLine, startCol, endLine, endCol] on a module row. The words still travel as words:
   the client never depends on a PasTree enum's order, only on this
   response's own tables. The same list is ~8 MB, and this reader turns it
   into records in one pass over the characters, no DOM. It is handed the
@@ -76,6 +78,10 @@ type
     /// Detail, flattened - [s1, l1, s2, l2, ...]. nil when the server sent
     /// no 13th element (a PasTree before outline type spans).
     TypeSpans: TArray<Integer>;
+    /// The declaration node's extent, 1-based, the end column just past its
+    /// last character - a module row's 14th element. All 0 when the server
+    /// sent none: a project row, an include, a server before node extents.
+    ExtStartLine, ExtStartCol, ExtEndLine, ExtEndCol: Integer;
   end;
 
   EOutlineTable = class(Exception);
@@ -450,6 +456,28 @@ var
             LRow.TypeSpans := LRow.TypeSpans + [S.ReadInt];
             S.SkipWs;
           until not S.TryConsume(',');
+          S.Expect(']');
+        end;
+      end;
+      // Optional 14th: the node's extent, [sl, sc, el, ec] or [].
+      LRow.ExtStartLine := 0;
+      LRow.ExtStartCol := 0;
+      LRow.ExtEndLine := 0;
+      LRow.ExtEndCol := 0;
+      S.SkipWs;
+      if S.TryConsume(',') then
+      begin
+        S.Expect('[');
+        S.SkipWs;
+        if not S.TryConsume(']') then
+        begin
+          LRow.ExtStartLine := S.ReadInt;
+          S.Expect(',');
+          LRow.ExtStartCol := S.ReadInt;
+          S.Expect(',');
+          LRow.ExtEndLine := S.ReadInt;
+          S.Expect(',');
+          LRow.ExtEndCol := S.ReadInt;
           S.Expect(']');
         end;
       end;

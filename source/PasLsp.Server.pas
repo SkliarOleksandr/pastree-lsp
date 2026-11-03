@@ -6720,11 +6720,13 @@ end;
     "scope": "project"
     "kinds": [...], "heads": [...], "sections": [...], "owners": [...]
     "files": [[uri, unitName, unitId], ...]
-    "rows": [[kind, head, owner, "Name", "detail", section, isImpl, file, sym, node, line, col, [typeStart, typeLen, ...]], ...]
+    "rows": [[kind, head, owner, "Name", "detail", section, isImpl, file, sym, node, line, col, [typeStart, typeLen, ...], [startLine, startCol, endLine, endCol]], ...]
 
   kind/head/owner/section/file are indices into the tables; isImpl is 0/1;
-  the last element is the detail's type names as 1-based (start, len)
-  pairs, flattened, empty when it names none (PasTree's DetailTypes).
+  the 13th element is the detail's type names as 1-based (start, len)
+  pairs, flattened, empty when it names none (PasTree's DetailTypes); the
+  14th the declaration node's extent (OutlineNodeExtent), empty on a project
+  row.
   Same list: ~8 MB, and the client reads it in one pass
   (PasTreeIdePlugin.OutlineRows, the reader; TLspClient.RequestRaw hands it
   the text without a DOM). Kinds, heads and sections still travel as WORDS
@@ -6795,6 +6797,45 @@ begin
   end;
 end;
 
+{ pastree/outline's 14th element (module scope): where the row's declaration
+  NODE starts and ends - its leftmost token to the end of its last, 1-based,
+  the end column just past the last character. What a host needs to tell
+  which declaration a caret is INSIDE (the IDE's navigation toolbar asks
+  "the type and the routine whose lines hold the caret"); the row's own
+  Line/Col stays the name's. False - no extent - for an include row (its
+  Node is an IncludeRefs index, not a node) and for a node whose ends are not
+  both in the row's file. }
+function OutlineNodeExtent(const ATree: TPasTree;
+  const AEntry: TPasOutlineEntry; out AStartLine, AStartCol, AEndLine,
+  AEndCol: Integer): Boolean;
+var
+  LFirst, LLast: Integer;
+  LV1, LV2: TPasVisibleToken;
+begin
+  Result := False;
+  if (AEntry.Kind = okInclude) or (AEntry.Node < 0)
+    or (AEntry.Node > High(ATree.Nodes)) then
+    Exit;
+  LFirst := ATree.NodeLeftmostVis(AEntry.Node);
+  LLast := ATree.Nodes[AEntry.Node].LastToken;
+  if (LFirst < 0) or (LLast < LFirst)
+    or (LLast > High(ATree.Source.Visible)) then
+    Exit;
+  LV1 := ATree.Source.Visible[LFirst];
+  LV2 := ATree.Source.Visible[LLast];
+  if (LV1.FileId <> LV2.FileId) or (LV1.FileId < 0)
+    or (LV1.FileId > High(ATree.Source.Files))
+    or not SameText(ATree.Source.FileNames[LV1.FileId], AEntry.FilePath) then
+    Exit;
+  var LTS := ATree.Source.Files[LV1.FileId];
+  if (LV1.TokenIndex < 0) or (LV1.TokenIndex > High(LTS.Tokens))
+    or (LV2.TokenIndex < 0) or (LV2.TokenIndex > High(LTS.Tokens)) then
+    Exit;
+  LTS.OffsetToLineCol(LTS.Tokens[LV1.TokenIndex].Start, AStartLine, AStartCol);
+  LTS.OffsetToLineCol(LTS.Tokens[LV2.TokenIndex].EndPos, AEndLine, AEndCol);
+  Result := True;
+end;
+
 // TArray.Contains<T> is Delphi 12+, and the server is built by the compiler of
 // the RAD Studio version the build targets - 11.3 included.
 function ContainsInt(const AItems: TArray<Integer>; AValue: Integer): Boolean;
@@ -6826,6 +6867,8 @@ var
   LHeadIdx, LOwnerIdx, LFileIdx: TArray<Integer>;
   LKind: TPasOutlineKind;
   LSection: TPasOutlineSection;
+  LTreeMid: Integer;   // the module's model, for the extents; -1 for the project
+  LExtSL, LExtSC, LExtEL, LExtEC: Integer;
 
   function Intern(ADict: TDictionary<string, Integer>; AList: TList<string>;
     const AValue: string): Integer;
@@ -6868,6 +6911,7 @@ begin
   end;
 
   LStart := GetTickCount64;
+  LTreeMid := -1;
   if LScope = 'module' then
   begin
     LMid := FNav.ModelIdOf(LPath);
@@ -6881,6 +6925,7 @@ begin
       Log('outline: could not rehydrate ' + LPath);
       Exit(BuildResponse(AMsg.IdJson, 'null'));
     end;
+    LTreeMid := LMid;
     LEntries := PasModuleOutline(FProject.Model(LMid).Tree);
     if (AMsg.Params <> nil)
       and AMsg.Params.GetValue<Boolean>('usesItems', False) then
@@ -7035,6 +7080,23 @@ begin
           LBuf.AddInt(DetailTypes[LSpan].Start);
           LBuf.AddChar(',');
           LBuf.AddInt(DetailTypes[LSpan].Len);
+        end;
+        // 14th: the declaration node's extent, [startLine, startCol,
+        // endLine, endCol] (OutlineNodeExtent) - module rows only; empty on
+        // a project row, whose node is another model's, and where there is
+        // none.
+        LBuf.Add('],[');
+        if (LTreeMid >= 0) and OutlineNodeExtent(
+          FProject.Model(LTreeMid).Tree, LEntries[LIdx],
+          LExtSL, LExtSC, LExtEL, LExtEC) then
+        begin
+          LBuf.AddInt(LExtSL);
+          LBuf.AddChar(',');
+          LBuf.AddInt(LExtSC);
+          LBuf.AddChar(',');
+          LBuf.AddInt(LExtEL);
+          LBuf.AddChar(',');
+          LBuf.AddInt(LExtEC);
         end;
         LBuf.Add(']]');
       end;

@@ -25,7 +25,8 @@ uses
   System.JSON,
   System.Generics.Collections,   // TJSONArray.GetValue<T> inlines through it
   PasTreeIdePlugin.LspClient,
-  PasTreeIdePlugin.OutlineRows;  // the Go To table's reader, checked in 5d-ter
+  PasTreeIdePlugin.OutlineRows,  // the Go To table's reader, checked in 5d-ter
+  PasTreeIdePlugin.NavSymbols;   // the navigation toolbar's tree, ditto
 
 const
   { The server this repo's own build.bat produces, as a path RELATIVE to the
@@ -2458,6 +2459,19 @@ var
   LLine, LChar: Integer;
   LUnitLine, LUnitChar: Integer;
   LAllStamped, LAnyInterface, LAnyImplementation, LAnyPositioned: Boolean;
+  LNav: TNavSymbols;
+  LSym: Integer;
+
+  function NavIndex(const ASyms: array of TNavSymbol;
+    const AName: string): Integer;
+  var
+    I: Integer;
+  begin
+    Result := -1;
+    for I := 0 to High(ASyms) do
+      if string(ASyms[I].Name) = AName then
+        Exit(I);
+  end;
 
   function FindRow(const AKind, AName: string; AImpl: Boolean;
     const AUnit: string): Integer;
@@ -2536,6 +2550,67 @@ begin
     (LField >= 0) and (LRows[LField].Key = 'tbox.value'),
     'the reader stamps the lower-cased name column as the filter key');
 
+  // The node extents (14th element) and the navigation toolbar's tree built
+  // from them (PasTreeIdePlugin.NavSymbols): DelphiLSP's shape, and ranges
+  // that END where the declaration does - the toolbar asks which type and
+  // which routine hold the caret's line.
+  LIdx := FindRow('type', 'TBox', False, '');
+  FindPos(LUnitFile, '  TBox = record', 'TBox', LUnitLine, LUnitChar);
+  Check((LIdx >= 0) and (LRows[LIdx].ExtStartLine = LUnitLine + 1) and
+    (LRows[LIdx].ExtEndLine = LUnitLine + 3),
+    'a type row carries its declaration''s extent, through its end');
+  Check((LGreetImpl >= 0) and (LRows[LGreetImpl].ExtEndLine >
+    LRows[LGreetImpl].ExtStartLine) and (LRows[LGreetImpl].ExtStartCol = 1),
+    'a routine body''s extent starts at its keyword and spans the body');
+  LNav := BuildNavSymbols(LUnitFile, LRows);
+  Check((Length(LNav) = 2) and (LNav[0].Name = 'interface') and
+    (LNav[0].Detail = 'section') and (LNav[0].Kind = cNavModule) and
+    (LNav[1].Name = 'implementation'),
+    'the toolbar''s tree: the sections at the top, as DelphiLSP answers');
+  LSym := NavIndex(LNav[0].Children, 'TBox');
+  Check((LSym >= 0) and (LNav[0].Children[LSym].Kind = cNavStruct) and
+    (LNav[0].Children[LSym].Range.Start.Line = LUnitLine) and
+    (LNav[0].Children[LSym].Range.Stop.Line = LUnitLine + 2) and
+    (NavIndex(LNav[0].Children[LSym].Children, 'Value: string') >= 0),
+    'a record is a Struct spanning its lines, its field under it by name and type');
+  LSym := NavIndex(LNav[0].Children, 'Greet(const AName: string): string');
+  Check((LSym >= 0) and (LNav[0].Children[LSym].Kind = cNavMethod) and
+    (LNav[0].Children[LSym].Detail = 'declaration'),
+    'a routine''s declaration is a Method, signature in its name');
+  LSym := NavIndex(LNav[1].Children, 'Greet(const AName: string): string');
+  Check((LSym >= 0) and (LNav[1].Children[LSym].Detail = 'implementation') and
+    (LNav[1].Children[LSym].Range.Start.Character = 0) and
+    (LNav[1].Children[LSym].Range.Stop.Line =
+     LNav[1].Children[LSym].Range.Start.Line + 3),
+    'its body is one under the implementation, spanning begin to end');
+  // A class with its method: the declaration under the class, the body under
+  // the implementation, qualified - the toolbar's tables keep one level
+  // below the sections, so a body under its class would not be written.
+  LParams := TJSONObject.Create;
+  LParams.AddPair('scope', 'module');
+  LDoc := TJSONObject.Create;
+  LDoc.AddPair('uri', PathToLspUri(TPath.Combine(GFixtureDir,
+    'DemoClassCompleteBase.pas')));
+  LParams.AddPair('textDocument', LDoc);
+  Check(AskRaw('pastree/outline', LParams), 'outline of a unit with a class answered');
+  LNav := BuildNavSymbols(TPath.Combine(GFixtureDir, 'DemoClassCompleteBase.pas'),
+    ParseOutlineTable(GResultJson, 'Demo.dproj'));
+  LSym := -1;
+  if Length(LNav) > 0 then
+    LSym := NavIndex(LNav[0].Children, 'TCcBase');
+  Check((LSym >= 0) and (LNav[0].Children[LSym].Kind = cNavClass) and
+    (NavIndex(LNav[0].Children[LSym].Children,
+      'GetShared: Integer') >= 0) and
+    (LNav[0].Children[LSym].Children[NavIndex(LNav[0].Children[LSym].Children,
+      'GetShared: Integer')].Detail
+      = 'declaration'),
+    'a class is a Class, its method''s declaration under it');
+  Check((Length(LNav) > 1) and
+    (NavIndex(LNav[1].Children, 'TCcBase.GetShared: Integer') >= 0) and
+    (LNav[1].Children[NavIndex(LNav[1].Children, 'TCcBase.GetShared: Integer')]
+      .Detail = 'implementation'),
+    'and its body under the implementation, qualified by the class');
+
   // usesItems (the Structure pane's tree): the program's uses clause, then a
   // row per unit it names, positioned on the name. Without it - the picker's
   // request above - a uses clause is the one landmark row.
@@ -2560,6 +2635,16 @@ begin
     (LRows[LField].Col = LUnitChar + 1), 'a unit row sits on the unit''s name');
   Check(FindRow('section', '', False, '') >= 0,
     'and the program''s main begin is a section row');
+  LNav := BuildNavSymbols(TPath.Combine(GFixtureDir, 'DemoApp.dpr'), LRows);
+  LSym := NavIndex(LNav, 'uses');
+  Check((LSym >= 0) and (LNav[LSym].Kind = cNavModule) and
+    (NavIndex(LNav[LSym].Children, 'Demo.Dotted') >= 0) and
+    (LNav[LSym].Children[NavIndex(LNav[LSym].Children, 'Demo.Dotted')].Kind
+     = cNavFile),
+    'a program''s toolbar tree: its uses clause at the top, the units as files');
+  LSym := NavIndex(LNav, 'begin');
+  Check((LSym >= 0) and (LNav[LSym].Detail = 'block'),
+    'and its main begin, a block');
 
   // The project list.
   LParams := TJSONObject.Create;
