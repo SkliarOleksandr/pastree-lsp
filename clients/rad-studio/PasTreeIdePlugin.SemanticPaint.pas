@@ -74,6 +74,7 @@ uses
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.Settings,
+  PasTreeIdePlugin.PaintLines,
   PasTreeIdePlugin.TokenShift;
 
 type
@@ -215,13 +216,13 @@ begin
   CheckBufferReloaded(LServices.GetViewForEditor(AEditor));
 end;
 
-{ Where row ARow's tokens are, and ARow's text now - one TokenShift match per
-  line per pass (see GPassEditor). No base lines means nothing to match
-  against: the tokens apply where they are, as before there was a base. }
+{ Where row ARow's tokens are, and ARow's text now (ALine's, nil when not
+  known) - one TokenShift match per line per pass (see GPassEditor). No base
+  lines means nothing to match against: the tokens apply where they are, as
+  before there was a base. }
 function LineShiftFor(const AContext: INTACodeEditorPaintContext;
-  ARow: Integer; const ABase: TArray<string>; out AText: string): TLineShift;
-var
-  LLine: INTACodeEditorLineState;
+  ARow: Integer; const ALine: INTACodeEditorLineState;
+  const ABase: TArray<string>; out AText: string): TLineShift;
 begin
   if AContext.EditControl <> GPassEditor then
   begin
@@ -239,14 +240,10 @@ begin
   Result := Default(TLineShift);
   Result.BaseRow := ARow;
   Result.Same := True;
-  if ABase <> nil then
+  if (ABase <> nil) and Assigned(ALine) then
   begin
-    LLine := AContext.LineState;
-    if Assigned(LLine) then
-    begin
-      AText := LLine.Text;
-      Result := ShiftForLine(ABase, ARow, AText, GPassHint);
-    end;
+    AText := ALine.Text;
+    Result := ShiftForLine(ABase, ARow, AText, GPassHint);
   end;
   GLineRow := ARow;
   GLineBase := Pointer(ABase);
@@ -264,6 +261,7 @@ var
   LBase: TArray<string>;
   LShift: TLineShift;
   LLineText: string;
+  LLine: INTACodeEditorLineState;
   LIdx, LRow, LFrom, LTo, LRunEnd, LTokFrom, LTokTo: Integer;
   LCanvas: TCanvas;
   LOldColor, LColor, LInactiveColor: TColor;
@@ -321,10 +319,14 @@ begin
   end;
   if LTokens = nil then
     Exit;
-  LRow := AContext.LogicalLineNum;
+  // Not AContext.LogicalLineNum: below a folded block it names another
+  // line (PasTreeIdePlugin.PaintLines).
+  LRow := PaintedRow(AContext, AColNum, AText, LLine);
+  if LRow < 1 then
+    Exit;
   // The answer describes the text it was asked about; this line may have
   // moved or changed since (PasTreeIdePlugin.TokenShift).
-  LShift := LineShiftFor(AContext, LRow, LBase, LLineText);
+  LShift := LineShiftFor(AContext, LRow, LLine, LBase, LLineText);
   if LShift.BaseRow = 0 then
     Exit;
   LRunEnd := AColNum + Length(AText);

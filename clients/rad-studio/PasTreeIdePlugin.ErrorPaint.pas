@@ -83,6 +83,7 @@ uses
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.DiagnosticLines,
+  PasTreeIdePlugin.PaintLines,
   PasTreeIdePlugin.NativeErrorInsight,   // CoreIdeExport
   PasTreeIdePlugin.Settings;   // PasTreeErrorSquigglesEnabled, IdeErrorMarkStyle
 
@@ -379,6 +380,7 @@ procedure TPasErrorPaintNotifier.HandlePaintText(const ARect: TRect;
   const AContext: INTACodeEditorPaintContext);
 var
   LDiags: TArray<TLspDiagnostic>;
+  LLine: INTACodeEditorLineState;
   LIdx, LRow, LFrom, LTo, LColTo, LXFrom, LXTo, LXAnchor, LMaxSev: Integer;
 begin
   // AFTER the IDE painted the run - underlining is an overlay, never a
@@ -397,7 +399,11 @@ begin
     Exit;
   if not LiveDiagnostics(AContext.FileName, LDiags) then
     Exit;
-  LRow := AContext.LogicalLineNum;
+  // Not AContext.LogicalLineNum: below a folded block it names another
+  // line (PasTreeIdePlugin.PaintLines).
+  LRow := PaintedRow(AContext, AColNum, AText, LLine);
+  if LRow < 1 then
+    Exit;
   // The level the user had chosen for Error Insight, now ours to honour.
   LMaxSev := PasTreeErrorMaxSeverity;
   for LIdx := 0 to High(LDiags) do
@@ -728,6 +734,7 @@ var
   LDiags: TArray<TLspDiagnostic>;
   LWorst: TDictionary<Integer, Integer>;
   LState: INTACodeEditorState;
+  LLine: INTACodeEditorLineState;
   LCanvas: TCanvas;
   LSev, LPPI, LCell, LGap, LNumberLeft, LNumberRight: Integer;
   LGlyph, LShifted: TRect;
@@ -743,11 +750,14 @@ begin
       Exit;
     LState := AContext.EditorState;
     LCanvas := AContext.Canvas;
-    if (LState = nil) or (LCanvas = nil) or (AContext.LineState = nil) then
+    // Not AContext.LineState: below a folded block it is another line
+    // (PasTreeIdePlugin.PaintLines).
+    LLine := PaintedLineState(AContext);
+    if (LState = nil) or (LCanvas = nil) or (LLine = nil) then
       Exit;
     LWorst := WorstByRow(LDiags);
     try
-      LSev := LineSeverity(AContext.LineState, LWorst);
+      LSev := LineSeverity(LLine, LWorst);
     finally
       LWorst.Free;
     end;
@@ -773,7 +783,7 @@ begin
       // where its width says.
       if LNumberLeft = LGlyph.Right then
         LNumberLeft := LNumberRight + 1 - LCanvas.TextWidth(
-          IntToStr(AContext.LineState.GetLogicalLineNum));
+          IntToStr(LLine.GetLogicalLineNum));
       // Too close: the glyph moves left by what the gap lacks, into the
       // empty gutter before the column when it is empty there (no
       // breakpoint, no bookmark); the number is wiped only when it is not.
