@@ -970,9 +970,9 @@ minimap and `IOTAEditLineTracker` - built in 0.80.0.
 
 1. **Error Insight - DELIVERED via the paint path (2026-08-22).** The spike answered NEGATIVE the same day (closed
    experiment above); `PasTreeIdePlugin.ErrorPaint` draws the squiggles
-   from the session's publishDiagnostics cache. Still queued from the
-   diagnostics table: the gutter glyph and the scrollbar minimap, which
-   make a squiggle findable rather than merely visible.
+   from the session's publishDiagnostics cache. The gutter glyph and the
+   scrollbar minimap, which make a squiggle findable rather than merely
+   visible, followed in 0.80.0.
 2. **Help Insight: XMLDoc documentation - DELIVERED 2026-08-23.** PasTree 0.6.3 landed §8D, so the block arrives from the
    engine (`SymDocComment` for hover, `ItemDocComment` per completion item)
    and the RENDERING is ours: `source/PasLsp.XmlDoc.pas` turns the raw
