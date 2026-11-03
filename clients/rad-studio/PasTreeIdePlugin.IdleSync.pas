@@ -106,6 +106,7 @@ uses
   DockForm,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.ErrorPaint,   // ErrorPaintViewModified
   PasTreeIdePlugin.Timing;
 
 const
@@ -343,7 +344,12 @@ end;
 procedure TIdleSyncNotifier.EditorViewModified(
   const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
 begin
-  if (GTimer = nil) or not Assigned(EditView) then
+  if not Assigned(EditView) then
+    Exit;
+  // Every keystroke, before the sync waits out the pause: the diagnostics
+  // marks follow the lines the edit moved (PasTreeIdePlugin.DiagnosticLines).
+  ErrorPaintViewModified(EditView);
+  if GTimer = nil then
     Exit;
   if not IsPascalSourceFile(EditView.Buffer.FileName) then
     Exit;

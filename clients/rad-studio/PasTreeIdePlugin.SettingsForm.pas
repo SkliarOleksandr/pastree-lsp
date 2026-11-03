@@ -99,6 +99,7 @@ type
     cbxErrorSquiggles: TComboBox;
     lblErrorSquigglesHint: TLabel;
     chkNativeErrorInsight: TCheckBox;
+    chkErrorMarks: TCheckBox;
     lblInsightManager: TLabel;
     cbxInsightManager: TComboBox;
     lblInsightManagerHint: TLabel;
@@ -566,6 +567,7 @@ begin
     LForm.cbxErrorSquiggles.ItemIndex := Ord(LSettings.PasTreeErrorSquiggles);
     LForm.FErrorSquigglesOwn := LSettings.PasTreeErrorSquiggles;
     LForm.chkNativeErrorInsight.Checked := LSettings.NativeErrorInsight;
+    LForm.chkErrorMarks.Checked := LSettings.ErrorMarks;
     LForm.cbxInsightManager.ItemIndex := Ord(LSettings.PasTreeInsightManager);
     LForm.chkCompletionBoldNames.Checked := LSettings.CompletionBoldNames;
     LForm.chkNoExplicitProps.Checked := LSettings.DfmNoExplicitProps;
@@ -610,6 +612,7 @@ begin
       LSettings.PasTreeErrorSquiggles := LForm.FErrorSquigglesOwn;
     LSettings.PasTreeInsightManager := LForm.cbxInsightManager.ItemIndex = 1;
     LSettings.NativeErrorInsight := LForm.chkNativeErrorInsight.Checked;
+    LSettings.ErrorMarks := LForm.chkErrorMarks.Checked;
     LSettings.CompletionBoldNames := LForm.chkCompletionBoldNames.Checked;
     LSettings.DfmNoExplicitProps := LForm.chkNoExplicitProps.Checked;
     LSettings.DfmNoDefaultStyleElems := LForm.chkNoDefaultStyleElements.Checked;

@@ -335,6 +335,18 @@ queries natively and cannot be displaced. They follow the server's
 `publishDiagnostics`, so they appear when the analysis lands and vanish when it
 comes back clean, with no polling.
 
+The same problems are marked beside the code too: a mark per line in the
+gutter, just left of the line number (a red disc with a cross for an error, an orange
+triangle for a warning, a grey dot for a hint; a folded block shows the worst
+it hides), and a mark per line on the editor's scroll bar in the same colours,
+so a whole file's problems are visible at a glance (RAD Studio 12 and later;
+the IDE's own "Toggle Scroll bar annotations" hides them with the others).
+"Error marks in the gutter and on the scroll bar" on the Code Insight tab, on
+by default. While you type, the underlines
+and both marks stay on their lines when lines are inserted or deleted above
+them - the editor's own line tracker moves them - until the next analysis
+answers.
+
 While PasTree is the Code Insight Manager (the default), PasTree draws the
 error underlines and this choice is greyed: the IDE's Error Insight takes its
 errors from the selected provider alone. With RAD Studio as the manager,

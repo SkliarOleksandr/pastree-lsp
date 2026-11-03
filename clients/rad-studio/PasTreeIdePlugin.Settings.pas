@@ -283,6 +283,15 @@ function PasTreeErrorMaxSeverity: Integer;
 function NativeErrorInsightEnabled: Boolean;
 
 /// <summary>
+/// Code Insight tab, under Errors Insight: whether PasTree's underlines come
+/// with a mark per line in the gutter's line-number column and on the
+/// editor's scroll bar (PasTreeIdePlugin.ErrorPaint, 0.80.0). ON BY DEFAULT
+/// - a problem off screen is findable then.
+/// Drawn only while the underlines are PasTree's.
+/// </summary>
+function ErrorMarksEnabled: Boolean;
+
+/// <summary>
 /// Code Insight tab (0.68.0): whether PasTree's Code Insight manager is
 /// registered and selected as the IDE's Insight Provider through the
 /// environment option InsightManager - see PasTreeIdePlugin.CodeInsight's
@@ -444,6 +453,8 @@ type
     PasTreeErrorSquiggles: Boolean;
     // See NativeErrorInsightEnabled. Default True.
     NativeErrorInsight: Boolean;
+    // See ErrorMarksEnabled. Default True.
+    ErrorMarks: Boolean;
     // Code Insight tab - see PasTreeInsightManagerEnabled. Default True.
     PasTreeInsightManager: Boolean;
     // IDE Fixes tab - see DfmNoExplicitProperties. Default True.
@@ -520,7 +531,8 @@ uses
   PasTreeIdePlugin.OptionSets,
   // LspLogToServer only, for SyncErrorInsightChoice's line.
   PasTreeIdePlugin.LspSession,
-  PasTreeIdePlugin.NativeErrorInsight;   // NativeErrorInsightSettingChanged
+  PasTreeIdePlugin.NativeErrorInsight,   // NativeErrorInsightSettingChanged
+  PasTreeIdePlugin.ErrorPaint;           // ErrorMarksSettingChanged
 
 const
   cSettingsKey = 'PasTree';
@@ -546,6 +558,7 @@ const
   cValueHighlightInactive = 'HighlightInactiveCode';
   cValueErrorSquiggles = 'PasTreeErrorSquiggles';
   cValueNativeErrorInsight = 'NativeErrorInsight';
+  cValueErrorMarks = 'ErrorMarks';
   cValueInsightManager = 'PasTreeInsightManager';
   cValueDfmNoExplicit = 'DfmNoExplicitProperties';
   cValueDfmNoDefaultStyleElements = 'DfmNoDefaultStyleElements';
@@ -742,6 +755,7 @@ begin
   Result.HighlightInactive := True;
   Result.PasTreeErrorSquiggles := False;
   Result.NativeErrorInsight := True;
+  Result.ErrorMarks := True;
   Result.PasTreeInsightManager := True;
   Result.DfmNoExplicitProps := True;
   Result.DfmNoDefaultStyleElems := True;
@@ -800,6 +814,8 @@ begin
         ReadFlag(LReg, cValueErrorSquiggles, Result.PasTreeErrorSquiggles);
       Result.NativeErrorInsight :=
         ReadFlag(LReg, cValueNativeErrorInsight, Result.NativeErrorInsight);
+      Result.ErrorMarks :=
+        ReadFlag(LReg, cValueErrorMarks, Result.ErrorMarks);
       Result.PasTreeInsightManager :=
         ReadFlag(LReg, cValueInsightManager, Result.PasTreeInsightManager);
       Result.DfmNoExplicitProps :=
@@ -878,6 +894,7 @@ begin
           Ord(ASettings.PasTreeErrorSquiggles));
         LReg.WriteInteger(cValueNativeErrorInsight,
           Ord(ASettings.NativeErrorInsight));
+        LReg.WriteInteger(cValueErrorMarks, Ord(ASettings.ErrorMarks));
         LReg.WriteInteger(cValueInsightManager,
           Ord(ASettings.PasTreeInsightManager));
         LReg.WriteInteger(cValueDfmNoExplicit,
@@ -915,6 +932,9 @@ begin
   SetCrashLogAll(ASettings.LogAllIdeCrashes);
   // Ours onto the buffers, or off them, as the switch now says.
   NativeErrorInsightSettingChanged;
+  // The editors repainted, the marks on or off - the
+  // underlines' own choice above may have moved the marks' gate too.
+  ErrorMarksSettingChanged;
 end;
 
 function CurrentSettings: TPasTreeSettings;
@@ -1067,6 +1087,11 @@ end;
 function NativeErrorInsightEnabled: Boolean;
 begin
   Result := CurrentSettings.NativeErrorInsight;
+end;
+
+function ErrorMarksEnabled: Boolean;
+begin
+  Result := CurrentSettings.ErrorMarks;
 end;
 
 function PasTreeErrorMaxSeverity: Integer;

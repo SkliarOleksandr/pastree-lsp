@@ -350,7 +350,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
       object lblInsightManager: TLabel
         Left = 16
-        Top = 220
+        Top = 244
         Width = 117
         Height = 15
         Caption = 'Code Insight Manager'
@@ -358,7 +358,7 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
       object lblInsightManagerHint: TLabel
         Left = 35
-        Top = 246
+        Top = 268
         Width = 403
         Height = 45
         Caption = 
@@ -391,11 +391,11 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
       end
       object cbxInsightManager: TComboBox
         Left = 170
-        Top = 216
+        Top = 240
         Width = 270
         Height = 23
         Style = csDropDownList
-        TabOrder = 3
+        TabOrder = 4
         OnChange = cbxInsightManagerChange
         Items.Strings = (
           'RAD Studio (DelphiLSP)'
@@ -411,15 +411,25 @@ object PasTreeSettingsForm: TPasTreeSettingsForm
         State = cbChecked
         TabOrder = 2
       end
+      object chkErrorMarks: TCheckBox
+        Left = 35
+        Top = 202
+        Width = 405
+        Height = 17
+        Caption = 'Error marks in the gutter and on the scroll bar'
+        Checked = True
+        State = cbChecked
+        TabOrder = 3
+      end
       object chkCompletionBoldNames: TCheckBox
         Left = 35
-        Top = 298
+        Top = 320
         Width = 405
         Height = 17
         Caption = 'Bold names in the Code Completion list'
         Checked = True
         State = cbChecked
-        TabOrder = 4
+        TabOrder = 5
       end
     end
     object tsDiagnostics: TTabSheet

@@ -99,6 +99,7 @@ uses
   Vcl.Controls, Vcl.Graphics, Vcl.Forms, Vcl.ExtCtrls, Vcl.AppEvnts,
   ToolsAPI, ToolsAPI.Editor, PasTreeIdePlugin.IdeUI,
   PasTreeIdePlugin.LspSession, PasTreeIdePlugin.LspDocuments,
+  PasTreeIdePlugin.DiagnosticLines,
   PasTreeIdePlugin.ResultRows, PasTreeIdePlugin.DirectiveText,
   PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.Settings,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.CodeInsight,
@@ -1371,7 +1372,7 @@ var
 begin
   Result := nil;
   if not PasTreeErrorSquigglesEnabled or
-     not LspTryGetDiagnostics(FFileName, LAll) then
+     not LiveDiagnostics(FFileName, LAll) then
     Exit;
 
   for LSev := 1 to 3 do

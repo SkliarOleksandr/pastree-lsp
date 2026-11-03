@@ -99,6 +99,7 @@ contains
   PasTreeIdePlugin.SemanticPaint in 'PasTreeIdePlugin.SemanticPaint.pas',
   PasTreeIdePlugin.TokenShift in 'PasTreeIdePlugin.TokenShift.pas',
   PasTreeIdePlugin.ConfigSwitch in 'PasTreeIdePlugin.ConfigSwitch.pas',
+  PasTreeIdePlugin.DiagnosticLines in 'PasTreeIdePlugin.DiagnosticLines.pas',
   PasTreeIdePlugin.DirectiveText in 'PasTreeIdePlugin.DirectiveText.pas',
   PasTreeIdePlugin.IdleSync in 'PasTreeIdePlugin.IdleSync.pas',
   PasTreeIdePlugin.IdeUI in 'PasTreeIdePlugin.IdeUI.pas',

@@ -290,6 +290,11 @@ debounce timer on `EditorViewModified` and pushes only the modified buffers as
   the *stale decoration* problem: between two server round trips, everything we
   have drawn is anchored to line numbers that the user is actively invalidating.
   Without it, squiggles drift as soon as someone presses Enter above them.
+  **Adopted in 0.80.0, run in 11.3, 12 and 13** (`PasTreeIdePlugin.DiagnosticLines`): each
+  publishDiagnostics registers its rows, each `EditorViewModified` reads them
+  back - no notifier and no held tracker, for the dangling-reference reason in
+  that unit's header. Lines only; a squiggle still slides within its line
+  until the next answer.
 
 Also worth adopting for configuration, on top of the previous section:
 `IOTABuildConfiguration140.GetValues(PropName, Values, IncludeInherited)`
@@ -789,8 +794,8 @@ version are delivered in that form.
 |---|---|---|---|
 | Squiggles, native | **Have** (0.75.3, on by default; switchable because it rides undocumented coreide entry points; public routes DEAD - spikes 2026-08-22 and 2026-10-20) | `PasTreeIdePlugin.NativeErrorInsight` | the public routes stay dead (the module answers `IOTAModuleErrors` natively; the manager is never asked for it). The private one DelphiLSP uses: the marker `IInternalSupportErrorInsight` on the manager, `Errorinsite.UpdateErrorMarks(..., True)` - marks, Structure View Errors folder, status bar count - and the `Sourcemodule.LSPGetErrors` hook, chained; see "How DelphiLSP feeds Error Insight" above |
 | Squiggles, painted | **Have** (2026-08-22) | `PasTreeIdePlugin.ErrorPaint`: `PaintText` after-event overlay, per token run | wavy underline over the run∩diagnostic column intersection, red/orange/gray by severity, in the shape the IDE's Error Insight "Editor rendering style" names (`ErrorInsight Marks`, `0..3` = Classic/Smooth Wave/Solid Line/Dots, read at most once a second - `IdeErrorMarkStyle`, since 0.52.5), each shape measured off the IDE's own and drawn anti-aliased through a premultiplied DIB + `AlphaBlend`, errors in the IDE's crimson; repaint via the session's diagnostics-changed listener. Since 0.52.4 a choice, off by default and forced on while PasTree is the Insight Provider (0.73.7): selecting it sets the Pascal option set's `ErrorInsightLevel` to `None` through `IOTAEnvironmentOptions.Values` (`WithPascalOptionSet`, 0.73.8) and remembers the old level (`ApplyErrorInsightChoice`) |
-| Gutter error glyph | Ready | `RequestGutterColumn` (`984`) + `PaintGutter` (`726`) | reserves our own gutter column; size is in 96-DPI pixels, the editor scales it |
-| Whole-file diagnostic minimap | Ready | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
+| Gutter error glyph | **Have** (0.80.0, run in 11.3, 12 and 13; `PasTreeIdePlugin.ErrorPaint`: drawn into the line-number column at `pgsLineNumber`, 12 px at 96 DPI at the column's left edge; where the IDE drew the number is read off its pixels, since the rect also holds a right margin and the modified-lines bar; too close to the number, the glyph moves left into the empty gutter, and the number is wiped only when a breakpoint or bookmark is there, a disc/triangle/dot per severity, a folded line shows the worst it hides) | `PaintGutter` (`726`); `RequestGutterColumn` (`984`) tried first and dropped | a column of our own cost a glyph's width on every line, and requested at package load it was placed left of the line numbers whatever position it named |
+| Whole-file diagnostic minimap | **Have** (0.80.0, 12 and 13 only - 11.3 has no such interface; run in both; `TPasScrollbarMarks` in `PasTreeIdePlugin.ErrorPaint`, one entry per line in its severity colour, drawn by the IDE; a new answer is pushed to the bar through coreide's `TEditorScrollbarMarksManager.UpdateMarksBuffer`, since ToolsAPI has no refresh and the bar otherwise waits for a click or a save) | `INTACodeEditorScrollbarAnnotation` (`1005`) + `AddScrollbarAnnotationEntry` (`1094`) | marks every affected line on the scrollbar; 16px of lanes shared between providers |
 | A diagnostics list pane | Ready | custom messages, or `IOTAToDoManager` (`8330`) | see "Result surfaces" |
 | Honour project warning suppression | Server | - | the `DCC_<WARNING>` triples name which warnings are off or promoted to errors |
 
@@ -958,8 +963,8 @@ The original eight-step order (file-trait spike, diagnostics, idle
 symbols, Code Insight) is spent: every step was delivered, answered negative
 (the spike); the outline, withdrawn on 2026-09-01, is back since 0.76.3 (see
 the inventory). What it left open
-is only the decoration around diagnostics - the gutter column, the scrollbar
-minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
+was the decoration around diagnostics - the gutter marks, the scrollbar
+minimap and `IOTAEditLineTracker` - built in 0.80.0.
 
 ## The live queue (2026-08-22, user asks - supersedes the first order)
 
@@ -1473,10 +1478,9 @@ minimap and `IOTAEditLineTracker` - all still **Ready** in the inventory above.
    in the first cut →
    `LspIdleSync`, a no-op without a running server) - first live run
    found squiggles updating only on save, because the doc sync ran only in
-   front of requests. `IOTAEditLineTracker` stays queued: between an edit
-   and the next publishDiagnostics the painted ranges are stale by
-   whatever lines were inserted above them; the tracker is what would
-   shift them live.
+   front of requests. `IOTAEditLineTracker` followed in 0.80.0
+   (`PasTreeIdePlugin.DiagnosticLines`): lines inserted or deleted above a
+   problem move its marks with it until the next publishDiagnostics.
 7. **Toggle decl/impl on a cursor that was never on a routine - DELIVERED
    2026-08-29, silent now.** Ctrl+Shift+Up/Down on a constant, a type, a
    comment, blank space - anywhere except a routine with a separate
