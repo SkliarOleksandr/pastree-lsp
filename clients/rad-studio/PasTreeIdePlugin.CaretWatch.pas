@@ -83,6 +83,9 @@ begin
   LPath := LView.Buffer.FileName;
   LRow := LView.Buffer.EditPosition.Row;
   LCol := LView.Buffer.EditPosition.Column;
+  // A repaint is also the code view coming back from the form designer,
+  // which had the Structure pane meanwhile - the caret has not moved then.
+  OutlineEditorPainted(LPath);
   if SameText(LPath, GLastFile) and (LRow = GLastRow) and (LCol = GLastCol) then
     Exit;
   GLastFile := LPath;

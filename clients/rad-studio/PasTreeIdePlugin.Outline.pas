@@ -61,6 +61,13 @@ procedure OutlineProviderChanged(AActive: Boolean);
 /// </summary>
 procedure OutlineCaretMoved(const AFilePath: string; ARow, ACol: Integer);
 
+/// <summary>
+/// The code editor showing AFilePath has repainted and come to rest
+/// (PasTreeIdePlugin.CaretWatch): when the form designer had the pane, or
+/// took it from our outline, the outline goes back in.
+/// </summary>
+procedure OutlineEditorPainted(const AFilePath: string);
+
 implementation
 
 uses
@@ -118,6 +125,9 @@ var
   // pane may drop the context while a caret move still looks here.
   GNodesByRow: TArray<IOTAStructureNode>;
   GNodeRows, GNodeCols: TArray<Integer>;
+  // An outline answer was held back because the form designer was in front
+  // (FormDesignerInFront): the code view's next repaint asks again.
+  GHeldForDesigner: Boolean = False;
 
 type
   // IOTAStructureNode.Data widened from Integer to IntPtr in Delphi 12; the
@@ -759,6 +769,35 @@ begin
   end;
 end;
 
+{ THE FORM DESIGNER OWNS THE PANE WHILE IT IS IN FRONT. Switching a unit to
+  its Design tab puts the IDE's designer context (Designer.StructureType -
+  the form's components) into the Structure pane; a SetStructureContext of
+  ours after that replaces it with the code outline. And ours always comes
+  after it: the outline is an async answer, requested when the unit's view
+  activates and again after every analysis, so a form opened, or switched
+  to, showed its unit's code structure instead of its components (2026-11-05).
+  The front module's current editor tells: an IOTAFormEditor while the
+  designer is shown, the source editor otherwise. }
+function FormDesignerInFront: Boolean;
+var
+  LModules: IOTAModuleServices;
+  LModule: IOTAModule;
+  LEditor: IOTAEditor;
+begin
+  Result := False;
+  try
+    if not Supports(BorlandIDEServices, IOTAModuleServices, LModules) then
+      Exit;
+    LModule := LModules.CurrentModule;
+    if LModule = nil then
+      Exit;
+    LEditor := LModule.CurrentEditor;
+    Result := Supports(LEditor, IOTAFormEditor);
+  except
+    Result := False;
+  end;
+end;
+
 { THE NODE THE CARET IS IN: the node that starts nearest above the caret's
   row, or on it. pastree/outline gives where a declaration starts, not
   where it ends, so a caret between two declarations belongs to the one
@@ -796,7 +835,8 @@ var
 
 begin
   if not GAlive or not GContextInstalled or (ARow < 1) or
-     not PasTreeProviderSelected or not SameText(AFilePath, GCurrentFile) then
+     not PasTreeProviderSelected or not SameText(AFilePath, GCurrentFile) or
+     FormDesignerInFront then
     Exit;
   // The last node starting at or before the caret, by row then column - so
   // of `FirstLine, FirstCol: Integer` the caret on FirstLine selects that
@@ -875,6 +915,36 @@ begin
   SelectCaretNode(AFilePath, ARow, ACol, False);
 end;
 
+procedure RequestOutline(const AFilePath: string); forward;
+
+procedure OutlineEditorPainted(const AFilePath: string);
+var
+  LView: IOTAStructureView;
+  LContext: IOTAStructureContext;
+  LTaken: Boolean;
+begin
+  if not GAlive or not PasTreeProviderSelected or
+     not IsPascalSourceFile(AFilePath) or FormDesignerInFront then
+    Exit;
+  LTaken := False;
+  if GContextInstalled and SameText(AFilePath, GCurrentFile) and
+     Supports(BorlandIDEServices, IOTAStructureView, LView) then
+    try
+      LContext := LView.GetStructureContext;
+      LTaken := (LContext = nil) or
+        not SameText(LContext.StructureType, cOutlineStructureType);
+    except
+      LTaken := False;
+    end;
+  if not (GHeldForDesigner or LTaken) then
+    Exit;
+  LspLogDetail('outline: the code view of ' + ExtractFileName(AFilePath)
+    + ' is back - its outline again');
+  GHeldForDesigner := False;
+  GInstalledSignature := '';
+  RequestOutline(AFilePath);
+end;
+
 procedure InstallOutline(const AFilePath: string;
   const ARows: TArray<TLspOutlineRow>);
 var
@@ -898,6 +968,19 @@ begin
     end;
     Exit;
   end;
+  if FormDesignerInFront then
+  begin
+    // The pane is the designer's. Asked again when the code view is back
+    // (OutlineEditorPainted) - the designer's context replaced ours, so the
+    // next install must not be skipped as "the same symbols".
+    if not GHeldForDesigner then
+      LspLogDetail('outline: ' + ExtractFileName(AFilePath)
+        + ' held back - the form designer is in front');
+    GHeldForDesigner := True;
+    GInstalledSignature := '';
+    Exit;
+  end;
+  GHeldForDesigner := False;
   LSignature := OutlineSignature(AFilePath, ARows);
   if GContextInstalled and (LSignature = GInstalledSignature) then
     Exit;
