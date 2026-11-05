@@ -4769,6 +4769,15 @@ begin
       Result := Result + ',';
     Result := Result + '"hasParams":true';
   end;
+  // The fit to the expected type (0 exact, 1 assignable, 2 leads to it), for
+  // the RAD list's sort; absent for everything else (3: proven wrong), which
+  // is every item where nothing is expected.
+  if AItem.Match < 3 then
+  begin
+    if Result <> '' then
+      Result := Result + ',';
+    Result := Result + '"match":' + IntToStr(AItem.Match);
+  end;
   // The same doc as an HTML fragment, for the RAD viewer's documentation
   // surface: IOTACodeInsightSymbolList80.GetSymbolDocumentation is documented
   // as returning HTML, and the plain rendering we send as

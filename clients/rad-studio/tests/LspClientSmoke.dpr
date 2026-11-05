@@ -2012,6 +2012,30 @@ begin
     'the parameter list takes the argument as the result type does');
 end;
 
+{ 5b-ter. The right side of a comparison: the values of the left side's type
+  rank first (sortText leads with the match, data carries it for the RAD
+  list), the others after, and a procedure is no operand at all. }
+procedure TestCompletionExpected;
+var
+  LFile: string;
+  LLine, LChar: Integer;
+begin
+  Writeln;
+  Writeln('=== 5b-ter. completion ranked by the expected type ===');
+  LFile := TPath.Combine(GFixtureDir, 'DemoExpected.pas');
+  FindPos(LFile, 'if LColor = ecRed', 'ecRed', LLine, LChar);
+  Check(Ask('textDocument/completion', PositionParams(LFile, LLine, LChar)),
+    'completion answered on the right side of a comparison');
+  Check(GOk and GResultJson.Contains('"sortText":"004ecred"'),
+    'a value of the left side''s enumeration sorts first');
+  Check(GOk and GResultJson.Contains('"match":0'),
+    'the item''s data carries the exact match');
+  Check(GOk and GResultJson.Contains('"sortText":"304esround"'),
+    'a value of another enumeration sorts last, proven wrong');
+  Check(GOk and not GResultJson.Contains('"label":"ExpReset"'),
+    'a procedure is not listed as an operand');
+end;
+
 { 5c, continued. Every shape of a declaration whose type is not written -
   fixtures\DemoHoverInfer.pas - hovered at its declaration, and the composed
   signature must carry the type the analysis inferred (Alex, 2026-10-07: a
@@ -5510,6 +5534,7 @@ begin
       TestIncrementalPath;
       TestCompletion;
       TestCompletionGenericDetail;
+      TestCompletionExpected;
       TestHover;
       TestSignatureHelp;
       TestDocumentSymbol;

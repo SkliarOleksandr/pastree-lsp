@@ -362,7 +362,11 @@ const
   /// nkAmbiguous node for the arguments the model reads it as (spec 16.3.1;
   /// AmbigArgCount / AmbigArg, which annotateArgs expands) - an older
   /// library does not compile.
-  cMinPasTreeVersion = '0.145.0';
+  /// 0.147.0 (2026-11-05): TPasComplMatch gains cmLeads, so the sortText
+  /// digit and data.match run 0..3 - an older library would compile and
+  /// send fit 3 as "leads"; also the expected type after a dot, in an
+  /// inline declaration, and XConvX.
+  cMinPasTreeVersion = '0.147.0';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

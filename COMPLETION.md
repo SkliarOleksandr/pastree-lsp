@@ -55,6 +55,185 @@ stub-by-default: a mechanism has to be SEEN working) served its purpose -
 every wiring fix from the wire format to the RAD viewer's columns landed
 against it - and was deleted the day the engine arrived.
 
+## List order and filtering - the rules (DRAFT 2026-11-05, under discussion)
+
+**Goal: guess what the user is about to type here, from the context.** The
+constraint on every rule below: it is simple enough to state in one row of
+one table. A rule that needs a paragraph to explain is a rule the user cannot
+predict, and a list the user cannot predict is one they stop reading.
+
+### Terms
+
+- **Context** - a position where the engine knows what the next value (or
+  type) must be, and so what "fits" means there. A context only ORDERS the
+  list. **Never listed** is the one exception: what the grammar forbids at
+  the position, whatever its type - a procedure where a value is read, a
+  variable where a constant must stand. Nothing is hidden for its type alone.
+
+Value positions:
+
+| Context | Example | Fits | Never listed | State |
+|---|---|---|---|---|
+| assignment | `X := \|` | assignable to X's type | procedures | 0.84 |
+| comparison | `if X = \|`, `<>` `<` `>` `<=` `>=` | comparable with X | procedures | 0.84 |
+| a member chain in either | `X := Obj.\|` | the same, for the chain's last member | procedures | 0.84 |
+| an inline variable's initializer | `var X: T := \|` | assignable to T - the assignment, with the type written out | procedures | 0.84 |
+| a call argument | `Foo(A, \|)` | assignable to that parameter; over overloads, the best fit among those taking this many arguments | procedures | planned |
+| ... a `var`/`out` argument | `Inc(\|)`, `TryStrToInt(S, \|)` | a variable of exactly that type | constants, functions, procedures | planned |
+| ... an untyped or generic parameter | `FillChar(\|`, `Max<T>(\|` | no context | procedures | - |
+| a value typecast | `Int64(\|)`, `TFoo(\|)` | the cast's family: any ordinal (integer, enumeration, Char, Boolean) for an ordinal type; a class, interface or pointer for a class or pointer type | procedures | planned |
+| `Exit(\|)` | | the routine's result type | procedures | planned |
+| a condition | `if \|`, `while \|`, `until \|`, `not \|` | Boolean | procedures | planned |
+| a `case` selector | `case \| of` | any ordinal | procedures | planned |
+| a `case` label | `case K of \|:` | constants of K's type | variables, functions, procedures - a label is a constant expression | planned |
+| `for` bounds | `for I := \| to \|` | I's type | procedures | planned |
+| `for ... in` | `for X in \|` | what can be enumerated: an array, a set, a string, a class or record with GetEnumerator | procedures | planned |
+| an index | `A[\|]`, `Dict[\|]` | the index type: Integer for a dynamic array, the declared ordinal for a static one, the parameter of an array property (a dictionary's key) | procedures | planned |
+| a set element | `S := [\|]`, `K in [\|` | the set's element type | procedures | planned |
+| an operand of an operator | `X := A + \|` | A's family: a number, a string or Char, a set | procedures | later |
+| `with \| do` | | a value with members | procedures | planned |
+| `raise \|` | | an exception instance (`EFoo.Create`, an exception variable) | procedures | planned |
+| a default parameter value, a typed constant | `(A: Integer = \|)`, `const C: T = \|` | constants of the type | variables, functions, procedures | 0.84 ranks by the type and hides procedures; hiding variables and functions planned |
+| an event or method pointer | `OnClick := \|` | methods whose signature matches the procedural type (0.84 keeps every procedure here, unranked) | - | planned |
+
+Type positions (types alone are listed; the context ranks them):
+
+| Context | Example | Fits | State |
+|---|---|---|---|
+| a declaration | `Name: \|` | any type | done |
+| a generic argument | `TList<\|>`, `Foo<\|>(...)` | what the parameter's constraint admits: `class` - classes; `record` - value types; `constructor` - classes with a parameterless constructor; a class or interface - its descendants or implementors | planned |
+| `is` / `as` | `if Sender is \|` | descendants of the left side's static type (and interfaces after `as`) | planned |
+| an exception handler | `on E: \|` | exception classes | planned |
+| a heritage list | `class(\|)` | classes first, then interfaces | done (types alone) |
+| a generic constraint | `<T: \|>` | `class`, `record`, `constructor`, classes, interfaces | planned |
+| an attribute | `[\|]` before a declaration | TCustomAttribute descendants | planned |
+
+A type NAME fits as a value where its type would (`X := TFoo(Y)`,
+`X := TFoo.Create`): the cast and the constructor both produce one.
+
+- **Filter** - the letters already typed of the identifier at the caret.
+- **Fit** (per item, decided by PasTree's `MatchOf`, sent as `data.match`:
+  0 and 1 are fit 1 - the same type, an assignable one - 2 is fit 2, 3 or
+  absent fit 3; split since 0.84.0):
+
+| Fit | What it is |
+|---|---|
+| 1 - fits | the same type, or assignable with evidence: a descendant class or interface, an integer for an integer or float, a Char for a string, `True`/`False` for a Boolean, `nil` for a reference or a dynamic array, a dynamic array whose element fits (the start of `A[I]`) |
+| 2 - leads to it | may reach the value through `.` `[` `(`: a value of a type with members (class, record, interface, a class reference), an array, a pointer, a procedural value, a type (`TFoo.Create`, `TPath.Combine`, a cast), a unit name, a function whose result the engine cannot type (`GetValue<T>`, `Ord`, `Copy`); everything where a Boolean is expected, since a comparison makes one of any value |
+| 3 - does not fit | proven wrong: a number, a string, a Char, an enumeration or a set of no fit. A scalar's helper (`S := I.ToString`) is the one way out this ignores. (A procedure is not listed at all - the context's "Never listed".) |
+
+- **Proximity** - where the name is declared, nearest first: locals and
+  parameters, members of the class the caret is in, this unit, used units,
+  System. The server already sends it as the second key of `sortText`.
+
+### The rules
+
+| # | Context | Filter | What is listed | Order |
+|---|---|---|---|---|
+| A | no | no | everything reachable from the position | proximity, name |
+| B | yes | no | everything reachable, less what the context never lists | fit, proximity, name - fit 3 last |
+| C | any | yes | every name the filter matches (tiers 1 to 4 below; tier 1 and 2 alone when the IDE's "contain filter" option is off), less what the context never lists | fit 3 last (with a context); above it and inside it: match tier, then fit, proximity, name |
+
+The match tiers of rule C (the tiers VS Code and Roslyn rank a filtered list by):
+
+| Tier | The filter is | Example |
+|---|---|---|
+| 1 | the whole name | `str` - `Str` |
+| 2 | the start of the name | `str` - `StrAlloc` |
+| 3 | the start of a word inside it, or the starts of its words in order | `str` - `pkStripe`; `gs` - `GetSelection`; `fpf` - `CC_FPFASTCALL` |
+| 4 | anywhere else in it | `fas` - `CC_FPFASTCALL` |
+
+A word starts at a capital after a small letter or a digit, at the last
+capital of a run followed by a small letter (`TIEFast`: T, I, Fast), after an
+underscore, and at a digit after a non-digit. Without the IDE's "starts with
+first" option tiers 1 to 4 are one run.
+
+Selected row: the first. Under the IDE's "Select shortest matching symbol",
+the shortest name of the first row's tier and fit.
+
+### Measured (local/cc-sim, 2026-11-05)
+
+317 real `:=`/`=`/`<>` sites of this repository and PasTree, each replayed as
+if the right side were being typed. "top 5" is the share where the name the
+author wrote is among the first five rows.
+
+| Typed | Order | Head of the right side: top 5 / median row | Member after a dot: top 5 / median row |
+|---|---|---|---|
+| nothing | name only (before 0.84) | 0% / 1322 | 25% / 14 |
+| nothing | fit, name (0.84) | 12% / 207 | 46% / 11 |
+| nothing | fit, proximity, name (rule B order) | 20% / 125 | 46% / 11 |
+| 1 letter | fit first, then filter match (0.84 before rule C) | 38% / 12 | 61% / 2 |
+| 1 letter | start or contained first, then fit, proximity | 41% / 8 | 87% / 2 |
+| 1 letter | the four match tiers, then fit, proximity (rule C) | 41% / 8 | 87% / 2 |
+| 2 letters | fit first, then filter match (0.84 before rule C) | 68% / 2 | 88% / 1 |
+| 2 letters | start or contained first, then fit, proximity | 72% / 2 | 95% / 1 |
+| 2 letters | the four match tiers, then fit, proximity (rule C) | 73% / 2 | 95% / 1 |
+| 3 letters | fit first, then filter match (0.84 before rule C) | 87% / 1 | 92% / 1 |
+| 3 letters | start or contained first, then fit, proximity | 89% / 1 | 100% / 1 |
+| 3 letters | the four match tiers, then fit, proximity (rule C) | 89% / 1 | 100% / 1 |
+
+The selected row (the head of the right side) is the author's name at 45% of
+the sites with 2 letters typed under the tiers, 42% without them; 63% with 3
+letters, 66% without: a whole-name match comes first even where it does not
+fit - `nil` for `NIL_NODE`, `Low` for `LowerCase` - as in Roslyn.
+
+A match at a word start inside the name (`pkStripe` for `str`) counted as a
+start-of-name match was also measured and is worse than both (1 letter, after
+a dot: 64%): every capital is a word start, so one letter matches nearly
+everything.
+
+### Open decisions
+
+- **Rule C - DECIDED 2026-11-05: what is proven wrong (fit 3) last, then
+  the match tier, then the fit.** Three steps: the tier outer for all, as
+  VS Code and Roslyn do; then the fit outer, after a session in the IDE
+  (Alex: a name that matches the letters well but does not fit is no help);
+  then, with fit 2 and fit 3 told apart, only fit 3 below everything - a
+  value that leads to the type (`LM.` for `LM`) is no worse a start than a
+  fitting name that merely contains the letters. `PayKind = str` lists
+  `pkStripe` above `StrAlloc` (a PChar, which leads to no enumeration) and
+  the string functions.
+  The replay prices it (run7, top 5, head of the right side / member after a
+  dot): 2 letters 62% / 88% against 73% / 95% with the tier outer; 3 letters
+  84% / 92% against 89% / 100%. Every loss is a name of the server's third
+  group (`data.match` 2), which today holds both "leads to it" and "does not
+  fit": `LM` for `LM.UsesList[LU].UnitId`, `Ord`, `FModel.Symbols` - each
+  below every fitting name that merely contains the letters.
+  With the third group split (0.84.0, run8): the author's name is never fit
+  3, so "proven wrong" is sound. Top 5, head / member, by letters typed:
+
+  | Order | 1 | 2 | 3 |
+  |---|---|---|---|
+  | tier, then fit (VS Code) | 43% / 90% | 74% / 93% | 90% / 100% |
+  | fit (1, 2, 3), then tier | 42% / 83% | 63% / 90% | 87% / 97% |
+  | fit 3 last; fit 1 and 2 by tier, then fit - rule C | 43% / 90% | 74% / 93% | 90% / 100% |
+
+  The third also selects the author's name most often (2 letters 48%, 3
+  letters 67%, against 37% and 60% with the fit outer).
+  After two classification fixes (run9: a subrange bounded by an
+  expression - TColor, TModalResult - was uncategorized, and every type name
+  led somewhere) rule C reaches 51% / 76% / 92% at the head for 1 / 2 / 3
+  letters. A fitting name matched at a word start ranked with the name
+  starts (`pkStripe` above `StrToGUID` for `str`) was measured and drops
+  it to 33% / 70% / 89%: one or two letters start a word in most names.
+- **Rule B - DECIDED 2026-11-05: fit 3 goes last, it is not hidden.** Only
+  the grammar hides (the "Never listed" column). Hiding by type would have
+  lost the author's name at 15 of the 313 sites with a context (5%): 7 types
+  (`TStringBuilder.Create`), 6 functions the engine cannot type
+  (`GetValue<string>`, `Default`, `Ord`, `Copy`), 2 casts or untyped names.
+  A scalar with a helper has members too (`S := I.ToString`), so "another
+  scalar type" is not proof of a wrong name. The major engines agree: clangd,
+  Roslyn, VS Code and IntelliJ's basic completion all demote on the expected
+  type and hide only what the grammar forbids (VS: base lists, `catch`,
+  `is`/`as`); IntelliJ hides by type only in its separate smart completion
+  and warns that the list can come out empty when inference fails.
+- **Rule A - DECIDED 2026-11-05: proximity, then name**, as VS Code orders
+  by sortText; the native list sorts by name alone, but the measurement says
+  proximity helps wherever there is no filter.
+- **The match tiers - TAKEN 2026-11-05 from VS Code and Roslyn** (0.84.0),
+  inside each fit group. Not measured: abbreviations (`gs`), which a replay of
+  what was typed never produces.
+
 ## Server (phase A - done 2026-08-21, on the keyword provider)
 
 1. **Advertise** `completionProvider: {"triggerCharacters": ["."]}` in the

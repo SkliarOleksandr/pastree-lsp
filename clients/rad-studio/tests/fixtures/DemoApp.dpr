@@ -27,6 +27,7 @@ uses
   DemoAnnotateUse in 'DemoAnnotateUse.pas',
   DemoGenericDetail in 'DemoGenericDetail.pas',
   DemoGenericUse in 'DemoGenericUse.pas',
+  DemoExpected in 'DemoExpected.pas',
   DemoMissingUnit in 'DemoMissingUnit.pas';
 
 var

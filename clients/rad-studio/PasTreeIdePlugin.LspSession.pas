@@ -201,6 +201,16 @@ type
     // True for a routine declared WITH parameters - what auto-parenthesis
     // reads on accept.
     HasParams: Boolean;
+    // The fit to the type the position expects - the right side of `:=` or
+    // a comparison: 0 the left side's own type, 1 an assignable one, 2 what
+    // may lead to it through `.` `[` `(`, 3 proven wrong or nothing expected
+    // (data.match; absent = 3). The list's first sort key.
+    Match: Integer;
+    // Where the name is declared, nearest first (locals, members, this unit,
+    // used units, System, ...): the two digits after the match in sortText
+    // (PasLsp.Completion.BucketSort); 99 from a server that sends none. The
+    // list's second sort key.
+    Bucket: Integer;
     // The declaration's XMLDoc as DISPLAY text, already rendered by the
     // server (PasLsp.XmlDoc): what Help Insight shows for the selected row.
     // '' whenever the declaration carries no `///` block, which is most of
@@ -3152,6 +3162,7 @@ var
   LValue: TJSONValue;
   LObj, LRange, LStart, LEnd, LData: TJSONObject;
   LItem: TLspCompletionItem;
+  LSort: string;
   LLine, LChar, LEndLine, LEndChar, LDummyRow, LCount: Integer;
 begin
   Result := nil;
@@ -3181,6 +3192,10 @@ begin
     LItem.Detail := LObj.GetValue<string>('detail', '');
     LItem.Head := LObj.GetValue<string>('data.head', '');
     LItem.HasParams := LObj.GetValue<Boolean>('data.hasParams', False);
+    LItem.Match := LObj.GetValue<Integer>('data.match', 3);
+    LSort := LObj.GetValue<string>('sortText', '');
+    if (Length(LSort) < 3) or not TryStrToInt(Copy(LSort, 2, 2), LItem.Bucket) then
+      LItem.Bucket := 99;
     // documentation is markdown-shaped per LSP, but OUR server sends the
     // already-rendered display text (no emphasis markers - see the server's
     // PasLsp.XmlDoc), so it is taken verbatim. The plain-string form of the

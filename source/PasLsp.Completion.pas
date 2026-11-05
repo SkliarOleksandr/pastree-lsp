@@ -53,7 +53,11 @@ type
     // hover's typeSpans are for its line, so the RAD list paints a row's
     // types as the hint does (DetailTypeSpans).
     TypeSpans: TArray<Integer>;
-    SortText: string;    // bucket-ranked; see BucketSort
+    SortText: string;    // match- then bucket-ranked; see BucketSort
+    { How the item fits the type the position expects (PasTree's
+      TPasComplMatch: 0 the same type, 1 assignable, 2 may lead to it
+      through `.` `[` `(`, 3 proven wrong or nothing expected) - the first key the RAD list sorts by. }
+    Match: Integer;
     { The routine's own head keyword ('constructor', 'operator', ...) when
       the engine knows one - richer than any LSP kind, so it rides the item's
       data field for OUR client (the RAD viewer's class column) while other
@@ -274,14 +278,17 @@ begin
   end;
 end;
 
-{ sortText: the bucket's ordinal ranks first, the lower-cased name breaks
-  ties - so clients that sort by sortText (VS Code) present the engine's
-  resolution-precedence order (members before unit names before builtins
-  before keywords), while clients that filter/sort themselves (the RAD
-  viewer's SetFilter) simply ignore it. }
-function BucketSort(ABucket: TPasComplBucket; const AName: string): string;
+{ sortText: the fit to the expected type ranks first (the right side of `:=`
+  or a comparison: the left side's own type, then an assignable one), the
+  bucket's ordinal next, the lower-cased name breaks ties - so clients that
+  sort by sortText (VS Code) present the values that fit before the rest,
+  each group in the engine's resolution-precedence order (members before
+  unit names before builtins before keywords). The RAD list sorts by the
+  match it reads from the item's data, then by name. }
+function BucketSort(AMatch: TPasComplMatch; ABucket: TPasComplBucket;
+  const AName: string): string;
 begin
-  Result := Format('%.2d%s', [Ord(ABucket), LowerCase(AName)]);
+  Result := Format('%d%.2d%s', [Ord(AMatch), Ord(ABucket), LowerCase(AName)]);
 end;
 
 { A declaration written over several lines, as one: every line break with the
@@ -1944,7 +1951,9 @@ begin
         end;
         LEntry.TypeSpans := DetailTypeSpans(LEntry.ItemLabel, LEntry.Detail,
           LItems[LIdx].Kind, LValueTypes);
-        LEntry.SortText := BucketSort(LItems[LIdx].Bucket, LItems[LIdx].Name);
+        LEntry.SortText := BucketSort(LItems[LIdx].Match, LItems[LIdx].Bucket,
+          LItems[LIdx].Name);
+        LEntry.Match := Ord(LItems[LIdx].Match);
         Result.Items[LIdx] := LEntry;
       end;
     finally

@@ -878,6 +878,9 @@ type
     // FAll's labels upper-cased once, parallel to it - the filter's haystack.
     FUpper: TArray<string>;
     FVisible: TArray<Integer>;   // indices into FAll, after SetFilter
+    // The match tier of each visible row, parallel to FVisible (MatchTier);
+    // all 0 without a filter.
+    FVisTier: TArray<Byte>;
     FFilter: string;             // the last SetFilter's text
     FSortOrder: TOTASortOrder;
     procedure Rebuild(const AFilter: string);
@@ -931,11 +934,20 @@ begin
   // whole-RTL-sized lists, and both of Rebuild's passes preserve order - so
   // Rebuild never needs to sort, only scan. (soScope grouping, when it comes,
   // means a second precomputed permutation, not a per-keystroke sort.)
+  // The fit to the expected type first (the right side of `:=` or a
+  // comparison: the left side's own type, then an assignable one), then where
+  // the name is declared, nearest first, then the name - COMPLETION.md, "List
+  // order and filtering", rules A and B. Rebuild puts the filter's match
+  // tier between the fit and the proximity (rule C).
   TArray.Sort<TLspCompletionItem>(FAll,
     TComparer<TLspCompletionItem>.Construct(
       function(const A, B: TLspCompletionItem): Integer
       begin
-        Result := CompareText(A.ItemLabel, B.ItemLabel);
+        Result := A.Match - B.Match;
+        if Result = 0 then
+          Result := A.Bucket - B.Bucket;
+        if Result = 0 then
+          Result := CompareText(A.ItemLabel, B.ItemLabel);
         // A name's overloads, each a row since 0.74.3, in one order from
         // one invocation to the next - the sort is not stable.
         if Result = 0 then
@@ -947,54 +959,189 @@ begin
   Rebuild('');
 end;
 
+{ Where the words of a name start: its first letter, a capital after a small
+  letter or a digit, the last capital of a run followed by a small letter
+  (TIEFast: T, I, Fast), a letter after an underscore, a digit after a
+  non-digit. Underscores themselves start nothing. }
+function WordStarts(const ALabel: string): TArray<Integer>;
+var
+  LIdx, LCount: Integer;
+  C, P, N: Char;
+begin
+  SetLength(Result, Length(ALabel));
+  LCount := 0;
+  for LIdx := 1 to Length(ALabel) do
+  begin
+    C := ALabel[LIdx];
+    if C = '_' then
+      Continue;
+    if LIdx > 1 then P := ALabel[LIdx - 1] else P := #0;
+    if LIdx < Length(ALabel) then N := ALabel[LIdx + 1] else N := #0;
+    if (LIdx = 1) or (P = '_') or
+       (CharInSet(C, ['A'..'Z']) and CharInSet(P, ['a'..'z', '0'..'9'])) or
+       (CharInSet(C, ['A'..'Z']) and CharInSet(P, ['A'..'Z']) and
+        CharInSet(N, ['a'..'z'])) or
+       (CharInSet(C, ['0'..'9']) and not CharInSet(P, ['0'..'9'])) then
+    begin
+      Result[LCount] := LIdx;
+      Inc(LCount);
+    end;
+  end;
+  SetLength(Result, LCount);
+end;
+
+{ Whether ANeedle is spelled by the starts of the name's words, in order,
+  some words skipped: `gs` and `gsel` for GetSelection, `fpf` for
+  CC_FPFASTCALL. AUpper and ANeedle upper-cased, 1-based. }
+function HumpsMatch(const AUpper, ANeedle: string;
+  const AStarts: TArray<Integer>): Boolean;
+
+  function WordEnd(AWord: Integer): Integer;
+  begin
+    if AWord < High(AStarts) then
+      Result := AStarts[AWord + 1]
+    else
+      Result := Length(AUpper) + 1;
+    while (Result > AStarts[AWord]) and (AUpper[Result - 1] = '_') do
+      Dec(Result);
+  end;
+
+  function From(AWord, ANext: Integer): Boolean;
+  var
+    LW, LK: Integer;
+  begin
+    if ANext > Length(ANeedle) then
+      Exit(True);
+    for LW := AWord to High(AStarts) do
+    begin
+      LK := 0;
+      while (AStarts[LW] + LK < WordEnd(LW)) and
+            (ANext + LK <= Length(ANeedle)) and
+            (AUpper[AStarts[LW] + LK] = ANeedle[ANext + LK]) do
+      begin
+        Inc(LK);
+        if From(LW + 1, ANext + LK) then
+          Exit(True);
+      end;
+    end;
+    Result := False;
+  end;
+
+begin
+  Result := From(0, 1);
+end;
+
+{ The match tier of a name for the filter - the outer key of a filtered list,
+  as in VS Code and Roslyn (COMPLETION.md, rule C): 0 the whole name, 1 its
+  start, 2 a word start inside it or the starts of its words (`str` in
+  pkStripe, `gs` for GetSelection), 3 anywhere else; -1 no match. }
+function MatchTier(const ALabel, AUpper, ANeedle: string): Integer;
+var
+  LPos: Integer;
+  LStarts: TArray<Integer>;
+begin
+  LPos := Pos(ANeedle, AUpper);
+  if LPos = 1 then
+  begin
+    if Length(AUpper) = Length(ANeedle) then
+      Exit(0);
+    Exit(1);
+  end;
+  LStarts := WordStarts(ALabel);
+  if LPos > 1 then
+  begin
+    for var LS in LStarts do
+      if Copy(AUpper, LS, Length(ANeedle)) = ANeedle then
+        Exit(2);
+    Exit(3);
+  end;
+  // One letter spells no humps that a word start inside the name did not.
+  if (Length(ANeedle) >= 2) and HumpsMatch(AUpper, ANeedle, LStarts) then
+    Exit(2);
+  Result := -1;
+end;
+
 { BY CONTAINMENT, NOT PREFIX - the native viewer's rule (Alex, 2026-10-13,
   AVImark): "fas" lists faSysFile, but also iefFast, TIEFastDrawing and
   CC_FPFASTCALL. Until 0.68.0 this kept only the labels STARTING with the
   filter, so the list was a fraction of DelphiLSP's for the same text - the
-  server sends every name in scope and never filtered; this did. Prefix
-  matches first, then the rest, each alphabetical, as the native list does. }
+  server sends every name in scope and never filtered; this did.
+  Since 0.84.0 a name proven wrong for the expected type (fit 3, Match 3)
+  goes below every other, however well it matches the filter - a match of
+  the letters is no help there (Alex, 2026-11-05). Above it the filter's
+  match tier (MatchTier) leads and the fit follows, as VS Code and Roslyn
+  order a filtered list: a value that leads to the type (`LM.` for `LM`)
+  is no worse a start than a fitting name merely containing the letters.
+  COMPLETION.md, rule C, has the measurements of the orders tried. FAll is
+  already sorted by fit, proximity and name, so each of the two groups is
+  split into its tiers in that order and Rebuild never sorts. }
 procedure TPasSymbolList.Rebuild(const AFilter: string);
 var
-  LIdx, LCount, LPos: Integer;
+  LIdx, LTier, LCount: Integer;
+  LWrong: Boolean;
   LNeedle: string;
-  LInner: TArray<Integer>;
-  LInnerCount: Integer;
+  LTiers: array[0..3] of TArray<Integer>;
+  LTierCount: array[0..3] of Integer;
+
+  // One group's rows (those that may fit, then the wrong ones), tier by tier.
+  procedure Flush;
+  begin
+    for var LT := 0 to 3 do
+    begin
+      for var LI := 0 to LTierCount[LT] - 1 do
+      begin
+        FVisible[LCount] := LTiers[LT][LI];
+        FVisTier[LCount] := LT;
+        Inc(LCount);
+      end;
+      LTierCount[LT] := 0;
+    end;
+  end;
+
 begin
   // Counted growth, not per-element appends: this runs per keystroke and
   // FAll can hold thousands of rows.
   SetLength(FVisible, Length(FAll));
-  LCount := 0;
+  SetLength(FVisTier, Length(FAll));
   if AFilter = '' then
   begin
     for LIdx := 0 to High(FAll) do
+    begin
       FVisible[LIdx] := LIdx;
+      FVisTier[LIdx] := 0;
+    end;
     Exit;
   end;
   LNeedle := UpperCase(AFilter);
-  SetLength(LInner, Length(FAll));
-  LInnerCount := 0;
+  for LTier := 0 to 3 do
+  begin
+    SetLength(LTiers[LTier], Length(FAll));
+    LTierCount[LTier] := 0;
+  end;
+  LCount := 0;
+  LWrong := False;
   for LIdx := 0 to High(FAll) do
   begin
-    LPos := Pos(LNeedle, FUpper[LIdx]);
-    // The IDE's Insight Options: without "contain filter" only prefix
-    // matches stay; without "starts with first" every match is one
-    // alphabetical run.
-    if (LPos > 1) and not FOptions.Contained then
-      Continue;
-    if (LPos = 1) or ((LPos > 1) and not FOptions.StartsFirst) then
+    // FAll is sorted by Match: the wrong ones, 3, come last.
+    if not LWrong and (FAll[LIdx].Match >= 3) then
     begin
-      FVisible[LCount] := LIdx;
-      Inc(LCount);
-    end
-    else if LPos > 1 then
-    begin
-      LInner[LInnerCount] := LIdx;
-      Inc(LInnerCount);
+      Flush;
+      LWrong := True;
     end;
+    LTier := MatchTier(FAll[LIdx].ItemLabel, FUpper[LIdx], LNeedle);
+    // The IDE's Insight Options: without "contain filter" only the names
+    // starting with the filter stay; without "starts with first" every
+    // match is one run, in the fit-proximity-name order.
+    if (LTier < 0) or ((LTier > 1) and not FOptions.Contained) then
+      Continue;
+    if not FOptions.StartsFirst then
+      LTier := 1;
+    LTiers[LTier][LTierCount[LTier]] := LIdx;
+    Inc(LTierCount[LTier]);
   end;
-  for LIdx := 0 to LInnerCount - 1 do
-    FVisible[LCount + LIdx] := LInner[LIdx];
-  SetLength(FVisible, LCount + LInnerCount);
+  Flush;
+  SetLength(FVisible, LCount);
+  SetLength(FVisTier, LCount);
 end;
 
 procedure TPasSymbolList.Clear;
@@ -1002,6 +1149,7 @@ begin
   FAll := nil;
   FUpper := nil;
   FVisible := nil;
+  FVisTier := nil;
 end;
 
 function TPasSymbolList.GetCount: Integer;
@@ -1064,33 +1212,24 @@ end;
 function TPasSymbolList.FindIdent(const AnIdent: string): Integer;
 var
   LIdx: Integer;
-  LNeedle: string;
-  LPrefixOnly: Boolean;
 begin
   Result := 0;
   if FFilter <> '' then
   begin
     // Filtered, the first row is the one selected, whatever the viewer asks
     // with (Alex, 2026-10-16) - Rebuild already put the best match there -
-    // or, under "Select shortest matching symbol", the shortest of the
-    // prefix matches (of all matches when none starts with the filter).
+    // or, under "Select shortest matching symbol", the shortest name of the
+    // first row's match tier and fit: a shorter name that matches worse or
+    // does not fit the expected type does not win.
     if FOptions.Shortest and (Length(FVisible) > 1) then
-    begin
-      LNeedle := UpperCase(FFilter);
-      LPrefixOnly := False;
-      for LIdx := 0 to High(FVisible) do
-        if FUpper[FVisible[LIdx]].StartsWith(LNeedle) then
-        begin
-          LPrefixOnly := True;
+      for LIdx := 1 to High(FVisible) do
+      begin
+        if (FVisTier[LIdx] <> FVisTier[0]) or
+           (FAll[FVisible[LIdx]].Match <> FAll[FVisible[0]].Match) then
           Break;
-        end;
-      Result := -1;
-      for LIdx := 0 to High(FVisible) do
-        if (not LPrefixOnly or FUpper[FVisible[LIdx]].StartsWith(LNeedle)) and
-           ((Result < 0) or (Length(FUpper[FVisible[LIdx]]) <
-              Length(FUpper[FVisible[Result]]))) then
+        if Length(FUpper[FVisible[LIdx]]) < Length(FUpper[FVisible[Result]]) then
           Result := LIdx;
-    end;
+      end;
   end
   else
     // "Closest partial match": the first visible label the ident is a prefix
@@ -1111,22 +1250,31 @@ var
   LIdx: Integer;
 begin
   Result := False;
-  for LIdx := 0 to High(FVisible) do
-    if SameText(FAll[FVisible[LIdx]].ItemLabel, Ident) then
-    begin
-      Index := LIdx;
-      Result := True;
-      Break;
-    end;
   // The viewer (37.0) selects through THIS call alone: after every SetFilter
   // it asks FindSymIndex(<filter>) and never FindIdent, so a filter that is
   // no whole label selected nothing (Alex, 2026-10-19, the trace below). A
-  // filtered list answers its best row instead - FindIdent's choice.
-  if not Result and (FFilter <> '') and (Length(FVisible) > 0) then
+  // filtered list answers its best row - FindIdent's choice; a name equal to
+  // the filter heads its fit group there (match tier 0), and one that does
+  // not fit (`Str` for `PayKind = str`) stays below the values that do.
+  if FFilter <> '' then
   begin
-    Index := FindIdent(Ident);
-    Result := True;
-  end;
+    if Length(FVisible) > 0 then
+    begin
+      Index := FindIdent(Ident);
+      Result := True;
+    end;
+  end
+  else
+    for LIdx := 0 to High(FVisible) do
+      // Only within the first row's fit group: a name that does not fit the
+      // expected type does not take the selection from a value that does.
+      if (FAll[FVisible[LIdx]].Match = FAll[FVisible[0]].Match) and
+         SameText(FAll[FVisible[LIdx]].ItemLabel, Ident) then
+      begin
+        Index := LIdx;
+        Result := True;
+        Break;
+      end;
   TraceList(Format('FindSymIndex("%s") under filter "%s" -> %s',
     [Ident, FFilter, BoolToStr(Result, True)]));
 end;
