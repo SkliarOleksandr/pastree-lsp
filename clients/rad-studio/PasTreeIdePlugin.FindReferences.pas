@@ -70,11 +70,18 @@ procedure FinalizeFindReferencesMessageGroup;
 /// </summary>
 procedure CloseFindReferencesResults;
 
+/// <summary>
+/// Registers Ctrl+Shift+Q - Find All > References from the keyboard - with
+/// PasTreeIdePlugin.KeyBindings. Call before InitializeKeyBindings.
+/// </summary>
+procedure InitializeFindReferencesKey;
+
 implementation
 
 uses
-  Winapi.Windows, System.SysUtils, System.Character,
-  System.Generics.Collections, Vcl.Dialogs, Vcl.Forms,
+  Winapi.Windows, System.SysUtils, System.Character, System.Classes,
+  System.Generics.Collections, Vcl.Dialogs, Vcl.Forms, Vcl.Menus,
+  PasTreeIdePlugin.KeyBindings,
   PasTreeIdePlugin.IdeUI, PasTreeIdePlugin.LspSession, PasTreeIdePlugin.ResultRows,
   PasTreeIdePlugin.WaitDialog, PasTreeIdePlugin.GroupScope,
   PasTreeIdePlugin.Settings, PasTreeIdePlugin.RenameToolbar;
@@ -698,6 +705,35 @@ begin
       LogDiagnostic(Format('Find References: unhandled %s: %s', [E.ClassName, E.Message]));
     end;
   end;
+end;
+
+{ Ctrl+Shift+Q, the keyboard way to Find All > References (Alex,
+  2026-11-06), through the package's one binding
+  (PasTreeIdePlugin.KeyBindings). Not Ctrl+Shift+R: the Default keymap
+  records a keystroke macro on it. No caret gate here, as with Rename: the
+  command itself answers when the caret is on nothing it can resolve. }
+procedure FindReferencesKeyProc(const AContext: IOTAKeyContext;
+  AKeyCode: TShortCut; var ABindingResult: TKeyBindingResult);
+begin
+  // The Find All switch off is the key handed back to the IDE - the one
+  // krUnhandled, ahead of the krHandled below (Rename's off-switch rule).
+  if not FindAllEnabled then
+  begin
+    ABindingResult := krUnhandled;
+    Exit;
+  end;
+  ABindingResult := krHandled;
+  if not GAlive or not Assigned(AContext) or
+     not Assigned(AContext.EditBuffer) then
+    Exit;
+  ExecuteFindReferences(AContext.EditBuffer.TopView);
+end;
+
+procedure InitializeFindReferencesKey;
+begin
+  // Registered, not bound: the wizard binds everything at once
+  // (InitializeKeyBindings).
+  RegisterKey(ShortCut(Ord('Q'), [ssCtrl, ssShift]), FindReferencesKeyProc);
 end;
 
 end.

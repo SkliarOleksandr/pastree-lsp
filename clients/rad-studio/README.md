@@ -52,8 +52,8 @@ it**. See "Architecture" below.
 A RAD Studio IDE package that surfaces PasTree's analysis inside the Delphi
 editor itself. Four features so far:
 
-- **Find References** (the feature already available in
-  `object-pascal-tree`'s `demo/`);
+- **Find References** on Ctrl+Shift+Q and in the editor's Find All submenu
+  (the feature already available in `object-pascal-tree`'s `demo/`);
 - **Go to Declaration**, replacing RAD Studio's own DelphiLSP-based navigation
   (reported to work poorly on large projects) - both the native menu item and
   Ctrl+Click;
@@ -425,6 +425,9 @@ starts from:
 
 ### Find References
 
+- **Ctrl+Shift+Q** runs Find All > References (0.84.5). Not Ctrl+Shift+R,
+  the first choice: the Default keymap records a keystroke macro on it. With
+  the Find All submenu switched off in Settings the key goes back to the IDE.
 - Results go to a dedicated "Find References" tab in the Messages panel
   (`IOTAMessageServices.AddMessageGroup`), grouped by file (one header row
   per file, the same `Parent`/`LineRef` tree structure "Find in Files" uses),
@@ -1141,7 +1144,7 @@ unreliable here.
 ## Keyboard bindings: one `IOTAKeyboardBinding` for the whole package
 
 Every key this plugin takes - Ctrl+G, Ctrl+F12, Alt+F11, Ctrl+Shift+C,
-Ctrl+Shift+E, Ctrl+Shift+A, Ctrl+Shift+Up/Down - goes through ONE `IOTAKeyboardBinding`,
+Ctrl+Shift+E, Ctrl+Shift+A, Ctrl+Shift+Q, Ctrl+Shift+Up/Down - goes through ONE `IOTAKeyboardBinding`,
 `PasTreeIdePlugin.KeyBindings`, registered once after every feature has
 handed it a key (`RegisterKey`) and removed once, first thing at unload. A
 feature never calls `AddKeyboardBinding` itself. Until 0.46.7 there were

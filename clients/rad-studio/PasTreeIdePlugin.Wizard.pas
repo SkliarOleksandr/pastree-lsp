@@ -364,6 +364,10 @@ begin
     LAction.Caption := cItemCaption[LItem];
     LAction.Category := cFindAllCategory + '.' + cItemName[LItem];
     FItemActions[LItem] := LAction;
+    // A LABEL, NOT A BINDING - Rename's note in AddActions: the key is
+    // delivered by FindReferencesKeyProc (PasTreeIdePlugin.FindReferences).
+    if LItem = faiReferences then
+      LAction.ShortCut := ShortCut(Ord('Q'), [ssCtrl, ssShift]);
     LAction.OnUpdate := OnFindAllItemUpdate;
     LAction.OnExecute := OnFindAllItemExecute;
     LAction.Enabled := True;
@@ -950,6 +954,8 @@ begin
   // ToolsAPI has no refactoring surface, so this is a plain command -
   // see PasTreeIdePlugin.Rename.
   InitializeRename;
+  // Ctrl+Shift+Q: Find All > References - see PasTreeIdePlugin.FindReferences.
+  InitializeFindReferencesKey;
   // Ctrl+G: the Go To picker over the module and the project - see
   // PasTreeIdePlugin.GoToPicker.
   InitializeGoTo;
