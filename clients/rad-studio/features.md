@@ -274,8 +274,11 @@ alone), or only the argument at the caret (offered when the caret was inside
 the list); mark `var`/`out` parameters with `{var}`/`{out}` (`const` is never
 marked); put each argument on its own line, indented under the call. The
 dialog remembers its last choices for the session. The overload is the one the
-resolver bound the call to, and a call whose overload cannot be told from its
-arguments is refused rather than guessed - the reason lands in the Build tab.
+resolver bound the call to - the one Go To Definition lands on. When the
+analysis has not caught up with a fresh edit yet and the arguments alone do not
+tell the overloads apart, the command waits for it under the IDE's wait
+dialog; a call whose overload still cannot be told is refused rather than
+guessed - the reason lands in the Build tab.
 Running it again adds only what is missing; an argument already carrying a
 `{...:}` comment is left alone, and one already on its own line stays there.
 One undoable step per call.

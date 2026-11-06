@@ -7635,10 +7635,10 @@ begin
     LMid := FNav.ModelIdOf(APath);
   if (FProject <> nil) and (LMid >= 0) then
     Result := FCompletion.AnnotateArgsAt(APath, LText, APasLine, APasCol,
-      FProject, LMid, AOptions)
+      FProject, LMid, FNav, AOptions)
   else
     Result := FCompletion.AnnotateArgsAt(APath, LText, APasLine, APasCol,
-      nil, -1, AOptions);
+      nil, -1, nil, AOptions);
 end;
 
 (* pastree/annotateArgs - OUR request, the server half of "Annotate
@@ -7648,7 +7648,14 @@ end;
   NO WaitAnalyzed: the call under the caret may have been typed a second ago,
   and only the live buffer resolved through the overlay knows it. `scope` says
   what the caret meant: "one" (inside the arguments - that argument) or "all"
-  (on the routine's name - every argument); "" when there is no call. *)
+  (on the routine's name - every argument); "" when there is no call.
+  ONE EXCEPTION, the overload: when two or more overloads fit the call's
+  argument count and the project analysis that would tell them apart is
+  missing or behind the buffer (AnalysisBehind), the request waits for it,
+  as definition does, and asks once more - the IDE shows its wait dialog
+  meanwhile. A refusal there was a call Ctrl+Click resolved a moment later
+  (Alex, 2026-11-06). A unit outside the analyzed closure is not waited
+  for: no analysis would ever answer for it. *)
 function TLspServer.HandleAnnotateArgs(const AMsg: TLspIncoming): string;
 var
   LPath, LEdits, LMode, LDetail: string;
@@ -7684,6 +7691,16 @@ begin
   LOptions.OneArgPerLine := AMsg.Params.GetValue<Boolean>('multiline', False);
   LStart := GetTickCount64;
   LAnswer := AnnotateArgsAtPath(LPath, LPasLine, LPasCol, LOptions);
+  if LAnswer.AnalysisBehind and ((FNav = nil) or (FNav.ModelIdOf(LPath) >= 0))
+  then
+  begin
+    Log(Format('annotateArgs: %s -> the overload needs the analysis (%s), '
+      + 'waiting for it', [PosTag(LPath, LPasLine, LPasCol), LAnswer.Provider]));
+    if not WaitAnalyzed(LPath, AMsg.IdJson) or
+       not EnsureFileFull(LPath, AMsg.Method) then
+      Exit(BuildError(AMsg.IdJson, LSP_REQUEST_CANCELLED, 'request cancelled'));
+    LAnswer := AnnotateArgsAtPath(LPath, LPasLine, LPasCol, LOptions);
+  end;
   LEdits := '';
   for LIdx := 0 to High(LAnswer.Edits) do
   begin

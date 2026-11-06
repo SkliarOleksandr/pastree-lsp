@@ -3515,6 +3515,10 @@ var
   // said before any session exists.
   GProviderLogLines: TArray<string> = nil;
   GProviderKindLogged: Boolean = False;
+  // What ApplyProviderInPascal just switched the IDE's option to: 1 PasTree,
+  // -1 another provider, 0 nothing. Acted on after the door closes
+  // (ApplyInsightManagerChoice) - see ProviderSwitchedByUs.
+  GProviderSwitched: Integer = 0;
 
 procedure FlushProviderLog;
 var
@@ -3683,7 +3687,10 @@ begin
     end;
     ReadProvider(LAfter);
     if SameText(LAfter, cOurManagerId) then
-      ProviderLog('PasTree selected in place of "' + LBefore + '"')
+    begin
+      GProviderSwitched := 1;
+      ProviderLog('PasTree selected in place of "' + LBefore + '"');
+    end
     else
       ProviderFailure('"' + cOurManagerId + '" was written over "' + LBefore
         + '" and the option reads "' + LAfter + '" (option set '
@@ -3703,10 +3710,13 @@ begin
       end;
       ReadProvider(LAfter);
       if SameText(LAfter, LRestore) then
+      begin
+        GProviderSwitched := -1;
         ProviderLog('RAD Studio - put back "' + LRestore + '"'
           + IfThen(Assigned(GManager), '; PasTree stays registered until'
           + ' the IDE restarts', ' over a PasTree selection with no PasTree'
-          + ' manager registered'))
+          + ' manager registered'));
+      end
       else
         ProviderFailure('"' + LRestore + '" was written over "' + LBefore
           + '" and the option reads "' + LAfter + '" (option set '
@@ -3720,9 +3730,28 @@ begin
   end;
 end;
 
+{ OUR OWN SWITCH IS THE IDE'S WORD TOO. Writing the option InsightManager
+  changes the provider without a ManagerEnabled / ManagerDisabled: the IDE
+  sends those only for its own combobox. So GProviderSelected, sticky by
+  design (PasTreeProviderSelected), stayed True after the settings' Code
+  Insight Manager was set to RAD Studio, and the Structure pane went on
+  showing our outline over DelphiLSP's - even after the project was opened
+  again - while completion was already DelphiLSP's (Alex, 2026-11-06). The
+  features that belong to the provider are told here exactly as the IDE's
+  notifications would tell them. }
+procedure ProviderSwitchedByUs(ASelected: Boolean);
+begin
+  if GProviderSelected = ASelected then
+    Exit;
+  GProviderSelected := ASelected;
+  NativeErrorInsightProviderChanged(ASelected);
+  OutlineProviderChanged(ASelected);
+end;
+
 procedure ApplyInsightManagerChoice;
 begin
   GProviderPending := False;
+  GProviderSwitched := 0;
   try
     // Registration is no option of a set: done as it was, before the door.
     if PasTreeInsightManagerEnabled and not Assigned(GManager) then
@@ -3737,6 +3766,10 @@ begin
         CheckInsightGate('the provider choice applied');
       end) then
       DeferProviderChoice;
+    // After the door, so the outline it may request reads no option set.
+    if GProviderSwitched <> 0 then
+      ProviderSwitchedByUs(GProviderSwitched > 0);
+    GProviderSwitched := 0;
   except
     on E: Exception do
       ProviderFailure(E.ClassName + ': ' + E.Message);

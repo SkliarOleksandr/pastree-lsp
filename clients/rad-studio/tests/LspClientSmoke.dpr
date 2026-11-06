@@ -3928,7 +3928,7 @@ end;
   this section. See the fixture's header for the call-per-rule list. *)
 procedure TestAnnotateArgs;
 var
-  LFile: string;
+  LFile, LText, LBefore, LAfter: string;
   LLine, LChar: Integer;
 
   { The caret on the line containing ALineHint, at AToken. AMode '' sends no
@@ -4188,6 +4188,54 @@ begin
     and GResultJson.Contains('"detail":"the one argument without a name')
     and not GResultJson.Contains('already annotated'),
     'nothing written because the argument names itself - and said so');
+
+  // Two overloads of one arity in ANOTHER unit: the overlay of this unit
+  // cannot choose, the project analysis did - and the answer is the overload
+  // Go To Definition lands on (2026-11-06: a constructor called through its
+  // class name and a method through a variable were refused as ambiguous).
+  Check(AskAt('TDemoSheet.CreateFor(S, 2);', 'CreateFor'),
+    'answered for a constructor overloaded by type in another unit');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ADoctor:} "')
+    and GResultJson.Contains('"newText":"{ASite:} "'),
+    'the string argument takes CreateFor(const ADoctor: string; ...)');
+  Check(AskAt('TDemoSheet.CreateFor(S, 2);', '2'),
+    'answered with the caret on the constructor''s second argument');
+  Check(GOk and GResultJson.Contains('"scope":"one"')
+    and GResultJson.Contains('"newText":"{ASite:} "'),
+    'the one argument at the caret is named from the same overload');
+  Check(AskAt('LSheet.Show(S, True);', 'Show'),
+    'answered for a method overloaded by type, called through a variable');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ATitle:} "')
+    and GResultJson.Contains('"newText":"{AWide:} "'),
+    'the string argument takes Show(const ATitle: string; ...)');
+
+  // The same call with the analysis BEHIND the buffer - an edit the rebuild
+  // has not taken yet (a line after `end.`, so no position moves). The
+  // overlay still cannot choose and the analysis cannot be asked, so the
+  // server waits for it and asks again instead of refusing by count
+  // (Alex, 2026-11-06: progress rather than a refusal).
+  LText := TFile.ReadAllText(LFile);
+  SendDidOpenText(LFile, LText);
+  // definition waits for the analysis: the open text is in it after this.
+  FindPos(LFile, 'TDemoSheet.CreateFor(S, 2);', 'CreateFor', LLine, LChar);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered for the constructor, the use unit open');
+  LBefore := ReadServerLog;
+  SendDidChange(LFile, LText + '// edited'#13#10);
+  Check(AskAt('TDemoSheet.CreateFor(S, 2);', 'CreateFor'),
+    'answered for the constructor while the analysis is behind the buffer');
+  LAfter := Copy(ReadServerLog, Length(LBefore) + 1, MaxInt);
+  Check(LAfter.Contains('the overload needs the analysis'),
+    'the server waited for the analysis rather than refuse by count');
+  Check(GOk and GResultJson.Contains('"count":2')
+    and GResultJson.Contains('"newText":"{ADoctor:} "')
+    and GResultJson.Contains('"newText":"{ASite:} "'),
+    'and after the wait the analysis chose CreateFor(const ADoctor: string; ...)');
+  SendDidChange(LFile, LText);
+  Check(Ask('textDocument/definition', PositionParams(LFile, LLine, LChar)),
+    'definition answered with the use unit back as on disk');
 end;
 
 { 5l. Two PasTree 0.17 typings, through THIS server's seam: an inline

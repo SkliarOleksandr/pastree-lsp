@@ -38,6 +38,7 @@ uses
   PasTree.SourceManager,
   PasTree.Preprocessor,
   PasTree.Sema.Project,
+  PasTree.Sema.Nav,
   PasLsp.ClassComplete,
   PasLsp.SyncPrototypes,
   PasLsp.AnnotateArgs,
@@ -224,10 +225,11 @@ type
       `{var}`/`{out}` in front of the arguments (PasLsp.AnnotateArgs has the
       rules). The signature-help pipeline exactly: the LIVE text, resolved
       through the overlay+bridge, so the call typed a second ago answers,
-      and the overload is the one the resolver bound. *)
+      and the overload is the one the resolver bound - the overlay's, else
+      the project analysis's through ANav, as Go To Definition reads it. *)
     function AnnotateArgsAt(const AFileName, AText: string;
       APasLine, APasCol: Integer; AProject: TPasSemaProject;
-      AProjectMid: Integer;
+      AProjectMid: Integer; ANav: TPasNavigator;
       const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
     { What the LIVE text is and what it uses (PasLsp.UseUnit) - parse only,
       so the unit list can leave out what the buffer already names, a
@@ -2186,7 +2188,7 @@ end;
 
 function TLspCompletionEngine.AnnotateArgsAt(const AFileName, AText: string;
   APasLine, APasCol: Integer; AProject: TPasSemaProject;
-  AProjectMid: Integer;
+  AProjectMid: Integer; ANav: TPasNavigator;
   const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
 var
   LPre: TPasPreprocessed;
@@ -2202,7 +2204,7 @@ begin
     LCompletion := TPasCompletion.Create(LModel, AProject, AProjectMid);
     try
       Result := PasLsp.AnnotateArgs.AnnotateArgsAt(LCompletion, LModel,
-        AProject, APasLine, APasCol, AOptions);
+        AProject, ANav, AProjectMid, APasLine, APasCol, AOptions);
     finally
       LCompletion.Free;
     end;

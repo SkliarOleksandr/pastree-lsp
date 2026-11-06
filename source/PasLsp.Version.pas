@@ -366,7 +366,11 @@ const
   /// digit and data.match run 0..3 - an older library would compile and
   /// send fit 3 as "leads"; also the expected type after a dot, in an
   /// inline declaration, and XConvX.
-  cMinPasTreeVersion = '0.147.0';
+  /// 0.151.1 (2026-11-06): an outline detail keeps no space just inside a
+  /// bracket, so a header wrapped after its `(` reads `(const A: T)` - an
+  /// older library compiles and silently sends `( const A: T)`, which RAD
+  /// Studio's Structure pane draws unformatted.
+  cMinPasTreeVersion = '0.151.1';
 
 /// <summary>
 /// One line naming the product version, the PasTree it was built against, and

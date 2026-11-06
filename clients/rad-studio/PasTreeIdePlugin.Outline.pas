@@ -589,7 +589,6 @@ const
   cIconMethod = 6;
   cIconFunction = 7;
   cIconType = 10;
-  cIconConstructor = 11;
 
 function RowIcon(const ARow: TLspOutlineRow): Integer;
 var
@@ -609,9 +608,15 @@ begin
   end
   else if ARow.Kind = 'routine' then
   begin
-    if Pos('constructor', ARow.Head) > 0 then
-      Result := cIconConstructor
-    else if ARow.Owner <> '' then
+    // A constructor takes the method's icon, as DelphiLSP's own pane shows
+    // it (Alex's screenshot, 2026-11-06), not the gear (11) of the table
+    // above: the pane formats a caption - bold name, coloured types - only
+    // for nodes whose icon is one of five (coreide's StructureView.
+    // TStructureNodeTypesHelper.IsSupportedDelphiNodeType: ProcedureSprig,
+    // InterfaceSprig, TypeSprig and two Project Manager ones, read off
+    // coreide370.bpl 2026-11-06), and the gear is not among them - every
+    // constructor row was plain text.
+    if ARow.Owner <> '' then
       Result := cIconMethod
     else
       Result := cIconFunction;

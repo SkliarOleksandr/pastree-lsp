@@ -25,12 +25,29 @@ unit PasLsp.AnnotateArgs;
   The server decides everything by looking at the caret and the options, so
   the client never has to understand the call.
 
-  THE OVERLOAD MUST BE THE RIGHT ONE, or the names are lies. The resolver's
-  own choice is used whenever it made one (TPasCallInfo.BoundExact, PasTree
-  0.29.0 - SelectOverload's arity-and-type winner for a call it could see
-  through); when it did not - a cross-unit family bridged by name, a member
-  found by lookup - the family is narrowed by ARITY here, and a family that
-  two or more members still fit is REFUSED by count rather than guessed at.
+  THE OVERLOAD MUST BE THE RIGHT ONE, or the names are lies. In order:
+
+  1. The overlay's own choice (TPasCallInfo.BoundExact, PasTree 0.29.0) -
+     the unit typer's winner, for a call it could see through on its own:
+     a bare routine, `TFoo.Create(` of a class in the same unit.
+  2. The PROJECT analysis's choice, read exactly as Go To Definition reads
+     it - TPasNavigator.SymbolAt on the callee's name in the analyzed model
+     (AnalyzedChoice). The overlay is the unit alone and has no project
+     pass, so a member called through a variable (`K.Add(`) or a
+     constructor of another unit's class (`TList.CreateList(`) was never
+     bound there, and two overloads of one arity were refused although
+     Ctrl+Click landed on the right one (2026-11-06). Only while the
+     analyzed text IS the buffer: positions and declarations are compared
+     between the two, and a call typed a second ago is not in the analysis.
+  3. Otherwise ARITY: the one member of the family that takes this many
+     arguments. A family that two or more members still fit is not guessed
+     at: when the analysis could not be asked (none yet, or behind the
+     buffer) the answer says so (AnalysisBehind) and the server waits for
+     it and asks again, the IDE showing its wait dialog meanwhile, as Go To
+     Definition would wait (Alex, 2026-11-06: progress rather than a
+     refusal). Asked and still undecided - the call does not compile - it
+     is REFUSED.
+
   A wrong `{Count:}` is worse than none: it reads as documentation.
 
   IDEMPOTENT: an argument already carrying `{Name:}` (any name - the user may
@@ -67,7 +84,8 @@ uses
   PasTree.Ast,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
-  PasTree.Sema.Complete;
+  PasTree.Sema.Complete,
+  PasTree.Sema.Nav;
 
 type
   (* Which arguments get a name. amAuto is the caret's own reading - inside
@@ -121,17 +139,27 @@ type
       shows Provider in the Build tab, and a sentence there is noise (Alex,
       2026-09-30). '' when Provider says it all. }
     Detail: string;
+    { True when the call was refused because two or more overloads fit its
+      argument count AND the project analysis could not be asked - none yet,
+      or it has not caught up with the buffer. The server then waits for the
+      analysis and asks once more (TLspServer.HandleAnnotateArgs) rather
+      than refuse what Go To Definition would resolve a moment later. }
+    AnalysisBehind: Boolean;
   end;
 
 { The annotation edits for the call at (APasLine, APasCol). ACompletion is a
   TPasCompletion over the overlay model AModel (both built by the caller from
   the LIVE text, exactly as signature help builds them), bridged to AProject
-  (nil standalone). Never raises; every refusal is an empty edit list with a
+  (nil standalone). ANav is the navigator over AProject's analysis and
+  AProjectMid this file's model in it - where the overload a call is a call
+  of is read when the overlay could not choose (nil / -1: arity alone).
+  Never raises; every refusal is an empty edit list with a
   Provider that says why, and Scope still set when a call WAS found - the
   menu wants "this is a call, and nothing needed doing" told apart from "no
   call here". }
 function AnnotateArgsAt(ACompletion: TPasCompletion; AModel: TPasSemaModel;
-  AProject: TPasSemaProject; APasLine, APasCol: Integer;
+  AProject: TPasSemaProject; ANav: TPasNavigator; AProjectMid: Integer;
+  APasLine, APasCol: Integer;
   const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
 
 { The options a client that asks for nothing gets: the caret decides the
@@ -854,8 +882,102 @@ begin
   end;
 end;
 
+{ Where a symbol's declaration starts in its model's source: the file it is
+  in (0 = the main file) and the character offset there. Two parses of one
+  text agree on both, which is how a symbol of the overlay is matched with
+  the same declaration in the analyzed model of the same unit - their symbol
+  numbers need not agree. False for a symbol with no declaration node. }
+function DeclSite(AModel: TPasSemaModel; ASym: Integer;
+  out AFileId, AOffset: Integer): Boolean;
+var
+  LTree: TPasTree;
+  LNode, LVis: Integer;
+begin
+  Result := False;
+  AFileId := -1;
+  AOffset := -1;
+  if (AModel = nil) or (ASym < 0) or (ASym >= AModel.SymCount) then
+    Exit;
+  LTree := AModel.Tree;
+  LNode := AModel.Symbols[ASym].DeclNode;
+  if (LNode = NIL_NODE) or (LNode > High(LTree.Nodes)) then
+    Exit;
+  LVis := LTree.Nodes[LNode].FirstToken;
+  if (LVis < 0) or (LVis > High(LTree.Source.Visible)) then
+    Exit;
+  AFileId := LTree.Source.Visible[LVis].FileId;
+  if (AFileId < 0) or (AFileId > High(LTree.Source.Files)) then
+    Exit;
+  AOffset := LTree.Source.Files[AFileId].Tokens[
+    LTree.Source.Visible[LVis].TokenIndex].Start;
+  Result := True;
+end;
+
+{ The member of AInfo.Targets the PROJECT analysis bound the call ACall to,
+  or -1. Read the way Go To Definition reads it - TPasNavigator.SymbolAt on
+  the callee's name, whose binding the project pass re-points at the overload
+  it selected - so the two can never disagree about which overload a call
+  is. Only while the analyzed model's main file holds exactly the buffer's
+  text: the callee's position and the overlay's declarations are read
+  across the two. A target of another unit is matched by its (Mid, Sym), one
+  of this unit (the overlay's Mid -1) by where it is declared. }
+function AnalyzedChoice(AModel: TPasSemaModel; AProject: TPasSemaProject;
+  ANav: TPasNavigator; AProjectMid, ACall: Integer;
+  const AInfo: TPasCallInfo; out ABehind: Boolean): Integer;
+var
+  LAnalyzed: TPasSemaModel;
+  LName, LFirst, LLast, LLine, LCol, LBoundMid, LBoundSym: Integer;
+  LIdx, LMatches, LFileA, LOffA, LFileB, LOffB: Integer;
+  LBoundName: string;
+  LSame: Boolean;
+begin
+  Result := -1;
+  // Not asked - no analysis, or one of another text: a wait may answer.
+  ABehind := True;
+  if ACall = NIL_NODE then
+    ABehind := False;
+  if (ANav = nil) or (AProject = nil) or (AProjectMid < 0) or
+     (ACall = NIL_NODE) then
+    Exit;
+  LAnalyzed := ModelOf(AModel, AProject, AProjectMid);
+  if (LAnalyzed = nil) or (Length(LAnalyzed.Tree.Source.Files) = 0) or
+     (Length(AModel.Tree.Source.Files) = 0) or
+     (LAnalyzed.Tree.Source.Files[0].Source <>
+      AModel.Tree.Source.Files[0].Source) then
+    Exit;
+  // Asked: whatever it says now, waiting will not change it.
+  ABehind := False;
+  LName := CalleeNameNode(AModel.Tree, ACall);
+  if (LName = NIL_NODE) or
+     not AModel.Tree.NodeVisRange(LName, LFirst, LLast) or
+     not VisStart(AModel.Tree, LFirst, LLine, LCol) or
+     not ANav.SymbolAt(AProjectMid, LLine, LCol, LBoundMid, LBoundSym,
+       LBoundName) then
+    Exit;
+  LMatches := 0;
+  for LIdx := 0 to High(AInfo.Targets) do
+  begin
+    if AInfo.Targets[LIdx].Mid >= 0 then
+      LSame := (AInfo.Targets[LIdx].Mid = LBoundMid) and
+        (AInfo.Targets[LIdx].Sym = LBoundSym)
+    else
+      LSame := (LBoundMid = AProjectMid) and
+        DeclSite(AModel, AInfo.Targets[LIdx].Sym, LFileA, LOffA) and
+        DeclSite(LAnalyzed, LBoundSym, LFileB, LOffB) and
+        (LFileA = LFileB) and (LOffA = LOffB);
+    if LSame then
+    begin
+      Inc(LMatches);
+      Result := LIdx;
+    end;
+  end;
+  if LMatches <> 1 then
+    Result := -1;
+end;
+
 function AnnotateArgsAt(ACompletion: TPasCompletion; AModel: TPasSemaModel;
-  AProject: TPasSemaProject; APasLine, APasCol: Integer;
+  AProject: TPasSemaProject; ANav: TPasNavigator; AProjectMid: Integer;
+  APasLine, APasCol: Integer;
   const AOptions: TLspAnnotateOptions): TLspAnnotateAnswer;
 var
   LTree: TPasTree;
@@ -868,6 +990,7 @@ var
   LCall, LOnlyArg, LArg, LArgIdx, LFirst, LLast: Integer;
   LOpenLine, LOpenCol, LLine, LCol: Integer;
   LIdx, LChosen, LFitting, LArgCount, LSelfNamed: Integer;
+  LBehind: Boolean;
   LModel: TPasSemaModel;
   LParams, LCand: TArray<TParamInfo>;
   LVarargs, LCandVarargs: Boolean;
@@ -942,15 +1065,17 @@ begin
     Exit;
   end;
 
-  { WHICH OVERLOAD. The resolver's when it made one; otherwise the only
-    member of the family that takes this many arguments; otherwise refuse.
-    Intrinsics and procedural values are refused up front - see the header. }
+  { WHICH OVERLOAD. The overlay's choice when it made one; else the project
+    analysis's, as Go To Definition reads it; otherwise the only member of
+    the family that takes this many arguments; otherwise refuse - see the
+    header. }
   if Length(LInfo.Targets) = 0 then
   begin
     Result.Provider := cProvider + ': the callee did not resolve';
     Exit;
   end;
   LChosen := -1;
+  LBehind := False;
   if LInfo.BoundExact then
     for LIdx := 0 to High(LInfo.Targets) do
       if (LInfo.Targets[LIdx].Mid = LInfo.BoundMid) and
@@ -959,6 +1084,9 @@ begin
         LChosen := LIdx;
         Break;
       end;
+  if (LChosen < 0) and (Length(LInfo.Targets) > 1) then
+    LChosen := AnalyzedChoice(AModel, AProject, ANav, AProjectMid, LCall,
+      LInfo, LBehind);
   if LChosen < 0 then
   begin
     if Length(LInfo.Targets) = 1 then
@@ -985,6 +1113,7 @@ begin
         Result.Provider := Format('%s: %d of the %d overloads of %s take %d '
           + 'argument(s) - ambiguous, not annotated', [cProvider, LFitting,
           Length(LInfo.Targets), LInfo.Targets[0].Name, LArgCount]);
+        Result.AnalysisBehind := LBehind;
         Exit;
       end;
     end;

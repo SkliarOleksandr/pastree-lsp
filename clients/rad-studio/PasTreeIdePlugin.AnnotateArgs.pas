@@ -60,11 +60,16 @@ uses
   PasTreeIdePlugin.LspDocuments,
   PasTreeIdePlugin.LspSession,
   PasTreeIdePlugin.KeyBindings,
+  PasTreeIdePlugin.WaitDialog,
   PasTreeIdePlugin.AnnotateArgsForm;
 
 const
   // How long the key may wait for the caret's reading - the menu's budget.
   cKeyGateBudgetMs = 250;
+  // The wait dialog is ARMED for this long (ShowWaitDialogAfter): the answer
+  // is usually immediate, and only a call whose overload needs the analysis
+  // to catch up waits - for the analysis, seconds on a large project.
+  cWaitDialogDelayMs = 250;
 
 var
   // The request's callback can fire while the package is unloading, and by
@@ -159,10 +164,16 @@ begin
     + 'multiline=%s', [ExtractFileName(LFileName), LRow, LCol, LOptions.Mode,
     BoolToStr(LOptions.MarkByRef, True),
     BoolToStr(LOptions.OneArgPerLine, True)]));
+  // When two overloads fit the call's argument count and the analysis has
+  // not caught up with the buffer, the server waits for it before choosing
+  // (TLspServer.HandleAnnotateArgs) - progress, as Find References shows
+  // it, rather than a refusal (Alex, 2026-11-06).
+  ShowWaitDialogAfter(cWaitDialogDelayMs, 'Annotating arguments...');
   LspAnnotateArgs(LFileName, LRow, LCol, LOptions,
     procedure(ASuccess: Boolean; const AAnswer: TLspAnnotateArgs;
       const AError: string)
     begin
+      CloseWaitDialog;   // before anything else - see that unit's rules
       if not GAlive then
         Exit;
       if not ASuccess then
