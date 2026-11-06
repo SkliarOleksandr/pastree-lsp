@@ -579,7 +579,8 @@ end;
   Icons are DelphiLSP's offsets (IDELSP370.bpl, TDocumentSymbolNode.
   get_ImageIndex, by LSP SymbolKind): 0 file, 1 field/variable/constant,
   2 class, 3 interface, 4 property, 6 method, 7 function, 8 folder (9 open),
-  10 other type, 11 constructor. A plain procedure is a Function there too. }
+  10 other type, 11 constructor. Every routine row here takes 6 - see
+  RowIcon for why neither 7 nor 11 is used. }
 const
   cIconFile = 0;
   cIconVar = 1;
@@ -587,7 +588,6 @@ const
   cIconInterface = 3;
   cIconProperty = 4;
   cIconMethod = 6;
-  cIconFunction = 7;
   cIconType = 10;
 
 function RowIcon(const ARow: TLspOutlineRow): Integer;
@@ -615,11 +615,11 @@ begin
     // TStructureNodeTypesHelper.IsSupportedDelphiNodeType: ProcedureSprig,
     // InterfaceSprig, TypeSprig and two Project Manager ones, read off
     // coreide370.bpl 2026-11-06), and the gear is not among them - every
-    // constructor row was plain text.
-    if ARow.Owner <> '' then
-      Result := cIconMethod
-    else
-      Result := cIconFunction;
+    // constructor row was plain text. A routine outside any type takes it
+    // too, for the same reason and as DelphiLSP's pane shows it (Alex's
+    // screenshot, 2026-11-06): the green function icon (7) is not among the
+    // five either, and every global routine's row was plain text.
+    Result := cIconMethod;
   end
   else if ARow.Kind = 'property' then
     Result := cIconProperty
