@@ -98,6 +98,7 @@ contains
   PasTreeIdePlugin.NativeErrorInsight in 'PasTreeIdePlugin.NativeErrorInsight.pas',
   PasTreeIdePlugin.PaintLines in 'PasTreeIdePlugin.PaintLines.pas',
   PasTreeIdePlugin.SemanticPaint in 'PasTreeIdePlugin.SemanticPaint.pas',
+  PasTreeIdePlugin.CtrlHoverLink in 'PasTreeIdePlugin.CtrlHoverLink.pas',
   PasTreeIdePlugin.TokenShift in 'PasTreeIdePlugin.TokenShift.pas',
   PasTreeIdePlugin.ConfigSwitch in 'PasTreeIdePlugin.ConfigSwitch.pas',
   PasTreeIdePlugin.DiagnosticLines in 'PasTreeIdePlugin.DiagnosticLines.pas',

@@ -1980,7 +1980,13 @@ begin
   end;
   case AChar of
     #0: CodeInsightType := citCodeInsight;
-    #2: CodeInsightType := citBrowseCodeInsight;
+    #2:
+      begin
+        CodeInsightType := citBrowseCodeInsight;
+        // Which tokens the IDE asks a browse about at all (Advanced
+        // Logging) - a Ctrl+Click with no line here never reached us.
+        LspLogDetail(Format('browse: GetCodeInsightType element %d', [AElement]));
+      end;
     // Without this arm the IDE never reaches AsyncGetHintText at all: it
     // asks GetCodeInsightType(#3) BEFORE invoking a hint, and citNone here
     // vetoes the whole gesture - the first tooltip bring-up showed exactly
@@ -2610,6 +2616,8 @@ begin
   LId := FNextId;
   FActiveBrowseId := LId;
   LInInvoke := True;
+  LspLogDetail(Format('browse: AsyncGotoDefinitionEx %s line %d char %d',
+    [ExtractFileName(AFileName), ALine, ACharIndex]));
   // Browse parameters CONFIRMED live (2026-08-21): 1-based line, 0-based
   // char index - the +1 below landed the jump exactly. (Completion's
   // parameters remain untrusted; it reads the caret instead - see above.)

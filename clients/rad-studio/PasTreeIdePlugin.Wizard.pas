@@ -76,7 +76,7 @@ uses
   PasTreeIdePlugin.DcuSource,
   PasTreeIdePlugin.CodeInsight, PasTreeIdePlugin.IdeInsight,
   PasTreeIdePlugin.ErrorPaint, PasTreeIdePlugin.NativeErrorInsight,
-  PasTreeIdePlugin.SemanticPaint,
+  PasTreeIdePlugin.SemanticPaint, PasTreeIdePlugin.CtrlHoverLink,
   PasTreeIdePlugin.IdleSync,
   PasTreeIdePlugin.StatusPanel,
   PasTreeIdePlugin.Outline,
@@ -919,6 +919,9 @@ begin
   SetCrashLogAll(LogAllIdeCrashes);
   // Type names in their own colour, from the server's semantic tokens.
   InitializeSemanticPaint;
+  // The Ctrl+hover underline the IDE does not draw with PasTree selected
+  // (a conditional symbol, `inherited`) - see the unit.
+  InitializeCtrlHoverLink;
   // Idle-debounced didChange - keeps the squiggles (and every other answer)
   // tracking the buffer as it is typed, not as it was last saved.
   InitializeIdleSync;
@@ -1034,6 +1037,7 @@ begin
   // asks the session pool.
   FinalizeIdleSync;
   FinalizeStatusPanel;
+  FinalizeCtrlHoverLink;
   FinalizeSemanticPaint;
   FinalizeErrorPaint;
   FinalizeNativeErrorInsight;

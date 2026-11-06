@@ -687,7 +687,7 @@ type
       AX, AY: Integer): Boolean;
     procedure DoHookedClick(const AEditor: TWinControl; AX, AY: Integer);
 {$ENDIF}
-    function PointOnDirectiveName(const Editor: TWinControl; X, Y: Integer): Boolean;
+    function PointOnUnaskedLink(const Editor: TWinControl; X, Y: Integer): Boolean;
     function PointInSelection(const Editor: TWinControl;
       X, Y: Integer): Boolean;
     function TryGetPosition(const Editor: TWinControl; X, Y: Integer;
@@ -750,17 +750,19 @@ begin
   Result := True;
 end;
 
-{ True when the editor pixel sits on a NAME INSIDE A DIRECTIVE - the symbol
-  of $IFDEF / $IFNDEF / $DEFINE / $UNDEF, or any name of a $IF expression
-  (Defined(X), CompilerVersion, a constant) - located syntactically in the
-  line's own text (PasTreeIdePlugin.DirectiveText). Why the click needs
-  to know: the IDE's tokenizer sees a comment there, so with PasTree as the
-  Insight Provider its click chain never asks AsyncGotoDefinitionEx about the
-  position and the click would do nothing - that one click is ours under
-  every provider. (The IDE does draw its own Ctrl+hover underline over the
-  directive token, so no painting of ours is needed; a painted overlay was
-  tried and withdrawn on 2026-09-13.) }
-function TGotoDeclarationManager.PointOnDirectiveName(const Editor: TWinControl;
+{ True when the editor pixel sits on a name the IDE never asks the Insight
+  Provider to browse - a NAME INSIDE A DIRECTIVE (the symbol of $IFDEF /
+  $IFNDEF / $DEFINE / $UNDEF, any name of a $IF expression) or the
+  `inherited` KEYWORD - located syntactically in the line's own text
+  (PasTreeIdePlugin.DirectiveText.UnaskedLinkAt). Why the click needs to
+  know: the IDE's tokenizer sees a comment or a reserved word there, so with
+  PasTree as the Insight Provider its click chain never reaches
+  AsyncGotoDefinitionEx and the click would do nothing - that one click is
+  ours under every provider. Nor does the IDE draw its Ctrl+hover underline
+  there with PasTree selected (traced on 37.0, 2026-11-06 - the 2026-09-13
+  note that it did was made with DelphiLSP selected); ours is
+  PasTreeIdePlugin.CtrlHoverLink. }
+function TGotoDeclarationManager.PointOnUnaskedLink(const Editor: TWinControl;
   X, Y: Integer): Boolean;
 var
   LState: INTACodeEditorState;
@@ -778,7 +780,7 @@ begin
   LLineState := LState.LineState[LVisibleLine];
   if not Assigned(LLineState) then
     Exit;
-  Result := DirectiveNameAt(LLineState.Text, LColumn, LFrom, LTo);
+  Result := UnaskedLinkAt(LLineState.Text, LColumn, LFrom, LTo);
 end;
 
 { True when the editor pixel sits INSIDE the current selection. Such a click
@@ -849,9 +851,10 @@ end;
 /// <summary>
 /// Whether THIS click is ours: the right chord, the feature switched on, and
 /// PasTree not already serving the IDE's own click chain as the selected
-/// Insight Provider - EXCEPT on a conditional symbol, which the IDE's chain
-/// never reaches in any mode (its tokenizer sees a comment there and does not
-/// ask AsyncGotoDefinitionEx), so that click is ours under every provider.
+/// Insight Provider - EXCEPT on a conditional symbol or the `inherited`
+/// keyword, which the IDE's chain never asks it about (a comment and a
+/// reserved word to its tokenizer - PointOnUnaskedLink), so that click is
+/// ours under every provider.
 /// Plus: never inside the current selection, which belongs to Ctrl+drag-copy
 /// (PointInSelection). ASKED ONCE PER CLICK, on the button-down only - the
 /// up follows that decision, see DoMouseUp.
@@ -864,7 +867,7 @@ begin
     and Assigned(GManager)
     and not GManager.PointInSelection(AEditor, X, Y)
     and (not PasTreeIsActiveInsightProvider
-      or GManager.PointOnDirectiveName(AEditor, X, Y));
+      or GManager.PointOnUnaskedLink(AEditor, X, Y));
 end;
 
 /// <summary>
@@ -899,6 +902,15 @@ begin
   if Button <> mbLeft then
     Exit;
   FDownClaimed := ClaimsClick(Shift, Button, Editor, X, Y);
+  // Each condition of the claim on its own, for a Ctrl+Click that does
+  // nothing: which one said no is the whole question (Advanced Logging).
+  if IsPlainCtrlLeftClick(Shift, Button) then
+    LspLogDetail(Format('ctrl+click: claimed=%s switch=%s inSelection=%s '
+      + 'providerIsPasTree=%s onUnaskedLink=%s',
+      [BoolToStr(FDownClaimed, True), BoolToStr(CtrlClickNavigation, True),
+       BoolToStr(PointInSelection(Editor, X, Y), True),
+       BoolToStr(PasTreeIsActiveInsightProvider, True),
+       BoolToStr(PointOnUnaskedLink(Editor, X, Y), True)]));
   FDownEditor := Editor;
   FDownX := X;
   FDownY := Y;
@@ -942,7 +954,7 @@ begin
   Result := CtrlClickNavigation
     and not PointInSelection(AEditor, AX, AY)
     and (not PasTreeIsActiveInsightProvider
-      or PointOnDirectiveName(AEditor, AX, AY));
+      or PointOnUnaskedLink(AEditor, AX, AY));
 end;
 
 procedure TGotoDeclarationManager.DoHookedClick(const AEditor: TWinControl;

@@ -236,6 +236,46 @@ begin
   CheckHit('  {$IF COMPILERVERSION < 31}function X;', 10, 'COMPILERVERSION',
     '{$IF CompilerVersion < N}');
 end;
+
+{ The `inherited` keyword as the plugin's own Ctrl+Click and Ctrl+hover link
+  find it (PasTreeIdePlugin.DirectiveText.InheritedKeywordAt) - the IDE never
+  asks the Insight Provider about a reserved word. }
+procedure TestInheritedKeyword;
+
+  procedure CheckHit(const ALine: string; ACol: Integer;
+    const AWant: string; const AName: string);
+  var
+    LFrom, LTo: Integer;
+    LGot: string;
+  begin
+    if InheritedKeywordAt(ALine, ACol, LFrom, LTo) then
+      LGot := Copy(ALine, LFrom, LTo - LFrom)
+    else
+      LGot := '';
+    CheckEq(LGot, AWant, AName);
+  end;
+
+const
+  cBare = '  inherited;';
+  cNamed = '  Result := inherited IsValid(A, ''inherited'') // inherited';
+begin
+  Writeln;
+  Writeln('inherited keyword');
+
+  CheckHit(cBare, 3, 'inherited', 'bare: first char');
+  CheckHit(cBare, 11, 'inherited', 'bare: last char');
+  CheckHit(cBare, 12, '', 'bare: the semicolon is not the keyword');
+  CheckHit(cNamed, 15, 'inherited', 'named: on the keyword');
+  CheckHit(cNamed, 26, '', 'named: the method name is not the keyword');
+  CheckHit(cNamed, 40, '', 'in a string');
+  CheckHit(cNamed, 55, '', 'after //');
+  CheckHit('  INHERITED Create;', 5, 'INHERITED', 'upper case');
+  CheckHit('{ inherited } inherited;', 4, '', 'in a brace comment');
+  CheckHit('{ inherited } inherited;', 16, 'inherited', 'after a brace comment');
+  CheckHit('(* inherited *)', 5, '', 'in a (* *) comment');
+  CheckHit('  X.&inherited;', 7, '', '&inherited is an identifier');
+  CheckHit('  inheritedX;', 4, '', 'a longer identifier');
+end;
 { PasTreeIdePlugin.TokenShift: the last tokens answer carried onto the text
   on screen. The base is what the answer describes; each case is a line as
   the editor holds it now, and where the TList token (row 5, [12, 17)) is
@@ -429,6 +469,7 @@ begin
   TestXmlDocProse;
   TestPositions;
   TestDirectiveSymbol;
+  TestInheritedKeyword;
   TestTokenShift;
   TestConfigSwitch;
 

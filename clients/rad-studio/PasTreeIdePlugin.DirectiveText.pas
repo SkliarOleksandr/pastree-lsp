@@ -1,10 +1,11 @@
 unit PasTreeIdePlugin.DirectiveText;
 
 {
-  Which identifier in a line of source is a NAME INSIDE A DIRECTIVE - the pure
-  string test behind the Ctrl+Click override's PointOnDirectiveName
-  (PasTreeIdePlugin.GotoDeclaration), kept apart because it links nothing, so
-  LspTextSmoke can hold it to cases. Recognized: $IFDEF X, $IFNDEF X,
+  Which identifier in a line of source is a NAME INSIDE A DIRECTIVE, or the
+  `inherited` keyword - the pure string tests behind the Ctrl+Click
+  override's PointOnUnaskedLink (PasTreeIdePlugin.GotoDeclaration) and the
+  Ctrl+hover link (PasTreeIdePlugin.CtrlHoverLink), kept apart because they
+  link nothing, so LspTextSmoke can hold them to cases. Recognized: $IFDEF X, $IFNDEF X,
   $DEFINE X, $UNDEF X (the one symbol after the keyword) and every name of a
   $IF / $ELSEIF expression - a Defined(X) argument, a constant like
   CompilerVersion, a Declared(X) argument - in brace and (*$...*) spelling
@@ -20,6 +21,27 @@ interface
 /// AFrom/ATo bracket the identifier, ATo exclusive.
 /// </summary>
 function DirectiveNameAt(const ALine: string; ACol: Integer;
+  out AFrom, ATo: Integer): Boolean;
+
+/// <summary>
+/// The `inherited` keyword covering 1-based ACol of ALine, AFrom/ATo
+/// bracketing it (ATo exclusive) - not in a string, not after `//`, not in a
+/// brace or (* *) comment opened on this line. A comment opened on an
+/// earlier line is not seen (one line at a time, as above).
+/// </summary>
+function InheritedKeywordAt(const ALine: string; ACol: Integer;
+  out AFrom, ATo: Integer): Boolean;
+
+/// <summary>
+/// A name the IDE never asks the Insight Provider to browse, with PasTree
+/// selected: a conditional symbol (DirectiveNameAt - the IDE's tokenizer
+/// sees a comment) or the `inherited` keyword (a reserved word). Measured on
+/// 37.0, 2026-11-06: a Ctrl+Click on either reached neither
+/// GetCodeInsightType nor AsyncGotoDefinitionEx, and the IDE drew no
+/// Ctrl+hover underline - so the click and the underline are the plugin's
+/// (PasTreeIdePlugin.GotoDeclaration, PasTreeIdePlugin.CtrlHoverLink).
+/// </summary>
+function UnaskedLinkAt(const ALine: string; ACol: Integer;
   out AFrom, ATo: Integer): Boolean;
 
 /// <summary>
@@ -164,6 +186,70 @@ begin
     LNext := SkipBlanks(ALine, ATo, LBodyTo);
     Result := (LNext >= LBodyTo) or (ALine[LNext] <> '(');
   end;
+end;
+
+{ True when 1-based ACol of S is code: not inside a string, a `//` comment,
+  or a brace / (* *) comment - as far as this one line shows. }
+function IsCodeAt(const S: string; ACol: Integer): Boolean;
+var
+  I, LClose: Integer;
+begin
+  I := 1;
+  while (I <= Length(S)) and (I <= ACol) do
+  begin
+    case S[I] of
+      '''':
+        begin
+          // A string; '' inside it is an escaped quote and continues it.
+          LClose := I + 1;
+          while (LClose <= Length(S)) and (S[LClose] <> '''') do
+            Inc(LClose);
+          if ACol <= LClose then
+            Exit(False);
+          I := LClose + 1;
+          Continue;
+        end;
+      '/':
+        if (I < Length(S)) and (S[I + 1] = '/') then
+          Exit(False);
+      '{':
+        begin
+          LClose := Pos('}', S, I + 1);
+          if (LClose = 0) or (ACol <= LClose) then
+            Exit(False);
+          I := LClose + 1;
+          Continue;
+        end;
+      '(':
+        if (I < Length(S)) and (S[I + 1] = '*') then
+        begin
+          LClose := Pos('*)', S, I + 2);
+          if (LClose = 0) or (ACol <= LClose + 1) then
+            Exit(False);
+          I := LClose + 2;
+          Continue;
+        end;
+    end;
+    Inc(I);
+  end;
+  Result := True;
+end;
+
+function InheritedKeywordAt(const ALine: string; ACol: Integer;
+  out AFrom, ATo: Integer): Boolean;
+begin
+  Result := IdentRunAt(ALine, ACol, AFrom, ATo)
+    and SameText(Copy(ALine, AFrom, ATo - AFrom), 'inherited')
+    // Not `&inherited`, an identifier spelled like the keyword.
+    and ((AFrom = 1) or (ALine[AFrom - 1] <> '&'))
+    and IsCodeAt(ALine, AFrom);
+end;
+
+function UnaskedLinkAt(const ALine: string; ACol: Integer;
+  out AFrom, ATo: Integer): Boolean;
+begin
+  Result := DirectiveNameAt(ALine, ACol, AFrom, ATo)
+    or InheritedKeywordAt(ALine, ACol, AFrom, ATo);
 end;
 
 end.

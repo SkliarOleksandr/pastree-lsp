@@ -380,7 +380,14 @@ implementer does not re-derive it:
   reversible, `PasTreeIdePlugin.EditorPopup`.) The IDE draws the
   Ctrl+hover underline from OUR resolver (today it underlines from the native
   engine while the click resolves through ours - a visible disagreement we
-  currently just live with), navigates, and feeds its own history.
+  currently just live with), navigates, and feeds its own history. Except
+  where the IDE never asks: a name inside a directive (a comment to its
+  tokenizer) and the `inherited` keyword (a reserved word) get neither a
+  GetCodeInsightType/AsyncGotoDefinitionEx call nor the underline with
+  PasTree selected (traced on 37.0, 2026-11-06). There the click is claimed
+  by the mouse override under every provider (`PointOnUnaskedLink`) and the
+  underline is painted by `PasTreeIdePlugin.CtrlHoverLink`, in the editor's
+  Hot Link colour.
 - **Not covered by the manager, stays ours either way** - Find References
   (no references in the interface; our Messages-panel tree remains the
   surface), the decl↔impl toggle key binding (not a Code Insight concept), and
